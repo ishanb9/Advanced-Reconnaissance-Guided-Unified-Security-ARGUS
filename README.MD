@@ -1,6 +1,6 @@
 # Kali MCP Pentest-Assist Platform
 
-An AI-powered penetration testing assistance platform that combines Kali Linux security tools with Large Language Models (LLMs) through the Model Context Protocol (MCP). This platform enables natural language interaction with 217+ security tools, providing contextual awareness, intelligent tool selection, and detailed explanations for every action.
+An AI-powered penetration testing assistance platform that combines Kali Linux security tools with Large Language Models (LLMs) through the Model Context Protocol (MCP). This platform enables natural language interaction with 200+ security tools, providing contextual awareness, intelligent tool selection, and detailed explanations for every action.
 
 
 ## Features
@@ -49,7 +49,7 @@ An AI-powered penetration testing assistance platform that combines Kali Linux s
 ### Components
 
 1. **MCP Server** (Node.js) - Port 3000
-   - Manages 217 Kali security tools
+   - Manages 200+ Kali security tools
    - Executes commands with proper permissions
    - Streams real-time output via Server-Sent Events (SSE)
 
