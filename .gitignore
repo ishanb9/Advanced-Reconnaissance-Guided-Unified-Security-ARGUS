@@ -1,0 +1,41 @@
+```
+```
+# Node
+node_modules/
+npm-debug.log
+package-lock.json
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Temporary
+*.tmp
+*.bak
+*.backup
+
+# Sensitive
+.env
+config.local.py
+secrets.json

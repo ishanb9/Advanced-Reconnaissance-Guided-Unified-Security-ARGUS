@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>KALI PENTEST TERMINAL v2.0</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <!-- Animated Cyber Background -->
+    <canvas id="cyberCanvas"></canvas>
+    <div class="grid-overlay"></div>
+    <div class="scanlines"></div>
+    
+    <!-- Main Container -->
+    <div class="terminal-container">
+        <!-- Header -->
+        <div class="header">
+            <div class="logo">
+                <div class="logo-icon">
+                    <i class="fas fa-skull-crossbones"></i>
+                </div>
+                <div class="logo-text">
+                    <div class="title">KALI PENTEST</div>
+                    <div class="subtitle">TACTICAL SECURITY TERMINAL</div>
+                </div>
+            </div>
+            
+            <div class="stats">
+                <div class="stat">
+                    <i class="fas fa-clock"></i>
+                    <span id="clock">00:00:00</span>
+                </div>
+                <div class="stat">
+                    <i class="fas fa-server"></i>
+                    <span id="status">ONLINE</span>
+                </div>
+            </div>
+            <button class="btn-clear-history" id="clearHistoryBtn" title="Clear conversation history">
+                    <i class="fas fa-trash"></i>
+                    <span>CLEAR</span>
+                </button>
+            <button class="btn-arsenal" id="arsenalBtn">
+                <i class="fas fa-shield-alt"></i>
+                <span>ARSENAL</span>
+                <span class="badge" id="toolCount">0</span>
+            </button>
+        </div>
+
+        <!-- Arsenal Panel -->
+        <div class="arsenal-panel" id="arsenalPanel">
+            <div class="arsenal-header">
+                <h3><i class="fas fa-shield-virus"></i> TACTICAL ARSENAL</h3>
+                <button class="btn-close" id="closeArsenal">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <input type="text" id="searchTools" class="search-input" placeholder="🔍 Search tools...">
+            <div class="arsenal-content" id="toolsList">
+                <div class="loading">
+                    <i class="fas fa-circle-notch fa-spin"></i>
+                    <span>Loading Arsenal...</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Output Terminal -->
+        <div class="terminal-output" id="output">
+            <div class="welcome">
+                <div class="welcome-icon">
+                    <i class="fas fa-terminal"></i>
+                </div>
+                <h1 class="glitch" data-text="PENETRATION TESTING">PENETRATION TESTING</h1>
+                <h2>COMMAND & CONTROL CENTER</h2>
+                <div class="info-grid">
+                    <div class="info-item">
+                        <span class="label">STATUS:</span>
+                        <span class="value green">OPERATIONAL</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="label">MCP:</span>
+                        <span class="value cyan">ACTIVE</span>
+                    </div>
+                    <div class="info-item">
+                        <span class="label">SECURITY:</span>
+                        <span class="value red">MAXIMUM</span>
+                    </div>
+                </div>
+                <p class="instruction"><i class="fas fa-angle-right"></i> Enter command or select tool from arsenal</p>
+            </div>
+        </div>
+
+        <!-- Input Bar -->
+        <div class="input-bar">
+            <!-- Natural Language Input -->
+            <div class="chat-input-section">
+                <div class="input-label">
+                    <i class="fas fa-comments"></i>
+                    <span>NATURAL LANGUAGE COMMAND</span>
+                </div>
+                <div class="chat-input-group">
+                    <input type="text" id="chatInput" placeholder="e.g., 'scan ports on 192.168.1.1' or 'find wifi networks on wlan0mon'">
+                    <button class="btn-chat" id="chatBtn">
+                        <i class="fas fa-paper-plane"></i>
+                        <span>SEND</span>
+                    </button>
+                </div>
+            </div>
+            
+            <div class="divider">
+                <span>OR</span>
+            </div>
+            
+            <!-- Manual Input -->
+            <div class="manual-input-section">
+                <div class="input-row">
+                    <div class="input-group">
+                        <div class="input-label">
+                            <i class="fas fa-terminal"></i>
+                            <span>TOOL</span>
+                        </div>
+                        <input type="text" id="toolInput" placeholder="Tool name...">
+                    </div>
+                    <div class="input-group">
+                        <div class="input-label">
+                            <i class="fas fa-crosshairs"></i>
+                            <span>TARGET</span>
+                        </div>
+                        <input type="text" id="targetInput" placeholder="IP / Domain / Interface...">
+                    </div>
+                    <div class="input-group">
+                        <div class="input-label">
+                            <i class="fas fa-cog"></i>
+                            <span>OPTIONS</span>
+                        </div>
+                        <input type="text" id="optionsInput" placeholder="Flags...">
+                    </div>
+                    <button class="btn-execute" id="executeBtn">
+                        <i class="fas fa-bolt"></i>
+                        <span>EXECUTE</span>
+                    </button>
+                </div>
+            </div>
+        </div>
+
+    <script src="/static/js/app.js"></script>
+</body>
+</html>
