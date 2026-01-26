@@ -313,12 +313,6 @@ This platform interfaces with Kali Linux security tools. Each tool has its own l
 - **Ollama Team** - For local LLM infrastructure
 - **Open Source Community** - For all the amazing tools and libraries
 
-##  Support
-
-- **Issues**: [GitHub Issues](https://github.com/ishanb9/kali-mcp/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/ishanb9/kali-mcp/discussions)
-- **Security**: Report vulnerabilities privately to [your-email@example.com]
-
 ##  Roadmap
 
 - [ ] Execute multiple commands in parallel
