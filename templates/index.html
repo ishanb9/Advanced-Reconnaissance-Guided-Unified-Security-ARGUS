@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>ARGUS — Advanced Pentest Platform</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet"/>
+  <link rel="stylesheet" href="/static/vendor/antd.reset.min.css"/>
+  <link rel="stylesheet" href="/static/vendor/xterm.min.css"/>
+  <link rel="stylesheet" href="/static/css/main.css"/>
+</head>
+<body>
+  <div id="root"></div>
+
+  <!-- Load order matters: dayjs MUST come before antd -->
+  <script src="/static/vendor/react.production.min.js"></script>
+  <script src="/static/vendor/react-dom.production.min.js"></script>
+  <script src="/static/vendor/dayjs.min.js"></script>
+  <script src="/static/vendor/antd.min.js"></script>
+  <script src="/static/vendor/icons.umd.js"></script>
+  <script src="/static/vendor/d3.min.js"></script>
+  <script src="/static/vendor/xterm.min.js"></script>
+  <script src="/static/vendor/babel.min.js"></script>
+
+  <!-- Platform core -->
+  <script type="text/babel" src="/static/js/api.js"></script>
+  <script type="text/babel" src="/static/js/store.js"></script>
+
+  <!-- Shared components -->
+  <script type="text/babel" src="/static/js/components/StatusBadge.jsx"></script>
+  <script type="text/babel" src="/static/js/components/LiveTerminal.jsx"></script>
+  <script type="text/babel" src="/static/js/components/AgentCard.jsx"></script>
+  <script type="text/babel" src="/static/js/components/FindingCard.jsx"></script>
+  <script type="text/babel" src="/static/js/components/PhaseTimeline.jsx"></script>
+
+  <!-- Pages (Phase 1/2) -->
+  <script type="text/babel" src="/static/js/pages/MissionControl.jsx"></script>
+  <script type="text/babel" src="/static/js/pages/TargetConfig.jsx"></script>
+  <script type="text/babel" src="/static/js/pages/FindingsBoard.jsx"></script>
+  <script type="text/babel" src="/static/js/pages/AgentConsole.jsx"></script>
+  <script type="text/babel" src="/static/js/pages/AttackGraph.jsx"></script>
+  <script type="text/babel" src="/static/js/pages/OsintIntel.jsx"></script>
+  <script type="text/babel" src="/static/js/pages/ToolWorkshop.jsx"></script>
+  <script type="text/babel" src="/static/js/pages/MetricsDash.jsx"></script>
+
+  <!-- Pages (Phase 3) -->
+  <script type="text/babel" src="/static/js/pages/ShellManager.jsx"></script>
+  <script type="text/babel" src="/static/js/pages/PayloadBuilder.jsx"></script>
+  <script type="text/babel" src="/static/js/pages/ReportPage.jsx"></script>
+  <script type="text/babel" src="/static/js/pages/SessionHistory.jsx"></script>
+  <script type="text/babel" src="/static/js/pages/KnowledgePage.jsx"></script>
+
+  <!-- Pages (v3 — gap-fill) -->
+  <script type="text/babel" src="/static/js/pages/CredentialsPage.jsx"></script>
+  <script type="text/babel" src="/static/js/pages/SubagentConsolePage.jsx"></script>
+  <script type="text/babel" src="/static/js/pages/LateralPostPage.jsx"></script>
+  <script type="text/babel" src="/static/js/pages/AIObservability.jsx"></script>
+
+  <!-- App router (must be last) -->
+  <script type="text/babel" src="/static/js/app.jsx"></script>
+</body>
+</html>

@@ -1,0 +1,12 @@
+/* xterm.css stub — replace with real file from: */
+/* curl -sL https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css -o static/vendor/xterm.min.css */
+.xterm { position: relative; user-select: none; -ms-user-select: none; -webkit-user-select: none; }
+.xterm.focus, .xterm:focus { outline: none; }
+.xterm .xterm-helpers { position: absolute; top: 0; z-index: 5; }
+.xterm .xterm-helper-textarea { padding: 0; border: 0; width: 0; height: 0; position: absolute; overflow: hidden; resize: none; }
+.xterm .composition-view { background: #000; color: #FFF; display: none; position: absolute; white-space: nowrap; z-index: 1; }
+.xterm canvas { position: absolute; left: 0; top: 0; }
+.xterm-viewport { background-color: #000; overflow-y: scroll; cursor: default; position: absolute; right: 0; left: 0; top: 0; bottom: 0; }
+.xterm-screen { position: relative; }
+.xterm-scroll-area { visibility: hidden; }
+.xterm-char-measure-element { display: inline-block; visibility: hidden; position: absolute; top: 0; left: -9999em; line-height: normal; }

@@ -1,0 +1,30 @@
+# KALI PENTEST PLATFORM v2 — Python Requirements
+# Install: pip install -r requirements.txt --break-system-packages
+
+# Web framework
+fastapi==0.111.0
+uvicorn[standard]==0.30.0
+python-multipart==0.0.9
+jinja2==3.1.4
+aiofiles==23.2.1
+
+# Database
+motor==3.4.0          # Async MongoDB driver
+pymongo==4.7.2        # Sync MongoDB + bson
+dnspython==2.6.1      # Required by motor
+
+# HTTP client
+httpx==0.27.0
+
+# System / network
+psutil==5.9.8
+netifaces==0.11.0
+
+# Data validation
+pydantic==2.7.1
+
+# CORS
+starlette==0.37.2
+
+# Utilities
+python-dotenv==1.0.1

@@ -1,0 +1,142 @@
+// ReportPage.jsx — View and export pentest report (HTML/PDF)
+const { useState, useEffect, useRef } = React;
+const { Card, Button, Alert, Tag, Space } = window.antd;
+
+function ReportPage() {
+  const { state } = window.useStore();
+  const sessionId  = state.sessionId;
+  const { activeSession, findingsSummary, flags, currentPhase } = state;
+
+  const [loading, setLoading]   = useState(false);
+  const [previewing, setPreviewing] = useState(false);
+  const iframeRef = useRef(null);
+
+  // Auto-preview when session changes
+  useEffect(() => { if (sessionId) preview(); }, [sessionId]);
+
+  async function preview() {
+    if (!sessionId) return;
+    setPreviewing(true);
+    // We use iframe src pointing at the server-rendered report
+    // The iframe fetches /sessions/{id}/report?format=html
+    if (iframeRef.current) {
+      iframeRef.current.src = window.API.reportUrl(sessionId, 'html') + '&_t=' + Date.now();
+    }
+  }
+
+  function openInNewTab() {
+    if (!sessionId) return;
+    window.open(window.API.reportUrl(sessionId, 'html'), '_blank');
+  }
+
+  function downloadPDF() {
+    if (!sessionId) return;
+    const url = window.API.reportUrl(sessionId, 'pdf');
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `pentest_report_${sessionId.slice(-8)}.pdf`;
+    a.click();
+  }
+
+  const canExport = sessionId && activeSession;
+
+  const sevColor = { critical: 'var(--red)', high: 'var(--amber)',
+                     medium: 'var(--amber)', low: 'var(--cyan)', info: 'var(--text-muted)' };
+
+  return React.createElement('div', { style: { display: 'flex', flexDirection: 'column', height: 'calc(100vh - 60px)' } },
+
+    // Header
+    React.createElement('div', { className: 'page-header' },
+      React.createElement('div', null,
+        React.createElement('div', { className: 'page-title' }, '📄 Report Generator'),
+        activeSession && React.createElement('div', { className: 'page-subtitle' },
+          `Target: ${activeSession.target_ip} · Session: ${sessionId?.slice(-8)}`)
+      ),
+      React.createElement('div', { style: { display: 'flex', gap: 8 } },
+        React.createElement('button', {
+          style: { padding: '6px 14px', borderRadius: 6, border: '1px solid var(--border-light)',
+                   background: 'rgba(255,255,255,0.04)', color: canExport ? 'var(--text-secondary)' : 'var(--text-muted)',
+                   cursor: canExport ? 'pointer' : 'not-allowed', fontSize: 12 },
+          onClick: preview, disabled: !canExport
+        }, '↻ Refresh'),
+        React.createElement('button', {
+          style: { padding: '6px 14px', borderRadius: 6, border: '1px solid var(--border-light)',
+                   background: 'rgba(255,255,255,0.04)',
+                   color: canExport ? 'var(--text-secondary)' : 'var(--text-muted)',
+                   cursor: canExport ? 'pointer' : 'not-allowed', fontSize: 12 },
+          onClick: openInNewTab, disabled: !canExport
+        }, '↗ Full Page'),
+        React.createElement('button', {
+          style: { padding: '6px 14px', borderRadius: 6,
+                   border: canExport ? '1px solid var(--accent)' : '1px solid var(--border)',
+                   background: canExport ? 'var(--accent)' : 'transparent',
+                   color: canExport ? '#0D0E14' : 'var(--text-muted)',
+                   cursor: canExport ? 'pointer' : 'not-allowed', fontSize: 12, fontWeight: 600,
+                   boxShadow: canExport ? '0 0 10px var(--accent-glow)' : 'none' },
+          onClick: downloadPDF, disabled: !canExport
+        }, '⬇ Export PDF')
+      )
+    ),
+
+    !sessionId && React.createElement(Alert, {
+      type: 'info',
+      message: 'No active session',
+      description: 'Start a pentest session to generate a report.',
+      style: { margin: '0 0 16px 0' },
+      showIcon: true
+    }),
+
+    // Quick stats
+    sessionId && React.createElement('div', {
+      style: { display: 'flex', gap: 10, marginBottom: 14, flexShrink: 0 }
+    },
+      ...Object.entries(findingsSummary).filter(([k]) => k !== 'total').map(([sev, count]) =>
+        React.createElement('div', {
+          key: sev,
+          style: { padding: '8px 16px', borderRadius: 6, background: 'var(--bg-card)',
+                   border: `1px solid var(--border)`, textAlign: 'center', minWidth: 80 }
+        },
+          React.createElement('div', {
+            style: { fontSize: 22, fontWeight: 700, color: sevColor[sev] || 'var(--text-primary)' }
+          }, count),
+          React.createElement('div', { style: { fontSize: 10, color: 'var(--text-muted)', textTransform: 'uppercase' } }, sev)
+        )
+      ),
+      React.createElement('div', {
+        style: { padding: '8px 16px', borderRadius: 6, background: 'var(--bg-card)',
+                 border: '1px solid var(--border)', textAlign: 'center', minWidth: 80 }
+      },
+        React.createElement('div', { style: { fontSize: 22, fontWeight: 700, color: 'var(--accent)' } },
+          flags.length),
+        React.createElement('div', { style: { fontSize: 10, color: 'var(--text-muted)', textTransform: 'uppercase' } }, 'Flags')
+      )
+    ),
+
+    // iframe report preview
+    sessionId && React.createElement('div', {
+      style: { flex: 1, borderRadius: 8, overflow: 'hidden',
+               border: '1px solid var(--border-light)', background: '#fff',
+               boxShadow: '0 0 0 1px var(--border)' }
+    },
+      React.createElement('iframe', {
+        ref: iframeRef,
+        src: window.API.reportUrl(sessionId, 'html'),
+        style: { width: '100%', height: '100%', border: 'none' },
+        onLoad: () => setPreviewing(false)
+      })
+    ),
+
+    !sessionId && React.createElement('div', {
+      style: { flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center',
+               background: 'var(--bg-card)', borderRadius: 8, border: '1px solid var(--border)' }
+    },
+      React.createElement('div', { style: { textAlign: 'center', color: 'var(--text-muted)' } },
+        React.createElement('div', { style: { fontSize: 64, marginBottom: 16 } }, '📄'),
+        React.createElement('div', { style: { fontSize: 16, marginBottom: 8 } }, 'Report Preview'),
+        React.createElement('div', { style: { fontSize: 12 } },
+          'Start a session and run a pentest to generate a professional report')
+      )
+    )
+  );
+}
+window.ReportPage = ReportPage;
