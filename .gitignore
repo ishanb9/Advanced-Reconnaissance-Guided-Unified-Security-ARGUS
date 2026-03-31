@@ -1,2 +1,7 @@
 knowledge/data
 .claude/
+knowledge\chroma_db
+*.pdf
+*.sqlite
+*.db
+*.zip
