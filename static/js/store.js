@@ -513,6 +513,45 @@ function reducer(state, action) {
       return { ...state, planSteps: merged };
     }
 
+    case 'RESTORE_PLAN_SKELETON': {
+      // Resume path: incoming steps have status 'done'/'pending' set by backend.
+      // Merge with any existing planSteps — never downgrade a step that is already
+      // 'active' or 'done' in the current store.
+      const STATUS_RANK = { done: 3, active: 2, pending: 1 };
+      const incomingSteps = action.payload?.steps || [];
+      const existingById  = {};
+      (state.planSteps || []).forEach(s => { existingById[s.id] = s; });
+
+      const restored = incomingSteps.map(step => {
+        const prev = existingById[step.id];
+        const prevRank = STATUS_RANK[prev?.status] || 0;
+        const newRank  = STATUS_RANK[step.status]  || 0;
+        return {
+          ...step,
+          // Keep richer label/tool data from prev if available
+          label:  (prev?.label  && prev.label  !== step.id) ? prev.label  : step.label,
+          tool:   prev?.tool   || step.tool,
+          // Never downgrade status
+          status: prevRank >= newRank ? prev.status : step.status,
+          result: prev?.result || step.result,
+          detail: prev?.detail || step.detail,
+        };
+      });
+
+      // Keep any existing steps that weren't in the restore payload (edge case)
+      const restoredIds = new Set(restored.map(s => s.id));
+      (state.planSteps || []).forEach(s => {
+        if (!restoredIds.has(s.id)) restored.push(s);
+      });
+
+      return {
+        ...state,
+        planSteps:      restored,
+        planHypothesis: action.payload?.hypothesis       || state.planHypothesis,
+        planAssessment: action.payload?.assessment_type  || state.planAssessment,
+      };
+    }
+
     case 'PLAN_STEP_UPDATE': {
       const { step_id, status, result, detail, found, ts, label, icon } = action.payload;
       const existing = state.planSteps.find(s => s.id === step_id);
@@ -1293,6 +1332,19 @@ function routeWsEvent(msg, dispatch, shellListeners) {
       }});
       break;
 
+    case 'plan_skeleton_restore': {
+      // Fired on resume — merges incoming steps into existing planSteps.
+      // Incoming steps already carry correct status ('done'/'pending') from backend.
+      // We never downgrade an existing 'active' or 'done' step to 'pending'.
+      dispatch({ type: 'RESTORE_PLAN_SKELETON', payload: data });
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'master', eventType: 'plan_skeleton_restore',
+        message: `Scan resumed — ${(data?.phases_completed||[]).length} phase(s) already complete`,
+        data
+      }});
+      break;
+    }
+
     case 'plan_step_update':
       dispatch({ type: 'PLAN_STEP_UPDATE', payload: data });
       break;
@@ -1701,7 +1753,8 @@ function extractFeedMessage(type, agent, data) {
     case 'awaiting_confirmation': return `Confirm exploitation to proceed`;
     case 'scan_paused':           return `⏸ Scan paused`;
     case 'scan_resumed':          return `▶ Scan resumed`;
-    case 'checkpoint_restored':   return `♻ Checkpoint restored`;
+    case 'checkpoint_restored':   return `♻ Checkpoint restored — resuming after ${data?.resume_after || '?'}`;
+    case 'plan_skeleton_restore': return `▶ Resumed — ${(data?.phases_completed||[]).length} phase(s) already done`;
     case 'pentest_complete':      return `Pentest complete`;
     case 'attack_tree_ready':     return `Attack tree: ${(data?.tree?.attack_nodes||[]).length} nodes`;
     case 'graph_node':            return `${data?.label} (${data?.type})`;

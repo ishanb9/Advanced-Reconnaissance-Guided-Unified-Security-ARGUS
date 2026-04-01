@@ -1240,8 +1240,19 @@ function MissionControl() {
   const [showGuidance,   setShowGuidance]   = useState(false);
   const feedRef = useRef(null);
 
-  const needsConfirm = feedEntries.some(e => e.eventType === 'awaiting_confirmation');
-  const activeAgents = Object.entries(agents).filter(([, a]) => a.status === 'running' || a.status === 'thinking');
+  const needsConfirm  = feedEntries.some(e => e.eventType === 'awaiting_confirmation');
+  const activeAgents  = Object.entries(agents).filter(([, a]) => a.status === 'running' || a.status === 'thinking');
+
+  // Show a transient "Resuming…" banner for ~8 s after a checkpoint_restored event
+  const [showResumeBanner, setShowResumeBanner] = useState(false);
+  const resumeAfterRef = useRef(null);
+  useEffect(() => {
+    const latest = [...feedEntries].reverse().find(e => e.eventType === 'plan_skeleton_restore' || e.eventType === 'checkpoint_restored');
+    if (!latest) return;
+    setShowResumeBanner(true);
+    clearTimeout(resumeAfterRef.current);
+    resumeAfterRef.current = setTimeout(() => setShowResumeBanner(false), 8000);
+  }, [feedEntries.filter(e => e.eventType === 'plan_skeleton_restore' || e.eventType === 'checkpoint_restored').length]);
 
   // Auto-focus running agent
   useEffect(() => {
@@ -1376,6 +1387,28 @@ function MissionControl() {
           }
         }, '⚠ Confirm Exploit')
       )
+    ),
+
+    // ── Resume banner (auto-dismisses after 8 s) ─────────────────────────
+    showResumeBanner && React.createElement('div', {
+      style: {
+        display: 'flex', alignItems: 'center', gap: 10,
+        padding: '8px 14px', borderRadius: 8, marginBottom: 12,
+        background: 'rgba(0,212,255,0.06)', border: '1px solid rgba(0,212,255,0.25)',
+        color: 'var(--cyan)', fontSize: 12, fontFamily: 'var(--font-mono)',
+      }
+    },
+      React.createElement('span', { style: { fontSize: 16 } }, '♻'),
+      React.createElement('span', null,
+        'Scan resumed from checkpoint — completed phases restored, continuing from next phase'
+      ),
+      React.createElement('button', {
+        onClick: () => setShowResumeBanner(false),
+        style: {
+          marginLeft: 'auto', background: 'none', border: 'none',
+          color: 'var(--text-muted)', cursor: 'pointer', fontSize: 14, lineHeight: 1,
+        }
+      }, '✕')
     ),
 
     // ── No session ────────────────────────────────────────────────────────

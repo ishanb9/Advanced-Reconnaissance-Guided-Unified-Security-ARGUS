@@ -493,111 +493,147 @@ class MasterAgent(BaseAgent):
             metadata = {"role": "primary_target", "type": target_type}
         )
 
-        # ── Step 2: LLM creates master plan ───────────────────
-        try:
-            plan = self._safe_llm_result(await self._create_master_plan(target, target_type))
-        except RuntimeError as e:
-            await self._emit("llm_halt", {"reason": str(e)})
-            return {"status": "halted", "reason": str(e)}
-
-        await self._emit("master_plan", {"plan": plan, "target": target})
-        await self.emit_reasoning(
-            step       = "master_plan_created",
-            reasoning  = plan.get("rationale", "Initial pentest plan created"),
-            decision   = f"Assessment type: {plan.get('assessment_type', 'full')}",
-            next_action= "Begin reconnaissance phase",
-            data       = plan
-        )
-
-        # ── Emit skeleton plan steps immediately so UI shows progress from second 1 ──
-        # Full attack tree comes later after recon; this gives instant visibility
-        phases_in_plan = _safe_list(plan.get("phases", []))
-        skeleton_steps = []
-
-        # Phase steps from master plan
-        phase_icons = {
-            "recon":        ("🔍", "Reconnaissance",          "nmap, whatweb, enum4linux"),
-            "vuln_id":      ("🔬", "Vulnerability ID",         "nmap --script vuln, searchsploit, nikto"),
-            "web_testing":  ("🌐", "Web App Testing",          "gobuster, sqlmap, nikto"),
-            "osint":        ("🕵", "OSINT / ExploitDB",        "searchsploit, CVE lookup"),
-            "exploit":      ("💥", "Exploitation",             "Based on findings — TBD after recon"),
-            "post_exploit": ("🎭", "Post Exploitation",        "Credential harvest, network map"),
-            "privesc":      ("⬆",  "Privilege Escalation",     "linPEAS, sudo, SUID, cron"),
-            "reporting":    ("📄", "Report Generation",        "Full findings report"),
-            # ── Specialist phases ──────────────────────────────
-            "lateral":      ("↔",  "Lateral Movement",         "ad_enum, kerberoast, ntlm_capture"),
-            "cloud":        ("☁",  "Cloud Enumeration",        "aws_enum, azure_enum, gcp_enum"),
-            "container":    ("🐳", "Container Audit",          "docker_audit, k8s_audit"),
-            "evasion":      ("👻", "AV/EDR Evasion",           "defense_enum, av_evasion, amsi_bypass"),
-            "traffic":      ("📡", "Traffic Analysis",         "pcap_capture, credential_sniff"),
-            "evidence":     ("📷", "Evidence Collection",      "screenshot, flag_capture"),
-            "forensics":    ("🔎", "Digital Forensics",        "artifact_collect, timeline, memory_analysis"),
-            "wireless":     ("📶", "Wireless Assessment",      "wifi_scan, wpa2_crack, evil_twin"),
-            "iot":          ("📟", "IoT Assessment",           "iot_device_scan, iot_default_creds, iot_protocol, iot_firmware"),
+        # ── Phase icon/label catalogue (shared by fresh start and resume) ───
+        _PHASE_ICONS = {
+            "recon":        ("🔍", "Reconnaissance",      "nmap, whatweb, enum4linux"),
+            "vuln_id":      ("🔬", "Vulnerability ID",    "nmap --script vuln, searchsploit, nikto"),
+            "web_testing":  ("🌐", "Web App Testing",     "gobuster, sqlmap, nikto"),
+            "osint":        ("🕵", "OSINT / ExploitDB",   "searchsploit, CVE lookup"),
+            "exploit":      ("💥", "Exploitation",        "Based on findings — TBD after recon"),
+            "post_exploit": ("🎭", "Post Exploitation",   "Credential harvest, network map"),
+            "privesc":      ("⬆",  "Privilege Escalation","linPEAS, sudo, SUID, cron"),
+            "reporting":    ("📄", "Report Generation",   "Full findings report"),
+            "lateral":      ("↔",  "Lateral Movement",    "ad_enum, kerberoast, ntlm_capture"),
+            "cloud":        ("☁",  "Cloud Enumeration",   "aws_enum, azure_enum, gcp_enum"),
+            "container":    ("🐳", "Container Audit",     "docker_audit, k8s_audit"),
+            "evasion":      ("👻", "AV/EDR Evasion",      "defense_enum, av_evasion, amsi_bypass"),
+            "traffic":      ("📡", "Traffic Analysis",    "pcap_capture, credential_sniff"),
+            "evidence":     ("📷", "Evidence Collection", "screenshot, flag_capture"),
+            "forensics":    ("🔎", "Digital Forensics",   "artifact_collect, timeline, memory_analysis"),
+            "wireless":     ("📶", "Wireless Assessment", "wifi_scan, wpa2_crack, evil_twin"),
+            "iot":          ("📟", "IoT Assessment",      "iot_device_scan, iot_default_creds, iot_protocol, iot_firmware"),
         }
 
-        # Build from plan phases if available, else use defaults
-        seen_phases = set()
+        # ── Step 2: master plan — skip LLM call on resume ─────
+        _is_resume = bool(resume_from_phase)
+
+        if _is_resume:
+            # Reuse the plan saved in intel by the original run — no LLM call needed.
+            plan = self._intel.get("_master_plan") or {
+                "phases":           [{"phase": p} for p in self._phases_to_run],
+                "assessment_type":  self._intel.get("target_type", "resumed"),
+                "attack_hypothesis": self._intel.get("attack_surface_notes", "Resuming from checkpoint"),
+                "rationale":        "Resumed from checkpoint — plan reconstructed from saved intel",
+            }
+            await self.emit_reasoning(
+                step       = "plan_restored",
+                reasoning  = "Resuming from checkpoint — skipping LLM plan creation",
+                decision   = f"Using saved plan, resuming after: {resume_from_phase}",
+                next_action= f"Skipping {len(self._phases_completed)} completed phase(s)"
+            )
+        else:
+            # Fresh start — ask LLM to create the plan
+            try:
+                plan = self._safe_llm_result(await self._create_master_plan(target, target_type))
+            except RuntimeError as e:
+                await self._emit("llm_halt", {"reason": str(e)})
+                return {"status": "halted", "reason": str(e)}
+
+            # Persist plan in intel so future resumes can reuse it without an LLM call
+            self._intel["_master_plan"] = plan
+
+            await self._emit("master_plan", {"plan": plan, "target": target})
+            await self.emit_reasoning(
+                step       = "master_plan_created",
+                reasoning  = plan.get("rationale", "Initial pentest plan created"),
+                decision   = f"Assessment type: {plan.get('assessment_type', 'full')}",
+                next_action= "Begin reconnaissance phase",
+                data       = plan
+            )
+
+        # ── Build skeleton steps ───────────────────────────────
+        phases_in_plan = _safe_list(plan.get("phases", []))
+        skeleton_steps = []
+        seen_phases    = set()
+        done_set       = set(self._phases_completed)
+
         for ph in phases_in_plan:
             phase_key = str(ph.get("phase","")).lower()
-            if phase_key in phase_icons and phase_key not in seen_phases:
-                icon, label, tools_hint = phase_icons[phase_key]
+            if phase_key in _PHASE_ICONS and phase_key not in seen_phases:
+                icon, lbl, tools_hint = _PHASE_ICONS[phase_key]
                 plan_tools = ph.get("tools", [])
+                step_status = "done" if phase_key in done_set else "pending"
                 skeleton_steps.append({
                     "id":          phase_key,
-                    "label":       label,
+                    "label":       lbl,
                     "icon":        icon,
                     "phase":       phase_key,
                     "tool":        ", ".join(plan_tools[:3]) if plan_tools else tools_hint,
-                    "status":      "pending",
-                    "result":      "",
+                    "status":      step_status,
+                    "result":      "Completed before pause" if step_status == "done" else "",
                     "detail":      ph.get("reasoning",""),
                     "probability": None,
                 })
                 seen_phases.add(phase_key)
 
-        # Fill in any missing standard phases
-        for phase_key, (icon, label, tools_hint) in phase_icons.items():
+        for phase_key, (icon, lbl, tools_hint) in _PHASE_ICONS.items():
             if phase_key not in seen_phases:
+                step_status = "done" if phase_key in done_set else "pending"
                 skeleton_steps.append({
                     "id":          phase_key,
-                    "label":       label,
+                    "label":       lbl,
                     "icon":        icon,
                     "phase":       phase_key,
                     "tool":        tools_hint,
-                    "status":      "pending",
-                    "result":      "",
+                    "status":      step_status,
+                    "result":      "Completed before pause" if step_status == "done" else "",
                     "detail":      "",
                     "probability": None,
                 })
 
-        # Add hypothesis as a pinned note
         hypothesis = plan.get("attack_hypothesis","")
-        await self._emit("plan_skeleton", {
-            "steps":      skeleton_steps,
-            "hypothesis": hypothesis,
-            "assessment_type": plan.get("assessment_type","unknown"),
-            "target":     target,
-            "ts":         datetime.utcnow().isoformat()
-        })
+
+        if _is_resume:
+            # Restore event — frontend merges into existing steps preserving richer data
+            await self._emit("plan_skeleton_restore", {
+                "steps":            skeleton_steps,
+                "hypothesis":       hypothesis,
+                "assessment_type":  plan.get("assessment_type", "resumed"),
+                "target":           target,
+                "phases_completed": list(done_set),
+                "resume_after":     resume_from_phase,
+                "ts":               datetime.utcnow().isoformat(),
+            })
+        else:
+            await self._emit("plan_skeleton", {
+                "steps":           skeleton_steps,
+                "hypothesis":      hypothesis,
+                "assessment_type": plan.get("assessment_type", "unknown"),
+                "target":          target,
+                "ts":              datetime.utcnow().isoformat(),
+            })
 
         # ── Step 3: Start Attack Graph Agent (background, runs whole session) ──
-        try:
-            from agents.attack_graph_agent import AttackGraphAgent
-            import db.mongo_client as _db_mod
-            _aga = AttackGraphAgent(
-                session_id = session_id,
-                target     = target,
-                broadcast  = self.broadcast,
-                db         = _db_mod.get_db(),
-                services   = self._intel.get("services", {}),
-            )
-            self._create_task(_aga.run_analysis_loop())
-            # Keep reference so we can push updated services later
-            self._attack_graph_agent = _aga
-        except Exception as _aga_err:
-            import logging as _l
-            _l.getLogger(__name__).warning("AttackGraphAgent failed to start: %s", _aga_err)
+        # On resume, skip restarting the agent — the graph already exists in DB and
+        # will be served from there.  Starting it fresh would trigger a _wait_for_agents_idle()
+        # stall ("1 item still active") while it re-crawls an already-complete graph.
+        if not _is_resume:
+            try:
+                from agents.attack_graph_agent import AttackGraphAgent
+                import db.mongo_client as _db_mod
+                _aga = AttackGraphAgent(
+                    session_id = session_id,
+                    target     = target,
+                    broadcast  = self.broadcast,
+                    db         = _db_mod.get_db(),
+                    services   = self._intel.get("services", {}),
+                )
+                self._create_task(_aga.run_analysis_loop())
+                # Keep reference so we can push updated services later
+                self._attack_graph_agent = _aga
+            except Exception as _aga_err:
+                import logging as _l
+                _l.getLogger(__name__).warning("AttackGraphAgent failed to start: %s", _aga_err)
 
         # ── Step 4: Execute phases ─────────────────────────────
         try:
