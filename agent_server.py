@@ -287,13 +287,23 @@ async def get_session_summary(session_id: str):
 
 @app.post("/sessions/{session_id}/stop")
 async def stop_session(session_id: str):
+    """
+    Hard-stop a session.  Saves a checkpoint first so the scan can be
+    resumed later via POST /sessions/{id}/resume.
+    """
+    agent = active_agents.get(session_id)
+    if agent:
+        # Graceful: ask MasterAgent to save a checkpoint before cancelling
+        if hasattr(agent, "_save_checkpoint"):
+            try:
+                await agent._save_checkpoint("manual_pause")
+            except Exception:
+                pass
+        agent.stop_all_agents()   # works for both MasterAgent and CIDROrchestrator
     task = active_tasks.get(session_id)
     if task and not task.done():
         task.cancel()
-    agent = active_agents.get(session_id)
-    if agent:
-        agent.stop_all_agents()   # works for both MasterAgent and CIDROrchestrator
-    await db.update_session(session_id, {"status": "paused"})
+    await db.update_session(session_id, {"status": "stopped"})
     return {"status": "stopped", "session_id": session_id}
 
 
@@ -1576,6 +1586,177 @@ async def websocket_endpoint(ws: WebSocket, session_id: str):
     finally:
         ws_manager.disconnect(session_id, ws)
         print(f"[WS] Disconnected from session {session_id}")
+
+
+# ══════════════════════════════════════════════════════════════
+#  PAUSE / RESUME / CHECKPOINTS
+# ══════════════════════════════════════════════════════════════
+
+@app.post("/sessions/{session_id}/pause")
+async def pause_session(session_id: str):
+    """
+    Request a graceful pause.  The scan stops at the next phase boundary,
+    saves a checkpoint, and sets session status to PAUSED.
+    Returns immediately; actual pause happens asynchronously at phase boundary.
+    """
+    agent = active_agents.get(session_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail="No active agent for this session")
+
+    # MasterAgent exposes pause(); CIDROrchestrator pause cascades to all hosts
+    if hasattr(agent, "pause"):
+        await agent.pause()
+    else:
+        raise HTTPException(status_code=400, detail="Agent does not support pause")
+
+    # Mark as paused in DB immediately so a WS reconnect shows the correct status
+    # even if the phase-boundary checkpoint hasn't fired yet.
+    await db.update_session(session_id, {"status": "paused"})
+
+    return {"status": "pause_requested", "session_id": session_id,
+            "message": "Scan will pause after the current phase completes"}
+
+
+@app.post("/sessions/{session_id}/resume")
+async def resume_session(session_id: str):
+    """
+    Resume a paused scan.  If the MasterAgent is still in memory (process
+    didn't restart), simply unblocks the pause event.  If the process restarted,
+    a new MasterAgent is created and restored from the latest checkpoint.
+    """
+    session = await db.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    agent = active_agents.get(session_id)
+
+    # ── Fast path: agent still in memory ─────────────────────────────────
+    if agent and hasattr(agent, "resume"):
+        resumed = await agent.resume()
+        if resumed:
+            await db.update_session(session_id, {"status": "active"})
+            return {"status": "resumed", "session_id": session_id, "method": "in_memory"}
+        # already running — still return 200
+        return {"status": "already_running", "session_id": session_id}
+
+    # ── Cold path: process restarted — restore from checkpoint ───────────
+    cp = await db.get_latest_checkpoint(session_id)
+    if not cp:
+        raise HTTPException(
+            status_code=409,
+            detail="No checkpoint found — cannot resume. Start a new scan."
+        )
+
+    async def broadcast(msg):
+        await ws_manager.broadcast(msg)
+
+    master = MasterAgent(broadcast=broadcast)
+    active_agents[session_id] = master
+
+    # Re-create ShellAgent for this session
+    shell_agent = ShellAgent(broadcast=broadcast)
+    shell_agent._session_id = session_id
+    active_shell_agents[session_id] = shell_agent
+
+    # Restore run-config from checkpoint
+    mc = cp.get("master_config", {})
+    task = asyncio.create_task(master.run(
+        session_id        = session_id,
+        target            = session.get("target_ip", ""),
+        target_type       = mc.get("target_type", session.get("target_type", "unknown")),
+        auto_exploit      = mc.get("auto_exploit", False),
+        threading_enabled = mc.get("threading_enabled", False),
+        max_threads       = mc.get("max_threads", 3),
+        phases            = mc.get("phases") or None,
+        notes             = mc.get("notes", ""),
+        scope             = mc.get("scope", ""),
+        checkpoint_id     = cp.get("id"),
+    ))
+    active_tasks[session_id] = task
+    await db.update_session(session_id, {"status": "active"})
+
+    return {
+        "status":        "resumed",
+        "session_id":    session_id,
+        "method":        "checkpoint_restore",
+        "checkpoint_id": cp.get("id"),
+        "resume_after":  cp.get("current_phase"),
+    }
+
+
+@app.get("/sessions/{session_id}/checkpoints")
+async def list_checkpoints(session_id: str, host: Optional[str] = None, limit: int = 20):
+    """List all checkpoints for a session, newest first."""
+    checkpoints = await db.get_checkpoints(session_id, host=host, limit=limit)
+    return {"checkpoints": checkpoints, "count": len(checkpoints)}
+
+
+@app.get("/sessions/{session_id}/checkpoints/latest")
+async def get_latest_checkpoint(session_id: str, host: Optional[str] = None):
+    """Get the most recent checkpoint for a session."""
+    cp = await db.get_latest_checkpoint(session_id, host=host)
+    if not cp:
+        raise HTTPException(status_code=404, detail="No checkpoints found for this session")
+    return cp
+
+
+@app.delete("/sessions/{session_id}/checkpoints/{checkpoint_id}")
+async def delete_checkpoint(session_id: str, checkpoint_id: str):
+    """Delete a specific checkpoint."""
+    deleted = await db.delete_checkpoint(checkpoint_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Checkpoint not found")
+    return {"status": "deleted", "checkpoint_id": checkpoint_id}
+
+
+# ══════════════════════════════════════════════════════════════
+#  SESSION ARCHIVING
+# ══════════════════════════════════════════════════════════════
+
+@app.post("/sessions/{session_id}/archive")
+async def archive_session(session_id: str):
+    """
+    Archive a completed session — moves heavy data to archived_ collections,
+    stores a compact summary for fast retrieval, marks session as archived.
+    """
+    session = await db.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    if session.get("status") not in ("completed", "paused", "stopped"):
+        raise HTTPException(
+            status_code=409,
+            detail="Only completed/paused/stopped sessions can be archived"
+        )
+    archive = await db.archive_session(session_id)
+    return {"status": "archived", "session_id": session_id, "archive": archive}
+
+
+@app.post("/sessions/{session_id}/unarchive")
+async def unarchive_session(session_id: str):
+    """Restore an archived session — moves data back from archived_ collections."""
+    ok = await db.unarchive_session(session_id)
+    if not ok:
+        raise HTTPException(
+            status_code=409,
+            detail="Session not found or was not archived"
+        )
+    return {"status": "unarchived", "session_id": session_id}
+
+
+@app.get("/sessions/{session_id}/archive")
+async def get_session_archive(session_id: str):
+    """Get the archive summary for a session."""
+    archive = await db.get_session_archive(session_id)
+    if not archive:
+        raise HTTPException(status_code=404, detail="No archive found for this session")
+    return archive
+
+
+@app.get("/archives")
+async def list_archives(limit: int = 50):
+    """List all archived session summaries, newest first."""
+    archives = await db.list_archived_sessions(limit=limit)
+    return {"archives": archives, "count": len(archives)}
 
 
 # ══════════════════════════════════════════════════════════════

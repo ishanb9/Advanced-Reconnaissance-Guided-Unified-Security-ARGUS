@@ -58,6 +58,11 @@ class CIDROrchestrator:
         self._stop              = False
         self._active_masters:   List[MasterAgent] = []
 
+        # Pause/resume — mirrors the MasterAgent contract so agent_server
+        # can call pause()/resume() on either type without isinstance checks.
+        self._pause_event: asyncio.Event = asyncio.Event()
+        self._pause_event.set()   # start in running state
+
     def request_stop(self) -> None:
         """Stop the orchestrator and all active child MasterAgents."""
         self._stop = True
@@ -70,6 +75,39 @@ class CIDROrchestrator:
     def stop_all_agents(self) -> None:
         """Alias used by agent_server stop endpoint."""
         self.request_stop()
+
+    async def pause(self) -> str:
+        """
+        Pause the orchestrator: blocks new host slots from being acquired
+        and cascades pause() to every in-flight MasterAgent.
+        Returns empty string (checkpoint IDs come from each MasterAgent).
+        """
+        self._pause_event.clear()
+        await self._emit("scan_paused", {
+            "message": "Multi-host scan pause requested — finishing current hosts",
+        })
+        for m in list(self._active_masters):
+            try:
+                await m.pause()
+            except Exception:
+                pass
+        return ""
+
+    async def resume(self) -> bool:
+        """
+        Resume: unblock the pause event and cascade resume() to every
+        in-flight MasterAgent.  Returns True if was paused.
+        """
+        was_paused = not self._pause_event.is_set()
+        self._pause_event.set()
+        for m in list(self._active_masters):
+            try:
+                await m.resume()
+            except Exception:
+                pass
+        if was_paused:
+            await self._emit("scan_resumed", {"message": "Multi-host scan resumed"})
+        return was_paused
 
     def inject_guidance(self, guidance: dict) -> None:
         """Forward operator guidance to all active MasterAgents."""
@@ -152,10 +190,25 @@ class CIDROrchestrator:
         mode = SessionMode.CIDR if "/" in self.target_input else SessionMode.MULTI
         await _db.update_session(self.session_id, {"session_mode": mode.value})
 
+        # ── Resume: skip hosts already finished before a pause ─
+        session_doc   = await _db.get_session(self.session_id)
+        hosts_done    = set(session_doc.get("hosts_completed", []) if session_doc else [])
+        pending_hosts = [h for h in live_hosts if h not in hosts_done]
+        if hosts_done:
+            await self._emit("cidr_resume", {
+                "skipped": list(hosts_done),
+                "pending": pending_hosts,
+                "message": f"Resuming — skipping {len(hosts_done)} already-completed host(s)",
+            })
+
         # ── Step 4: Bounded parallel execution ────────────────
         semaphore = asyncio.Semaphore(self.max_parallel_hosts)
-        tasks     = [self._run_host(host, semaphore) for host in live_hosts]
+        tasks     = [self._run_host(host, semaphore) for host in pending_hosts]
         results   = await asyncio.gather(*tasks, return_exceptions=True)
+        # Inject placeholder results for already-completed hosts
+        for h in hosts_done:
+            live_hosts_order = live_hosts  # keep original order for summary
+        live_hosts = pending_hosts   # results align with pending_hosts
 
         summary = {}
         for host, res in zip(live_hosts, results):
@@ -170,6 +223,8 @@ class CIDROrchestrator:
     # ── Per-host runner ────────────────────────────────────────────────────────
 
     async def _run_host(self, host: str, semaphore: asyncio.Semaphore) -> Any:
+        # Wait if paused — block until resume() sets the event
+        await self._pause_event.wait()
         async with semaphore:
             if self._stop:
                 return "stopped"

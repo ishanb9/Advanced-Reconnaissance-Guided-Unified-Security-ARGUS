@@ -328,6 +328,21 @@ class MasterAgent(BaseAgent):
         # report generation begins.
         self._background_tasks: List[asyncio.Task] = []
 
+        # Pause / Resume support
+        # _pause_event is SET (True) while the scan is running.
+        # Calling pause() clears it; resume() sets it again.
+        # Every phase boundary calls _check_pause() which awaits this event.
+        self._pause_event: asyncio.Event = asyncio.Event()
+        self._pause_event.set()   # start in running state
+
+        # Ordered list of phases that have already completed — used to skip
+        # already-done phases when resuming from a checkpoint.
+        self._phases_completed: List[str] = []
+
+        # Master run-config snapshot — saved into checkpoints so resume() can
+        # restore the full MasterAgent configuration.
+        self._master_config: Dict = {}
+
     # ─── Async KB Helpers ─────────────────────────────────────
     # Offload CPU-bound embedding/reranking to thread pool so the async
     # event loop is never blocked.  Also emit rag_query WS events so the
@@ -394,6 +409,7 @@ class MasterAgent(BaseAgent):
         phases:            List[str] = None,
         notes:             str  = "",
         scope:             str  = "",
+        checkpoint_id:     Optional[str] = None,   # resume from checkpoint
         **kwargs
     ) -> Dict:
         self._session_id     = session_id
@@ -403,6 +419,44 @@ class MasterAgent(BaseAgent):
         self._intel["target"]      = target
         self._intel["target_type"] = target_type
         self._phases_to_run  = phases or [p.value for p in AttackPhase]
+
+        # Snapshot run config for checkpoint restore
+        self._master_config = {
+            "target_type":       target_type,
+            "auto_exploit":      auto_exploit,
+            "threading_enabled": threading_enabled,
+            "max_threads":       max_threads,
+            "phases":            list(self._phases_to_run),
+            "notes":             notes,
+            "scope":             scope,
+        }
+
+        # ── Restore from checkpoint if resuming ──────────────────────────
+        resume_from_phase: Optional[str] = None
+        if checkpoint_id:
+            try:
+                cp = await db.get_latest_checkpoint(session_id)
+                if cp:
+                    self._intel.update(cp.get("intel_snapshot", {}))
+                    self._used_tools       = cp.get("used_tools", {})
+                    self._phases_completed = cp.get("phases_completed", [])
+                    self._phases_to_run    = cp.get("phases_to_run") or self._phases_to_run
+                    resume_from_phase      = cp.get("current_phase")
+                    self._intel["state"]   = cp.get("state_machine", "INIT")
+                    await self.emit_reasoning(
+                        step       = "checkpoint_restored",
+                        reasoning  = f"Restored state from checkpoint {checkpoint_id}",
+                        decision   = f"Resuming after phase: {resume_from_phase}",
+                        next_action= "Skipping completed phases"
+                    )
+                    await self._emit("checkpoint_restored", {
+                        "checkpoint_id":    checkpoint_id,
+                        "resume_after":     resume_from_phase,
+                        "phases_completed": self._phases_completed,
+                    })
+            except Exception as _ce:
+                import logging as _l
+                _l.getLogger(__name__).warning("Checkpoint restore failed: %s", _ce)
 
         # Store operator notes and scope for all planning prompts
         self._notes = notes.strip() if notes else ""
@@ -547,7 +601,7 @@ class MasterAgent(BaseAgent):
 
         # ── Step 4: Execute phases ─────────────────────────────
         try:
-            await self._execute_phases(session_id, target, plan)
+            await self._execute_phases(session_id, target, plan, resume_from=resume_from_phase)
         except RuntimeError as e:
             # LLM went offline mid-pentest
             await self._emit("llm_halt", {
@@ -765,6 +819,100 @@ class MasterAgent(BaseAgent):
         task.add_done_callback(_prune)
         return task
 
+    # ─── Pause / Resume ───────────────────────────────────────
+
+    async def pause(self) -> str:
+        """
+        Request a graceful pause.  The scan stops at the next phase boundary
+        (not mid-tool), saves a manual_pause checkpoint, and sets session
+        status to PAUSED.  Returns the checkpoint_id.
+        """
+        self._pause_event.clear()
+        await self._emit("scan_paused", {
+            "message":  "Pause requested — scan will stop after current phase",
+            "phase":    str(self.phase or ""),
+            "ts":       datetime.utcnow().isoformat()
+        })
+        # The actual checkpoint is written by _check_pause() at the next boundary.
+        # Return empty string here — callers should read the session's
+        # last_checkpoint_id from the DB after the boundary is reached.
+        return ""
+
+    async def resume(self) -> bool:
+        """
+        Resume a paused scan.  Sets the pause event so _check_pause() unblocks.
+        Returns True if the scan was actually paused, False if it was already running.
+        """
+        if self._pause_event.is_set():
+            return False   # already running
+        self._pause_event.set()
+        await self._emit("scan_resumed", {
+            "message": "Scan resumed",
+            "phase":   str(self.phase or ""),
+            "ts":      datetime.utcnow().isoformat()
+        })
+        return True
+
+    async def _save_checkpoint(self, checkpoint_type: str = "auto") -> Optional[str]:
+        """
+        Serialise current MasterAgent state to session_checkpoints collection.
+        Returns the checkpoint_id, or None if no session_id is set.
+        """
+        if not self._session_id:
+            return None
+        try:
+            cid = await db.store_checkpoint(
+                session_id            = self._session_id,
+                host                  = self._target,
+                checkpoint_type       = checkpoint_type,
+                state_machine         = self._intel.get("state", "INIT"),
+                current_phase         = str(self.phase or ""),
+                phases_completed      = list(self._phases_completed),
+                phases_to_run         = list(self._phases_to_run),
+                intel_snapshot        = dict(self._intel),
+                used_tools            = dict(self._used_tools),
+                pending_confirmations = list(self._confirm_events.keys()),
+                in_flight_subagents   = [
+                    t for t in self._background_tasks if not t.done()
+                    # we can't serialise Task objects; store count placeholder
+                ] and [],
+                master_config         = dict(self._master_config),
+            )
+            return cid
+        except Exception as _e:
+            import logging as _l
+            _l.getLogger(__name__).warning("Checkpoint save failed: %s", _e)
+            return None
+
+    async def _check_pause(self, phase_label: str = "") -> None:
+        """
+        Called at every phase boundary.  If a pause has been requested,
+        saves a manual_pause checkpoint and blocks until resume() is called.
+        Also saves an auto checkpoint when called normally (not paused).
+        """
+        if not self._pause_event.is_set():
+            # Operator requested pause — save checkpoint then wait
+            await self.emit_reasoning(
+                step       = "paused",
+                reasoning  = f"Scan paused by operator after phase: {phase_label}",
+                decision   = "Saving checkpoint and waiting for resume",
+                next_action= "Call POST /sessions/{id}/resume to continue"
+            )
+            await self._save_checkpoint("manual_pause")
+            await db.update_session(self._session_id, {"status": "paused"})
+            # Block until resume() sets the event
+            await self._pause_event.wait()
+            await db.update_session(self._session_id, {"status": "active"})
+            await self.emit_reasoning(
+                step       = "resumed",
+                reasoning  = "Scan resumed by operator",
+                decision   = "Continuing from next phase",
+                next_action= f"Proceeding after: {phase_label}"
+            )
+        else:
+            # Normal path — save auto checkpoint at this boundary
+            await self._save_checkpoint("auto")
+
     async def _run_phase_subagents(self, phase: str, target: str, **kwargs) -> None:
         """
         Launch the subagent orchestrator(s) for *phase* in a fire-and-forget task.
@@ -956,11 +1104,20 @@ class MasterAgent(BaseAgent):
                 ]
             self._create_task(_safe(asyncio.gather(*coros, return_exceptions=True)))
 
-    async def _execute_phases(self, session_id: str, target: str, plan: Dict):
+    async def _execute_phases(
+        self,
+        session_id:   str,
+        target:       str,
+        plan:         Dict,
+        resume_from:  Optional[str] = None
+    ):
         """
         Execute all enabled phases driven by the state machine.
         Phases 1-4 (recon/vuln/web/osint) run IN PARALLEL for speed.
         Attack planning runs after intelligence aggregation.
+
+        resume_from: if set, skip every phase that appears in _phases_completed
+                     until we reach the phase AFTER resume_from.
         """
         phases = self._phases_to_run
 
@@ -973,6 +1130,10 @@ class MasterAgent(BaseAgent):
                 return AttackPhase(p) in phases or p.upper() in [str(ph).upper() for ph in phases]
             except (ValueError, KeyError):
                 return False
+
+        def already_done(p: str) -> bool:
+            """True if this phase was completed before this resume."""
+            return p in self._phases_completed
 
         # ── Pull long-term memories relevant to this target ───
         await self._transition_state("RECON")
@@ -993,15 +1154,24 @@ class MasterAgent(BaseAgent):
             )
 
         # ── PHASE 1: RECON (always first, sequential) ─────────
-        if phase_enabled("recon"):
+        if phase_enabled("recon") and not already_done("recon"):
             await self._phase_recon(target, plan)
+            self._phases_completed.append("recon")
+        elif already_done("recon"):
+            await self.emit_reasoning(
+                step="recon_skipped", reasoning="Recon already completed before pause",
+                decision="Skipping recon phase", next_action="Continue from next phase"
+            )
+
+        # ── AUTO-CHECKPOINT 1: after recon ────────────────────
+        await self._check_pause("recon")
 
         # ── PHASE 2: PARALLEL intelligence gathering ──────────
         # Run vuln scan + web testing + OSINT simultaneously
         await self._transition_state("INTELLIGENCE_AGGREGATION")
 
         parallel_coros = []
-        if phase_enabled("vuln_id") or phase_enabled("scan"):
+        if (phase_enabled("vuln_id") or phase_enabled("scan")) and not already_done("vuln_id"):
             parallel_coros.append(("vuln", self._phase_vuln_id(target)))
 
         web_ports = []
@@ -1009,17 +1179,17 @@ class MasterAgent(BaseAgent):
             svc_name = (svc.get("service","") if isinstance(svc,dict) else str(svc)).lower()
             if svc_name in ("http","https","http-alt","http-proxy","ssl/http","http?"):
                 web_ports.append(port)
-        if web_ports:
+        if web_ports and not already_done("web_testing"):
             parallel_coros.append(("web", self._phase_web_testing(target, web_ports)))
 
-        if phase_enabled("osint"):
+        if phase_enabled("osint") and not already_done("osint"):
             parallel_coros.append(("osint", self._phase_osint(target)))
 
         # ── Optional specialist phases run alongside vuln/web/osint ──
         # Cloud: if cloud metadata port (80/443) or IMDS hints in scan results
         _svcs_str = _fmt_svcs(self._intel.get("services", {})).lower()
         _os_str   = self._intel.get("os_guess", "").lower()
-        if phase_enabled("cloud") and (
+        if phase_enabled("cloud") and not already_done("cloud") and (
             "169.254.169.254" in str(self._intel) or
             any(k in _svcs_str for k in ("aws", "azure", "gcp", "cloud", "metadata")) or
             self._intel.get("target_type", "") in ("cloud", "aws", "azure", "gcp")
@@ -1028,14 +1198,14 @@ class MasterAgent(BaseAgent):
 
         # Container: if docker (2375/2376) or k8s (6443/8443/10250) ports open
         _open_ports = set(str(p) for p in self._intel.get("open_ports", []))
-        if phase_enabled("container") and (
+        if phase_enabled("container") and not already_done("container") and (
             _open_ports & {"2375", "2376", "6443", "8443", "10250", "10255"} or
             any(k in _svcs_str for k in ("docker", "kubernetes", "k8s"))
         ):
             parallel_coros.append(("container", self._phase_container(target)))
 
         # Traffic: passive capture runs alongside other recon phases
-        if phase_enabled("traffic"):
+        if phase_enabled("traffic") and not already_done("traffic"):
             parallel_coros.append(("traffic", self._phase_traffic(target)))
 
         if parallel_coros:
@@ -1065,6 +1235,9 @@ class MasterAgent(BaseAgent):
                         decision   = "Continuing with remaining agents",
                         next_action= "Use available intel for planning"
                     )
+                else:
+                    if name not in self._phases_completed:
+                        self._phases_completed.append(name)
             await self.emit_reasoning(
                 step       = "parallel_intel_done",
                 reasoning  = f"All {len(parallel_coros)} parallel agents completed",
@@ -1074,6 +1247,9 @@ class MasterAgent(BaseAgent):
 
             # Sync gate: ensure all parallel agents are truly done before continuing
             await self._wait_for_agents_idle(timeout=120.0)
+
+        # ── AUTO-CHECKPOINT 2: after parallel intel ───────────
+        await self._check_pause("parallel_intel")
 
         # Capture all enumeration as evidence
         if self._intel.get("open_ports"):
@@ -1100,13 +1276,17 @@ class MasterAgent(BaseAgent):
 
         # ── PHASE 4: ATTACK PLANNING (new) ────────────────────
         await self._transition_state("ATTACK_PLANNING")
-        attack_tree = await self._phase_attack_planning(target)
-        if attack_tree:
-            self._intel["attack_tree"] = attack_tree
+        if not already_done("attack_planning"):
+            attack_tree = await self._phase_attack_planning(target)
+            if attack_tree:
+                self._intel["attack_tree"] = attack_tree
+            self._phases_completed.append("attack_planning")
+        else:
+            attack_tree = self._intel.get("attack_tree")
 
         # ── PHASE 5: EXPLOITATION ─────────────────────────────
         await self._transition_state("EXPLOITATION")
-        if phase_enabled("exploit"):
+        if phase_enabled("exploit") and not already_done("exploit"):
             if self._auto_exploit:
                 await self._phase_exploit(target)
             else:
@@ -1119,18 +1299,29 @@ class MasterAgent(BaseAgent):
                 confirmed = await self._wait_for_confirmation("exploit", timeout=3600)
                 if confirmed:
                     await self._phase_exploit(target)
+                    self._phases_completed.append("exploit")
                 else:
                     await self._emit("phase_skipped", {"phase": "exploit"})
+        elif already_done("exploit"):
+            await self.emit_reasoning(
+                step="exploit_skipped", reasoning="Exploit phase completed before pause",
+                decision="Skipping exploit phase", next_action="Continue to post-exploit"
+            )
+
+        # ── AUTO-CHECKPOINT 3: after exploitation ─────────────
+        await self._check_pause("exploit")
 
         # ── PHASE 6: POST-EXPLOITATION + PRIVESC ──────────────
         if self._intel["shell_access"]:
             await self._transition_state("POST_EXPLOITATION")
-            if phase_enabled("post_exploit"):
+            if phase_enabled("post_exploit") and not already_done("post_exploit"):
                 await self._phase_post_exploit(target)
+                self._phases_completed.append("post_exploit")
 
             await self._transition_state("PRIVILEGE_ESCALATION")
-            if phase_enabled("privesc"):
+            if phase_enabled("privesc") and not already_done("privesc"):
                 await self._phase_privesc(target)
+                self._phases_completed.append("privesc")
                 # Store privesc success in long-term memory
                 if self._intel.get("root_flag") or self._intel.get("current_user") == "root":
                     await self._store_success_memory(
@@ -1145,24 +1336,29 @@ class MasterAgent(BaseAgent):
 
             # ── PHASE 6b: EVASION (when shell active) ─────────
             # Run defense enumeration + AV evasion after initial access
-            if phase_enabled("evasion"):
+            if phase_enabled("evasion") and not already_done("evasion"):
                 await self._phase_evasion(target)
+                self._phases_completed.append("evasion")
 
             # ── PHASE 7: LATERAL MOVEMENT ─────────────────────
             await self._transition_state("LATERAL_MOVEMENT")
-            if phase_enabled("lateral"):
+            if phase_enabled("lateral") and not already_done("lateral"):
                 await self._phase_lateral_movement(target)
-            elif phase_enabled("exploit") and self._intel.get("lateral_targets"):
+                self._phases_completed.append("lateral")
+            elif phase_enabled("exploit") and self._intel.get("lateral_targets") and not already_done("lateral"):
                 # Legacy: also trigger if exploit phase found lateral targets
                 await self._phase_lateral_movement(target)
+                self._phases_completed.append("lateral")
 
         # ── PHASE 7b: WIRELESS (optional standalone phase) ────
-        if phase_enabled("wireless") or self._intel.get("wireless_config"):
+        if (phase_enabled("wireless") or self._intel.get("wireless_config")) and not already_done("wireless"):
             await self._phase_wireless(target)
+            self._phases_completed.append("wireless")
 
         # ── PHASE 7c: IoT ASSESSMENT (auto-detected or explicit) ──────────────
-        if phase_enabled("iot") or self._intel.get("_iot_detected"):
+        if (phase_enabled("iot") or self._intel.get("_iot_detected")) and not already_done("iot"):
             await self._phase_iot(target)
+            self._phases_completed.append("iot")
 
         # ── PHASE 8: EVIDENCE COLLECTION ─────────────────────
         # Sync gate: every agent must be IDLE before evidence is collected.
@@ -1177,12 +1373,14 @@ class MasterAgent(BaseAgent):
         await self._transition_state("EVIDENCE_COLLECTION")
 
         # ── Enhanced evidence: screenshot + flag capture (EvidenceAgent) ──
-        if self._intel.get("shell_access") and phase_enabled("evidence"):
+        if self._intel.get("shell_access") and phase_enabled("evidence") and not already_done("evidence"):
             await self._phase_evidence_enhanced(target)
+            self._phases_completed.append("evidence")
 
         # ── Forensics deep-dive: timeline + artifacts + memory ────────────
-        if phase_enabled("forensics"):
+        if phase_enabled("forensics") and not already_done("forensics"):
             await self._phase_forensics_deep(target)
+            self._phases_completed.append("forensics")
 
         await self._phase_evidence_collection(session_id, target)
 

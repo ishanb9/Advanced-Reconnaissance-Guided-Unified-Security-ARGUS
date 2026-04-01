@@ -1,14 +1,16 @@
 """
-KALI PENTEST PLATFORM v2 — MongoDB Client
+ARGUS Pentest Platform — MongoDB Client
 All database operations. Uses Motor (async MongoDB driver).
 
-Collections:
+Collections (operational):
   sessions, findings, tool_outputs, agent_logs,
   shell_sessions, flags, attack_graph_nodes,
-  attack_graph_edges, osint_results
+  attack_graph_edges, osint_results, credentials,
+  subagent_results, persistence, session_checkpoints,
+  session_archives
 
 MongoDB must be running: sudo systemctl start mongod
-Default: mongodb://localhost:27017/kali_pentest
+Default: mongodb://localhost:27017/argus_pentest
 """
 
 import asyncio
@@ -27,7 +29,7 @@ from db.schemas import (
 # ─── Connection ────────────────────────────────────────────
 
 MONGO_URI = "mongodb://localhost:27017"
-DB_NAME   = "kali_pentest"
+DB_NAME   = "argus_pentest"
 
 # Motor async client (initialized in setup())
 _client:      Optional[motor.motor_asyncio.AsyncIOMotorClient]  = None
@@ -63,64 +65,171 @@ async def teardown():
 
 
 async def _create_indexes():
-    """Create indexes for efficient queries."""
+    """
+    Create all indexes for efficient queries.
+
+    Naming conventions:
+      - Every operational collection has (session_id, host) compound index
+        for fast per-IP isolation in multi-host scans.
+      - TTL indexes auto-expire stale documents; partial filters keep
+        only auto-checkpoints under TTL so manual ones survive forever.
+      - schema_version indexes let callers target documents with specific
+        newer fields without scanning the whole collection.
+    """
     db = get_db()
-    # sessions
+
+    # ── sessions ────────────────────────────────────────────────────────────
     await db.sessions.create_index([("status", ASCENDING)])
     await db.sessions.create_index([("started_at", DESCENDING)])
-    # findings
-    await db.findings.create_index([("session_id", ASCENDING), ("severity", ASCENDING)])
+    await db.sessions.create_index([("archived", ASCENDING), ("started_at", DESCENDING)])
+
+    # ── findings ────────────────────────────────────────────────────────────
+    # Covering index: all three filter fields in one compound index
+    await db.findings.create_index(
+        [("session_id", ASCENDING), ("host", ASCENDING), ("severity", ASCENDING)]
+    )
     await db.findings.create_index([("session_id", ASCENDING), ("phase", ASCENDING)])
     await db.findings.create_index([("cves", ASCENDING)])
-    # tool_outputs
-    await db.tool_outputs.create_index([("session_id", ASCENDING), ("started_at", DESCENDING)])
+
+    # ── tool_outputs ────────────────────────────────────────────────────────
+    await db.tool_outputs.create_index(
+        [("session_id", ASCENDING), ("host", ASCENDING), ("started_at", DESCENDING)]
+    )
     await db.tool_outputs.create_index([("session_id", ASCENDING), ("agent", ASCENDING)])
-    # agent_logs
-    await db.agent_logs.create_index([("session_id", ASCENDING), ("timestamp", DESCENDING)])
+    # backward-compat index on legacy `target` field
+    await db.tool_outputs.create_index([("session_id", ASCENDING), ("target", ASCENDING)])
+    # TTL — purge tool output records older than 180 days
+    await db.tool_outputs.create_index(
+        [("created_at", ASCENDING)],
+        expireAfterSeconds=180 * 24 * 3600,
+        name="tool_outputs_ttl_180d"
+    )
+
+    # ── agent_logs ──────────────────────────────────────────────────────────
+    await db.agent_logs.create_index(
+        [("session_id", ASCENDING), ("host", ASCENDING), ("timestamp", DESCENDING)]
+    )
     await db.agent_logs.create_index([("session_id", ASCENDING), ("agent", ASCENDING)])
-    # shell_sessions
+    await db.agent_logs.create_index([("session_id", ASCENDING), ("log_level", ASCENDING)])
+    # TTL — purge agent logs older than 90 days
+    await db.agent_logs.create_index(
+        [("created_at", ASCENDING)],
+        expireAfterSeconds=90 * 24 * 3600,
+        name="agent_logs_ttl_90d"
+    )
+
+    # ── shell_sessions ──────────────────────────────────────────────────────
     await db.shell_sessions.create_index([("session_id", ASCENDING), ("active", ASCENDING)])
-    # flags
-    await db.flags.create_index([("session_id", ASCENDING)])
-    # attack graph
-    await db.attack_graph_nodes.create_index([("session_id", ASCENDING)])
+    await db.shell_sessions.create_index([("session_id", ASCENDING), ("rhost", ASCENDING)])
+
+    # ── flags ───────────────────────────────────────────────────────────────
+    await db.flags.create_index([("session_id", ASCENDING), ("host", ASCENDING)])
+
+    # ── attack graph ────────────────────────────────────────────────────────
+    await db.attack_graph_nodes.create_index(
+        [("session_id", ASCENDING), ("host", ASCENDING)]
+    )
     await db.attack_graph_edges.create_index([("session_id", ASCENDING)])
-    # osint
-    await db.osint_results.create_index([("session_id", ASCENDING), ("relevance_score", DESCENDING)])
-    # payloads (Phase 3)
+
+    # ── osint_results ───────────────────────────────────────────────────────
+    await db.osint_results.create_index(
+        [("session_id", ASCENDING), ("host", ASCENDING), ("relevance_score", DESCENDING)]
+    )
+
+    # ── payloads ────────────────────────────────────────────────────────────
     await db.payloads.create_index([("session_id", ASCENDING)])
     await db.payloads.create_index([("generated_at", DESCENDING)])
-    # attack_tree — attack plans generated by planner agent
+
+    # ── attack_tree ─────────────────────────────────────────────────────────
     await db.attack_tree.create_index([("session_id", ASCENDING), ("created_at", DESCENDING)])
-    # long_term_memory — cross-session reusable knowledge
+
+    # ── long_term_memory ────────────────────────────────────────────────────
     await db.long_term_memory.create_index([("target_type", ASCENDING)])
     await db.long_term_memory.create_index([("tags", ASCENDING)])
     await db.long_term_memory.create_index([("created_at", DESCENDING)])
-    # evidence_collection — structured evidence per session
-    await db.evidence.create_index([("session_id", ASCENDING), ("phase", ASCENDING)])
+
+    # ── evidence ────────────────────────────────────────────────────────────
+    await db.evidence.create_index(
+        [("session_id", ASCENDING), ("host", ASCENDING), ("phase", ASCENDING)]
+    )
     await db.evidence.create_index([("session_id", ASCENDING), ("evidence_type", ASCENDING)])
-    # mitre_mappings — ATT&CK technique mappings per session
-    await db.mitre_mappings.create_index([("session_id", ASCENDING)])
-    # Phase 4: Subagent collections
-    # credentials — discovered credentials across all phases
-    await db.credentials.create_index([("session_id", ASCENDING), ("service", ASCENDING)])
-    await db.credentials.create_index([("session_id", ASCENDING), ("host", ASCENDING)])
-    # tunnels — network tunnels and pivots
+
+    # ── mitre_mappings ──────────────────────────────────────────────────────
+    await db.mitre_mappings.create_index(
+        [("session_id", ASCENDING), ("host", ASCENDING)]
+    )
+
+    # ── credentials ─────────────────────────────────────────────────────────
+    await db.credentials.create_index(
+        [("session_id", ASCENDING), ("host", ASCENDING), ("service", ASCENDING)]
+    )
+    await db.credentials.create_index([("session_id", ASCENDING), ("verified", ASCENDING)])
+
+    # ── tunnels ─────────────────────────────────────────────────────────────
     await db.tunnels.create_index([("session_id", ASCENDING), ("active", ASCENDING)])
-    # persistence — persistence mechanisms
-    await db.persistence.create_index([("session_id", ASCENDING), ("host", ASCENDING)])
-    # subagent_results — full subagent execution results
-    await db.subagent_results.create_index([("session_id", ASCENDING), ("agent", ASCENDING)])
-    await db.subagent_results.create_index([("session_id", ASCENDING), ("subagent_name", ASCENDING)])
-    # rag_history — RAG query/result pairs
+
+    # ── persistence ─────────────────────────────────────────────────────────
+    await db.persistence.create_index(
+        [("session_id", ASCENDING), ("host", ASCENDING)]
+    )
+
+    # ── subagent_results ────────────────────────────────────────────────────
+    await db.subagent_results.create_index(
+        [("session_id", ASCENDING), ("host", ASCENDING), ("agent", ASCENDING)]
+    )
+    await db.subagent_results.create_index(
+        [("session_id", ASCENDING), ("subagent_name", ASCENDING)]
+    )
+
+    # ── rag_history ─────────────────────────────────────────────────────────
     await db.rag_history.create_index([("session_id", ASCENDING), ("timestamp", DESCENDING)])
-    # attack_chains — identified multi-step exploit chains
+    # TTL — purge RAG history older than 30 days
+    await db.rag_history.create_index(
+        [("timestamp", ASCENDING)],
+        expireAfterSeconds=30 * 24 * 3600,
+        name="rag_history_ttl_30d"
+    )
+
+    # ── attack_chains ───────────────────────────────────────────────────────
     await db.attack_chains.create_index([("session_id", ASCENDING)])
-    # ── Multi-host compound indexes (session_id + host for per-IP queries) ──
-    await db.findings.create_index([("session_id", ASCENDING), ("host", ASCENDING)])
-    await db.tool_outputs.create_index([("session_id", ASCENDING), ("target", ASCENDING)])
-    await db.credentials.create_index([("session_id", ASCENDING), ("host", ASCENDING)])
-    await db.persistence.create_index([("session_id", ASCENDING), ("host", ASCENDING)])
+
+    # ── session_checkpoints ─────────────────────────────────────────────────
+    await db.session_checkpoints.create_index(
+        [("session_id", ASCENDING), ("created_at", DESCENDING)]
+    )
+    await db.session_checkpoints.create_index(
+        [("session_id", ASCENDING), ("checkpoint_type", ASCENDING)]
+    )
+    # TTL — auto-checkpoints expire after 30 days; manual checkpoints kept indefinitely
+    await db.session_checkpoints.create_index(
+        [("created_at", ASCENDING)],
+        expireAfterSeconds=30 * 24 * 3600,
+        partialFilterExpression={"checkpoint_type": "auto"},
+        name="session_checkpoints_auto_ttl_30d"
+    )
+
+    # ── session_archives ────────────────────────────────────────────────────
+    await db.session_archives.create_index([("session_id", ASCENDING)], unique=True)
+    await db.session_archives.create_index([("archived_at", DESCENDING)])
+
+    # ── agent_logs_realtime (capped ring-buffer for sync-gate diagnostics) ──
+    # Create only if it doesn't already exist — capped collections cannot be
+    # converted after creation, so we guard with a try/except.
+    try:
+        existing = await db.list_collection_names()
+        if "agent_logs_realtime" not in existing:
+            await db.create_collection(
+                "agent_logs_realtime",
+                capped=True,
+                size=100 * 1024 * 1024,   # 100 MB ring buffer
+                max=500_000
+            )
+            await db.agent_logs_realtime.create_index(
+                [("session_id", ASCENDING), ("timestamp", DESCENDING)]
+            )
+    except Exception:
+        pass  # collection already exists or MongoDB doesn't support capped here
+
     print("[DB] Indexes created.")
 
 
@@ -185,6 +294,12 @@ async def create_session(data: SessionCreate) -> Dict:
         "discovered_hosts":  [],
         "hosts_completed":   [],
         "host_count":        0,
+        # Pause/resume
+        "last_checkpoint_id": None,
+        "pause_count":        0,
+        # Archiving
+        "archived":           False,
+        "archived_at":        None,
     }
     await db.sessions.insert_one(doc)
     return _serialize(doc)
@@ -231,12 +346,21 @@ async def delete_session(session_id: str) -> bool:
         db.findings.delete_many({"session_id": session_id}),
         db.tool_outputs.delete_many({"session_id": session_id}),
         db.agent_logs.delete_many({"session_id": session_id}),
+        db.agent_logs_realtime.delete_many({"session_id": session_id}),
         db.flags.delete_many({"session_id": session_id}),
-        db.graph_nodes.delete_many({"session_id": session_id}),
-        db.graph_edges.delete_many({"session_id": session_id}),
+        db.attack_graph_nodes.delete_many({"session_id": session_id}),
+        db.attack_graph_edges.delete_many({"session_id": session_id}),
         db.shell_sessions.delete_many({"session_id": session_id}),
         db.payloads.delete_many({"session_id": session_id}),
         db.osint_results.delete_many({"session_id": session_id}),
+        db.credentials.delete_many({"session_id": session_id}),
+        db.persistence.delete_many({"session_id": session_id}),
+        db.subagent_results.delete_many({"session_id": session_id}),
+        db.session_checkpoints.delete_many({"session_id": session_id}),
+        db.evidence.delete_many({"session_id": session_id}),
+        db.mitre_mappings.delete_many({"session_id": session_id}),
+        db.attack_tree.delete_many({"session_id": session_id}),
+        db.rag_history.delete_many({"session_id": session_id}),
         return_exceptions=True  # don't fail if a collection doesn't exist
     )
 
@@ -459,31 +583,39 @@ async def store_tool_output(
     phase:      AttackPhase,
     tool_name:  str,
     command:    str,
-    target:     Optional[str] = None,
+    host:       Optional[str] = None,    # per-host key (None = session-wide)
+    target:     Optional[str] = None,    # kept for backward compat
     thread_id:  Optional[str] = None
 ) -> str:
     """
-    Create a tool output record (empty). 
-    Returns the record ID — use update_tool_output() as output streams in.
+    Create a tool output record (empty).
+    Returns the record ID — use finalize_tool_output() when the tool finishes.
+    `host` is the canonical per-IP isolation key; `target` is kept for
+    backward-compat with documents written before this field was added.
     """
     db = get_db()
+    now = datetime.utcnow()
     doc = {
-        "_id":          ObjectId(),
-        "session_id":   session_id,
-        "agent":        agent,
-        "phase":        phase,
-        "tool_name":    tool_name,
-        "command":      command,
-        "target":       target,
-        "stdout":       "",
-        "stderr":       "",
-        "exit_code":    None,
-        "summary":      None,
-        "key_findings": [],
-        "started_at":   datetime.utcnow(),
-        "ended_at":     None,
-        "duration_ms":  None,
-        "thread_id":    thread_id
+        "_id":               ObjectId(),
+        "session_id":        session_id,
+        "host":              host or target,   # canonical field
+        "agent":             str(agent),
+        "phase":             str(phase),
+        "schema_version":    2,
+        "tool_name":         tool_name,
+        "command":           command,
+        "target":            target,           # legacy compat field
+        "stdout":            "",
+        "stderr":            "",
+        "exit_code":         None,
+        "content_truncated": False,
+        "summary":           None,
+        "key_findings":      [],
+        "created_at":        now,
+        "ended_at":          None,
+        "duration_ms":       None,
+        "thread_id":         thread_id,
+        "extra":             {}
     }
     await db.tool_outputs.insert_one(doc)
     await increment_session_stats(session_id, tools=1)
@@ -503,6 +635,8 @@ async def append_tool_stdout(output_id: str, chunk: str):
         pass
 
 
+_STDOUT_CAP = 64 * 1024   # 64 KB — prevents multi-MB nmap outputs dominating storage
+
 async def finalize_tool_output(
     output_id: str,
     stdout:    str,
@@ -511,23 +645,34 @@ async def finalize_tool_output(
     summary:   Optional[str]  = None,
     key_findings: List[str]   = None
 ):
-    """Mark tool output as complete with final output."""
+    """
+    Mark tool output as complete with final stdout/stderr.
+    stdout is capped at 64 KB; if truncated, content_truncated is set True
+    so callers know the full output is available only in filesystem logs.
+    """
     db = get_db()
     now = datetime.utcnow()
     try:
         doc = await db.tool_outputs.find_one({"_id": ObjectId(output_id)})
-        started = doc["started_at"] if doc else now
-        duration_ms = int((now - started).total_seconds() * 1000)
+        started      = doc.get("created_at", now) if doc else now
+        duration_ms  = int((now - started).total_seconds() * 1000)
+
+        truncated = len(stdout.encode("utf-8", errors="replace")) > _STDOUT_CAP
+        if truncated:
+            stdout = stdout.encode("utf-8", errors="replace")[:_STDOUT_CAP].decode("utf-8", errors="replace")
+            stdout += "\n…[truncated — full output in filesystem logs]"
+
         await db.tool_outputs.update_one(
             {"_id": ObjectId(output_id)},
             {"$set": {
-                "stdout":       stdout,
-                "stderr":       stderr,
-                "exit_code":    exit_code,
-                "summary":      summary,
-                "key_findings": key_findings or [],
-                "ended_at":     now,
-                "duration_ms":  duration_ms
+                "stdout":            stdout,
+                "stderr":            stderr[:_STDOUT_CAP],
+                "exit_code":         exit_code,
+                "content_truncated": truncated,
+                "summary":           summary,
+                "key_findings":      key_findings or [],
+                "ended_at":          now,
+                "duration_ms":       duration_ms
             }}
         )
     except (InvalidId, TypeError):
@@ -554,30 +699,49 @@ async def log_agent_action(
     action:        str,
     reasoning:     str,
     new_status:    AgentStatus,
+    host:          Optional[str]         = None,   # per-host key
     prev_status:   Optional[AgentStatus] = None,
     tool:          Optional[str]         = None,
     sent_to:       Optional[AgentName]   = None,
     received_from: Optional[AgentName]   = None,
-    message:       Optional[str]         = None
+    message:       Optional[str]         = None,
+    log_level:     str                   = "info"  # "debug"|"info"|"warning"|"error"
 ) -> Dict:
-    """Log an agent decision or status change."""
+    """
+    Log an agent decision or status change.
+    debug-level logs are also written to the capped agent_logs_realtime
+    ring-buffer for live UI polling without polluting the main log.
+    """
     db = get_db()
+    now = datetime.utcnow()
     doc = {
-        "_id":           ObjectId(),
-        "session_id":    session_id,
-        "agent":         agent,
-        "phase":         phase,
-        "action":        action,
-        "reasoning":     reasoning,
-        "tool":          tool,
-        "prev_status":   prev_status,
-        "new_status":    new_status,
-        "timestamp":     datetime.utcnow(),
-        "sent_to":       sent_to,
-        "received_from": received_from,
-        "message":       message
+        "_id":            ObjectId(),
+        "session_id":     session_id,
+        "host":           host,
+        "agent":          str(agent),
+        "phase":          str(phase),
+        "schema_version": 2,
+        "action":         action,
+        "reasoning":      reasoning,
+        "tool":           tool,
+        "prev_status":    str(prev_status) if prev_status else None,
+        "new_status":     str(new_status),
+        "timestamp":      now,
+        "created_at":     now,
+        "sent_to":        str(sent_to)       if sent_to       else None,
+        "received_from":  str(received_from) if received_from else None,
+        "message":        message,
+        "log_level":      log_level,
+        "extra":          {}
     }
     await db.agent_logs.insert_one(doc)
+    # Mirror debug/info logs to the capped realtime ring-buffer (best-effort)
+    try:
+        rt_doc = {k: v for k, v in doc.items() if k != "_id"}
+        rt_doc["_id"] = ObjectId()
+        await db.agent_logs_realtime.insert_one(rt_doc)
+    except Exception:
+        pass
     return _serialize(doc)
 
 
@@ -606,22 +770,27 @@ async def create_shell_session(
     """Create a new shell session record."""
     db = get_db()
     doc = {
-        "_id":         ObjectId(),
-        "session_id":  session_id,
-        "agent":       AgentName.SHELL,
-        "shell_type":  shell_type,
-        "lhost":       lhost,
-        "lport":       lport,
-        "rhost":       rhost,
-        "rport":       rport,
-        "protocol":    protocol,
-        "active":      False,
-        "pid":         None,
-        "shell_user":  None,
-        "shell_cwd":   None,
-        "commands":    [],
-        "opened_at":   datetime.utcnow(),
-        "closed_at":   None
+        "_id":            ObjectId(),
+        "session_id":     session_id,
+        "host":           rhost,          # BaseDocument per-host key mirrors rhost
+        "agent":          str(AgentName.SHELL),
+        "phase":          "exploit",
+        "schema_version": 2,
+        "shell_type":     shell_type,
+        "lhost":          lhost,
+        "lport":          lport,
+        "rhost":          rhost,
+        "rport":          rport,
+        "protocol":       protocol,
+        "active":         False,
+        "pid":            None,
+        "shell_user":     None,
+        "shell_cwd":      None,
+        "commands":       [],
+        "opened_at":      datetime.utcnow(),
+        "created_at":     datetime.utcnow(),
+        "closed_at":      None,
+        "extra":          {}
     }
     await db.shell_sessions.insert_one(doc)
     return _serialize(doc)
@@ -672,19 +841,28 @@ async def store_flag(
     value:      str,
     location:   str,
     found_by:   AgentName,
-    context:    Optional[str] = None
+    host:       Optional[str] = None,   # which host the flag came from
+    context:    Optional[str] = None,
+    phase:      str           = "post_exploit"
 ) -> Dict:
     """Store a captured flag."""
     db = get_db()
+    now = datetime.utcnow()
     doc = {
-        "_id":        ObjectId(),
-        "session_id": session_id,
-        "flag_type":  flag_type,
-        "value":      value,
-        "location":   location,
-        "found_by":   found_by,
-        "context":    context,
-        "found_at":   datetime.utcnow()
+        "_id":            ObjectId(),
+        "session_id":     session_id,
+        "host":           host,
+        "agent":          str(found_by),
+        "phase":          phase,
+        "schema_version": 2,
+        "flag_type":      flag_type,
+        "value":          value,
+        "location":       location,
+        "found_by":       str(found_by),
+        "context":        context,
+        "found_at":       now,
+        "created_at":     now,
+        "extra":          {}
     }
     await db.flags.insert_one(doc)
     await add_flag_to_session(session_id, value)
@@ -932,6 +1110,7 @@ async def store_osint_result(
     source:      str,
     title:       str,
     summary:     str,
+    host:        Optional[str]  = None,   # target host this OSINT relates to
     url:         Optional[str]  = None,
     cves:        List[str]      = None,
     exploits:    List[str]      = None,
@@ -941,9 +1120,14 @@ async def store_osint_result(
 ) -> Dict:
     """Store an OSINT/internet research result."""
     db = get_db()
+    now = datetime.utcnow()
     doc = {
         "_id":             ObjectId(),
         "session_id":      session_id,
+        "host":            host,
+        "agent":           "osint",
+        "phase":           "osint",
+        "schema_version":  2,
         "query":           query,
         "source":          source,
         "title":           title,
@@ -951,10 +1135,12 @@ async def store_osint_result(
         "summary":         summary,
         "cves":            cves or [],
         "exploits":        exploits or [],
-        "severity":        severity,
+        "severity":        str(severity) if severity else None,
         "raw":             raw,
         "relevance_score": relevance,
-        "fetched_at":      datetime.utcnow()
+        "fetched_at":      now,
+        "created_at":      now,
+        "extra":           {}
     }
     await db.osint_results.insert_one(doc)
     return _serialize(doc)
@@ -1353,3 +1539,230 @@ async def activate_session(session_id: str) -> Optional[Dict]:
 
     # Return a full summary for the frontend to hydrate its store
     return await get_session_summary(session_id)
+
+
+# ═══════════════════════════════════════════════════════════
+#  SESSION CHECKPOINTS  (pause / resume)
+#  Full MasterAgent state snapshots — lets operator pause mid-scan
+#  and resume from exactly where they left off.
+# ═══════════════════════════════════════════════════════════
+
+async def store_checkpoint(
+    session_id:           str,
+    host:                 str,
+    checkpoint_type:      str,   # CheckpointType value string
+    state_machine:        str,
+    current_phase:        str,
+    phases_completed:     List[str]      = None,
+    phases_to_run:        List[str]      = None,
+    intel_snapshot:       Dict[str, Any] = None,
+    used_tools:           Dict[str, int] = None,
+    pending_confirmations: List[str]     = None,
+    in_flight_subagents:  List[str]      = None,
+    master_config:        Dict[str, Any] = None,
+) -> str:
+    """
+    Serialise the full MasterAgent state to session_checkpoints.
+    Returns the checkpoint ID (str).  The session document is updated
+    with last_checkpoint_id and pause_count is incremented for manual pauses.
+    """
+    db = get_db()
+    doc = {
+        "_id":                   ObjectId(),
+        "session_id":            session_id,
+        "host":                  host,
+        "checkpoint_type":       checkpoint_type,
+        "schema_version":        1,
+        "state_machine":         state_machine,
+        "current_phase":         current_phase,
+        "phases_completed":      phases_completed or [],
+        "phases_to_run":         phases_to_run    or [],
+        "intel_snapshot":        intel_snapshot   or {},
+        "used_tools":            used_tools       or {},
+        "pending_confirmations": pending_confirmations or [],
+        "in_flight_subagents":   in_flight_subagents  or [],
+        "master_config":         master_config    or {},
+        "created_at":            datetime.utcnow(),
+    }
+    await db.session_checkpoints.insert_one(doc)
+    checkpoint_id = str(doc["_id"])
+
+    # Update session to track latest checkpoint
+    session_update: Dict = {"last_checkpoint_id": checkpoint_id, "updated_at": datetime.utcnow()}
+    if checkpoint_type == "manual_pause":
+        session_update["status"] = "paused"
+        # Increment pause_count via $inc for atomicity
+        try:
+            await db.sessions.update_one(
+                {"_id": ObjectId(session_id)},
+                {"$inc": {"pause_count": 1}, "$set": session_update}
+            )
+        except Exception:
+            pass
+    else:
+        await update_session(session_id, session_update)
+
+    return checkpoint_id
+
+
+async def get_latest_checkpoint(
+    session_id: str,
+    host:       Optional[str] = None
+) -> Optional[Dict]:
+    """
+    Return the most recent checkpoint for a session (optionally scoped to a host).
+    Prefers manual_pause checkpoints over auto ones if both share the same timestamp.
+    """
+    db = get_db()
+    query: Dict = {"session_id": session_id}
+    if host:
+        query["host"] = host
+    doc = await db.session_checkpoints.find_one(
+        query,
+        sort=[("created_at", DESCENDING)]
+    )
+    return _serialize(doc) if doc else None
+
+
+async def get_checkpoints(
+    session_id: str,
+    host:       Optional[str] = None,
+    limit:      int           = 20
+) -> List[Dict]:
+    """List checkpoints for a session, newest first."""
+    db = get_db()
+    query: Dict = {"session_id": session_id}
+    if host:
+        query["host"] = host
+    cursor = db.session_checkpoints.find(query).sort("created_at", DESCENDING).limit(limit)
+    return _serialize_list(await cursor.to_list(length=limit))
+
+
+async def delete_checkpoint(checkpoint_id: str) -> bool:
+    """Delete a specific checkpoint (e.g. after successful resume)."""
+    db = get_db()
+    try:
+        result = await db.session_checkpoints.delete_one({"_id": ObjectId(checkpoint_id)})
+        return result.deleted_count > 0
+    except InvalidId:
+        return False
+
+
+# ═══════════════════════════════════════════════════════════
+#  SESSION ARCHIVING  (>90 day old sessions)
+#  archive_session() moves heavy data to archived_* collections
+#  and writes a lightweight SessionArchive summary for fast retrieval.
+# ═══════════════════════════════════════════════════════════
+
+async def archive_session(session_id: str, report_html: Optional[str] = None) -> Optional[Dict]:
+    """
+    Archive a completed session:
+      1. Write a SessionArchive summary document (with inline report HTML).
+      2. Cascade-move findings/tool_outputs/agent_logs to archived_ collections.
+      3. Mark session.archived = True and set archived_at timestamp.
+    Returns the archive document, or None if session not found.
+    """
+    db  = get_db()
+    session = await get_session(session_id)
+    if not session:
+        return None
+
+    # ── 1. Build findings severity counts ──────────────────────────────────
+    summary = await get_findings_summary(session_id)
+
+    now = datetime.utcnow()
+    archive_doc = {
+        "_id":            ObjectId(),
+        "session_id":     session_id,
+        "target_ip":      session.get("target_ip", ""),
+        "session_mode":   session.get("session_mode", "single"),
+        "started_at":     session.get("started_at") or now,
+        "completed_at":   session.get("completed_at"),
+        "archived_at":    now,
+        "findings_count": summary.get("total", 0),
+        "critical_count": summary.get("critical", 0),
+        "high_count":     summary.get("high", 0),
+        "medium_count":   summary.get("medium", 0),
+        "low_count":      summary.get("low", 0),
+        "flags_found":    session.get("flags_found", []),
+        "hosts_tested":   session.get("hosts_completed") or [session.get("target_ip", "")],
+        "report_html":    report_html,
+    }
+
+    # ── 2. Upsert archive doc (idempotent) ─────────────────────────────────
+    await db.session_archives.update_one(
+        {"session_id": session_id},
+        {"$setOnInsert": {"_id": ObjectId()}, "$set": archive_doc},
+        upsert=True
+    )
+
+    # ── 3. Move heavy collections to archived_ siblings (bulk copy + delete) ──
+    import asyncio as _asyncio
+
+    async def _move(src_col, dst_col):
+        try:
+            docs = await db[src_col].find({"session_id": session_id}).to_list(length=50_000)
+            if docs:
+                await db[dst_col].insert_many(docs, ordered=False)
+                await db[src_col].delete_many({"session_id": session_id})
+        except Exception:
+            pass  # non-fatal — archived_ collections are best-effort
+
+    await _asyncio.gather(
+        _move("findings",     "archived_findings"),
+        _move("tool_outputs", "archived_tool_outputs"),
+        _move("agent_logs",   "archived_agent_logs"),
+        _move("osint_results","archived_osint_results"),
+    )
+
+    # ── 4. Flag the session as archived ────────────────────────────────────
+    await update_session(session_id, {"archived": True, "archived_at": now})
+
+    result = await db.session_archives.find_one({"session_id": session_id})
+    return _serialize(result) if result else _serialize(archive_doc)
+
+
+async def unarchive_session(session_id: str) -> bool:
+    """
+    Restore an archived session: move data back from archived_ siblings
+    and clear the archived flag.  Returns True on success.
+    """
+    db  = get_db()
+    session = await get_session(session_id)
+    if not session or not session.get("archived"):
+        return False
+
+    import asyncio as _asyncio
+
+    async def _restore(src_col, dst_col):
+        try:
+            docs = await db[src_col].find({"session_id": session_id}).to_list(length=50_000)
+            if docs:
+                await db[dst_col].insert_many(docs, ordered=False)
+                await db[src_col].delete_many({"session_id": session_id})
+        except Exception:
+            pass
+
+    await _asyncio.gather(
+        _restore("archived_findings",     "findings"),
+        _restore("archived_tool_outputs", "tool_outputs"),
+        _restore("archived_agent_logs",   "agent_logs"),
+        _restore("archived_osint_results","osint_results"),
+    )
+
+    await update_session(session_id, {"archived": False, "archived_at": None})
+    return True
+
+
+async def get_session_archive(session_id: str) -> Optional[Dict]:
+    """Retrieve the archive summary for a session."""
+    db = get_db()
+    doc = await db.session_archives.find_one({"session_id": session_id})
+    return _serialize(doc) if doc else None
+
+
+async def list_archived_sessions(limit: int = 50) -> List[Dict]:
+    """List all archived session summaries, newest first."""
+    db = get_db()
+    cursor = db.session_archives.find().sort("archived_at", DESCENDING).limit(limit)
+    return _serialize_list(await cursor.to_list(length=limit))

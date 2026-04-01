@@ -190,6 +190,11 @@ function reducer(state, action) {
     case 'SET_SESSION':
       return { ...state, activeSession: action.payload, sessionId: action.payload?.id || null };
 
+    // Patch only the status field of the active session without needing full state access
+    case 'UPDATE_SESSION_STATUS':
+      if (!state.activeSession) return state;
+      return { ...state, activeSession: { ...state.activeSession, status: action.payload } };
+
     case 'SET_SYS_STATUS':
       return { ...state, sysStatus: { ...state.sysStatus, ...action.payload } };
 
@@ -1641,6 +1646,30 @@ function routeWsEvent(msg, dispatch, shellListeners) {
       break;
     }
 
+    // ── Pause / Resume ────────────────────────────────────
+    case 'scan_paused':
+      dispatch({ type: 'UPDATE_SESSION_STATUS', payload: 'paused' });
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent, eventType: 'scan_paused',
+        message: `Scan paused — ${data?.message || ''}`, data
+      }});
+      break;
+
+    case 'scan_resumed':
+      dispatch({ type: 'UPDATE_SESSION_STATUS', payload: 'active' });
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent, eventType: 'scan_resumed',
+        message: `Scan resumed`, data
+      }});
+      break;
+
+    case 'checkpoint_restored':
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent, eventType: 'checkpoint_restored',
+        message: `Checkpoint restored — resuming after ${data?.resume_after || '?'}`, data
+      }});
+      break;
+
     // ── Tool timeout warning ───────────────────────────────
     case 'tool_timeout_warning': {
       const saD = data || msg;
@@ -1670,6 +1699,9 @@ function extractFeedMessage(type, agent, data) {
     case 'master_plan':           return `Plan ready for ${data?.target}`;
     case 'llm_status':            return data?.available ? `LLM online: ${data?.model}` : `LLM offline`;
     case 'awaiting_confirmation': return `Confirm exploitation to proceed`;
+    case 'scan_paused':           return `⏸ Scan paused`;
+    case 'scan_resumed':          return `▶ Scan resumed`;
+    case 'checkpoint_restored':   return `♻ Checkpoint restored`;
     case 'pentest_complete':      return `Pentest complete`;
     case 'attack_tree_ready':     return `Attack tree: ${(data?.tree?.attack_nodes||[]).length} nodes`;
     case 'graph_node':            return `${data?.label} (${data?.type})`;

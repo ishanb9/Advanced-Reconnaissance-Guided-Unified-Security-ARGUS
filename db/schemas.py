@@ -1,10 +1,17 @@
 """
-KALI PENTEST PLATFORM v2 — Database Schemas
+ARGUS Pentest Platform — Database Schemas
 Pydantic models mapping to MongoDB collections.
-All IDs are strings (MongoDB ObjectId serialized as str).
+
+Design principles:
+  - BaseDocument is the contract every operational collection document must satisfy.
+  - agent/phase stored as str (not Enum) for forward-compatibility — new agents/phases
+    never cause validation failures on old documents.
+  - schema_version lets queries target documents that have specific newer fields.
+  - extra: Dict[str, Any] absorbs new fields before they are promoted to first-class.
+  - All IDs are strings (MongoDB ObjectId serialized as str).
 """
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, validator
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 from enum import Enum
@@ -12,29 +19,31 @@ from enum import Enum
 
 # ═══════════════════════════════════════════════════════════
 #  ENUMERATIONS
+#  Use str(Enum) so values serialise as plain strings.
+#  Add new members freely — they never break existing documents.
 # ═══════════════════════════════════════════════════════════
 
 class AttackPhase(str, Enum):
     """Standard penetration testing lifecycle phases."""
-    RECON        = "recon"           # Network/app reconnaissance
-    SCAN         = "scan"            # Port/service scanning
-    VULN_ID      = "vuln_id"         # Vulnerability identification
-    OSINT        = "osint"           # Internet intel gathering
-    EXPLOIT      = "exploit"         # Initial foothold
-    POST_EXPLOIT = "post_exploit"    # Post-exploitation
-    PRIVESC      = "privesc"         # Privilege escalation
-    PERSISTENCE  = "persistence"     # Maintaining access
-    REPORTING    = "reporting"       # Evidence collection
-    # ── Specialist phases (v3) ────────────────────────────────
-    LATERAL      = "lateral"         # Lateral movement (AD/Kerberos/NTLM)
-    CLOUD        = "cloud"           # Cloud infrastructure enumeration
-    CONTAINER    = "container"       # Docker/Kubernetes security audit
-    EVASION      = "evasion"         # AV/EDR evasion techniques
-    TRAFFIC      = "traffic"         # Passive traffic capture & credential sniff
-    EVIDENCE     = "evidence"        # Screenshot/flag capture (EvidenceAgent)
-    FORENSICS    = "forensics"       # Digital forensics (artifacts/timeline/memory)
-    WIRELESS     = "wireless"        # Wireless assessment (WiFi/WPA2/EvilTwin)
-    IOT          = "iot"             # IoT device enumeration & exploitation
+    RECON        = "recon"
+    SCAN         = "scan"
+    VULN_ID      = "vuln_id"
+    OSINT        = "osint"
+    EXPLOIT      = "exploit"
+    POST_EXPLOIT = "post_exploit"
+    PRIVESC      = "privesc"
+    PERSISTENCE  = "persistence"
+    REPORTING    = "reporting"
+    # Specialist phases
+    LATERAL      = "lateral"
+    CLOUD        = "cloud"
+    CONTAINER    = "container"
+    EVASION      = "evasion"
+    TRAFFIC      = "traffic"
+    EVIDENCE     = "evidence"
+    FORENSICS    = "forensics"
+    WIRELESS     = "wireless"
+    IOT          = "iot"
 
 
 class AgentName(str, Enum):
@@ -50,17 +59,16 @@ class AgentName(str, Enum):
 
 
 class SessionMode(str, Enum):
-    """How the target was specified."""
-    SINGLE = "single"   # Single IP or hostname
-    CIDR   = "cidr"     # CIDR range e.g. 192.168.1.0/24
-    MULTI  = "multi"    # Comma-separated list of IPs
+    SINGLE = "single"
+    CIDR   = "cidr"
+    MULTI  = "multi"
 
 
 class AgentStatus(str, Enum):
     IDLE     = "idle"
-    THINKING = "thinking"   # LLM processing
-    RUNNING  = "running"    # Tool executing
-    WAITING  = "waiting"    # Waiting for dependency
+    THINKING = "thinking"
+    RUNNING  = "running"
+    WAITING  = "waiting"
     DONE     = "done"
     ERROR    = "error"
 
@@ -78,229 +86,330 @@ class SessionStatus(str, Enum):
     PAUSED    = "paused"
     COMPLETED = "completed"
     FAILED    = "failed"
+    ARCHIVED  = "archived"
+
+
+class CheckpointType(str, Enum):
+    MANUAL_PAUSE   = "manual_pause"   # operator clicked pause
+    AUTO           = "auto"           # auto-saved at key phase boundaries
+    PHASE_COMPLETE = "phase_complete" # saved when a major phase finishes
+
+
+# ═══════════════════════════════════════════════════════════
+#  BASE DOCUMENT CONTRACT
+#  Every operational collection document must include these.
+#  agent/phase are str (not Enum) — accepts any new agent or
+#  phase string without migration or validation errors.
+# ═══════════════════════════════════════════════════════════
+
+class BaseDocument(BaseModel):
+    """Minimum contract for every operational collection document."""
+    id:             str
+    session_id:     str
+    host:           Optional[str]       = None    # per-host isolation key; None = session-wide
+    agent:          str                           # str not Enum — new agents work without migration
+    phase:          str                           # str not Enum — new phases work without migration
+    schema_version: int                 = 1       # bump when fields are added; enables partial queries
+    extra:          Dict[str, Any]      = {}      # forward-compatible overflow for new fields
+    created_at:     datetime            = Field(default_factory=datetime.utcnow)
 
 
 # ═══════════════════════════════════════════════════════════
 #  COLLECTION: sessions
-#  One document per pentest engagement
 # ═══════════════════════════════════════════════════════════
 
 class SessionCreate(BaseModel):
     target_ip:          str
     target_hostname:    Optional[str] = None
-    target_type:        str = "unknown"          # linux, windows, web, ctf, iot
-    scope:              Optional[str] = None     # CIDR or URL list
+    target_type:        str = "unknown"
+    scope:              Optional[str] = None
     notes:              Optional[str] = None
     threading_enabled:  bool = False
     max_threads:        int  = 3
-    # Multi-target fields
     session_mode:       SessionMode = SessionMode.SINGLE
-    max_parallel_hosts: int  = 5               # semaphore bound for parallel host testing
+    max_parallel_hosts: int  = 5
+    phases:             List[str] = []
+    auto_exploit:       bool = False
 
 
 class Session(SessionCreate):
     id:               str
     status:           SessionStatus = SessionStatus.ACTIVE
-    current_phase:    AttackPhase   = AttackPhase.RECON
+    current_phase:    str           = "recon"     # str for forward-compat
     phases_completed: List[str]     = []
     started_at:       datetime      = Field(default_factory=datetime.utcnow)
     updated_at:       datetime      = Field(default_factory=datetime.utcnow)
     completed_at:     Optional[datetime] = None
-    # Summary stats (updated live)
+    # Summary stats
     findings_count:   int = 0
     tools_run:        int = 0
     flags_found:      List[str] = []
-    # Multi-host tracking (populated by CIDROrchestrator)
-    discovered_hosts: List[str] = []           # live IPs found during host-discovery
-    hosts_completed:  List[str] = []           # subset that finished all phases
-    host_count:       int = 0                  # len(discovered_hosts)
+    # Multi-host tracking
+    discovered_hosts: List[str] = []
+    hosts_completed:  List[str] = []
+    host_count:       int = 0
+    # Pause/resume
+    last_checkpoint_id: Optional[str] = None
+    pause_count:        int = 0
+    # Archiving
+    archived:           bool = False
+    archived_at:        Optional[datetime] = None
 
 
 # ═══════════════════════════════════════════════════════════
 #  COLLECTION: findings
-#  Every vulnerability or notable finding
 # ═══════════════════════════════════════════════════════════
 
-class Finding(BaseModel):
-    id:          str
-    session_id:  str
-    agent:       AgentName
-    phase:       AttackPhase
-    severity:    FindingSeverity
+class Finding(BaseDocument):
+    severity:    str                            # FindingSeverity value
     title:       str
     description: str
-    # Target info
-    host:        str
+    # Target info — host is inherited from BaseDocument (required here)
     port:        Optional[int]    = None
     service:     Optional[str]    = None
     protocol:    Optional[str]    = None
     # CVE / exploit info
-    cves:        List[str]        = []       # ["CVE-2021-44228", ...]
-    exploits:    List[str]        = []       # exploit-db IDs or MSF modules
+    cves:        List[str]        = []
+    exploits:    List[str]        = []
     # Evidence
     tool_used:   Optional[str]    = None
     raw_output:  Optional[str]    = None
-    screenshot:  Optional[str]    = None     # base64 or file path
+    screenshot:  Optional[str]    = None
     # Remediation
     remediation: Optional[str]    = None
-    # Timestamps
-    found_at:    datetime = Field(default_factory=datetime.utcnow)
-    verified:    bool     = False
-    # Extra fields (flexible NoSQL advantage)
-    extra:       Dict[str, Any] = {}
+    # Timestamps — created_at inherited; add found_at alias
+    found_at:    datetime         = Field(default_factory=datetime.utcnow)
+    verified:    bool             = False
 
 
 # ═══════════════════════════════════════════════════════════
 #  COLLECTION: tool_outputs
-#  Raw stdout/stderr from every tool execution
 # ═══════════════════════════════════════════════════════════
 
-class ToolOutput(BaseModel):
-    id:          str
-    session_id:  str
-    agent:       AgentName
-    phase:       AttackPhase
-    tool_name:   str
-    command:     str                         # Full command string
-    target:      Optional[str] = None
+class ToolOutput(BaseDocument):
+    tool_name:        str
+    command:          str
+    # host is inherited — replaces the old freeform `target` field
+    # target kept for backward compat with existing documents
+    target:           Optional[str] = None
     # Output
-    stdout:      str   = ""
-    stderr:      str   = ""
-    exit_code:   Optional[int] = None
-    # Parsed summary (LLM-generated)
-    summary:     Optional[str] = None
-    key_findings: List[str]    = []          # Extracted highlights
-    # Timing
-    started_at:  datetime = Field(default_factory=datetime.utcnow)
-    ended_at:    Optional[datetime] = None
-    duration_ms: Optional[int]     = None
-    # Thread info
-    thread_id:   Optional[str] = None
+    stdout:           str   = ""
+    stderr:           str   = ""
+    exit_code:        Optional[int] = None
+    content_truncated: bool = False    # True when stdout was capped at 64KB
+    # Parsed summary
+    summary:          Optional[str] = None
+    key_findings:     List[str]     = []
+    # Timing — created_at = started_at
+    ended_at:         Optional[datetime] = None
+    duration_ms:      Optional[int]      = None
+    thread_id:        Optional[str]      = None
+
+    @property
+    def started_at(self) -> datetime:
+        return self.created_at
 
 
 # ═══════════════════════════════════════════════════════════
 #  COLLECTION: agent_logs
-#  Agent reasoning, decisions, and status changes
 # ═══════════════════════════════════════════════════════════
 
-class AgentLog(BaseModel):
-    id:          str
-    session_id:  str
-    agent:       AgentName
-    phase:       AttackPhase
-    # What the agent decided
-    action:      str              # "decided_to_run_nmap", "escalated_to_master", etc.
-    reasoning:   str              # LLM reasoning text
-    tool:        Optional[str] = None
-    # Status change
-    prev_status: Optional[AgentStatus] = None
-    new_status:  AgentStatus
-    # Timestamps
-    timestamp:   datetime = Field(default_factory=datetime.utcnow)
-    # Communication between agents
-    sent_to:     Optional[AgentName]   = None   # message target
-    received_from: Optional[AgentName] = None   # message source
-    message:     Optional[str]         = None
+class AgentLog(BaseDocument):
+    action:        str
+    reasoning:     str
+    tool:          Optional[str]          = None
+    prev_status:   Optional[str]          = None   # str for forward-compat
+    new_status:    str
+    # Timestamps — created_at = timestamp
+    timestamp:     datetime               = Field(default_factory=datetime.utcnow)
+    # Communication
+    sent_to:       Optional[str]          = None
+    received_from: Optional[str]          = None
+    message:       Optional[str]          = None
+    # Diagnostic level — "debug" logs go to capped realtime collection
+    log_level:     str                    = "info"  # "debug" | "info" | "warning" | "error"
 
 
 # ═══════════════════════════════════════════════════════════
 #  COLLECTION: shell_sessions
-#  Active and historic shell/reverse-shell connections
 # ═══════════════════════════════════════════════════════════
 
-class ShellSession(BaseModel):
-    id:          str
-    session_id:  str             # parent pentest session
-    agent:       AgentName = AgentName.SHELL
-    shell_type:  str             # "reverse_shell", "bind_shell", "web_shell", "ssh"
-    # Connection info
-    lhost:       Optional[str] = None    # listener host
-    lport:       Optional[int] = None    # listener port
-    rhost:       str                     # remote (target) host
+class ShellSession(BaseDocument):
+    shell_type:  str
+    lhost:       Optional[str] = None
+    lport:       Optional[int] = None
+    rhost:       str                    # remote (target) host — connection semantics
+    # host (from BaseDocument) mirrors rhost for uniform per-host queries
     rport:       Optional[int] = None
     protocol:    str = "tcp"
-    # State
     active:      bool     = False
-    pid:         Optional[int] = None    # local process PID
-    # Context
-    shell_user:  Optional[str] = None    # user on target
-    shell_cwd:   Optional[str] = None    # current directory
-    # History
-    commands:    List[Dict[str, Any]] = []  # [{cmd, output, ts}]
-    # Timestamps
+    pid:         Optional[int] = None
+    shell_user:  Optional[str] = None
+    shell_cwd:   Optional[str] = None
+    commands:    List[Dict[str, Any]] = []
     opened_at:   datetime = Field(default_factory=datetime.utcnow)
     closed_at:   Optional[datetime] = None
 
 
 # ═══════════════════════════════════════════════════════════
 #  COLLECTION: flags
-#  CTF flags and sensitive data discovered
 # ═══════════════════════════════════════════════════════════
 
-class Flag(BaseModel):
-    id:          str
-    session_id:  str
-    flag_type:   str             # "user", "root", "admin", "custom"
-    value:       str             # The actual flag text
-    location:    str             # Where found (file path, URL, etc.)
-    found_by:    AgentName
-    context:     Optional[str] = None    # How it was found
-    found_at:    datetime = Field(default_factory=datetime.utcnow)
+class Flag(BaseDocument):
+    flag_type:   str             # "user" | "root" | "admin" | "custom"
+    value:       str
+    location:    str             # file path, URL, etc.
+    found_by:    str             # agent name — str for forward-compat
+    context:     Optional[str]  = None
+    found_at:    datetime       = Field(default_factory=datetime.utcnow)
+    # host is inherited from BaseDocument — which host this flag came from
+
+
+# ═══════════════════════════════════════════════════════════
+#  COLLECTION: credentials
+# ═══════════════════════════════════════════════════════════
+
+class Credential(BaseDocument):
+    service:         str                    # "ssh" | "smb" | "http" | "ftp" | "mqtt" etc.
+    username:        str
+    password:        Optional[str]  = None
+    hash_value:      Optional[str]  = None  # NTLM/LM/bcrypt hash
+    hash_type:       Optional[str]  = None  # "ntlm" | "sha1" | "bcrypt"
+    domain:          Optional[str]  = None
+    source_tool:     Optional[str]  = None  # "hydra" | "secretsdump" etc.
+    verified:        bool           = False
+    privilege_level: Optional[str]  = None  # "admin" | "user" | "root"
+    port:            Optional[int]  = None
+
+
+# ═══════════════════════════════════════════════════════════
+#  COLLECTION: subagent_results
+# ═══════════════════════════════════════════════════════════
+
+class SubagentResult(BaseDocument):
+    subagent_name:   str
+    parent_agent:    str
+    status:          str              # "success" | "error" | "timeout" | "skipped"
+    findings_count:  int              = 0
+    findings_ids:    List[str]        = []
+    raw_summary:     Optional[str]    = None
+    duration_ms:     Optional[int]    = None
+    error_message:   Optional[str]    = None
+    tool_output_ids: List[str]        = []
+
+
+# ═══════════════════════════════════════════════════════════
+#  COLLECTION: persistence_mechanisms
+# ═══════════════════════════════════════════════════════════
+
+class PersistenceMechanism(BaseDocument):
+    mechanism_type:  str              # "cron" | "registry" | "service" | "startup" | "rootkit"
+    description:     str
+    command:         Optional[str]    = None
+    file_path:       Optional[str]    = None
+    privilege_level: Optional[str]    = None
+    removed:         bool             = False
 
 
 # ═══════════════════════════════════════════════════════════
 #  COLLECTION: attack_graph
-#  Nodes and edges for attack path visualization
 # ═══════════════════════════════════════════════════════════
 
-class AttackNode(BaseModel):
+class AttackNode(BaseDocument):
     node_id:     str
-    session_id:  str
-    node_type:   str             # "host", "service", "vulnerability", "exploit", "access"
+    node_type:   str
     label:       str
-    phase:       AttackPhase
-    host:        Optional[str] = None
     port:        Optional[int] = None
-    severity:    Optional[FindingSeverity] = None
+    severity:    Optional[str] = None
     metadata:    Dict[str, Any] = {}
-    created_at:  datetime = Field(default_factory=datetime.utcnow)
 
-class AttackEdge(BaseModel):
+
+class AttackEdge(BaseDocument):
     edge_id:     str
-    session_id:  str
-    source:      str             # node_id
-    target:      str             # node_id
-    label:       str             # "exploited", "leads_to", "discovered", etc.
+    source:      str
+    target_node: str          # renamed from target to avoid collision with BaseDocument
+    label:       str
     tool:        Optional[str] = None
-    created_at:  datetime = Field(default_factory=datetime.utcnow)
 
 
 # ═══════════════════════════════════════════════════════════
 #  COLLECTION: osint_results
-#  Internet-sourced intelligence
 # ═══════════════════════════════════════════════════════════
 
-class OsintResult(BaseModel):
-    id:          str
-    session_id:  str
-    query:       str             # What was searched
-    source:      str             # "nvd", "exploit_db", "shodan", "web", "cvedetails"
-    # Content
+class OsintResult(BaseDocument):
+    query:       str
+    source:      str
     title:       str
-    url:         Optional[str]   = None
+    url:         Optional[str]              = None
     summary:     str
-    cves:        List[str]       = []
-    exploits:    List[str]       = []
-    severity:    Optional[FindingSeverity] = None
-    raw:         Optional[Dict[str, Any]] = None
-    # Relevance
-    relevance_score: float = 0.0    # 0-1, how relevant to target
-    # Timestamps
-    fetched_at:  datetime = Field(default_factory=datetime.utcnow)
+    cves:        List[str]                  = []
+    exploits:    List[str]                  = []
+    severity:    Optional[str]              = None
+    raw:         Optional[Dict[str, Any]]   = None
+    relevance_score: float                  = 0.0
+    fetched_at:  datetime                   = Field(default_factory=datetime.utcnow)
 
 
 # ═══════════════════════════════════════════════════════════
-#  API MODELS — Request/Response shapes
+#  COLLECTION: session_checkpoints
+#  Pause/resume state snapshots
+# ═══════════════════════════════════════════════════════════
+
+class SessionCheckpoint(BaseModel):
+    """Full serialized MasterAgent state for pause/resume."""
+    id:                     str
+    session_id:             str
+    host:                   str                   # which host this checkpoint is for
+    checkpoint_type:        str = CheckpointType.MANUAL_PAUSE
+    schema_version:         int = 1
+
+    # Execution position
+    state_machine:          str                   # e.g. "EXPLOITATION"
+    current_phase:          str                   # AttackPhase value
+    phases_completed:       List[str]     = []
+    phases_to_run:          List[str]     = []
+
+    # Full intelligence snapshot — entire _intel dict
+    intel_snapshot:         Dict[str, Any] = {}
+
+    # Resume helpers
+    used_tools:             Dict[str, int] = {}   # tool → run count
+    pending_confirmations:  List[str]      = []   # phases awaiting confirm
+    in_flight_subagents:    List[str]      = []   # subagents running at pause time
+
+    # Agent configuration — enough to reconstruct MasterAgent
+    master_config:          Dict[str, Any] = {}
+
+    created_at:             datetime = Field(default_factory=datetime.utcnow)
+
+
+# ═══════════════════════════════════════════════════════════
+#  COLLECTION: session_archives
+#  Lightweight summary for archived (>90 day old) sessions
+# ═══════════════════════════════════════════════════════════
+
+class SessionArchive(BaseModel):
+    id:             str
+    session_id:     str
+    target_ip:      str
+    session_mode:   str
+    started_at:     datetime
+    completed_at:   Optional[datetime]
+    archived_at:    datetime = Field(default_factory=datetime.utcnow)
+    # Summary counts
+    findings_count: int = 0
+    critical_count: int = 0
+    high_count:     int = 0
+    medium_count:   int = 0
+    low_count:      int = 0
+    flags_found:    List[str] = []
+    hosts_tested:   List[str] = []
+    # Inline report for fast retrieval without un-archiving
+    report_html:    Optional[str] = None
+
+
+# ═══════════════════════════════════════════════════════════
+#  API REQUEST / RESPONSE SHAPES
 # ═══════════════════════════════════════════════════════════
 
 class StartPentestRequest(BaseModel):
@@ -311,23 +420,31 @@ class StartPentestRequest(BaseModel):
     notes:              Optional[str] = None
     threading_enabled:  bool = False
     max_threads:        int  = 3
-    phases:             List[str] = []    # empty = all phases
-    auto_exploit:       bool = False      # require confirmation before exploiting
-    max_parallel_hosts: int  = 5         # max concurrent hosts (CIDR/multi mode)
+    phases:             List[str] = []
+    auto_exploit:       bool = False
+    max_parallel_hosts: int  = 5
+
+
+class PauseRequest(BaseModel):
+    save_checkpoint: bool = True
+
+
+class ResumeRequest(BaseModel):
+    checkpoint_id: Optional[str] = None   # None = use latest checkpoint
+
 
 class AgentStatusUpdate(BaseModel):
-    agent:    AgentName
+    agent:    str           # str for forward-compat
     status:   AgentStatus
-    phase:    AttackPhase
+    phase:    str
     message:  str
     tool:     Optional[str] = None
 
+
 class WebSocketMessage(BaseModel):
-    """Standard WebSocket event structure."""
-    type:       str              # "agent_status", "tool_output", "finding", "log", "phase_change", "shell"
+    type:       str
     session_id: str
     agent:      Optional[str] = None
     data:       Dict[str, Any]
     timestamp:  datetime = Field(default_factory=datetime.utcnow)
-    # Multi-host: which specific IP this event belongs to (None = session-wide)
     host_id:    Optional[str] = None

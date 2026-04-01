@@ -1265,6 +1265,32 @@ function MissionControl() {
     await window.API.sessions.stop(activeSession.id);
   }
 
+  async function handlePause() {
+    if (!activeSession) return;
+    // Optimistically flip to paused immediately — don't wait for the WS event
+    dispatch({ type: 'UPDATE_SESSION_STATUS', payload: 'paused' });
+    try {
+      await window.API.sessions.pause(activeSession.id);
+    } catch (e) {
+      // Roll back on failure
+      dispatch({ type: 'UPDATE_SESSION_STATUS', payload: 'active' });
+    }
+  }
+
+  async function handleResume() {
+    if (!activeSession) return;
+    // Optimistically flip to active immediately
+    dispatch({ type: 'UPDATE_SESSION_STATUS', payload: 'active' });
+    try {
+      await window.API.sessions.resume(activeSession.id);
+    } catch (e) {
+      // Roll back on failure
+      dispatch({ type: 'UPDATE_SESSION_STATUS', payload: 'paused' });
+    }
+  }
+
+  const isPaused = activeSession?.status === 'paused' || activeSession?.status === 'stopped';
+
   const focusedLines = toolOutputs[focusedAgent] || [];
   const s = (v, d = 0) => v || d;
   const agentColor = (name) => (AGENT_META[name] || {}).color || 'var(--text-muted)';
@@ -1283,21 +1309,54 @@ function MissionControl() {
                      background: 'rgba(0,255,136,0.08)', border: '1px solid var(--green)', color: 'var(--green)' }
           }, '● LIVE')
         ),
-        activeSession && React.createElement('div', { className: 'page-subtitle' },
+        activeSession && React.createElement('div', { className: 'page-subtitle', style: { display: 'flex', alignItems: 'center', gap: 8 } },
           `${activeSession.target_ip}  ·  ${(currentPhase||'idle').toUpperCase()}`,
-          smState && smState !== 'INIT' && `  ·  ${smState}`
+          smState && smState !== 'INIT' && `  ·  ${smState}`,
+          isPaused && React.createElement('span', {
+            style: {
+              fontSize: 9, padding: '1px 6px', borderRadius: 8,
+              background: 'rgba(250,173,20,0.12)', border: '1px solid var(--medium-bd)',
+              color: 'var(--medium)', marginLeft: 4
+            }
+          }, '⏸ PAUSED')
         )
       ),
       React.createElement('div', { style: { display: 'flex', gap: 8, alignItems: 'center' } },
         llmThinking && React.createElement('span', { style: { fontSize: 10, color: 'var(--cyan)', animation: 'pulse 1s infinite' } }, '🧠 Thinking...'),
+
+        // ── Pause / Resume button — mutually exclusive with Stop ───────────
+        activeSession && !isPaused && React.createElement('button', {
+          onClick: handlePause,
+          title: 'Pause scan at the next phase boundary — saves a checkpoint',
+          style: {
+            padding: '5px 14px', borderRadius: 6, cursor: 'pointer', fontSize: 11, fontWeight: 600, fontFamily: 'var(--font-ui)',
+            border: '1px solid var(--medium-bd)',
+            background: 'var(--medium-bg)', color: 'var(--medium)',
+          }
+        }, '⏸ Pause'),
+
+        activeSession && isPaused && React.createElement('button', {
+          onClick: handleResume,
+          title: 'Resume scan from last checkpoint',
+          style: {
+            padding: '5px 14px', borderRadius: 6, cursor: 'pointer', fontSize: 11, fontWeight: 600, fontFamily: 'var(--font-ui)',
+            border: '1px solid var(--green)',
+            background: 'rgba(0,255,136,0.08)', color: 'var(--green)',
+            animation: 'pulse 1.5s infinite',
+          }
+        }, '▶ Resume'),
+
+        // ── Stop (hard-stop, checkpoint saved before kill) ─────────────────
         activeSession && React.createElement('button', {
           onClick: handleStop,
+          title: 'Hard-stop scan (saves checkpoint for resume)',
           style: {
             padding: '5px 14px', borderRadius: 6, border: '1px solid var(--critical-bd)',
             background: 'var(--critical-bg)', color: 'var(--critical)',
             cursor: 'pointer', fontSize: 11, fontWeight: 600, fontFamily: 'var(--font-ui)',
           }
         }, '■ Stop'),
+
         activeSession && React.createElement('button', {
           onClick: () => setShowGuidance(g => !g),
           style: {
