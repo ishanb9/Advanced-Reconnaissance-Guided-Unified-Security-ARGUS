@@ -50,7 +50,7 @@ MongoDB  (argus_pentest)  +  Ollama LLM  +  MCP Tool Server
 
 ## Pentest Methodology
 
-ARGUS follows an OSCP/OSWE-inspired methodology:
+ARGUS follows the Standard Penetration testing methodology:
 
 ```
 RECON → ENUM → VULN_ID → WEB_TESTING → EXPLOIT → POST_EXPLOIT → PRIVESC → REPORTING
