@@ -1233,6 +1233,7 @@ function MissionControl() {
     toolOutputs, smState, attackTree, mitreMap, llmThinking,
     planSteps, planHypothesis, planAssessment,
     credentials, sessionMode, discoveredHosts, hostFilter,
+    webConfirmPending, phaseTimeExtension,
   } = state;
 
   const [confirmVisible, setConfirmVisible] = useState(false);
@@ -1269,6 +1270,32 @@ function MissionControl() {
     if (!activeSession) return;
     await window.API.sessions.confirm(activeSession.id, 'exploit');
     setConfirmVisible(false);
+  }
+
+  async function handleWebConfirm() {
+    if (!activeSession) return;
+    await window.API.sessions.confirm(activeSession.id, 'web_testing');
+    dispatch({ type: 'WEB_CONFIRM_PENDING', payload: false });
+  }
+
+  async function handleWebSkip() {
+    if (!activeSession) return;
+    // Not confirming = skipping — backend will time out the wait eventually,
+    // but we can also just dismiss the modal on the frontend
+    dispatch({ type: 'WEB_CONFIRM_PENDING', payload: false });
+  }
+
+  async function handleExtendPhase() {
+    if (!activeSession || !phaseTimeExtension) return;
+    await window.API.sessions.extend(activeSession.id, phaseTimeExtension.phase);
+    dispatch({ type: 'CLEAR_PHASE_TIME_EXTENSION' });
+  }
+
+  async function handleStopPhase() {
+    if (!activeSession) return;
+    dispatch({ type: 'CLEAR_PHASE_TIME_EXTENSION' });
+    // Stopping the entire session is safest; backend will stop web agent on timeout anyway
+    await window.API.sessions.stop(activeSession.id);
   }
 
   async function handleStop() {
@@ -1385,7 +1412,25 @@ function MissionControl() {
             cursor: 'pointer', fontSize: 11, fontWeight: 700, fontFamily: 'var(--font-ui)',
             animation: 'pulse 1.5s infinite',
           }
-        }, '⚠ Confirm Exploit')
+        }, '⚠ Confirm Exploit'),
+        webConfirmPending && React.createElement('button', {
+          onClick: handleWebConfirm,
+          style: {
+            padding: '5px 14px', borderRadius: 6, border: '1px solid rgba(0,212,255,0.5)',
+            background: 'rgba(0,212,255,0.12)', color: 'var(--cyan)',
+            cursor: 'pointer', fontSize: 11, fontWeight: 700, fontFamily: 'var(--font-ui)',
+            animation: 'pulse 1.5s infinite',
+          }
+        }, '⚠ Confirm Web Test'),
+        phaseTimeExtension && React.createElement('button', {
+          onClick: handleExtendPhase,
+          style: {
+            padding: '5px 14px', borderRadius: 6, border: '1px solid rgba(255,170,0,0.5)',
+            background: 'rgba(255,170,0,0.12)', color: 'var(--amber)',
+            cursor: 'pointer', fontSize: 11, fontWeight: 700, fontFamily: 'var(--font-ui)',
+            animation: 'pulse 1.5s infinite',
+          }
+        }, '⏱ Extend Phase')
       )
     ),
 
@@ -1642,6 +1687,60 @@ function MissionControl() {
             onClick: handleConfirm,
             style: { padding: '7px 16px', borderRadius: 5, border: '1px solid var(--red)', background: 'rgba(255,68,102,0.2)', color: 'var(--red)', cursor: 'pointer', fontSize: 12, fontWeight: 700 }
           }, 'Proceed with Exploitation')
+        )
+      )
+    ),
+
+    // ── Web confirm modal ─────────────────────────────────────────────────
+    webConfirmPending && React.createElement('div', {
+      style: { position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.85)',
+               display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 },
+      onClick: e => { if (e.target === e.currentTarget) handleWebSkip(); }
+    },
+      React.createElement('div', {
+        style: { background: 'var(--bg-surface)', border: '1px solid rgba(0,212,255,0.4)', borderRadius: 10, width: 440, padding: 24 }
+      },
+        React.createElement('div', { style: { fontSize: 15, fontWeight: 700, color: 'var(--cyan)', marginBottom: 12 } }, '⚠ Confirm Web Application Testing'),
+        React.createElement('p', { style: { color: 'var(--text-muted)', fontSize: 13, marginBottom: 8 } },
+          'Web application testing is ready to begin. The web agent will enumerate endpoints, test for injection vulnerabilities, check authentication, and scan web-specific attack surface.'),
+        React.createElement('p', { style: { color: 'var(--amber)', fontSize: 11, marginBottom: 20 } },
+          'Web testing can be intrusive. Only proceed on systems you have explicit written authorisation to test.'),
+        React.createElement('div', { style: { display: 'flex', gap: 8, justifyContent: 'flex-end' } },
+          React.createElement('button', {
+            onClick: handleWebSkip,
+            style: { padding: '7px 16px', borderRadius: 5, border: '1px solid var(--border-bright)', background: 'transparent', color: 'var(--text-muted)', cursor: 'pointer', fontSize: 12 }
+          }, 'Skip Web Testing'),
+          React.createElement('button', {
+            onClick: handleWebConfirm,
+            style: { padding: '7px 16px', borderRadius: 5, border: '1px solid var(--cyan)', background: 'rgba(0,212,255,0.15)', color: 'var(--cyan)', cursor: 'pointer', fontSize: 12, fontWeight: 700 }
+          }, 'Proceed with Web Testing')
+        )
+      )
+    ),
+
+    // ── Phase time-extension modal ─────────────────────────────────────────
+    phaseTimeExtension && React.createElement('div', {
+      style: { position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.85)',
+               display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 },
+    },
+      React.createElement('div', {
+        style: { background: 'var(--bg-surface)', border: '1px solid rgba(255,170,0,0.4)', borderRadius: 10, width: 440, padding: 24 }
+      },
+        React.createElement('div', { style: { fontSize: 15, fontWeight: 700, color: 'var(--amber)', marginBottom: 12 } },
+          `⏱ Phase Timeout — ${(phaseTimeExtension.phase || '').replace('_', ' ').toUpperCase()}`),
+        React.createElement('p', { style: { color: 'var(--text-muted)', fontSize: 13, marginBottom: 8 } },
+          phaseTimeExtension.message || 'The phase has exceeded its time limit.'),
+        React.createElement('p', { style: { color: 'var(--text-secondary)', fontSize: 11, marginBottom: 20 } },
+          'Extend to allow the phase to continue running, or stop it now.'),
+        React.createElement('div', { style: { display: 'flex', gap: 8, justifyContent: 'flex-end' } },
+          React.createElement('button', {
+            onClick: handleStopPhase,
+            style: { padding: '7px 16px', borderRadius: 5, border: '1px solid var(--red)', background: 'rgba(255,68,102,0.1)', color: 'var(--red)', cursor: 'pointer', fontSize: 12, fontWeight: 600 }
+          }, 'Stop Phase'),
+          React.createElement('button', {
+            onClick: handleExtendPhase,
+            style: { padding: '7px 16px', borderRadius: 5, border: '1px solid var(--amber)', background: 'rgba(255,170,0,0.15)', color: 'var(--amber)', cursor: 'pointer', fontSize: 12, fontWeight: 700 }
+          }, 'Extend Time')
         )
       )
     ),

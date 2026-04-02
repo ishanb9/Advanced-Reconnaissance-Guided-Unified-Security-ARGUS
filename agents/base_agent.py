@@ -18,6 +18,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from abc import ABC, abstractmethod
 from typing import Optional, List, Dict, Any, Callable, Awaitable
 from datetime import datetime
@@ -165,6 +166,16 @@ class AgentBus:
 
 agent_bus = AgentBus()
 
+# ── Global agent registry — mirrors base_subagent._SUBAGENT_REGISTRY ──────────
+# Allows agent_server tool_extend / tool_stop WS handlers to reach BaseAgent
+# instances by their agent name string (e.g. "recon", "web", "vuln").
+_AGENT_REGISTRY: Dict[str, "BaseAgent"] = {}
+
+
+def get_agent(name: str) -> "Optional[BaseAgent]":
+    """Return the live BaseAgent instance registered under *name*, or None."""
+    return _AGENT_REGISTRY.get(name)
+
 
 # ═══════════════════════════════════════════════════════════════
 #  BASE AGENT
@@ -191,8 +202,15 @@ class BaseAgent(ABC):
         self._stop_requested  = False
         self._session_id: Optional[str] = None
         self._llm_available   = None   # None = unchecked, True/False = checked
+        # Tool timeout watchdog state (mirrors base_subagent pattern)
+        self._tool_run_start:    float = 0.0
+        self._tool_deadline_sec: float = 600.0   # default 10 minutes per tool
+        self._current_tool_name: str   = ""
+        self._current_proc: Optional[Any] = None  # asyncio subprocess handle
 
         agent_bus.register(str(name), self._handle_bus_message)
+        # Register in global registry so agent_server can reach us by name
+        _AGENT_REGISTRY[str(name)] = self
 
     # ─── Abstract ─────────────────────────────────────────────
 
@@ -266,6 +284,52 @@ class BaseAgent(ABC):
 
     def request_stop(self):
         self._stop_requested = True
+        if self._current_proc is not None:
+            try:
+                self._current_proc.kill()
+            except Exception:
+                pass
+
+    def extend_tool(self, extra_sec: float) -> None:
+        """Extend the running tool's deadline by *extra_sec* seconds."""
+        self._tool_deadline_sec += extra_sec
+
+    async def _tool_watchdog(self, tool_name: str) -> None:
+        """Emit tool_timeout_warning when tool exceeds its 10-min deadline.
+
+        Mirrors base_subagent._tool_watchdog exactly — fires every 30 s after
+        the deadline until the operator extends or the tool finishes.
+        """
+        try:
+            # Phase 1: sleep until first deadline
+            while not self._stop_requested:
+                elapsed   = time.monotonic() - self._tool_run_start
+                remaining = self._tool_deadline_sec - elapsed
+                if remaining <= 0:
+                    break
+                await asyncio.sleep(min(remaining, 10.0))
+
+            # Phase 2: deadline exceeded — emit warning every 30 s
+            while not self._stop_requested:
+                elapsed   = time.monotonic() - self._tool_run_start
+                remaining = self._tool_deadline_sec - elapsed
+
+                if remaining > 0:
+                    # Operator extended — wait for new deadline
+                    await asyncio.sleep(min(remaining, 10.0))
+                    continue
+
+                await self._emit("tool_timeout_warning", {
+                    "tool":         tool_name,
+                    "subagent":     str(self.name),
+                    "elapsed_sec":  round(elapsed),
+                    "deadline_sec": round(self._tool_deadline_sec),
+                })
+                await asyncio.sleep(30.0)
+
+        except asyncio.CancelledError:
+            pass
+
 
     def reset_stop(self):
         self._stop_requested = False
@@ -721,6 +785,12 @@ Return JSON:
         stderr_lines: List[str] = []
         exit_code = 0
 
+        # ── Watchdog setup (10-min deadline, operator can extend via WS) ────
+        self._current_tool_name = tool_name
+        self._tool_run_start    = time.monotonic()
+        self._tool_deadline_sec = 600.0   # reset fresh for each tool call
+        watchdog = asyncio.create_task(self._tool_watchdog(tool_name))
+
         # Tools that must run locally (not via MCP) because MCP does not expose
         # a generic shell executor.  The full_cmd is already assembled above.
         _LOCAL_TOOLS = {"bash", "sh", "zsh", "cmd", "powershell", "python", "python3", "perl", "ruby"}
@@ -738,13 +808,13 @@ Return JSON:
 
         async def _run_local() -> int:
             """Run full_cmd in a local subprocess and stream output."""
-            import asyncio as _asyncio
-            proc = await _asyncio.create_subprocess_shell(
+            proc = await asyncio.create_subprocess_shell(
                 full_cmd,
-                stdout=_asyncio.subprocess.PIPE,
-                stderr=_asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
                 limit=1024 * 1024,  # 1 MB read buffer
             )
+            self._current_proc = proc
             async def _drain(stream, ltype):
                 while True:
                     line_b = await stream.readline()
@@ -753,11 +823,12 @@ Return JSON:
                     decoded = line_b.decode(errors="replace").rstrip()
                     if decoded:
                         await _emit_line(decoded, ltype)
-            await _asyncio.gather(
+            await asyncio.gather(
                 _drain(proc.stdout, "stdout"),
                 _drain(proc.stderr, "stderr"),
             )
             await proc.wait()
+            self._current_proc = None
             return proc.returncode or 0
 
         async def _run_via_mcp() -> int:
@@ -827,6 +898,13 @@ Return JSON:
         except Exception as e:
             stderr_lines.append(f"[AGENT ERROR] {type(e).__name__}: {str(e)}")
             exit_code = -1
+        finally:
+            # Always cancel the watchdog — tool has finished (or errored)
+            watchdog.cancel()
+            try:
+                await watchdog
+            except asyncio.CancelledError:
+                pass
 
         stdout = "\n".join(stdout_lines)
         stderr = "\n".join(stderr_lines)

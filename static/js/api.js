@@ -43,6 +43,7 @@ const API = (() => {
       pause:       (id)        => post(`/sessions/${id}/pause`),
       resume:      (id)        => post(`/sessions/${id}/resume`),
       confirm:     (id, phase) => post(`/sessions/${id}/confirm/${phase}`),
+      extend:      (id, phase) => post(`/sessions/${id}/extend/${phase}`),
       activate:    (id)        => post(`/sessions/${id}/activate`),
       guidance:    (id, body)  => post(`/sessions/${id}/guidance`, body),
       delete:      (id)        => del(`/sessions/${id}`),

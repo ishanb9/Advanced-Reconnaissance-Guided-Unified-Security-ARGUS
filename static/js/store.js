@@ -130,6 +130,12 @@ const INIT = {
 
   // Tool timeout popup — set when a tool exceeds its deadline
   toolTimeoutWarning: null,     // null | {tool, subagent, elapsed_sec, deadline_sec}
+
+  // Phase time-extension popup — set when a phase hits its operator-configured timeout
+  phaseTimeExtension: null,     // null | {phase, timeout_secs, message}
+
+  // Web testing confirmation gate — set when confirm_web=true and web phase is ready
+  webConfirmPending:  false,
 };
 
 // ─── Selectors / derived state helpers ─────────────────────
@@ -817,6 +823,15 @@ function reducer(state, action) {
 
     case 'TOOL_TIMEOUT_CLEAR':
       return { ...state, toolTimeoutWarning: null };
+
+    case 'PHASE_TIME_EXTENSION':
+      return { ...state, phaseTimeExtension: action.payload };
+
+    case 'CLEAR_PHASE_TIME_EXTENSION':
+      return { ...state, phaseTimeExtension: null };
+
+    case 'WEB_CONFIRM_PENDING':
+      return { ...state, webConfirmPending: action.payload };
 
     case 'RESET_SESSION':
       return { ...INIT, sysStatus: state.sysStatus, llmStatus: state.llmStatus, sessions: state.sessions };
@@ -1734,6 +1749,67 @@ function routeWsEvent(msg, dispatch, shellListeners) {
       break;
     }
 
+    // ── Awaiting confirmation (exploit gate or web gate) ──
+    case 'awaiting_confirmation': {
+      const phase = data?.phase || '';
+      if (phase === 'web_testing') {
+        dispatch({ type: 'WEB_CONFIRM_PENDING', payload: true });
+      }
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'master', eventType: 'awaiting_confirmation',
+        message: phase === 'web_testing'
+          ? `⚠ Web testing ready — confirm to proceed`
+          : `⚠ Exploitation ready — confirm to proceed`,
+        data
+      }});
+      break;
+    }
+
+    // ── Phase time-extension request ──────────────────────
+    case 'awaiting_time_extension': {
+      const etd = data || msg;
+      dispatch({ type: 'PHASE_TIME_EXTENSION', payload: {
+        phase:       etd.phase       || 'web_testing',
+        timeout_secs: etd.timeout_secs || 0,
+        message:     etd.message     || 'Phase timed out — extend or stop?',
+      }});
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'master', eventType: 'awaiting_time_extension',
+        message: `⏱ ${etd.phase || 'Phase'} timed out — extend or stop?`, data: etd
+      }});
+      break;
+    }
+
+    // ── Phase extended by operator ────────────────────────
+    case 'phase_extended': {
+      dispatch({ type: 'CLEAR_PHASE_TIME_EXTENSION' });
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'master', eventType: 'phase_extended',
+        message: `⏱ ${data?.phase || 'Phase'} extended by operator`, data
+      }});
+      break;
+    }
+
+    // ── Phase stopped (timeout with no extension) ─────────
+    case 'phase_stopped': {
+      dispatch({ type: 'CLEAR_PHASE_TIME_EXTENSION' });
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'master', eventType: 'phase_stopped',
+        message: `⏹ ${data?.phase || 'Phase'} stopped — no extension received`, data
+      }});
+      break;
+    }
+
+    // ── Phase skipped (confirmation denied or timed out) ──
+    case 'phase_skipped': {
+      dispatch({ type: 'WEB_CONFIRM_PENDING', payload: false });
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'master', eventType: 'phase_skipped',
+        message: `⏭ ${data?.phase || 'Phase'} skipped`, data
+      }});
+      break;
+    }
+
     default: break;
   }
 }
@@ -1750,7 +1826,11 @@ function extractFeedMessage(type, agent, data) {
     case 'flag_found':            return `FLAG: ${data?.flag_type} — ${data?.value}`;
     case 'master_plan':           return `Plan ready for ${data?.target}`;
     case 'llm_status':            return data?.available ? `LLM online: ${data?.model}` : `LLM offline`;
-    case 'awaiting_confirmation': return `Confirm exploitation to proceed`;
+    case 'awaiting_confirmation':      return data?.phase === 'web_testing' ? `⚠ Confirm web testing` : `⚠ Confirm exploitation`;
+    case 'awaiting_time_extension':    return `⏱ ${data?.phase||'Phase'} timed out — extend or stop?`;
+    case 'phase_extended':             return `⏱ ${data?.phase||'Phase'} extended`;
+    case 'phase_stopped':              return `⏹ ${data?.phase||'Phase'} stopped`;
+    case 'phase_skipped':              return `⏭ ${data?.phase||'Phase'} skipped`;
     case 'scan_paused':           return `⏸ Scan paused`;
     case 'scan_resumed':          return `▶ Scan resumed`;
     case 'checkpoint_restored':   return `♻ Checkpoint restored — resuming after ${data?.resume_after || '?'}`;

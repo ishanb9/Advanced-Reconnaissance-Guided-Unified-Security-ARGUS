@@ -422,6 +422,8 @@ class StartPentestRequest(BaseModel):
     max_threads:        int  = 3
     phases:             List[str] = []
     auto_exploit:       bool = False
+    confirm_web:        bool = False  # Show confirmation gate before web testing starts
+    web_phase_timeout:  int  = 600    # Seconds before web phase emits time-extension popup (0 = no limit)
     max_parallel_hosts: int  = 5
 
 

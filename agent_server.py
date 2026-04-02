@@ -227,6 +227,8 @@ async def create_session(body: StartPentestRequest):
     master_kwargs = dict(
         target_type        = body.target_type,
         auto_exploit       = body.auto_exploit,
+        confirm_web        = getattr(body, "confirm_web",       False),
+        web_phase_timeout  = getattr(body, "web_phase_timeout", 600),
         threading_enabled  = body.threading_enabled,
         max_threads        = body.max_threads,
         phases             = body.phases,
@@ -1550,11 +1552,14 @@ async def websocket_endpoint(ws: WebSocket, session_id: str):
                         await agent.resize_shell(shell_id, cols, rows)
 
                 elif mtype == "tool_extend":
-                    # Extend a running tool's deadline
+                    # Extend a running tool's deadline.
+                    # Check both registries: BaseSubagent (v3 subagents) and
+                    # BaseAgent (recon/web/vuln/exploit/privesc main agents).
                     from agents.base_subagent import get_subagent
+                    from agents.base_agent import get_agent
                     subagent_name = msg.get("subagent", "")
                     extra_sec     = float(msg.get("extra_sec", 600))
-                    sa = get_subagent(subagent_name)
+                    sa = get_subagent(subagent_name) or get_agent(subagent_name)
                     if sa:
                         sa.extend_tool(extra_sec)
                     await ws.send_text(json.dumps({
@@ -1564,10 +1569,12 @@ async def websocket_endpoint(ws: WebSocket, session_id: str):
                     }))
 
                 elif mtype == "tool_stop":
-                    # Stop a specific running subagent/tool
+                    # Stop a specific running subagent/tool.
+                    # Check both registries: BaseSubagent and BaseAgent.
                     from agents.base_subagent import get_subagent
+                    from agents.base_agent import get_agent
                     subagent_name = msg.get("subagent", "")
-                    sa = get_subagent(subagent_name)
+                    sa = get_subagent(subagent_name) or get_agent(subagent_name)
                     if sa:
                         sa.request_stop()
                     await ws.send_text(json.dumps({
@@ -1591,6 +1598,25 @@ async def websocket_endpoint(ws: WebSocket, session_id: str):
 # ══════════════════════════════════════════════════════════════
 #  PAUSE / RESUME / CHECKPOINTS
 # ══════════════════════════════════════════════════════════════
+
+@app.post("/sessions/{session_id}/extend/{phase}")
+async def extend_phase(session_id: str, phase: str):
+    """
+    Grant a time extension for a running phase that has hit its timeout.
+    Called from the frontend when the user clicks "Extend" in the time-extension dialog.
+    Also used to confirm a web-phase confirmation gate.
+    """
+    agent = active_agents.get(session_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail="No active agent for this session")
+    if hasattr(agent, "extend_phase"):
+        agent.extend_phase(phase)
+        await ws_manager.broadcast_raw(session_id, "phase_extended", {
+            "phase": phase, "message": f"Time extension granted for {phase}"
+        })
+        return {"status": "extended", "phase": phase}
+    raise HTTPException(status_code=400, detail="Agent does not support phase extension")
+
 
 @app.post("/sessions/{session_id}/pause")
 async def pause_session(session_id: str):

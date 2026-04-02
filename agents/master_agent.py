@@ -239,10 +239,15 @@ class MasterAgent(BaseAgent):
         self._attack_graph_agent  = None   # background chain analyzer
 
         # Session config
-        self._target:        str  = ""
-        self._target_type:   str  = "unknown"
-        self._auto_exploit:  bool = False
-        self._phases_to_run: List[str] = []
+        self._target:             str  = ""
+        self._target_type:        str  = "unknown"
+        self._auto_exploit:       bool = False
+        self._confirm_web:        bool = False   # Gate web testing behind a confirmation popup
+        self._web_phase_timeout:  int  = 600     # Seconds; 0 = unlimited
+        self._phases_to_run:      List[str] = []
+
+        # Phase extension events — SET = user granted extension; cleared on each wait
+        self._extend_events: Dict[str, asyncio.Event] = {}
 
         # Accumulated intelligence — updated throughout pentest
         self._intel: Dict = {
@@ -404,6 +409,8 @@ class MasterAgent(BaseAgent):
         target:            str,
         target_type:       str  = "unknown",
         auto_exploit:      bool = False,
+        confirm_web:       bool = False,
+        web_phase_timeout: int  = 600,
         threading_enabled: bool = False,
         max_threads:       int  = 3,
         phases:            List[str] = None,
@@ -415,8 +422,10 @@ class MasterAgent(BaseAgent):
         self._session_id     = session_id
         self._target         = target
         self._target_type    = target_type
-        self._auto_exploit   = auto_exploit
-        self._intel["target"]      = target
+        self._auto_exploit        = auto_exploit
+        self._confirm_web         = confirm_web
+        self._web_phase_timeout   = web_phase_timeout
+        self._intel["target"]     = target
         self._intel["target_type"] = target_type
         self._phases_to_run  = phases or [p.value for p in AttackPhase]
 
@@ -1190,6 +1199,7 @@ class MasterAgent(BaseAgent):
             )
 
         # ── PHASE 1: RECON (always first, sequential) ─────────
+        await self._apply_pending_guidance()   # drain any queued guidance before recon
         if phase_enabled("recon") and not already_done("recon"):
             await self._phase_recon(target, plan)
             self._phases_completed.append("recon")
@@ -1204,6 +1214,7 @@ class MasterAgent(BaseAgent):
 
         # ── PHASE 2: PARALLEL intelligence gathering ──────────
         # Run vuln scan + web testing + OSINT simultaneously
+        await self._apply_pending_guidance()   # drain before parallel phase starts
         await self._transition_state("INTELLIGENCE_AGGREGATION")
 
         parallel_coros = []
@@ -1321,6 +1332,7 @@ class MasterAgent(BaseAgent):
             attack_tree = self._intel.get("attack_tree")
 
         # ── PHASE 5: EXPLOITATION ─────────────────────────────
+        await self._apply_pending_guidance()   # drain before exploit gate
         await self._transition_state("EXPLOITATION")
         if phase_enabled("exploit") and not already_done("exploit"):
             if self._auto_exploit:
@@ -1506,6 +1518,8 @@ class MasterAgent(BaseAgent):
                 decision   = f"{len(busy)} item(s) still active — Master waiting",
                 next_action= "Check again in 2 seconds"
             )
+            # Drain guidance queue while waiting so operator input is never blocked
+            await self._apply_pending_guidance()
             await _asyncio.sleep(2.0)
 
         # Timeout — force-set all busy agents to IDLE, cancel pending tasks, and continue
@@ -1539,6 +1553,7 @@ class MasterAgent(BaseAgent):
 
     async def _phase_recon(self, target: str, plan: Dict):
         """Master plans every recon task. Agent executes + extracts findings."""
+        await self._apply_pending_guidance()
         await self._advance_phase(AttackPhase.RECON)
         await self._emit("plan_step_update", {
             "step_id": "recon", "status": "active",
@@ -1702,6 +1717,7 @@ class MasterAgent(BaseAgent):
 
     async def _phase_vuln_id(self, target: str):
         """Master decides every vuln check. Agent executes + extracts CVEs."""
+        await self._apply_pending_guidance()
         await self._advance_phase(AttackPhase.VULN_ID)
         await self._emit("plan_step_update", {
             "step_id": "vuln_id", "status": "active",
@@ -1781,6 +1797,21 @@ class MasterAgent(BaseAgent):
             "detail":  "", "found": None, "ts": datetime.utcnow().isoformat()
         })
 
+        # ── Optional confirmation gate (enabled by confirm_web=True on session start) ──
+        if self._confirm_web:
+            await self._emit("awaiting_confirmation", {
+                "phase":   "web_testing",
+                "message": "Web application testing is ready to begin. Confirm to proceed.",
+                "ports":   web_ports,
+            })
+            confirmed = await self._wait_for_confirmation("web_testing", timeout=3600)
+            if not confirmed:
+                await self._emit("phase_skipped", {"phase": "web_testing", "reason": "Not confirmed by operator"})
+                return
+
+        # Drain any guidance that arrived before web phase started
+        await self._apply_pending_guidance()
+
         from agents.web_agent import WebAgent
         agent = WebAgent(broadcast=self.broadcast)
         agent._session_id = self._session_id
@@ -1810,7 +1841,8 @@ class MasterAgent(BaseAgent):
                  "purpose":"Web misconfiguration scan"},
             ]
 
-        result = await agent.execute_tasks(target, tasks, "WEB_TESTING", self._intel)
+        # ── Run web tasks with optional time-extension popup ─────────────────
+        result = await self._run_web_tasks_with_timeout(agent, target, tasks)
 
         for p in result.get("web_paths",result.get("paths",[])):
             if p not in self._intel["web_paths"]: self._intel["web_paths"].append(p)
@@ -1848,10 +1880,76 @@ class MasterAgent(BaseAgent):
         ]
         await self._run_phase_subagents("web", target, web_urls=web_urls)
 
+    async def _run_web_tasks_with_timeout(self, agent, target: str, tasks: List) -> Dict:
+        """
+        Runs web execute_tasks with an optional time-extension popup.
+        If web_phase_timeout > 0 and the tasks don't finish in time, we emit
+        awaiting_time_extension so the frontend shows the "Extend / Stop" dialog.
+        The operator can extend multiple times; each extension grants the same
+        extra period again.  Clicking "Stop" cancels the agent gracefully.
+        """
+        timeout_secs = self._web_phase_timeout
+
+        if timeout_secs <= 0:
+            # No time limit — run to completion
+            return await agent.execute_tasks(target, tasks, "WEB_TESTING", self._intel)
+
+        extension_key = "extend_web_testing"
+
+        while True:
+            try:
+                result = await asyncio.wait_for(
+                    agent.execute_tasks(target, tasks, "WEB_TESTING", self._intel),
+                    timeout=float(timeout_secs)
+                )
+                return result
+            except asyncio.TimeoutError:
+                # Emit time-extension popup to frontend
+                await self._emit("awaiting_time_extension", {
+                    "phase":          "web_testing",
+                    "timeout_secs":   timeout_secs,
+                    "message": (
+                        f"Web testing has been running for {timeout_secs}s. "
+                        "Extend to continue or stop web testing now."
+                    ),
+                })
+
+                # Prepare the extend event
+                if extension_key not in self._extend_events:
+                    self._extend_events[extension_key] = asyncio.Event()
+                else:
+                    self._extend_events[extension_key].clear()
+
+                # Wait up to 5 minutes for the operator to respond
+                try:
+                    await asyncio.wait_for(
+                        self._extend_events[extension_key].wait(),
+                        timeout=300.0
+                    )
+                    # Operator clicked "Extend" — loop back and run again
+                    await self._emit("phase_extended", {
+                        "phase":   "web_testing",
+                        "message": "Web testing time extended by operator",
+                    })
+                    await self._apply_pending_guidance()
+                    # Reset agent state so it continues from where tools left off
+                    # (execute_tasks with remaining tasks only — already-run tools cached)
+                    continue
+                except asyncio.TimeoutError:
+                    # No response — stop web testing gracefully
+                    agent.request_stop()
+                    await self._emit("phase_stopped", {
+                        "phase":   "web_testing",
+                        "message": "Web testing stopped — no response to time extension request",
+                    })
+                    return {"web_paths": [], "paths": [], "login_pages": [],
+                            "web_vulns": [], "raw_outputs": {}}
+
     # ─── PHASE: OSINT ─────────────────────────────────────────
 
     async def _phase_osint(self, target: str):
         """Master plans all OSINT tasks. Agent executes + extracts modules."""
+        await self._apply_pending_guidance()
         await self._advance_phase(AttackPhase.OSINT)
         await self._emit("plan_step_update", {
             "step_id": "osint", "status": "active",
@@ -4269,6 +4367,17 @@ Return JSON with enumeration goals: {{
         evt = self._confirm_events.get(f"confirm_{phase}")
         if evt:
             evt.set()
+
+    def extend_phase(self, phase: str):
+        """
+        Called by agent_server when operator clicks 'Extend' in the time-extension dialog.
+        Sets the extend event for the given phase so _phase_web_testing() (or any other
+        timed phase) can resume.  Also works as the confirmation gate for confirm_web.
+        """
+        key = f"extend_{phase}"
+        if key not in self._extend_events:
+            self._extend_events[key] = asyncio.Event()
+        self._extend_events[key].set()
 
     def stop_all_agents(self):
         for agent in [self._recon_agent, self._vuln_agent, self._web_agent,

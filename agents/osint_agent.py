@@ -1,47 +1,75 @@
 """
-KALI PENTEST PLATFORM v2 — OSINT Agent
-Internet intelligence gathering agent.
+ARGUS — OSINT Agent (Enhanced)
+================================
+Orchestrates a full fleet of OSINT subagents covering 13 intelligence sources.
 
-Sources:
-  - NVD (NIST National Vulnerability Database) API
-  - ExploitDB search (via searchsploit + web)
-  - Shodan API (optional, requires API key)
-  - CVEdetails scraping
-  - LLM-guided web research
-  - theHarvester for email/subdomain OSINT
+Sources (always-on, no key required):
+  nvd             — NIST National Vulnerability Database CVE search
+  exploit_db      — ExploitDB + local searchsploit
+  theharvester    — Email, subdomain, hostname, IP harvesting
+  recon_ng        — Recon-ng framework (DNS, WHOIS, contacts, GHDB)
+  wayback         — Archive.org / Wayback Machine historical URLs
+  ahmia           — Ahmia.fi dark web / Tor network mentions
+  bgpview         — BGP routing, ASN, IP prefix data
 
-No API keys required for NVD (rate limited but free).
-Shodan requires free API key: https://account.shodan.io
+Sources (API key required — configure in agents/osint/osint_config.py):
+  shodan          — Network scanner: ports, CVEs, banners, SSL certs
+  security_trails — DNS history, subdomains, associated domains
+  hibp            — Have I Been Pwned breach database
+  google_dorks    — Google Custom Search with 25+ dork templates
+  builtwith       — Website technology profiler
+  tineye          — Reverse image search
+  spiderfoot      — Local SpiderFoot instance (200+ modules)
+
+Adding new sources
+------------------
+1. Create agents/osint/my_source_subagent.py extending OsintSubagentBase
+2. Add an entry to SOURCES_ENABLED in agents/osint/osint_config.py
+3. Import and instantiate in _run_all_subagents() below
 """
 
 import asyncio
-import json
 import re
-import httpx
 from typing import Optional, Dict, List
 
+import httpx
+
 from agents.base_agent import BaseAgent, BroadcastFn
-from db.schemas import (
-    AgentName, AgentStatus, AttackPhase, FindingSeverity
-)
+from db.schemas import AgentName, AgentStatus, AttackPhase, FindingSeverity
 import db.mongo_client as db
 
-
-# ─── Optional API keys (set via environment or config) ─────
-import os
-SHODAN_API_KEY = os.environ.get("SHODAN_API_KEY", "")
-NVD_API_KEY    = os.environ.get("NVD_API_KEY", "")   # Optional, increases rate limit
+# ── Config & subagent imports ─────────────────────────────────────────────────
+from agents.osint.osint_config import (
+    NVD_API_KEY, SOURCES_ENABLED, TIMEOUTS
+)
+from agents.osint.theharvester_subagent    import TheHarvesterSubagent
+from agents.osint.recon_ng_subagent        import ReconNgSubagent
+from agents.osint.wayback_subagent         import WaybackSubagent
+from agents.osint.ahmia_subagent           import AhmiaSubagent
+from agents.osint.shodan_subagent          import ShodanSubagent
+from agents.osint.security_trails_subagent import SecurityTrailsSubagent
+from agents.osint.bgpview_subagent         import BGPViewSubagent
+from agents.osint.hibp_subagent            import HIBPSubagent
+from agents.osint.google_dorks_subagent    import GoogleDorksSubagent
+from agents.osint.builtwith_subagent       import BuiltWithSubagent
+from agents.osint.tineye_subagent          import TinEyeSubagent
+from agents.osint.spiderfoot_subagent      import SpiderFootSubagent
 
 
 class OsintAgent(BaseAgent):
     """
-    Internet OSINT and intelligence agent.
-    Searches NVD, ExploitDB, and Shodan for target intelligence.
+    Master OSINT orchestrator.
+    Runs all configured intelligence sources in parallel waves,
+    feeds results to the OSINT Intel dashboard in real time.
     """
 
     def __init__(self, broadcast: Optional[BroadcastFn] = None):
         super().__init__(AgentName.OSINT, broadcast)
         self.phase = AttackPhase.OSINT
+
+    # ─────────────────────────────────────────────────────────────
+    #  Main entry point
+    # ─────────────────────────────────────────────────────────────
 
     async def run(
         self,
@@ -52,325 +80,431 @@ class OsintAgent(BaseAgent):
         **kwargs
     ) -> Dict:
         self._session_id = session_id
-        search_terms = search_terms or []
-        services     = services or {}
+        search_terms     = search_terms or []
+        services         = services or {}
 
-        result = {
+        result: Dict = {
             "exploit_modules": [],
             "cve_details":     [],
             "shodan_data":     None,
-            "intelligence":    []
+            "intelligence":    [],
+            "emails":          [],
+            "subdomains":      [],
+            "technologies":    [],
         }
 
-        await self.set_status(AgentStatus.RUNNING, "Starting internet OSINT")
+        await self.set_status(AgentStatus.RUNNING, f"Starting comprehensive OSINT for {target}")
+        await self._emit("osint_start", {
+            "target":  target,
+            "sources": [k for k, v in SOURCES_ENABLED.items() if v],
+        })
 
-        # ── Step 1: NVD CVE search for each service ────────────
-        unique_queries = [t for t in search_terms if len(t) > 3][:8]  # limit to 8
-        for query in unique_queries:
-            if self._stop_requested:
-                break
-            await self.set_status(AgentStatus.RUNNING, f"NVD search: {query}")
-            cve_results = await self._search_nvd(query, session_id)
-            result["cve_details"].extend(cve_results)
-            await asyncio.sleep(0.5)  # NVD rate limiting
+        # ── Wave 1: NVD CVE search (fast, always-on) ──────────────
+        cves = await self._run_nvd(target, search_terms, session_id)
+        result["cve_details"].extend(cves)
 
-        # ── Step 2: Shodan lookup (if key available) ───────────
-        if SHODAN_API_KEY and self._is_ip(target):
-            await self.set_status(AgentStatus.RUNNING, f"Shodan lookup: {target}")
-            shodan_data = await self._shodan_lookup(target, session_id)
-            if shodan_data:
-                result["shodan_data"] = shodan_data
+        # ── Wave 2: ExploitDB ─────────────────────────────────────
+        exploits = await self._run_exploitdb(search_terms, session_id)
+        result["exploit_modules"].extend(exploits)
 
-        # ── Step 3: ExploitDB web search via LLM ──────────────
-        for query in unique_queries[:4]:
-            if self._stop_requested:
-                break
-            await self.set_status(AgentStatus.RUNNING, f"Exploit search: {query}")
-            exploits = await self._search_exploitdb(query, session_id)
-            result["exploit_modules"].extend(exploits)
+        # ── Wave 3: All subagents run concurrently ─────────────────
+        subagent_results = await self._run_all_subagents(target, session_id)
 
-        # ── Step 4: theHarvester for email/subdomain intel ─────
-        if not self._is_ip(target):
-            await self.set_status(AgentStatus.RUNNING, "theHarvester email/subdomain OSINT")
-            th = await self.run_tool(
-                "theHarvester",
-                f"-d {target} -l 100 -b bing,google",
-                target  = target,
-                timeout = 120
-            )
-            if th["stdout"]:
-                emails = re.findall(r'[\w\.-]+@[\w\.-]+\.\w+', th["stdout"])
-                hosts  = re.findall(r'\b[\w\-\.]+\.' + re.escape(target) + r'\b', th["stdout"])
-                if emails or hosts:
-                    await self.store_finding(
-                        severity    = FindingSeverity.INFO,
-                        title       = f"OSINT: Emails/Hosts for {target}",
-                        description = f"Found {len(emails)} emails and {len(hosts)} hostnames",
-                        host        = target,
-                        tool_used   = "theHarvester",
-                        raw_output  = th["stdout"][:3000],
-                        extra       = {"emails": emails[:20], "hosts": hosts[:20]}
-                    )
+        # Harvest structured data from subagent output
+        for r in subagent_results:
+            raw = r.get("raw") or {}
+            dt  = raw.get("data_type", "")
+            if dt == "email" and raw.get("email"):
+                result["emails"].append(raw["email"])
+            if dt in ("harvester_results", "recon_ng_results"):
+                result["subdomains"].extend(raw.get("subdomains", []))
+            if dt == "tech_profile":
+                result["technologies"].extend(raw.get("technologies", []))
+            if dt == "shodan_host":
+                result["shodan_data"] = raw
 
-        # ── Step 5: LLM synthesis of OSINT results ────────────
-        if result["cve_details"] or result["exploit_modules"]:
-            synthesis = await self._synthesize_intel(target, result, services)
-            result["synthesis"] = synthesis
-            await self._emit("osint_complete", {
-                "agent":    self.name,
-                "findings": len(result["cve_details"]),
-                "exploits": len(result["exploit_modules"]),
-                "synthesis": synthesis
-            })
+        result["emails"]       = list(dict.fromkeys(result["emails"]))
+        result["subdomains"]   = list(dict.fromkeys(result["subdomains"]))
+        result["technologies"] = list(dict.fromkeys(result["technologies"]))
 
-        await self.set_status(AgentStatus.DONE,
-            f"OSINT complete — {len(result['cve_details'])} CVEs, {len(result['exploit_modules'])} exploits")
+        # ── Wave 4: HIBP with harvested emails ────────────────────
+        if result["emails"] and SOURCES_ENABLED.get("hibp"):
+            hibp = HIBPSubagent(session_id, target, self.broadcast)
+            try:
+                await hibp.run(emails=result["emails"][:15])
+            except Exception as exc:
+                await self._emit("osint_warning", {
+                    "message": f"HIBP email check error: {exc}"
+                })
+
+        # ── Wave 5: LLM synthesis ─────────────────────────────────
+        if result["cve_details"] or result["exploit_modules"] or result["shodan_data"]:
+            result["synthesis"] = await self._synthesize_intel(target, result, services)
+
+        total = await self._count_osint_results(session_id)
+        await self.set_status(
+            AgentStatus.DONE,
+            f"OSINT complete — {total} intel entries | "
+            f"{len(result['cve_details'])} CVEs | "
+            f"{len(result['exploit_modules'])} exploits | "
+            f"{len(result['emails'])} emails | "
+            f"{len(result['subdomains'])} subdomains"
+        )
+        await self._emit("osint_complete", {
+            "agent":         self.name,
+            "total_results": total,
+            "cves":          len(result["cve_details"]),
+            "exploits":      len(result["exploit_modules"]),
+            "emails":        len(result["emails"]),
+            "subdomains":    len(result["subdomains"]),
+            "technologies":  len(result["technologies"]),
+        })
 
         return result
 
-    # ─── NVD Search ───────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────
+    #  Subagent orchestration
+    # ─────────────────────────────────────────────────────────────
 
-    async def _search_nvd(self, keyword: str, session_id: str) -> List[Dict]:
-        """Search NIST NVD for CVEs matching keyword."""
-        results = []
-        url = "https://services.nvd.nist.gov/rest/json/cves/2.0"
-        headers = {}
-        if NVD_API_KEY:
-            headers["apiKey"] = NVD_API_KEY
+    async def _run_all_subagents(
+        self, target: str, session_id: str
+    ) -> List[Dict]:
+        """Run all enabled OSINT subagents concurrently."""
 
-        params = {
-            "keywordSearch": keyword,
-            "resultsPerPage": 5,
-            "startIndex": 0
-        }
+        named_coros: List[tuple] = []
 
-        try:
-            async with httpx.AsyncClient(timeout=30) as client:
-                resp = await client.get(url, params=params, headers=headers)
-                if resp.status_code != 200:
-                    return results
-                data = resp.json()
+        if SOURCES_ENABLED.get("theharvester"):
+            named_coros.append(("theHarvester",
+                TheHarvesterSubagent(session_id, target, self.broadcast).run()))
+        if SOURCES_ENABLED.get("recon_ng"):
+            named_coros.append(("recon-ng",
+                ReconNgSubagent(session_id, target, self.broadcast).run()))
+        if SOURCES_ENABLED.get("wayback"):
+            named_coros.append(("wayback",
+                WaybackSubagent(session_id, target, self.broadcast).run()))
+        if SOURCES_ENABLED.get("ahmia"):
+            named_coros.append(("ahmia",
+                AhmiaSubagent(session_id, target, self.broadcast).run()))
+        if SOURCES_ENABLED.get("bgpview"):
+            named_coros.append(("bgpview",
+                BGPViewSubagent(session_id, target, self.broadcast).run()))
+        if SOURCES_ENABLED.get("shodan"):
+            named_coros.append(("shodan",
+                ShodanSubagent(session_id, target, self.broadcast).run()))
+        if SOURCES_ENABLED.get("security_trails"):
+            named_coros.append(("securitytrails",
+                SecurityTrailsSubagent(session_id, target, self.broadcast).run()))
+        if SOURCES_ENABLED.get("google_dorks"):
+            named_coros.append(("googledorks",
+                GoogleDorksSubagent(session_id, target, self.broadcast).run()))
+        if SOURCES_ENABLED.get("builtwith"):
+            named_coros.append(("builtwith",
+                BuiltWithSubagent(session_id, target, self.broadcast).run()))
+        if SOURCES_ENABLED.get("tineye"):
+            named_coros.append(("tineye",
+                TinEyeSubagent(session_id, target, self.broadcast).run()))
+        if SOURCES_ENABLED.get("spiderfoot"):
+            named_coros.append(("spiderfoot",
+                SpiderFootSubagent(session_id, target, self.broadcast).run()))
 
-            for vuln in data.get("vulnerabilities", [])[:5]:
-                cve    = vuln.get("cve", {})
-                cve_id = cve.get("id", "")
-                desc   = ""
-                for d in cve.get("descriptions", []):
-                    if d.get("lang") == "en":
-                        desc = d.get("value", "")
-                        break
-                # CVSS score
-                score    = 0.0
-                severity = FindingSeverity.INFO
-                metrics  = cve.get("metrics", {})
-                for metric_key in ("cvssMetricV31", "cvssMetricV30", "cvssMetricV2"):
-                    if metric_key in metrics and metrics[metric_key]:
-                        cvss = metrics[metric_key][0].get("cvssData", {})
-                        score = cvss.get("baseScore", 0.0)
-                        sev_str = cvss.get("baseSeverity", "").upper()
-                        severity = {
-                            "CRITICAL": FindingSeverity.CRITICAL,
-                            "HIGH":     FindingSeverity.HIGH,
-                            "MEDIUM":   FindingSeverity.MEDIUM,
-                            "LOW":      FindingSeverity.LOW
-                        }.get(sev_str, FindingSeverity.INFO)
-                        break
+        if not named_coros:
+            return []
 
-                entry = {
-                    "cve_id":      cve_id,
-                    "description": desc[:500],
-                    "cvss_score":  score,
-                    "severity":    severity,
-                    "url":         f"https://nvd.nist.gov/vuln/detail/{cve_id}",
-                    "keyword":     keyword
-                }
-                results.append(entry)
+        await self.set_status(
+            AgentStatus.RUNNING,
+            f"Running {len(named_coros)} OSINT source(s) in parallel"
+        )
 
-                # Store in DB
-                await db.store_osint_result(
-                    session_id = session_id,
-                    query      = keyword,
-                    source     = "nvd",
-                    title      = f"{cve_id}: {desc[:80]}",
-                    summary    = desc[:400],
-                    url        = entry["url"],
-                    cves       = [cve_id],
-                    severity   = severity,
-                    relevance  = min(score / 10.0, 1.0),
-                    raw        = {"score": score, "keyword": keyword}
-                )
+        gathered = await asyncio.gather(
+            *[coro for _, coro in named_coros],
+            return_exceptions=True,
+        )
 
-                # Store as finding if high severity
-                if score >= 7.0:
-                    await self.store_finding(
-                        severity    = severity,
-                        title       = f"CVE Found: {cve_id} (CVSS {score})",
-                        description = desc[:400],
-                        host        = "internet_intel",
-                        cves        = [cve_id],
-                        tool_used   = "nvd_api",
-                        extra       = {"cvss_score": score, "keyword": keyword}
-                    )
+        all_results: List[Dict] = []
+        for (name, _), outcome in zip(named_coros, gathered):
+            if isinstance(outcome, Exception):
+                await self._emit("osint_warning", {
+                    "message": f"[{name}] error: {outcome}"
+                })
+            elif isinstance(outcome, list):
+                all_results.extend(outcome)
 
-        except httpx.TimeoutException:
-            await self._emit("osint_warning", {"message": f"NVD API timeout for: {keyword}"})
-        except Exception as e:
-            print(f"[OSINT] NVD error for '{keyword}': {e}")
+        return all_results
+
+    # ─────────────────────────────────────────────────────────────
+    #  NVD CVE search
+    # ─────────────────────────────────────────────────────────────
+
+    async def _run_nvd(
+        self, target: str, search_terms: List[str], session_id: str
+    ) -> List[Dict]:
+        if not SOURCES_ENABLED.get("nvd"):
+            return []
+
+        queries = [t for t in search_terms if len(t) > 3][:8]
+        if not queries and not self._is_ip(target):
+            queries = [target.split(".")[0]]
+
+        results: List[Dict] = []
+        for q in queries:
+            if self._stop_requested:
+                break
+            await self.set_status(AgentStatus.RUNNING, f"NVD CVE search: {q}")
+            results.extend(await self._search_nvd(q, session_id))
+            await asyncio.sleep(0.5)
 
         return results
 
-    # ─── ExploitDB Search ─────────────────────────────────
+    async def _search_nvd(self, keyword: str, session_id: str) -> List[Dict]:
+        url     = "https://services.nvd.nist.gov/rest/json/cves/2.0"
+        headers = {"apiKey": NVD_API_KEY} if NVD_API_KEY else {}
+        params  = {"keywordSearch": keyword, "resultsPerPage": 5, "startIndex": 0}
 
-    async def _search_exploitdb(self, query: str, session_id: str) -> List[Dict]:
-        """Search ExploitDB website for public exploits."""
-        results = []
-        url = f"https://www.exploit-db.com/search?q={query.replace(' ', '+')}"
-        headers = {
-            "User-Agent":    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
-            "Accept":        "text/html,application/xhtml+xml",
-            "X-Requested-With": "XMLHttpRequest"
-        }
-        # Use JSON API
-        api_url = f"https://www.exploit-db.com/search?q={query.replace(' ', '+')}&type=exploits"
         try:
-            async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
-                # ExploitDB has a JSON endpoint
-                resp = await client.get(
-                    "https://www.exploit-db.com/search",
-                    params={"q": query, "type": "exploits"},
-                    headers={**headers, "Accept": "application/json"}
-                )
-                if resp.status_code == 200:
-                    try:
-                        data = resp.json()
-                        for item in data.get("data", [])[:5]:
-                            edb_id = item.get("id", "")
-                            title  = item.get("description", "")
-                            results.append({
-                                "edb_id":   str(edb_id),
-                                "title":    title,
-                                "url":      f"https://www.exploit-db.com/exploits/{edb_id}",
-                                "type":     item.get("type", {}).get("name", ""),
-                                "platform": item.get("platform", {}).get("name", ""),
-                                "keyword":  query
-                            })
+            async with httpx.AsyncClient(
+                timeout=TIMEOUTS.get("default", 20)
+            ) as client:
+                resp = await client.get(url, params=params, headers=headers)
+            if resp.status_code != 200:
+                return []
+            data = resp.json()
+        except Exception as exc:
+            await self._emit("osint_warning", {
+                "message": f"NVD error for '{keyword}': {exc}"
+            })
+            return []
 
-                            await db.store_osint_result(
-                                session_id = session_id,
-                                query      = query,
-                                source     = "exploit_db",
-                                title      = title[:100],
-                                summary    = f"ExploitDB #{edb_id}: {title}",
-                                url        = f"https://www.exploit-db.com/exploits/{edb_id}",
-                                exploits   = [str(edb_id)],
-                                severity   = FindingSeverity.HIGH,
-                                relevance  = 0.8,
-                                raw        = item
-                            )
-                    except Exception:
-                        pass
-        except Exception as e:
-            print(f"[OSINT] ExploitDB error for '{query}': {e}")
+        results: List[Dict] = []
+        for vuln in data.get("vulnerabilities", [])[:5]:
+            cve    = vuln.get("cve", {})
+            cve_id = cve.get("id", "")
+            desc   = next(
+                (d["value"] for d in cve.get("descriptions", []) if d.get("lang") == "en"),
+                "",
+            )
+            score    = 0.0
+            severity = FindingSeverity.INFO
+            for key in ("cvssMetricV31", "cvssMetricV30", "cvssMetricV2"):
+                metrics = cve.get("metrics", {}).get(key, [])
+                if metrics:
+                    cvss     = metrics[0].get("cvssData", {})
+                    score    = cvss.get("baseScore", 0.0)
+                    severity = {
+                        "CRITICAL": FindingSeverity.CRITICAL,
+                        "HIGH":     FindingSeverity.HIGH,
+                        "MEDIUM":   FindingSeverity.MEDIUM,
+                        "LOW":      FindingSeverity.LOW,
+                    }.get(cvss.get("baseSeverity", "").upper(), FindingSeverity.INFO)
+                    break
 
-        # Also run local searchsploit (offline, fast)
-        local = await self.run_tool(
-            "searchsploit",
-            query,
-            target  = query,
-            timeout = 20
-        )
-        if local["stdout"]:
-            for line in local["stdout"].splitlines():
-                if "|" in line and not line.startswith("-") and not line.lower().startswith("exploit"):
-                    parts = line.split("|")
-                    if len(parts) >= 2:
-                        results.append({
-                            "title":    parts[0].strip(),
-                            "path":     parts[-1].strip(),
-                            "source":   "searchsploit_local",
-                            "keyword":  query
-                        })
-
-        return results[:10]
-
-    # ─── Shodan ───────────────────────────────────────────
-
-    async def _shodan_lookup(self, ip: str, session_id: str) -> Optional[Dict]:
-        """Shodan host lookup — requires API key."""
-        if not SHODAN_API_KEY:
-            return None
-        try:
-            async with httpx.AsyncClient(timeout=15) as client:
-                resp = await client.get(
-                    f"https://api.shodan.io/shodan/host/{ip}",
-                    params={"key": SHODAN_API_KEY}
-                )
-                if resp.status_code != 200:
-                    return None
-                data = resp.json()
-
-            summary = {
-                "ip":           data.get("ip_str"),
-                "org":          data.get("org"),
-                "country":      data.get("country_name"),
-                "os":           data.get("os"),
-                "ports":        data.get("ports", []),
-                "hostnames":    data.get("hostnames", []),
-                "vulns":        list(data.get("vulns", {}).keys()),
-                "last_update":  data.get("last_update")
+            entry = {
+                "cve_id":      cve_id,
+                "description": desc[:500],
+                "cvss_score":  score,
+                "severity":    severity,
+                "url":         f"https://nvd.nist.gov/vuln/detail/{cve_id}",
+                "keyword":     keyword,
             }
+            results.append(entry)
 
             await db.store_osint_result(
                 session_id = session_id,
-                query      = ip,
-                source     = "shodan",
-                title      = f"Shodan Host: {ip}",
-                summary    = f"Org: {summary['org']}, Ports: {summary['ports'][:10]}, Vulns: {summary['vulns'][:5]}",
-                cves       = summary["vulns"][:20],
-                severity   = FindingSeverity.HIGH if summary["vulns"] else FindingSeverity.INFO,
-                relevance  = 0.95,
-                raw        = summary
+                host       = self._session_id or "",
+                query      = keyword,
+                source     = "nvd",
+                title      = f"{cve_id}: {desc[:80]}",
+                summary    = desc[:400],
+                url        = entry["url"],
+                cves       = [cve_id],
+                severity   = severity,
+                relevance  = min(score / 10.0, 1.0),
+                raw        = {"score": score, "keyword": keyword, "data_type": "cve"},
             )
 
-            if summary["vulns"]:
+            if score >= 7.0:
                 await self.store_finding(
-                    severity    = FindingSeverity.CRITICAL,
-                    title       = f"Shodan: {len(summary['vulns'])} CVEs for {ip}",
-                    description = f"Shodan reports {ip} has known CVEs: {', '.join(summary['vulns'][:10])}",
-                    host        = ip,
-                    cves        = summary["vulns"][:20],
-                    tool_used   = "shodan"
+                    severity    = severity,
+                    title       = f"CVE: {cve_id} (CVSS {score})",
+                    description = desc[:400],
+                    host        = "internet_intel",
+                    cves        = [cve_id],
+                    tool_used   = "nvd_api",
+                    extra       = {"cvss_score": score, "keyword": keyword},
                 )
-            return summary
 
-        except Exception as e:
-            print(f"[OSINT] Shodan error: {e}")
-            return None
+        return results
 
-    # ─── LLM Synthesis ────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────
+    #  ExploitDB search
+    # ─────────────────────────────────────────────────────────────
 
-    async def _synthesize_intel(self, target: str, result: Dict, services: Dict) -> str:
-        """LLM synthesizes all OSINT data into actionable guidance."""
-        cve_summary    = [(r["cve_id"], r.get("cvss_score", 0)) for r in result["cve_details"][:10]]
-        exploit_titles = [e.get("title", "") for e in result["exploit_modules"][:10]]
+    async def _run_exploitdb(
+        self, search_terms: List[str], session_id: str
+    ) -> List[Dict]:
+        if not SOURCES_ENABLED.get("exploit_db"):
+            return []
+
+        results: List[Dict] = []
+        for q in search_terms[:4]:
+            if self._stop_requested:
+                break
+            await self.set_status(AgentStatus.RUNNING, f"ExploitDB search: {q}")
+            results.extend(await self._search_exploitdb(q, session_id))
+
+        return results
+
+    async def _search_exploitdb(self, query: str, session_id: str) -> List[Dict]:
+        results: List[Dict] = []
+        try:
+            async with httpx.AsyncClient(
+                timeout=TIMEOUTS.get("default", 20), follow_redirects=True
+            ) as client:
+                resp = await client.get(
+                    "https://www.exploit-db.com/search",
+                    params={"q": query, "type": "exploits"},
+                    headers={
+                        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64)",
+                        "Accept":     "application/json",
+                    },
+                )
+            if resp.status_code == 200:
+                for item in resp.json().get("data", [])[:5]:
+                    edb_id = item.get("id", "")
+                    title  = item.get("description", "")
+                    results.append({
+                        "edb_id":   str(edb_id),
+                        "title":    title,
+                        "url":      f"https://www.exploit-db.com/exploits/{edb_id}",
+                        "type":     item.get("type", {}).get("name", ""),
+                        "platform": item.get("platform", {}).get("name", ""),
+                        "keyword":  query,
+                    })
+                    await db.store_osint_result(
+                        session_id = session_id,
+                        query      = query,
+                        source     = "exploit_db",
+                        title      = title[:100],
+                        summary    = f"ExploitDB #{edb_id}: {title}",
+                        url        = f"https://www.exploit-db.com/exploits/{edb_id}",
+                        exploits   = [str(edb_id)],
+                        severity   = FindingSeverity.HIGH,
+                        relevance  = 0.80,
+                        raw        = {**item, "data_type": "exploit"},
+                    )
+        except Exception as exc:
+            await self._emit("osint_warning", {
+                "message": f"ExploitDB error for '{query}': {exc}"
+            })
+
+        # Local searchsploit (list form — no shell injection risk)
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "searchsploit", query,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=20)
+            for line in stdout.decode("utf-8", errors="replace").splitlines():
+                if "|" in line and not line.startswith("-") and "Exploit Title" not in line:
+                    parts = line.split("|")
+                    if len(parts) >= 2:
+                        results.append({
+                            "title":   parts[0].strip(),
+                            "path":    parts[-1].strip(),
+                            "source":  "searchsploit_local",
+                            "keyword": query,
+                        })
+        except Exception:
+            pass
+
+        return results[:10]
+
+    # ─────────────────────────────────────────────────────────────
+    #  LLM synthesis
+    # ─────────────────────────────────────────────────────────────
+
+    async def _synthesize_intel(
+        self, target: str, result: Dict, services: Dict
+    ) -> str:
+        cve_summary    = [
+            (r["cve_id"], r.get("cvss_score", 0))
+            for r in result.get("cve_details", [])[:10]
+        ]
+        exploit_titles = [e.get("title", "") for e in result.get("exploit_modules", [])[:10]]
+        tech_stack     = result.get("technologies", [])[:10]
+        emails_found   = result.get("emails", [])[:5]
 
         prompt = f"""
-You are a senior penetration tester. Synthesize this OSINT intelligence.
+You are a senior penetration tester. Synthesize the following OSINT intelligence.
 
-Target: {target}
-Services: {list(services.values())[:5]}
-CVEs found (cve_id, cvss_score): {cve_summary}
-Public exploits available: {exploit_titles}
+Target       : {target}
+Services     : {list(services.values())[:5]}
+CVEs found   : {cve_summary}
+Exploits     : {exploit_titles}
+Technologies : {tech_stack}
+Emails found : {emails_found}
 
 Provide:
-1. Most critical attack vectors to try first
+1. Most critical attack vectors to prioritise
 2. Which CVEs have reliable public exploits
-3. Recommended Metasploit modules if any
-4. Overall risk assessment
+3. Recommended Metasploit modules
+4. Social engineering opportunities (if emails found)
+5. Overall risk assessment (Critical / High / Medium / Low)
 
-Be specific and actionable. Focus on what can realistically give initial access.
+Be specific and actionable. Focus on realistic initial access paths.
 """
         return await self.think(prompt, timeout=60)
 
-    def _is_ip(self, s: str) -> bool:
-        return bool(re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', s))
+    # ─────────────────────────────────────────────────────────────
+    #  Helpers
+    # ─────────────────────────────────────────────────────────────
+
+    async def _count_osint_results(self, session_id: str) -> int:
+        try:
+            return len(await db.get_osint_results(session_id))
+        except Exception:
+            return 0
+
+    @staticmethod
+    def _is_ip(s: str) -> bool:
+        return bool(re.match(r'^\d{1,3}(?:\.\d{1,3}){3}$', s or ""))
+
+    # ── Legacy compatibility: execute_tasks (called by master_agent) ──────────
+
+    async def execute_tasks(
+        self,
+        target:      str,
+        tasks:       List[Dict],
+        phase_label: str,
+        intel:       Dict,
+    ) -> Dict:
+        """
+        Called by master_agent._phase_osint().
+        Extracts service/version search terms from task list then runs full OSINT suite.
+        """
+        search_terms: List[str] = []
+        for t in tasks:
+            args = t.get("args", "")
+            if isinstance(args, str) and args:
+                search_terms.append(args)
+
+        services = intel.get("services", {})
+        for svc in services.values():
+            if isinstance(svc, str) and svc:
+                search_terms.append(svc)
+
+        result = await self.run(
+            session_id   = self._session_id or "",
+            target       = target,
+            search_terms = search_terms,
+            services     = services,
+        )
+
+        return {
+            "cves":            [r["cve_id"] for r in result.get("cve_details", [])],
+            "exploit_modules": [
+                e.get("title") or e.get("path", "")
+                for e in result.get("exploit_modules", [])
+            ],
+            "raw_outputs": {"osint": str(result.get("synthesis", ""))[:2000]},
+        }
