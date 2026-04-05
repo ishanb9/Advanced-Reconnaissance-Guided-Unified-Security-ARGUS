@@ -271,6 +271,7 @@ class BaseSubagent(ABC):
         self._tool_deadline_sec: float = 600.0   # default 10 minutes
         self._current_tool_name: str = ""
         self._current_proc: Optional[Any] = None   # asyncio.subprocess.Process
+        self._kill_current_tool_flag: bool = False  # one-shot: kill this tool only
         # Register in global registry keyed by SUBAGENT_NAME
         _SUBAGENT_REGISTRY[self.SUBAGENT_NAME] = self
 
@@ -283,6 +284,19 @@ class BaseSubagent(ABC):
                 self._current_proc.kill()
             except Exception:
                 pass
+
+    def kill_current_tool(self) -> None:
+        """Kill only the currently running tool without stopping the subagent.
+
+        The one-shot flag is cleared at the start of the next collect_tool()
+        call so the subagent continues with remaining tasks normally.
+        """
+        if self._current_proc is not None:
+            try:
+                self._current_proc.kill()
+            except Exception:
+                pass
+        self._kill_current_tool_flag = True
 
     def extend_tool(self, extra_sec: float) -> None:
         """Extend the running tool's deadline by *extra_sec* seconds."""
@@ -302,7 +316,7 @@ class BaseSubagent(ABC):
         """
         try:
             # ── Phase 1: sleep until first deadline ───────────────────────
-            while not self._stop_requested:
+            while not self._stop_requested and not self._kill_current_tool_flag:
                 elapsed   = time.monotonic() - self._tool_run_start
                 remaining = self._tool_deadline_sec - elapsed
                 if remaining <= 0:
@@ -311,7 +325,7 @@ class BaseSubagent(ABC):
                 await asyncio.sleep(min(remaining, 10.0))
 
             # ── Phase 2: deadline exceeded — emit warning every 30 s ──────
-            while not self._stop_requested:
+            while not self._stop_requested and not self._kill_current_tool_flag:
                 elapsed   = time.monotonic() - self._tool_run_start
                 remaining = self._tool_deadline_sec - elapsed
 
@@ -492,7 +506,7 @@ class BaseSubagent(ABC):
 
             async def _drain(stream, prefix=""):
                 while True:
-                    if self._stop_requested:
+                    if self._stop_requested or self._kill_current_tool_flag:
                         break
                     line_b = await stream.readline()
                     if not line_b:
@@ -503,14 +517,14 @@ class BaseSubagent(ABC):
                         yield f"{prefix}{decoded}"
 
             async for ln in _drain(proc.stdout):
-                if self._stop_requested:
+                if self._stop_requested or self._kill_current_tool_flag:
                     break
                 yield ln
-            if not self._stop_requested:
+            if not self._stop_requested and not self._kill_current_tool_flag:
                 async for ln in _drain(proc.stderr, "[STDERR] "):
                     yield ln
 
-            if self._stop_requested:
+            if self._stop_requested or self._kill_current_tool_flag:
                 try:
                     proc.kill()
                 except Exception:
@@ -604,8 +618,8 @@ class BaseSubagent(ABC):
                     if line:
                         await self._emit_tool_line(tool_name, line)
                         yield line
-                    # Check stop flag after each line
-                    if self._stop_requested:
+                    # Check stop flags after each line
+                    if self._stop_requested or self._kill_current_tool_flag:
                         cancelled_line = f"[CANCELLED] Tool '{tool_name}' stopped by operator"
                         await self._emit_tool_line(tool_name, cancelled_line)
                         yield cancelled_line
@@ -693,6 +707,7 @@ class BaseSubagent(ABC):
             Full tool output as a single string.
         """
         # ── Watchdog setup ────────────────────────────────────────────────
+        self._kill_current_tool_flag = False   # clear one-shot kill from previous tool
         self._current_tool_name = tool_name
         self._tool_run_start    = time.monotonic()
         self._tool_deadline_sec = 600.0   # reset to 10 min for each tool call

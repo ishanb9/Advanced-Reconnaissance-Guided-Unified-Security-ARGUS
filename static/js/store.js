@@ -1073,6 +1073,15 @@ function routeWsEvent(msg, dispatch, shellListeners) {
       dispatch({ type: 'TOOL_LINE', payload: {
         agent: normalizeAgent(data.agent), line: data.line, lineType: data.type
       }});
+      // Also feed the ToolExecutions tab (which reads subagentLines)
+      if (data.agent && data.tool && data.line) {
+        dispatch({ type: 'SUBAGENT_TOOL_LINE', payload: {
+          subagent: normalizeAgent(data.agent),
+          tool: data.tool,
+          line: data.line,
+          ts,
+        }});
+      }
       break;
 
     case 'tool_done':
@@ -1085,6 +1094,16 @@ function routeWsEvent(msg, dispatch, shellListeners) {
         ts, agent: normalizeAgent(data.agent), eventType: 'tool_done',
         message: `✓ ${data.tool} (exit ${data.exit_code}, ${data.lines} lines)`, data
       }});
+      // Also populate the ToolExecutions tab (which reads subagentStates[].toolExits)
+      if (data.agent && data.tool) {
+        dispatch({ type: 'SUBAGENT_TOOL_EXIT', payload: {
+          subagent:  normalizeAgent(data.agent),
+          tool:      data.tool,
+          exit_code: data.exit_code ?? -1,
+          success:   (data.exit_code ?? -1) === 0,
+          ts,
+        }});
+      }
       break;
 
     case 'tool_findings':

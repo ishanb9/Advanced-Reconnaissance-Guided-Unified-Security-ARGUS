@@ -63,6 +63,12 @@ BUILTWITH_API_KEY = os.environ.get("BUILTWITH_API_KEY", "")
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "")
 GOOGLE_CX      = os.environ.get("GOOGLE_CX", "")
 
+# Censys — internet-wide scan database (ports, certs, services)
+# Free tier: 250 queries/month. Get at https://search.censys.io/account/api
+# Needs both API_ID and API_SECRET (used as HTTP Basic auth)
+CENSYS_API_ID     = os.environ.get("CENSYS_API_ID",     "")
+CENSYS_API_SECRET = os.environ.get("CENSYS_API_SECRET", "")
+
 # SpiderFoot — local OSINT automation framework
 # Install: git clone https://github.com/smicallef/spiderfoot && cd spiderfoot && pip3 install -r requirements.txt
 # Run:     python3 sf.py -l 127.0.0.1:5009
@@ -89,6 +95,7 @@ SOURCES_ENABLED: dict = {
     "hibp":             bool(HIBP_API_KEY),                 # Breach database (needs API key)
     "tineye":           bool(TINEYE_API_KEY),               # Reverse image search (needs API key)
     "builtwith":        bool(BUILTWITH_API_KEY),            # Tech fingerprinting (needs API key)
+    "censys":           bool(CENSYS_API_ID and CENSYS_API_SECRET), # Censys host/cert intel (needs API ID + secret)
     "spiderfoot":       False,                             # SpiderFoot local (set True if running)
 }
 
@@ -110,6 +117,7 @@ TIMEOUTS: dict = {
     "builtwith":        20,
     "tineye":           20,
     "google_dorks":     15,
+    "censys":           20,
 }
 
 # ─────────────────────────────────────────────────────────────────────────────

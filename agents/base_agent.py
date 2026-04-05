@@ -206,7 +206,11 @@ class BaseAgent(ABC):
         self._tool_run_start:    float = 0.0
         self._tool_deadline_sec: float = 600.0   # default 10 minutes per tool
         self._current_tool_name: str   = ""
-        self._current_proc: Optional[Any] = None  # asyncio subprocess handle
+        # Parallel-safe: track ALL active procs/tasks so kill_current_tool()
+        # can terminate every tool running concurrently in asyncio.gather().
+        self._active_procs: set       = set()   # asyncio subprocess handles
+        self._active_tool_tasks: set  = set()   # asyncio.Tasks for MCP streams
+        self._kill_current_tool_flag: bool = False  # one-shot: kill all running tools
 
         agent_bus.register(str(name), self._handle_bus_message)
         # Register in global registry so agent_server can reach us by name
@@ -284,11 +288,36 @@ class BaseAgent(ABC):
 
     def request_stop(self):
         self._stop_requested = True
-        if self._current_proc is not None:
+        # Kill ALL active subprocesses (parallel-safe)
+        for proc in list(self._active_procs):
             try:
-                self._current_proc.kill()
+                proc.kill()
             except Exception:
                 pass
+        # Cancel ALL active MCP streaming tasks
+        for task in list(self._active_tool_tasks):
+            if not task.done():
+                task.cancel()
+
+    def kill_current_tool(self) -> None:
+        """Kill ALL currently running tools without stopping the agent.
+
+        Parallel-safe: when execute_tasks() runs 7 tools via asyncio.gather,
+        this kills every active subprocess and cancels every MCP streaming
+        task so readline/aiter_lines unblock immediately and gather returns.
+        The one-shot flag is cleared at the start of the next run_tool() call.
+        """
+        self._kill_current_tool_flag = True
+        # Kill ALL local subprocesses (parallel tools each track their proc)
+        for proc in list(self._active_procs):
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        # Cancel ALL MCP streaming tasks
+        for task in list(self._active_tool_tasks):
+            if not task.done():
+                task.cancel()
 
     def extend_tool(self, extra_sec: float) -> None:
         """Extend the running tool's deadline by *extra_sec* seconds."""
@@ -302,7 +331,7 @@ class BaseAgent(ABC):
         """
         try:
             # Phase 1: sleep until first deadline
-            while not self._stop_requested:
+            while not self._stop_requested and not self._kill_current_tool_flag:
                 elapsed   = time.monotonic() - self._tool_run_start
                 remaining = self._tool_deadline_sec - elapsed
                 if remaining <= 0:
@@ -310,7 +339,7 @@ class BaseAgent(ABC):
                 await asyncio.sleep(min(remaining, 10.0))
 
             # Phase 2: deadline exceeded — emit warning every 30 s
-            while not self._stop_requested:
+            while not self._stop_requested and not self._kill_current_tool_flag:
                 elapsed   = time.monotonic() - self._tool_run_start
                 remaining = self._tool_deadline_sec - elapsed
 
@@ -510,6 +539,14 @@ class BaseAgent(ABC):
             timeout   = int(task.get("timeout") or 120)
             if not tool_name:
                 return (task, None)
+
+            # Runtime OS guard: skip Linux-only tools when target is confirmed Windows.
+            # Checked at execution time (not build time) so the initial nmap scan's
+            # OS detection has a chance to update context["os_guess"] first.
+            if task.get("linux_only") and "windows" in (context.get("os_guess", "")).lower():
+                skipped = {"stdout": f"[SKIPPED] {tool_name} is Linux-only — target is Windows",
+                           "stderr": "", "exit_code": 0, "output_id": None}
+                return (task, skipped)
 
             # Update status for each tool so UI shows what's running
             await self.set_status(AgentStatus.RUNNING, f"▶ {tool_name}", tool=tool_name)
@@ -786,6 +823,7 @@ Return JSON:
         exit_code = 0
 
         # ── Watchdog setup (10-min deadline, operator can extend via WS) ────
+        self._kill_current_tool_flag = False   # clear one-shot kill from previous tool
         self._current_tool_name = tool_name
         self._tool_run_start    = time.monotonic()
         self._tool_deadline_sec = 600.0   # reset fresh for each tool call
@@ -814,22 +852,28 @@ Return JSON:
                 stderr=asyncio.subprocess.PIPE,
                 limit=1024 * 1024,  # 1 MB read buffer
             )
-            self._current_proc = proc
-            async def _drain(stream, ltype):
-                while True:
-                    line_b = await stream.readline()
-                    if not line_b:
-                        break
-                    decoded = line_b.decode(errors="replace").rstrip()
-                    if decoded:
-                        await _emit_line(decoded, ltype)
-            await asyncio.gather(
-                _drain(proc.stdout, "stdout"),
-                _drain(proc.stderr, "stderr"),
-            )
-            await proc.wait()
-            self._current_proc = None
-            return proc.returncode or 0
+            self._active_procs.add(proc)
+            try:
+                async def _drain(stream, ltype):
+                    while True:
+                        line_b = await stream.readline()
+                        if not line_b:
+                            break
+                        decoded = line_b.decode(errors="replace").rstrip()
+                        if decoded:
+                            await _emit_line(decoded, ltype)
+                await asyncio.gather(
+                    _drain(proc.stdout, "stdout"),
+                    _drain(proc.stderr, "stderr"),
+                )
+                # Process was killed by kill_current_tool() → readline returned EOF
+                if self._kill_current_tool_flag:
+                    await _emit_line(f"[CANCELLED] Tool '{tool_name}' stopped by operator", "stderr")
+                    return -2
+                await proc.wait()
+                return proc.returncode or 0
+            finally:
+                self._active_procs.discard(proc)
 
         async def _run_via_mcp() -> int:
             """Run tool via MCP SSE endpoint and stream output. Returns exit_code."""
@@ -846,7 +890,7 @@ Return JSON:
                 ) as resp:
                     resp.raise_for_status()   # raises HTTPStatusError on 4xx/5xx
                     async for raw in resp.aiter_lines():
-                        if self._stop_requested:
+                        if self._stop_requested or self._kill_current_tool_flag:
                             break
                         if not raw:
                             continue
@@ -876,8 +920,21 @@ Return JSON:
                 # Generic shell commands always run locally — MCP has no bash tool
                 exit_code = await _run_local()
             else:
+                # Wrap MCP execution in a Task so kill_current_tool() can cancel it
+                # immediately even while aiter_lines() is blocked mid-read.
+                mcp_task = asyncio.create_task(_run_via_mcp())
+                self._active_tool_tasks.add(mcp_task)
                 try:
-                    exit_code = await _run_via_mcp()
+                    exit_code = await mcp_task
+                except asyncio.CancelledError:
+                    if self._kill_current_tool_flag:
+                        # Tool kill — record cancellation, let scan continue
+                        await _emit_line(
+                            f"[CANCELLED] Tool '{tool_name}' stopped by operator", "stderr"
+                        )
+                        exit_code = -2
+                    else:
+                        raise   # Full scan cancellation — propagate upward
                 except httpx.HTTPStatusError as exc:
                     # MCP returned 4xx (tool not registered, bad args, etc.)
                     # Fall back to local subprocess so the pentest continues
@@ -891,6 +948,8 @@ Return JSON:
                         f"[MCP OFFLINE] Cannot reach MCP at {MCP_URL} — running '{tool_name}' locally"
                     )
                     exit_code = await _run_local()
+                finally:
+                    self._active_tool_tasks.discard(mcp_task)
 
         except asyncio.TimeoutError:
             stderr_lines.append(f"[TIMEOUT] {tool_name} timed out after {timeout}s")
@@ -972,10 +1031,19 @@ Return JSON:
         ]
 
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(timeout)) as client:
-                resp = await client.post(
-                    f"{OLLAMA_URL}/api/chat",
-                    json={"model": MODEL_NAME, "messages": messages, "stream": False}
+            async with httpx.AsyncClient(
+                # per-chunk read timeout keeps individual sockets from stalling
+                timeout=httpx.Timeout(connect=10, read=timeout, write=10, pool=5)
+            ) as client:
+                # Hard wall-clock timeout via asyncio — guarantees the ENTIRE call
+                # (including cloud LLM think time) completes within `timeout` seconds.
+                # httpx.Timeout alone is per-TCP-chunk and can be defeated by keepalives.
+                resp = await asyncio.wait_for(
+                    client.post(
+                        f"{OLLAMA_URL}/api/chat",
+                        json={"model": MODEL_NAME, "messages": messages, "stream": False}
+                    ),
+                    timeout=float(timeout),
                 )
                 resp.raise_for_status()
                 content = resp.json()["message"]["content"]
@@ -994,7 +1062,7 @@ Return JSON:
                     "ts":       datetime.utcnow().isoformat()
                 })
                 return content
-        except httpx.TimeoutException:
+        except (httpx.TimeoutException, asyncio.TimeoutError):
             self._llm_available = False
             raise RuntimeError(f"LLM timed out after {timeout}s. Pentest halted.")
         except httpx.ConnectError:

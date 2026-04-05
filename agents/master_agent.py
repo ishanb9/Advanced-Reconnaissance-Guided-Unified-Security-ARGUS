@@ -1149,6 +1149,28 @@ class MasterAgent(BaseAgent):
                 ]
             self._create_task(_safe(asyncio.gather(*coros, return_exceptions=True)))
 
+    async def _guidance_drain_loop(self):
+        """
+        Background task: drain the guidance queue every 2 seconds independently
+        of what the main scan coroutine is doing.
+
+        This is the fix for guidance hanging the scan. Without this task, guidance
+        only gets processed at explicit _apply_pending_guidance() checkpoints. If the
+        main coroutine is blocked inside a long think() call or a slow DB write,
+        those checkpoints never run and guidance sits in the queue indefinitely.
+
+        By running this as a separate asyncio task, guidance is always processed
+        within ~2 seconds of arrival regardless of LLM/DB latency.
+        """
+        while not self._stop_requested:
+            try:
+                # Drain ALL queued guidance items (not just one)
+                while not self._guidance_queue.empty():
+                    await self._apply_pending_guidance()
+            except Exception:
+                pass   # never crash the drain loop
+            await asyncio.sleep(2.0)
+
     async def _execute_phases(
         self,
         session_id:   str,
@@ -1179,6 +1201,10 @@ class MasterAgent(BaseAgent):
         def already_done(p: str) -> bool:
             """True if this phase was completed before this resume."""
             return p in self._phases_completed
+
+        # ── Background guidance drain task ────────────────────
+        # Processes guidance within 2 s regardless of LLM/DB latency in main flow.
+        _drain_task = asyncio.create_task(self._guidance_drain_loop())
 
         # ── Pull long-term memories relevant to this target ───
         await self._transition_state("RECON")
@@ -1457,6 +1483,13 @@ class MasterAgent(BaseAgent):
         })
         await self._transition_state("COMPLETE")
 
+        # Cancel the background guidance drain task — scan is complete
+        _drain_task.cancel()
+        try:
+            await _drain_task
+        except asyncio.CancelledError:
+            pass
+
     # ─── Agent Sync Gate ──────────────────────────────────────
 
     async def _wait_for_agents_idle(self, timeout: float = 300.0):
@@ -1632,12 +1665,28 @@ class MasterAgent(BaseAgent):
                  "purpose":f"HTTP headers from {base}"},
             ]
         if smb_ports or 445 in ports or 139 in ports:
+            _os_guess = self._intel.get("os_guess", "").lower()
+            _is_windows = "windows" in _os_guess
+            if not _is_windows:
+                # enum4linux queries Linux/Samba hosts — skip for confirmed Windows targets.
+                # "linux_only" flag lets execute_tasks re-check os_guess at runtime
+                # so a late nmap OS detection can still suppress it.
+                enum_tasks.append(
+                    {"tool":"enum4linux","args":f"-a {target}","timeout":120,"can_parallel":True,
+                     "purpose":"SMB/NetBIOS full enumeration (Linux/Samba)","linux_only":True},
+                )
             enum_tasks += [
-                {"tool":"enum4linux","args":f"-a {target}","timeout":120,"can_parallel":True,
-                 "purpose":"SMB/NetBIOS full enumeration"},
                 {"tool":"smbclient","args":f"-L //{target}/ -N","timeout":30,"can_parallel":True,
                  "purpose":"List SMB shares anonymously"},
+                {"tool":"nmap","args":f"-p 445,139 --script smb-security-mode,smb2-security-mode,smb-os-discovery,smb-enum-shares {target}","timeout":60,"can_parallel":True,
+                 "purpose":"SMB security mode and share discovery (Windows-compatible)"},
             ]
+            if _is_windows:
+                # Windows-specific SMB enumeration
+                enum_tasks.append(
+                    {"tool":"crackmapexec","args":f"smb {target} --shares","timeout":60,"can_parallel":True,
+                     "purpose":"Windows SMB share and user enumeration"},
+                )
         if ftp_ports or 21 in ports:
             enum_tasks.append({"tool":"nmap","timeout":60,"can_parallel":True,
                 "args":f"-sV -p 21 --script ftp-anon,ftp-syst {target}",
@@ -3222,7 +3271,10 @@ Priority services: {plan.get('priority_services', [])}
 Tools already used this session (DO NOT repeat these): {already_run}
 {intel_ctx}
 {kb}
-Pick DIFFERENT tools from: nmap, masscan, rustscan, fping, whatweb, wafw00f, dnsrecon, fierce, amass, enum4linux, smbmap, onesixtyone, snmpwalk
+Pick DIFFERENT tools from: nmap, masscan, rustscan, fping, whatweb, wafw00f, dnsrecon, fierce, amass, smbmap, onesixtyone, snmpwalk
+OS-AWARE RULES (current os_guess: {self._intel.get('os_guess','unknown')}):
+- If target is Windows: use crackmapexec, nmap smb scripts, smbmap — DO NOT use enum4linux (Linux/Samba only)
+- If target is Linux/unknown: enum4linux is allowed for SMB ports
 
 Return JSON with SPECIFIC nmap flags, tool commands, and reasoning.
 Use at most 4 steps — prefer speed over exhaustiveness:
@@ -4271,6 +4323,10 @@ Return JSON with enumeration goals: {{
         Check if user has injected guidance and apply it before the next tool runs.
         Non-blocking — returns immediately if nothing queued.
         Handles: skip_phase, force_tool, note (context injection into next LLM call).
+
+        Design note: state mutations (phases_to_run, forced_instructions, intel) happen
+        IMMEDIATELY and synchronously. The emit_reasoning / DB-write calls are fired as
+        background tasks so they never block guidance processing.
         """
         try:
             guidance = self._guidance_queue.get_nowait()
@@ -4283,7 +4339,15 @@ Return JSON with enumeration goals: {{
         force_args = guidance.get("force_args", "")
         note       = guidance.get("note", "")
 
-        await self.emit_reasoning(
+        # Fire WS notification immediately (fast — no DB write)
+        await self._emit("guidance_applied", {
+            "directive": directive,
+            "message":   f"Guidance applied: {note or directive or force_tool or skip_phase}"
+        })
+
+        # Emit reasoning as a fire-and-forget task so a slow DB write
+        # never blocks the guidance state changes below
+        asyncio.create_task(self.emit_reasoning(
             step       = "user_guidance_applied",
             reasoning  = f"User guidance received: {note or directive or 'no message'}",
             decision   = (
@@ -4293,11 +4357,7 @@ Return JSON with enumeration goals: {{
             ),
             next_action= force_tool or ("Continue — note will inform next LLM call" if note else "Continue"),
             data       = guidance
-        )
-        await self._emit("guidance_applied", {
-            "directive": directive,
-            "message":   f"Guidance applied: {note or directive or force_tool or skip_phase}"
-        })
+        ))
 
         # 1. Skip an entire phase
         if skip_phase:
@@ -4341,13 +4401,14 @@ Return JSON with enumeration goals: {{
             dns_map = self._intel.get("dns_overrides", {})
             dns_map[dns_host] = dns_ip
             self._intel["dns_overrides"] = dns_map
-            await self.emit_reasoning(
+            # Fire-and-forget — DB write must not block the guidance state change
+            asyncio.create_task(self.emit_reasoning(
                 step       = "dns_override_applied",
                 reasoning  = f"Operator added DNS mapping: {dns_host} → {dns_ip}",
                 decision   = "Stored in intel — subagents will use this hostname in tool args",
                 next_action= "Inject hostname into next web/recon tool calls",
                 data       = {"dns_host": dns_host, "dns_ip": dns_ip}
-            )
+            ))
 
     def inject_guidance(self, guidance: Dict):
         """

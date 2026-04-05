@@ -22,6 +22,7 @@ const SOURCE_META = {
   builtwith:        { bg: 'rgba(255,160,0,0.10)',   border: '#ffa000',          text: '#ffa000',          icon: '🏗', label: 'BuiltWith' },
   tineye:           { bg: 'rgba(100,220,100,0.10)', border: '#64dc64',          text: '#64dc64',          icon: '👁', label: 'TinEye' },
   spiderfoot:       { bg: 'rgba(255,100,180,0.10)', border: '#ff64b4',          text: '#ff64b4',          icon: '🕷', label: 'SpiderFoot' },
+  censys:           { bg: 'rgba(0,220,180,0.10)',  border: '#00dcb4',          text: '#00dcb4',          icon: '🔬', label: 'Censys' },
   web:              { bg: 'rgba(0,212,255,0.08)',   border: 'var(--cyan)',      text: 'var(--cyan)',      icon: '🌍', label: 'Web' },
   default:          { bg: 'rgba(255,255,255,0.04)', border: 'var(--border-light)', text: 'var(--text-secondary)', icon: '📄', label: null },
 };
@@ -56,6 +57,8 @@ const DATA_TYPE_LABELS = {
   asn_prefixes:          { icon: '📊', color: '#50a0ff',         label: 'Prefixes' },
   ip_neighbors:          { icon: '🏘', color: '#50a0ff',         label: 'Neighbours' },
   spiderfoot:            { icon: '🕷', color: '#ff64b4',         label: 'SpiderFoot' },
+  censys_host:           { icon: '🔬', color: '#00dcb4',         label: 'Censys Host' },
+  censys_hosts:          { icon: '🔬', color: '#00dcb4',         label: 'Censys Hosts' },
 };
 
 // ── Severity colour ────────────────────────────────────────────────────────

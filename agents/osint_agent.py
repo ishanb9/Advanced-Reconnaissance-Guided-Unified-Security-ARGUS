@@ -20,6 +20,7 @@ Sources (API key required — configure in agents/osint/osint_config.py):
   builtwith       — Website technology profiler
   tineye          — Reverse image search
   spiderfoot      — Local SpiderFoot instance (200+ modules)
+  censys          — Internet-wide scan: hosts, ports, certs, SANs
 
 Adding new sources
 ------------------
@@ -54,6 +55,7 @@ from agents.osint.google_dorks_subagent    import GoogleDorksSubagent
 from agents.osint.builtwith_subagent       import BuiltWithSubagent
 from agents.osint.tineye_subagent          import TinEyeSubagent
 from agents.osint.spiderfoot_subagent      import SpiderFootSubagent
+from agents.osint.censys_subagent          import CensysSubagent
 
 
 class OsintAgent(BaseAgent):
@@ -206,6 +208,9 @@ class OsintAgent(BaseAgent):
         if SOURCES_ENABLED.get("spiderfoot"):
             named_coros.append(("spiderfoot",
                 SpiderFootSubagent(session_id, target, self.broadcast).run()))
+        if SOURCES_ENABLED.get("censys"):
+            named_coros.append(("censys",
+                CensysSubagent(session_id, target, self.broadcast).run()))
 
         if not named_coros:
             return []

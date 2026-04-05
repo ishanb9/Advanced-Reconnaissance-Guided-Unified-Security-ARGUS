@@ -1569,18 +1569,21 @@ async def websocket_endpoint(ws: WebSocket, session_id: str):
                     }))
 
                 elif mtype == "tool_stop":
-                    # Stop a specific running subagent/tool.
-                    # Check both registries: BaseSubagent and BaseAgent.
+                    # Kill only the current tool — the agent continues with remaining tasks.
+                    # Do NOT call request_stop() which permanently halts the entire agent.
                     from agents.base_subagent import get_subagent
                     from agents.base_agent import get_agent
                     subagent_name = msg.get("subagent", "")
                     sa = get_subagent(subagent_name) or get_agent(subagent_name)
                     if sa:
-                        sa.request_stop()
+                        if hasattr(sa, "kill_current_tool"):
+                            sa.kill_current_tool()
+                        else:
+                            sa.request_stop()   # fallback for older agents
                     await ws.send_text(json.dumps({
                         "type": "tool_stopped",
                         "data": {"subagent": subagent_name,
-                                 "message": f"Tool stop requested for {subagent_name}"}
+                                 "message": f"Tool '{subagent_name}' cancelled — scan continues"}
                     }))
 
             except asyncio.TimeoutError:
