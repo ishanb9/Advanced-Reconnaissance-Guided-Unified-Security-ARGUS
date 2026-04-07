@@ -1,4 +1,4 @@
-# KALI PENTEST PLATFORM v2 — Python Requirements
+# ARGUS PENTEST PLATFORM — Python Requirements
 # Install: pip install -r requirements.txt --break-system-packages
 
 # Web framework
@@ -28,3 +28,7 @@ starlette==0.37.2
 
 # Utilities
 python-dotenv==1.0.1
+
+# Graph database (Neo4j — optional, Phase 2 semantic graph)
+# Install Neo4j Community Edition separately; driver auto-detects availability
+neo4j==5.20.0

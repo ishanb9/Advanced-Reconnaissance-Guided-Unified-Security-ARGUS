@@ -253,18 +253,132 @@ function ChainCard({ chain, isRecommended, isExpanded, onToggle }) {
 }
 
 // ── Main Component ────────────────────────────────────────────────────────────
+// ── Relationship type color map (Neo4j) ──────────────────────────────────────
+const REL_COLOR = {
+  EXPOSES:         'var(--cyan)',
+  RUNS:            'var(--low)',
+  VULNERABLE_TO:   'var(--critical)',
+  LEADS_TO:        '#ff6400',
+  REFERENCES:      'var(--text-muted)',
+  EXPLOITABLE_WITH:'var(--amber)',
+  HAS_CREDENTIAL:  '#ff6400',
+  COMPROMISED_VIA: 'var(--critical)',
+  ESCALATES_TO:    'var(--violet)',
+  PIVOTS_TO:       'var(--medium)',
+  AFFECTS:         'var(--medium)',
+  RELATED_TO:      'var(--border-bright)',
+};
+
+// ── Neo4j Settings Form ───────────────────────────────────────────────────────
+function Neo4jSetup({ onConnected }) {
+  const [uri,      setUri]      = useState('bolt://localhost:7687');
+  const [user,     setUser]     = useState('neo4j');
+  const [pass,     setPass]     = useState('');
+  const [saving,   setSaving]   = useState(false);
+  const [msg,      setMsg]      = useState('');
+  const [ok,       setOk]       = useState(false);
+
+  // Pre-fill with current settings on mount
+  React.useEffect(() => {
+    window.API.get('/settings/neo4j').then(d => {
+      if (d.uri)  setUri(d.uri);
+      if (d.user) setUser(d.user);
+    }).catch(() => {});
+  }, []);
+
+  const save = async () => {
+    setSaving(true); setMsg(''); setOk(false);
+    try {
+      const r = await window.API.post('/settings/neo4j', { uri, user, password: pass });
+      setOk(r.connected);
+      setMsg(r.message);
+      if (r.connected && onConnected) onConnected();
+    } catch (e) {
+      setMsg('Request failed: ' + e.message);
+    }
+    setSaving(false);
+  };
+
+  const inp = (val, set, placeholder, type='text') =>
+    React.createElement('input', {
+      type, value: val, placeholder,
+      onChange: e => set(e.target.value),
+      style: {
+        width: '100%', padding: '7px 10px', borderRadius: 6,
+        border: '1px solid var(--border-light)', background: 'var(--bg-elevated)',
+        color: 'var(--text-primary)', fontSize: 12, fontFamily: 'var(--font-mono)',
+        outline: 'none', boxSizing: 'border-box',
+      }
+    });
+
+  return React.createElement('div', {
+    style: {
+      maxWidth: 440, margin: '0 auto', padding: '24px 28px', borderRadius: 10,
+      background: 'var(--bg-surface)', border: '1px solid var(--border)',
+      display: 'flex', flexDirection: 'column', gap: 14,
+    }
+  },
+    React.createElement('div', { style: { display:'flex', alignItems:'center', gap:10, marginBottom:4 } },
+      React.createElement('div', { style:{fontSize:28} }, '🔗'),
+      React.createElement('div', null,
+        React.createElement('div', { style:{fontWeight:700, color:'var(--text-secondary)', fontSize:14} }, 'Connect Neo4j'),
+        React.createElement('div', { style:{fontSize:11, color:'var(--text-muted)', lineHeight:1.5} },
+          'Neo4j stores semantic relationships between discovered hosts, services, and vulnerabilities.'
+        )
+      )
+    ),
+    React.createElement('div', { style:{display:'flex', flexDirection:'column', gap:8} },
+      React.createElement('label', { style:{fontSize:10, color:'var(--text-muted)', fontWeight:600, letterSpacing:0.5} }, 'BOLT URI'),
+      inp(uri, setUri, 'bolt://localhost:7687'),
+    ),
+    React.createElement('div', { style:{display:'flex', gap:10} },
+      React.createElement('div', { style:{flex:1, display:'flex', flexDirection:'column', gap:8} },
+        React.createElement('label', { style:{fontSize:10, color:'var(--text-muted)', fontWeight:600, letterSpacing:0.5} }, 'USERNAME'),
+        inp(user, setUser, 'neo4j'),
+      ),
+      React.createElement('div', { style:{flex:1, display:'flex', flexDirection:'column', gap:8} },
+        React.createElement('label', { style:{fontSize:10, color:'var(--text-muted)', fontWeight:600, letterSpacing:0.5} }, 'PASSWORD'),
+        inp(pass, setPass, '••••••••', 'password'),
+      ),
+    ),
+    React.createElement('button', {
+      onClick: save, disabled: saving,
+      style: {
+        padding: '9px 0', borderRadius: 7, border: 'none', cursor: saving ? 'not-allowed' : 'pointer',
+        background: saving ? 'var(--border)' : 'var(--cyan)', color: '#000',
+        fontWeight: 700, fontSize: 12, letterSpacing: 0.5,
+      }
+    }, saving ? 'Connecting…' : 'Save & Connect'),
+    msg && React.createElement('div', {
+      style: {
+        padding: '8px 12px', borderRadius: 6, fontSize: 11,
+        background: ok ? 'rgba(0,212,120,0.08)' : 'rgba(255,80,80,0.08)',
+        border: `1px solid ${ok ? 'rgba(0,212,120,0.3)' : 'rgba(255,80,80,0.3)'}`,
+        color: ok ? 'var(--low)' : 'var(--critical)',
+      }
+    }, (ok ? '✓ ' : '✗ ') + msg),
+    React.createElement('div', { style:{fontSize:10, color:'var(--text-muted)', lineHeight:1.7} },
+      'Default Neo4j Community password is set during first-run setup. ',
+      'Settings are saved to .env in the server directory.'
+    )
+  );
+}
+
 function AttackGraph() {
-  const { state } = window.useStore();
+  const { state, loadNeo4jGraph, loadNeo4jPaths } = window.useStore();
   const svgRef      = useRef(null);
+  const neo4jSvgRef = useRef(null);
   const simRef      = useRef(null);
+  const neo4jSimRef = useRef(null);
   const [nodes,    setNodes]    = useState([]);
   const [edges,    setEdges]    = useState([]);
   const [loading,  setLoading]  = useState(false);
   const [selected, setSelected] = useState(null);
   const [filter,   setFilter]   = useState('all');
-  const [view,     setView]     = useState('chains'); // 'chains' | 'graph' | 'mitre'
+  const [view,     setView]     = useState('chains'); // 'chains' | 'graph' | 'rel' | 'paths' | 'mitre'
   const [minimap,  setMinimap]  = useState(true);
   const [expandedChain, setExpandedChain] = useState(null);
+  const [relFilter, setRelFilter] = useState('all');
 
   const mitreMap     = state.mitreMap || [];
   const chainAnalysis = state.chainAnalysis;
@@ -313,6 +427,12 @@ function AttackGraph() {
     drawGraph(filtered, filtEdges, svgRef.current, setSelected, simRef);
   }, [nodes, edges, filter, view]);
 
+  // Redraw Neo4j relationship graph when data or rel-type filter changes
+  useEffect(() => {
+    if (view !== 'rel' || !neo4jSvgRef.current) return;
+    drawNeo4jGraph(visibleNeo4jNodes, visibleNeo4jEdges, neo4jSvgRef.current, neo4jSimRef);
+  }, [visibleNeo4jNodes, visibleNeo4jEdges, view]);
+
   // Auto-expand recommended chain
   useEffect(() => {
     if (chainAnalysis?.recommended_chain && !expandedChain) {
@@ -324,6 +444,24 @@ function AttackGraph() {
   const recommended  = chainAnalysis?.recommended_chain || '';
   const immediates   = chainAnalysis?.immediate_actions || [];
   const assessment   = chainAnalysis?.target_assessment || '';
+
+  // ── Neo4j semantic graph ────────────────────────────────────────────────
+  const neo4jGraph     = state.neo4jGraph     || { nodes: [], edges: [] };
+  const neo4jPaths     = state.neo4jPaths     || [];
+  const neo4jAvailable = state.neo4jAvailable;
+
+  // Filtered Neo4j edges by relationship type
+  const visibleNeo4jEdges = relFilter === 'all'
+    ? neo4jGraph.edges
+    : neo4jGraph.edges.filter(e => (e.rel_type || '') === relFilter);
+  const visibleNeo4jNodeIds = new Set([
+    ...visibleNeo4jEdges.map(e => e.source),
+    ...visibleNeo4jEdges.map(e => e.target),
+  ]);
+  const visibleNeo4jNodes = relFilter === 'all'
+    ? neo4jGraph.nodes
+    : neo4jGraph.nodes.filter(n => visibleNeo4jNodeIds.has(n.node_id));
+  const neo4jRelTypes = [...new Set(neo4jGraph.edges.map(e => e.rel_type).filter(Boolean))].sort();
 
   const typeCounts = nodes.reduce((acc, n) => {
     const t = n.node_type || n.type || 'unknown';
@@ -349,12 +487,24 @@ function AttackGraph() {
         )
       ),
       React.createElement('div', { style: { display:'flex', gap:6, flexWrap:'wrap', alignItems:'center' } },
-        React.createElement(TabBtn, { label:'⛓ Chains', active: view==='chains', onClick:()=>setView('chains'), badge: chains.length||undefined }),
-        React.createElement(TabBtn, { label:'🗺 Graph',  active: view==='graph',  onClick:()=>{ setView('graph'); setTimeout(loadGraph,50); } }),
-        React.createElement(TabBtn, { label:'🛡 MITRE',  active: view==='mitre',  onClick:()=>setView('mitre'), badge: mitreMap.length||undefined }),
+        React.createElement(TabBtn, { label:'⛓ Chains',   active: view==='chains', onClick:()=>setView('chains'), badge: chains.length||undefined }),
+        React.createElement(TabBtn, { label:'🗺 Graph',    active: view==='graph',  onClick:()=>{ setView('graph'); setTimeout(loadGraph,50); } }),
+        React.createElement(TabBtn, {
+          label:'🔗 Relationships',
+          active: view==='rel',
+          onClick:()=>{ setView('rel'); if (state.sessionId) { loadNeo4jGraph(state.sessionId); } },
+          badge: neo4jGraph.edges.length || undefined,
+        }),
+        React.createElement(TabBtn, {
+          label:'🛤 Attack Paths',
+          active: view==='paths',
+          onClick:()=>{ setView('paths'); if (state.sessionId) { loadNeo4jPaths(state.sessionId); } },
+          badge: neo4jPaths.length || undefined,
+        }),
+        React.createElement(TabBtn, { label:'🛡 MITRE',    active: view==='mitre',  onClick:()=>setView('mitre'), badge: mitreMap.length||undefined }),
         React.createElement('div', { style:{ width:1, height:18, background:'var(--border-light)' } }),
         React.createElement('button', {
-          onClick: ()=>{ loadGraph(); loadChainAnalyses(); },
+          onClick: ()=>{ loadGraph(); loadChainAnalyses(); if(state.sessionId){loadNeo4jGraph(state.sessionId);loadNeo4jPaths(state.sessionId);} },
           style:{ padding:'5px 11px', borderRadius:6, border:'1px solid var(--border-light)',
                   background:'rgba(255,255,255,0.04)', color:'var(--text-secondary)', cursor:'pointer', fontSize:11 }
         }, '↻ Refresh'),
@@ -626,6 +776,135 @@ function AttackGraph() {
               })
             )
           )
+    ),
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // VIEW: RELATIONSHIP GRAPH (Neo4j)
+    // ══════════════════════════════════════════════════════════════════════════
+    view === 'rel' && state.sessionId && React.createElement('div', {
+      style: { display:'flex', flexDirection:'column', gap:10, flex:1 }
+    },
+      neo4jAvailable === false
+        ? React.createElement(Neo4jSetup, {
+            onConnected: () => {
+              if (state.sessionId) {
+                loadNeo4jGraph(state.sessionId);
+                loadNeo4jPaths(state.sessionId);
+              }
+            }
+          })
+        : React.createElement(React.Fragment, null,
+            // Rel-type filter bar
+            neo4jRelTypes.length > 0 && React.createElement('div', {
+              style:{ display:'flex', gap:5, flexWrap:'wrap', alignItems:'center' }
+            },
+              React.createElement('span', { style:{fontSize:10, color:'var(--text-muted)', marginRight:2} }, 'Filter:'),
+              ['all', ...neo4jRelTypes].map(rt =>
+                React.createElement('button', {
+                  key: rt,
+                  onClick: () => setRelFilter(rt),
+                  style:{
+                    padding:'3px 9px', borderRadius:12, fontSize:9, cursor:'pointer',
+                    fontFamily:'var(--font-mono)', fontWeight:600,
+                    border: relFilter===rt ? `1px solid ${REL_COLOR[rt]||'var(--cyan)'}` : '1px solid var(--border-light)',
+                    background: relFilter===rt ? `${REL_COLOR[rt]||'var(--cyan)'}22` : 'rgba(255,255,255,0.03)',
+                    color: relFilter===rt ? (REL_COLOR[rt]||'var(--cyan)') : 'var(--text-muted)',
+                  }
+                }, rt)
+              )
+            ),
+            // Stats strip
+            React.createElement('div', { style:{fontSize:10, color:'var(--text-muted)'} },
+              `${visibleNeo4jNodes.length} nodes · ${visibleNeo4jEdges.length} relationships`
+              + (relFilter !== 'all' ? ` (filtered: ${relFilter})` : '')
+            ),
+            // SVG canvas
+            neo4jGraph.nodes.length === 0
+              ? React.createElement('div', {
+                  style:{ padding:'40px 24px', borderRadius:10, background:'var(--bg-surface)',
+                          border:'1px dashed var(--border)', textAlign:'center', color:'var(--text-muted)', fontSize:11 }
+                }, 'No semantic relationships captured yet. Relationships are inferred automatically as tools run.')
+              : React.createElement('svg', {
+                  ref: neo4jSvgRef,
+                  style:{ width:'100%', height:520, borderRadius:10, border:'1px solid var(--border)',
+                          background:'var(--bg-surface)' }
+                }),
+            // Legend
+            React.createElement('div', { style:{ display:'flex', gap:8, flexWrap:'wrap', marginTop:2 } },
+              Object.entries(REL_COLOR).slice(0,8).map(([rt, col]) =>
+                React.createElement('div', { key:rt, style:{ display:'flex', alignItems:'center', gap:4, fontSize:9, color:'var(--text-muted)' } },
+                  React.createElement('div', { style:{ width:20, height:2, background:col, borderRadius:1 } }),
+                  rt.replace(/_/g,' ')
+                )
+              )
+            )
+          )
+    ),
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // VIEW: ATTACK PATHS (Neo4j shortest paths)
+    // ══════════════════════════════════════════════════════════════════════════
+    view === 'paths' && state.sessionId && React.createElement('div', {
+      style: { display:'flex', flexDirection:'column', gap:10 }
+    },
+      neo4jAvailable === false
+        ? React.createElement(Neo4jSetup, {
+            onConnected: () => {
+              if (state.sessionId) {
+                loadNeo4jGraph(state.sessionId);
+                loadNeo4jPaths(state.sessionId);
+              }
+            }
+          })
+        : neo4jPaths.length === 0
+          ? React.createElement('div', {
+              style:{ padding:'40px 24px', borderRadius:10, background:'var(--bg-surface)',
+                      border:'1px dashed var(--border)', textAlign:'center', color:'var(--text-muted)', fontSize:11 }
+            }, 'No attack paths found yet. Paths appear once Neo4j has enough host → access relationships.')
+          : React.createElement(React.Fragment, null,
+              React.createElement('div', { style:{ fontSize:11, color:'var(--text-muted)', marginBottom:4 } },
+                `${neo4jPaths.length} shortest path${neo4jPaths.length!==1?'s':''} from Host → Access`
+              ),
+              neo4jPaths.map((path, pi) =>
+                React.createElement('div', {
+                  key: pi,
+                  style:{
+                    padding:'12px 14px', borderRadius:8, marginBottom:6,
+                    background:'var(--bg-surface)', border:'1px solid var(--border)',
+                  }
+                },
+                  React.createElement('div', { style:{ fontSize:10, color:'var(--text-muted)', marginBottom:6 } },
+                    `Path ${pi+1} — length ${path.length}`
+                  ),
+                  // Path as a chain of nodes + rels
+                  React.createElement('div', {
+                    style:{ display:'flex', alignItems:'center', flexWrap:'wrap', gap:4 }
+                  },
+                    (path.nodes || []).map((pn, ni) =>
+                      React.createElement(React.Fragment, { key: ni },
+                        React.createElement('div', {
+                          style:{
+                            padding:'4px 10px', borderRadius:16, fontSize:10, fontFamily:'var(--font-mono)',
+                            background: NODE_COLOR[((pn.node_type||'finding').toLowerCase())] || 'rgba(255,255,255,0.06)',
+                            border:'1px solid rgba(255,255,255,0.12)',
+                            color:'var(--text-primary)',
+                          }
+                        }, pn.label || pn.node_id),
+                        ni < (path.nodes||[]).length-1 && React.createElement('div', {
+                          style:{
+                            fontSize:9, padding:'2px 6px', borderRadius:10,
+                            background: `${REL_COLOR[(path.rels||[])[ni]] || 'rgba(255,255,255,0.08)'}22`,
+                            color: REL_COLOR[(path.rels||[])[ni]] || 'var(--text-muted)',
+                            border: `1px solid ${REL_COLOR[(path.rels||[])[ni]] || 'var(--border-light)'}`,
+                            fontFamily:'var(--font-mono)', whiteSpace:'nowrap',
+                          }
+                        }, `→ ${((path.rels||[])[ni]||'').replace(/_/g,' ')} →`)
+                      )
+                    )
+                  )
+                )
+              )
+            )
     )
   );
 }
@@ -727,6 +1006,101 @@ function drawGraph(nodes, edges, svgEl, onSelect, simRef) {
     eLabel.attr('x',d=>((d.source.x||0)+(d.target.x||0))/2)
           .attr('y',d=>((d.source.y||0)+(d.target.y||0))/2);
     node.attr('transform',d=>`translate(${d.x},${d.y})`);
+  });
+}
+
+// ── Neo4j Relationship Graph renderer ────────────────────────────────────────
+function drawNeo4jGraph(nodes, edges, svgEl, simRef) {
+  if (!window.d3 || !svgEl || !nodes.length) return;
+  const d3 = window.d3;
+  d3.select(svgEl).selectAll('*').remove();
+
+  const W = svgEl.clientWidth  || 900;
+  const H = svgEl.clientHeight || 520;
+
+  const svg = d3.select(svgEl).attr('width', W).attr('height', H);
+
+  // Arrow markers — one per rel type colour
+  const usedColors = [...new Set(edges.map(e => REL_COLOR[e.rel_type] || '#4a5568'))];
+  const defs = svg.append('defs');
+  usedColors.forEach((col, i) => {
+    defs.append('marker').attr('id', `neo-arr-${i}`)
+      .attr('viewBox','0 -5 10 10').attr('refX',22).attr('refY',0)
+      .attr('markerWidth',5).attr('markerHeight',5).attr('orient','auto')
+      .append('path').attr('d','M0,-5L10,0L0,5').attr('fill', col);
+  });
+  const colorIndex = col => usedColors.indexOf(col);
+
+  const g = svg.append('g');
+  svg.call(d3.zoom().scaleExtent([0.1,4]).on('zoom', ev => g.attr('transform', ev.transform)));
+
+  const ns = nodes.map(n => ({...n}));
+  const edgeData = edges.map(e => ({...e}));
+
+  const sim = d3.forceSimulation(ns)
+    .force('link', d3.forceLink(edgeData).id(d => d.node_id).distance(120).strength(0.4))
+    .force('charge', d3.forceManyBody().strength(-200))
+    .force('center', d3.forceCenter(W/2, H/2))
+    .force('collision', d3.forceCollide(20));
+
+  if (simRef) simRef.current = sim;
+
+  // Edges
+  const link = g.append('g').selectAll('line')
+    .data(edgeData).join('line')
+    .attr('stroke', d => REL_COLOR[d.rel_type] || '#4a5568')
+    .attr('stroke-width', 1.5)
+    .attr('stroke-opacity', 0.7)
+    .attr('marker-end', d => {
+      const col = REL_COLOR[d.rel_type] || '#4a5568';
+      return `url(#neo-arr-${colorIndex(col)})`;
+    });
+
+  // Edge labels
+  const edgeLabel = g.append('g').selectAll('text')
+    .data(edgeData).join('text')
+    .attr('font-size', 7).attr('font-family', 'monospace')
+    .attr('fill', d => REL_COLOR[d.rel_type] || '#4a5568')
+    .attr('text-anchor', 'middle').attr('opacity', 0.8)
+    .text(d => (d.rel_type || '').replace(/_/g,' '));
+
+  // Nodes
+  const nodeType = n => (n.node_type || 'finding').toLowerCase();
+  const nodeGroup = g.append('g').selectAll('g')
+    .data(ns).join('g')
+    .attr('cursor','pointer')
+    .call(d3.drag()
+      .on('start', (ev,d) => { if(!ev.active) sim.alphaTarget(0.3).restart(); d.fx=d.x; d.fy=d.y; })
+      .on('drag',  (ev,d) => { d.fx=ev.x; d.fy=ev.y; })
+      .on('end',   (ev,d) => { if(!ev.active) sim.alphaTarget(0); d.fx=null; d.fy=null; })
+    );
+
+  nodeGroup.append('circle')
+    .attr('r', d => NODE_RADIUS[nodeType(d)] || 12)
+    .attr('fill', d => (NODE_COLOR[nodeType(d)] || 'rgba(255,255,255,0.15)') + '33')
+    .attr('stroke', d => NODE_COLOR[nodeType(d)] || 'rgba(255,255,255,0.3)')
+    .attr('stroke-width', 1.5);
+
+  nodeGroup.append('text')
+    .attr('text-anchor','middle').attr('dy','0.35em')
+    .attr('font-size', 10).attr('pointer-events','none')
+    .text(d => NODE_ICON[nodeType(d)] || '●');
+
+  nodeGroup.append('text')
+    .attr('text-anchor','middle').attr('dy', d => (NODE_RADIUS[nodeType(d)]||12)+12)
+    .attr('font-size', 8).attr('fill', 'var(--text-muted)').attr('pointer-events','none')
+    .text(d => (d.label||d.node_id||'').slice(0,22));
+
+  nodeGroup.append('title').text(d => `${d.node_type||'node'}: ${d.label||d.node_id}`);
+
+  sim.on('tick', () => {
+    link
+      .attr('x1', d => (d.source.x||0)).attr('y1', d => (d.source.y||0))
+      .attr('x2', d => (d.target.x||0)).attr('y2', d => (d.target.y||0));
+    edgeLabel
+      .attr('x', d => ((d.source.x||0)+(d.target.x||0))/2)
+      .attr('y', d => ((d.source.y||0)+(d.target.y||0))/2);
+    nodeGroup.attr('transform', d => `translate(${d.x},${d.y})`);
   });
 }
 

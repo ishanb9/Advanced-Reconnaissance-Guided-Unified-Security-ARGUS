@@ -32,31 +32,58 @@ from agents.iot.iot_firmware_subagent import IoTFirmwareSubagent
 
 logger = logging.getLogger(__name__)
 
-# IoT-characteristic ports — if any found during recon, switch to IoT mode
-IOT_INDICATOR_PORTS = {
-    1883, 8883,   # MQTT
-    5683,          # CoAP
-    502,           # Modbus
+# Strong IoT-only ports — almost never found on standard Windows/Linux servers
+IOT_STRONG_PORTS = {
+    1883, 8883,   # MQTT / MQTT over TLS
+    5683, 5684,   # CoAP / CoAP over DTLS
+    502,           # Modbus TCP
     47808,         # BACnet
-    7547,          # TR-069
+    7547,          # TR-069 (CWMP)
     4840,          # OPC-UA
-    554,           # RTSP
-    161,           # SNMP (also common on routers/cameras)
-    23,            # Telnet (still prevalent on embedded devices)
+    9600,          # Many PLC/SCADA systems
+    20000,         # DNP3 (SCADA)
+}
+
+# Weak indicator ports — common on IoT but also appear on many other systems
+IOT_WEAK_PORTS = {
+    554,   # RTSP — cameras/NVRs but also media servers
+    8554,  # RTSP alternate
+    23,    # Telnet — IoT but also Windows/Linux admin (DO NOT trigger alone)
+    161,   # SNMP — IoT but very common on Windows/network gear (DO NOT trigger alone)
 }
 
 
-def is_iot_target(target_type: str, open_ports: list) -> bool:
-    """Return True if the target should be treated as IoT."""
+def is_iot_target(target_type: str, open_ports: list, os_guess: str = "") -> bool:
+    """Return True if the target should be treated as an IoT/ICS device.
+
+    Conservative: avoids false positives on Windows servers that happen to
+    expose SNMP (161) or Telnet (23).
+    """
+    # Explicit target type always wins
     if target_type and target_type.lower() in ("iot", "ics", "scada", "embedded"):
         return True
-    port_ints = set()
+
+    # Never auto-classify a confirmed Windows/Linux server as IoT
+    # (Windows may have 23/161 open for admin; that is NOT an IoT indicator)
+    if os_guess and any(k in os_guess.lower() for k in ("windows", "linux", "ubuntu", "centos", "debian")):
+        return False
+
+    port_ints: set[int] = set()
     for p in open_ports:
         try:
             port_ints.add(int(str(p).split("/")[0]))
         except (ValueError, AttributeError):
             pass
-    return bool(port_ints & IOT_INDICATOR_PORTS)
+
+    # One strong IoT-only port is sufficient
+    if port_ints & IOT_STRONG_PORTS:
+        return True
+
+    # Two or more weak indicators together suggest IoT/embedded device
+    if len(port_ints & IOT_WEAK_PORTS) >= 2:
+        return True
+
+    return False
 
 
 class IoTAgent:

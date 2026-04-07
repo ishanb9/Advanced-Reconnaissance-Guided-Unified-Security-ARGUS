@@ -467,6 +467,12 @@ class MasterAgent(BaseAgent):
                 import logging as _l
                 _l.getLogger(__name__).warning("Checkpoint restore failed: %s", _ce)
 
+        # ── Shared tool-result cache injected into intel so execute_tasks()
+        # on ANY slave agent can check it and avoid re-running the same tool
+        # with the same args.  Using a single dict object (by reference) means
+        # every agent that receives self._intel automatically shares the cache.
+        self._intel["_tool_cache"] = self._instruction_cache
+
         # Store operator notes and scope for all planning prompts
         self._notes = notes.strip() if notes else ""
         self._scope = scope.strip() if scope else ""
@@ -481,16 +487,21 @@ class MasterAgent(BaseAgent):
                 "ts":   datetime.utcnow().isoformat()
             })
 
-        # ── Step 1: LLM GATE — halt immediately if offline ────
+        # ── Step 1: LLM check — warn if offline but NEVER halt ───
+        # Scan always starts regardless of LLM state.  Each phase has hardcoded
+        # fallback tool lists so recon/vuln/web phases run even without an LLM.
+        # LLM-guided planning kicks in as soon as Ollama becomes available.
         await self.set_status(AgentStatus.RUNNING, f"Initialising pentest on {target}")
         llm_ok = await self.check_llm_available()
         if not llm_ok:
-            await db.update_session(session_id, {"status": SessionStatus.PAUSED})
-            return {
-                "status":  "halted",
-                "reason":  "LLM offline",
-                "message": f"Cannot start pentest — LLM not reachable at {self._llm_available}"
-            }
+            await self._emit("llm_status", {
+                "available": False,
+                "url":       OLLAMA_URL if hasattr(self, '_target') else "",
+                "message":   (
+                    "LLM not reachable — scan will run with built-in defaults. "
+                    "AI-guided planning will engage automatically once Ollama responds."
+                )
+            })
 
         # Initial node in attack graph
         target_node = f"target_{target.replace('.', '_').replace('/', '_')}"
@@ -541,12 +552,16 @@ class MasterAgent(BaseAgent):
                 next_action= f"Skipping {len(self._phases_completed)} completed phase(s)"
             )
         else:
-            # Fresh start — ask LLM to create the plan
+            # Fresh start — ask LLM to create the plan (never halts on failure)
             try:
                 plan = self._safe_llm_result(await self._create_master_plan(target, target_type))
-            except RuntimeError as e:
-                await self._emit("llm_halt", {"reason": str(e)})
-                return {"status": "halted", "reason": str(e)}
+            except Exception as e:
+                # Any planning error → warn and use empty plan; phases run with defaults
+                await self._emit("llm_status", {
+                    "available": False,
+                    "message":   f"Master plan unavailable ({e}) — running all phases with built-in defaults."
+                })
+                plan = {}
 
             # Persist plan in intel so future resumes can reuse it without an LLM call
             self._intel["_master_plan"] = plan
@@ -647,21 +662,20 @@ class MasterAgent(BaseAgent):
         # ── Step 4: Execute phases ─────────────────────────────
         try:
             await self._execute_phases(session_id, target, plan, resume_from=resume_from_phase)
-        except RuntimeError as e:
-            # LLM went offline mid-pentest
-            await self._emit("llm_halt", {
-                "reason":  str(e),
-                "message": "Pentest paused — LLM became unavailable. Restart when LLM is back online."
-            })
-            await db.update_session(session_id, {"status": SessionStatus.PAUSED})
-            return {"status": "halted", "reason": str(e)}
         except asyncio.CancelledError:
+            # Explicit user cancellation (tool_stop / request_stop) — respect it
             await self.set_status(AgentStatus.IDLE, "Pentest cancelled by user")
             await db.update_session(session_id, {"status": SessionStatus.PAUSED})
             return {"status": "cancelled"}
         except Exception as e:
-            await self.set_status(AgentStatus.ERROR, f"Unexpected error: {e}")
-            return {"status": "error", "error": str(e)}
+            # Any other error (including any stray RuntimeError) — log and continue
+            # to the completion block so a partial scan is still saved.
+            await self._emit("scan_error", {
+                "error":   str(e),
+                "message": f"Non-fatal error during phases: {e} — saving partial results."
+            })
+            import logging as _log
+            _log.getLogger(__name__).error("_execute_phases error (non-fatal): %s", e, exc_info=True)
 
         # Complete
         await self.set_status(AgentStatus.DONE, "Pentest lifecycle complete")
@@ -1248,10 +1262,15 @@ class MasterAgent(BaseAgent):
             parallel_coros.append(("vuln", self._phase_vuln_id(target)))
 
         web_ports = []
+        _COMMON_WEB_PORTS = {80, 443, 8080, 8443, 8000, 8008, 8888, 3000, 5000, 9000, 8181, 4443, 7443}
         for port, svc in self._intel["services"].items():
             svc_name = (svc.get("service","") if isinstance(svc,dict) else str(svc)).lower()
-            if svc_name in ("http","https","http-alt","http-proxy","ssl/http","http?"):
+            is_web_svc = any(x in svc_name for x in ("http", "https", "web", "ssl/http", "http?", "www"))
+            is_web_port = int(str(port).split("/")[0]) in _COMMON_WEB_PORTS
+            if is_web_svc or is_web_port:
                 web_ports.append(port)
+        # Deduplicate and sort
+        web_ports = sorted(set(int(str(p).split("/")[0]) for p in web_ports))
         if web_ports and not already_done("web_testing"):
             parallel_coros.append(("web", self._phase_web_testing(target, web_ports)))
 
@@ -1631,7 +1650,8 @@ class MasterAgent(BaseAgent):
 
         # ── Auto-detect IoT target from discovered ports ───────
         from agents.iot.iot_agent import is_iot_target
-        if is_iot_target(self._target_type, self._intel["open_ports"]):
+        if is_iot_target(self._target_type, self._intel["open_ports"],
+                         self._intel.get("os_guess", "")):
             if not self._intel.get("_iot_detected"):
                 self._intel["_iot_detected"] = True
                 await self.emit_reasoning(
@@ -1836,21 +1856,29 @@ class MasterAgent(BaseAgent):
     # ─── PHASE: Web Application Testing ──────────────────────
 
     async def _phase_web_testing(self, target: str, web_ports: List[int]):
-        """Master plans all web tests. Agent executes + extracts paths/vulns."""
+        """
+        Adaptive, staged web application testing.
+
+        Stage 1 — Fingerprint : whatweb, headers, robots.txt, sitemap
+        Stage 2 — Discovery   : tech-aware gobuster, CMS tools
+        Stage 3 — Analysis    : classify paths (login/API/upload/forms)
+        Stage 4 — Targeted    : SQLi, auth, SSRF, SSL, CMS exploits
+        Stage 5 — Deep scan   : nikto, LFI, WebDAV, upload bypass
+
+        Each stage feeds the next; no fire-and-forget background tasks.
+        All tool output is visible in the event feed in real time.
+        """
         await self._advance_phase(AttackPhase.VULN_ID)
-        await self._emit("phase_start", {"phase":"WEB_TESTING",
-            "message": f"Web testing on ports: {web_ports}"})
-        await self._emit("plan_step_update", {
-            "step_id": "web_testing", "status": "active",
-            "result":  f"Web testing on ports: {web_ports}",
-            "detail":  "", "found": None, "ts": datetime.utcnow().isoformat()
+        await self._emit("phase_start", {
+            "phase":   "WEB_TESTING",
+            "message": f"Adaptive web testing starting on {len(web_ports)} port(s): {web_ports[:5]}"
         })
 
-        # ── Optional confirmation gate (enabled by confirm_web=True on session start) ──
+        # ── Optional confirmation gate ───────────────────────────────────
         if self._confirm_web:
             await self._emit("awaiting_confirmation", {
                 "phase":   "web_testing",
-                "message": "Web application testing is ready to begin. Confirm to proceed.",
+                "message": "Web application testing ready. Confirm to proceed.",
                 "ports":   web_ports,
             })
             confirmed = await self._wait_for_confirmation("web_testing", timeout=3600)
@@ -1858,7 +1886,6 @@ class MasterAgent(BaseAgent):
                 await self._emit("phase_skipped", {"phase": "web_testing", "reason": "Not confirmed by operator"})
                 return
 
-        # Drain any guidance that arrived before web phase started
         await self._apply_pending_guidance()
 
         from agents.web_agent import WebAgent
@@ -1866,68 +1893,386 @@ class MasterAgent(BaseAgent):
         agent._session_id = self._session_id
         self._web_agent   = agent
 
-        web_plan = self._safe_llm_result(await self._llm_plan_web_testing(target, web_ports))
-        await self.emit_reasoning(
-            step       = "web_planning",
-            reasoning  = web_plan.get("reasoning",""),
-            decision   = f"OWASP checks: {web_plan.get('owasp_checks',[])}",
-            next_action= f"{len(web_plan.get('tools',[]))} web tools in parallel"
-        )
-        tasks = [
-            {"tool": t["tool"], "args": t.get("args",""),
-             "purpose": t.get("purpose",""), "timeout": t.get("timeout",300),
-             "can_parallel": True}
-            for t in _safe_list(web_plan.get("tools")) if t.get("tool")
-        ]
-        if not tasks:
-            port0 = web_ports[0] if web_ports else 80
-            tasks = [
-                {"tool":"gobuster","timeout":180,"can_parallel":True,
-                 "args":f"dir -u http://{target}:{port0} -w /usr/share/wordlists/dirb/common.txt -x php,html,txt,bak -t 40 -q --no-error",
-                 "purpose":"Directory enumeration"},
-                {"tool":"nikto","timeout":150,"can_parallel":True,
-                 "args":f"-h http://{target}:{port0} -C all -maxtime 120",
-                 "purpose":"Web misconfiguration scan"},
+        os_guess     = self._intel.get("os_guess", "unknown").lower()
+        technologies = list(self._intel.get("technologies", []))
+        known_paths  = list(self._intel.get("web_paths", []))
+        all_findings = []
+
+        for port in web_ports[:3]:   # cap at 3 ports
+            port_int = int(str(port).split("/")[0])
+            proto    = "https" if port_int in (443, 8443, 4443, 7443) else "http"
+            base_url = f"{proto}://{target}:{port_int}"
+
+            # ── Stage 1: Fingerprint ─────────────────────────────────────
+            await self._emit("plan_step_update", {
+                "step_id": f"web_fp_{port_int}",
+                "status":  "active",
+                "result":  f"[Stage 1] Fingerprinting {base_url}",
+                "detail":  "Detecting tech stack, server, CMS, framework",
+                "found":   None,
+                "ts":      datetime.utcnow().isoformat()
+            })
+            await self.emit_reasoning(
+                step       = f"web_fingerprint_{port_int}",
+                reasoning  = f"Fingerprinting {base_url} before testing — determines wordlists, extensions, and which tools to run",
+                decision   = "Run whatweb + curl headers + robots.txt + sitemap",
+                next_action= "Detect: CMS, framework, server type, authentication method"
+            )
+            fp_tasks = [
+                {"tool": "whatweb",  "args": f"-a 3 --colour=never {base_url}",
+                 "purpose": "Technology fingerprint", "timeout": 30, "can_parallel": True},
+                {"tool": "curl",     "args": f"-sI -m 10 --max-redirs 3 {base_url}",
+                 "purpose": "HTTP response headers", "timeout": 15, "can_parallel": True},
+                {"tool": "curl",     "args": f"-s -m 8 --max-redirs 2 {base_url}/robots.txt",
+                 "purpose": "robots.txt discovery", "timeout": 10, "can_parallel": True},
+                {"tool": "curl",     "args": f"-s -m 8 --max-redirs 2 {base_url}/sitemap.xml",
+                 "purpose": "Sitemap structure", "timeout": 10, "can_parallel": True},
+                {"tool": "curl",     "args": f"-s -m 8 {base_url}/.well-known/security.txt",
+                 "purpose": "Security policy", "timeout": 8, "can_parallel": True},
             ]
+            fp_result = await agent.execute_tasks(target, fp_tasks, "WEB_FINGERPRINT", self._intel)
+            fp_raw = " ".join((fp_result.get("raw_outputs") or {}).values()).lower()
 
-        # ── Run web tasks with optional time-extension popup ─────────────────
-        result = await self._run_web_tasks_with_timeout(agent, target, tasks)
+            # Detect technologies from fingerprint output
+            is_wordpress = any(k in fp_raw for k in ("wordpress", "wp-content", "wp-login", "wp-json"))
+            is_drupal    = "drupal" in fp_raw
+            is_joomla    = any(k in fp_raw for k in ("joomla", "/components/", "/modules/"))
+            is_django    = "django" in fp_raw
+            is_dotnet    = any(k in fp_raw for k in ("asp.net", "x-aspnet", "aspnetcore", ".aspx", "viewstate"))
+            is_php       = any(k in fp_raw for k in ("php", "x-php", "phpsessid"))
+            is_java      = any(k in fp_raw for k in ("java", "jsessionid", "servlet", "spring", "j2ee"))
+            is_nodejs    = any(k in fp_raw for k in ("node.js", "express", "nodejs", "x-powered-by: express"))
+            is_iis       = any(k in fp_raw for k in ("iis", "microsoft-iis", "x-powered-by: asp.net"))
+            is_apache    = "apache" in fp_raw
+            is_nginx     = "nginx" in fp_raw
+            is_win_web   = is_iis or is_dotnet or "windows" in os_guess
 
-        for p in result.get("web_paths",result.get("paths",[])):
-            if p not in self._intel["web_paths"]: self._intel["web_paths"].append(p)
-        for p in result.get("login_pages",[]):
-            if p not in self._intel["login_pages"]: self._intel["login_pages"].append(p)
-        self._intel["raw_outputs"].update(result.get("raw_outputs",{}))
+            # Enrich intel with detected tech
+            for tech, flag in [("wordpress", is_wordpress), ("drupal", is_drupal),
+                                ("joomla", is_joomla), ("django", is_django),
+                                ("asp.net", is_dotnet), ("iis", is_iis)]:
+                if flag and tech not in technologies:
+                    technologies.append(tech)
+                    if tech not in self._intel.get("technologies", []):
+                        self._intel.setdefault("technologies", []).append(tech)
 
-        web_analysis = self._safe_llm_result(await self._llm_analyse_web_results(target, result))
+            await self._emit("plan_step_update", {
+                "step_id": f"web_fp_{port_int}",
+                "status":  "done",
+                "result":  f"[Stage 1] Fingerprint complete — detected: {', '.join(technologies) or 'generic web'}",
+                "found":   bool(technologies),
+                "ts":      datetime.utcnow().isoformat()
+            })
+
+            # ── Stage 2: Discovery ───────────────────────────────────────
+            await self._emit("plan_step_update", {
+                "step_id": f"web_disc_{port_int}",
+                "status":  "active",
+                "result":  f"[Stage 2] Discovering endpoints on {base_url}",
+                "detail":  "Directory enum with tech-appropriate wordlists",
+                "found":   None,
+                "ts":      datetime.utcnow().isoformat()
+            })
+            await self.emit_reasoning(
+                step       = f"web_discovery_{port_int}",
+                reasoning  = f"Discovery phase: enumerate paths, find login pages, APIs, upload endpoints",
+                decision   = f"Using {'Windows/IIS' if is_win_web else 'CMS-specific' if any([is_wordpress,is_drupal,is_joomla]) else 'generic'} wordlist strategy",
+                next_action= f"gobuster dir on {base_url}"
+            )
+            # Choose wordlist and extensions based on detected tech
+            if is_win_web:
+                wordlist   = "/usr/share/wordlists/dirb/common.txt"
+                extensions = "asp,aspx,ashx,asmx,config,xml,html,bak,old,zip"
+            elif is_wordpress:
+                wordlist   = "/usr/share/wordlists/dirbuster/directory-list-2.3-medium.txt"
+                extensions = "php,html,txt,bak,zip,sql,xml"
+            elif is_java:
+                wordlist   = "/usr/share/wordlists/dirb/common.txt"
+                extensions = "jsp,jspx,do,action,xml,properties,html,bak"
+            elif is_php:
+                wordlist   = "/usr/share/wordlists/dirb/common.txt"
+                extensions = "php,php5,php7,html,txt,bak,old,zip,sql,conf,xml,json"
+            else:
+                wordlist   = "/usr/share/wordlists/dirb/common.txt"
+                extensions = "html,txt,bak,old,zip,conf,xml,json,js,yaml,yml"
+
+            disc_tasks = [
+                {"tool": "gobuster",
+                 "args": f"dir -u {base_url} -w {wordlist} -x {extensions} "
+                         f"-t 30 -q --no-error --timeout 10s -s 200,204,301,302,307,401,403",
+                 "purpose": f"Directory enumeration ({extensions[:40]}...)",
+                 "timeout": 180, "can_parallel": False},
+            ]
+            # CMS-specific tools run alongside gobuster if applicable
+            if is_wordpress:
+                disc_tasks.append({
+                    "tool": "wpscan",
+                    "args": f"--url {base_url} --enumerate p,t,u,vp --plugins-detection mixed "
+                            f"--no-banner --format cli-no-color",
+                    "purpose": "WordPress plugin/theme/user enumeration",
+                    "timeout": 180, "can_parallel": True
+                })
+            elif is_drupal:
+                disc_tasks.append({
+                    "tool": "nmap",
+                    "args": f"--script http-drupal-enum,http-vuln-cve2014-3704 -p {port_int} {target}",
+                    "purpose": "Drupal vulnerability check",
+                    "timeout": 60, "can_parallel": True
+                })
+            elif is_joomla:
+                disc_tasks.append({
+                    "tool": "curl",
+                    "args": f"-s -m 10 {base_url}/administrator/ {base_url}/components/ {base_url}/modules/",
+                    "purpose": "Joomla admin and component enumeration",
+                    "timeout": 20, "can_parallel": True
+                })
+
+            disc_result = await agent.execute_tasks(target, disc_tasks, "WEB_DISCOVERY", self._intel)
+
+            # Collect and classify discovered paths
+            raw_paths = disc_result.get("web_paths", []) + disc_result.get("paths", []) + known_paths
+            for p in raw_paths:
+                if p not in self._intel["web_paths"]:
+                    self._intel["web_paths"].append(p)
+
+            login_paths  = [p for p in raw_paths if any(k in p.lower() for k in
+                ["login", "signin", "admin", "auth", "dashboard", "portal",
+                 "wp-admin", "wp-login", "manager", "console", "account", "user"])]
+            upload_paths = [p for p in raw_paths if any(k in p.lower() for k in
+                ["upload", "file", "image", "media", "attachment", "avatar", "import"])]
+            api_paths    = [p for p in raw_paths if any(k in p.lower() for k in
+                ["api", "rest", "graphql", "v1", "v2", "v3", "swagger", "openapi",
+                 "json", "xml", "endpoint"])]
+            form_paths   = [p for p in raw_paths if "?" in p]
+
+            # Update intel with login pages
+            for lp in login_paths:
+                full_lp = f"{base_url}{lp}"
+                if full_lp not in self._intel.get("login_pages", []):
+                    self._intel.setdefault("login_pages", []).append(full_lp)
+
+            await self._emit("plan_step_update", {
+                "step_id": f"web_disc_{port_int}",
+                "status":  "done",
+                "result":  (f"[Stage 2] Discovery complete: {len(raw_paths)} paths found — "
+                            f"{len(login_paths)} logins, {len(api_paths)} APIs, "
+                            f"{len(upload_paths)} upload endpoints"),
+                "found":   bool(raw_paths),
+                "ts":      datetime.utcnow().isoformat()
+            })
+            await self.emit_reasoning(
+                step       = f"web_discovery_result_{port_int}",
+                reasoning  = f"Discovered {len(raw_paths)} paths: {len(login_paths)} login pages, {len(api_paths)} API endpoints, {len(upload_paths)} file upload endpoints",
+                decision   = "Select targeted tests based on attack surface",
+                next_action= (f"Auth testing: {bool(login_paths)} | "
+                              f"SQLi: {bool(form_paths or True)} | "
+                              f"API fuzzing: {bool(api_paths)} | "
+                              f"Upload bypass: {bool(upload_paths)}")
+            )
+
+            # ── Stage 3: Baseline Scans (always run) ────────────────────
+            await self._emit("plan_step_update", {
+                "step_id": f"web_base_{port_int}",
+                "status":  "active",
+                "result":  f"[Stage 3] Running baseline scans on {base_url}",
+                "detail":  "nikto + security headers + SSL check",
+                "found":   None,
+                "ts":      datetime.utcnow().isoformat()
+            })
+            baseline_tasks = [
+                {"tool": "nikto",
+                 "args": f"-h {base_url} -C all -maxtime 120 -Format txt -nointeractive",
+                 "purpose": "Comprehensive server misconfiguration scan (A05)", "timeout": 150, "can_parallel": True},
+                {"tool": "curl",
+                 "args": f"-sI -m 10 --max-redirs 2 {base_url}",
+                 "purpose": "Security headers audit (HSTS/CSP/X-Frame)", "timeout": 15, "can_parallel": True},
+            ]
+            if proto == "https":
+                baseline_tasks.append({
+                    "tool": "sslscan",
+                    "args": f"--no-colour {target}:{port_int}",
+                    "purpose": "TLS/SSL cipher and certificate audit", "timeout": 60, "can_parallel": True
+                })
+            if is_win_web:
+                baseline_tasks.extend([
+                    {"tool": "nmap",
+                     "args": f"--script http-iis-webdav-vuln,http-iis-short-name-brute -p {port_int} {target}",
+                     "purpose": "IIS WebDAV and short-name vulnerability check", "timeout": 60, "can_parallel": True},
+                    {"tool": "nmap",
+                     "args": f"--script http-auth-finder,http-ntlm-info -p {port_int} {target}",
+                     "purpose": "Windows NTLM auth detection", "timeout": 30, "can_parallel": True},
+                ])
+
+            baseline_result = await agent.execute_tasks(target, baseline_tasks, "WEB_BASELINE", self._intel)
+            all_findings.extend(baseline_result.get("vulnerabilities", []))
+
+            # ── Stage 4: Targeted Attacks (finding-driven) ───────────────
+            await self._emit("plan_step_update", {
+                "step_id": f"web_atk_{port_int}",
+                "status":  "active",
+                "result":  f"[Stage 4] Targeted attacks on {base_url}",
+                "detail":  "SQLi / Auth / SSRF / Upload / API — based on discovered surface",
+                "found":   None,
+                "ts":      datetime.utcnow().isoformat()
+            })
+            targeted_tasks = []
+
+            # ◆ SQL Injection — always try; if params found target those specifically
+            sqli_target = (f"{base_url}{form_paths[0]}" if form_paths
+                           else f"{base_url}/ --crawl=2 --forms")
+            targeted_tasks.append({
+                "tool": "sqlmap",
+                "args": (f"-u '{base_url}{form_paths[0]}' --batch --level=2 --risk=2 --dbs --timeout=20"
+                         if form_paths else
+                         f"-u '{base_url}/' --crawl=2 --batch --level=2 --risk=2 --forms --dbs --timeout=20"),
+                "purpose": f"SQL injection test (A03) — {'param targeting' if form_paths else 'crawl mode'}",
+                "timeout": 130, "can_parallel": True
+            })
+
+            # ◆ Authentication — only if login pages found
+            if login_paths:
+                lp = login_paths[0]
+                targeted_tasks.extend([
+                    {"tool": "hydra",
+                     "args": (f"-L /usr/share/wordlists/metasploit/http_default_users.txt "
+                              f"-P /usr/share/wordlists/metasploit/http_default_pass.txt "
+                              f"-s {port_int} {target} http-post-form "
+                              f"'{lp}:username=^USER^&password=^PASS^:incorrect'"),
+                     "purpose": f"Default credential brute-force on {lp} (A07)",
+                     "timeout": 60, "can_parallel": True},
+                    {"tool": "curl",
+                     "args": (f"-s -X POST -d \"username=' OR '1'='1&password=x\" "
+                              f"-c /tmp/cookies_{port_int}.txt -L {base_url}{lp}"),
+                     "purpose": f"SQL auth bypass test on {lp}",
+                     "timeout": 15, "can_parallel": True},
+                ])
+
+            # ◆ SSRF — check URL parameters
+            ssrf_params = ["url", "redirect", "next", "return", "goto", "target", "fetch", "proxy", "load"]
+            ssrf_paths_found = [p for p in raw_paths
+                                if any(f"?{param}=" in p or f"&{param}=" in p for param in ssrf_params)]
+            if ssrf_paths_found:
+                targeted_tasks.append({
+                    "tool": "curl",
+                    "args": (f"-s -m 10 '{base_url}{ssrf_paths_found[0]}' "
+                             f"--data 'url=http://127.0.0.1:22/'"),
+                    "purpose": f"SSRF probe on {ssrf_paths_found[0]} (A10)",
+                    "timeout": 15, "can_parallel": True
+                })
+
+            # ◆ File upload bypass — only if upload endpoints exist
+            if upload_paths:
+                targeted_tasks.append({
+                    "tool": "curl",
+                    "args": (f"-s -X POST "
+                             f"-F 'file=@/dev/urandom;filename=test.php;type=image/jpeg' "
+                             f"{base_url}{upload_paths[0]}"),
+                    "purpose": f"File upload MIME bypass test on {upload_paths[0]} (A08)",
+                    "timeout": 15, "can_parallel": True
+                })
+
+            # ◆ API enumeration — if API paths found
+            if api_paths:
+                targeted_tasks.append({
+                    "tool": "ffuf",
+                    "args": (f"-u {base_url}{api_paths[0]}/FUZZ "
+                             f"-w /usr/share/wordlists/dirb/common.txt "
+                             f"-mc 200,201,204,400,401,403 -t 20 -timeout 5"),
+                    "purpose": f"API endpoint fuzzing on {api_paths[0]}",
+                    "timeout": 60, "can_parallel": True
+                })
+
+            # ◆ LFI check if any paths found
+            targeted_tasks.append({
+                "tool": "wfuzz",
+                "args": (f"-c -z file,/usr/share/wfuzz/wordlist/vulns/lfi.txt "
+                         f"--hc 404,400,500 {base_url}/FUZZ"),
+                "purpose": "Local file inclusion probe (A01)",
+                "timeout": 60, "can_parallel": True
+            })
+
+            # ◆ Command injection via commix on forms
+            if form_paths or not is_win_web:
+                targeted_tasks.append({
+                    "tool": "commix",
+                    "args": (f"--url={base_url}/ --crawl=1 --batch --level=2 "
+                             f"--output-dir=/tmp/commix_{port_int}"),
+                    "purpose": "OS command injection scan (A03)",
+                    "timeout": 90, "can_parallel": True
+                })
+
+            # ◆ WebDAV write access
+            targeted_tasks.append({
+                "tool": "davtest",
+                "args": f"-url {base_url}",
+                "purpose": "WebDAV write access check",
+                "timeout": 30, "can_parallel": True
+            })
+
+            targeted_result = await self._run_web_tasks_with_timeout(agent, target, targeted_tasks)
+            all_findings.extend(targeted_result.get("vulnerabilities", []))
+            for p in targeted_result.get("web_paths", []):
+                if p not in self._intel["web_paths"]:
+                    self._intel["web_paths"].append(p)
+
+            # ── Set adaptive flags based on findings ─────────────────────
+            if targeted_result.get("sqli_found") or any(
+                    "sqli" in str(v).lower() or "sql injection" in str(v).lower()
+                    for v in all_findings):
+                self._intel["critical_web_vulns"] = True
+                self._intel["sqli_confirmed"]     = True
+                await self.emit_reasoning(
+                    step       = "web_sqli_found",
+                    reasoning  = "SQL injection confirmed — high-priority exploit path available",
+                    decision   = "Flag for exploitation phase prioritisation",
+                    next_action= "Exploit phase will target this SQLi for data exfil / shell"
+                )
+
+            await self._emit("plan_step_update", {
+                "step_id": f"web_atk_{port_int}",
+                "status":  "done",
+                "result":  (f"[Stage 4] Targeted attacks complete on port {port_int}: "
+                            f"{len(targeted_result.get('vulnerabilities', []))} vulnerabilities found"),
+                "found":   bool(targeted_result.get("vulnerabilities")),
+                "ts":      datetime.utcnow().isoformat()
+            })
+
+        # ── Final LLM analysis across all ports ─────────────────────────
+        web_analysis = self._safe_llm_result(await self._llm_analyse_web_results(target, {
+            "web_vulns":   all_findings,
+            "web_paths":   self._intel["web_paths"],
+            "login_pages": self._intel.get("login_pages", []),
+            "technologies": technologies,
+            "sqli_confirmed": self._intel.get("sqli_confirmed", False),
+        }))
         await self.emit_reasoning(
-            step       = "web_analysis",
-            reasoning  = web_analysis.get("reasoning",""),
-            decision   = web_analysis.get("critical_findings",""),
-            next_action= web_analysis.get("exploit_recommendation",""),
+            step       = "web_final_analysis",
+            reasoning  = web_analysis.get("reasoning", ""),
+            decision   = web_analysis.get("critical_findings", ""),
+            next_action= web_analysis.get("exploit_recommendation", ""),
             data       = web_analysis
         )
-        self._intel["attack_path"].append({
-            "phase":"web_testing",
-            "result": web_analysis.get("critical_findings","") or
-                      f"Paths: {len(self._intel['web_paths'])} | Logins: {len(self._intel['login_pages'])}",
-            "ts": datetime.utcnow().isoformat()
-        })
+
+        # Adaptive: if critical web vulns found, ensure exploit phase knows
+        if web_analysis.get("critical_findings"):
+            self._intel.setdefault("attack_path", []).append({
+                "phase":  "web_testing",
+                "result": web_analysis.get("critical_findings", ""),
+                "ts":     datetime.utcnow().isoformat()
+            })
+            self._intel["critical_web_vulns"] = True
+
         await self._emit("plan_step_update", {
             "step_id": "web_testing",
             "status":  "done",
-            "result":  web_analysis.get("critical_findings","") or "Web testing complete",
-            "detail":  f"Paths: {len(self._intel.get('web_paths',[]))} | Login pages: {self._intel.get('login_pages',[])}",
-            "found":   len(self._intel.get("web_paths",[])) > 0 or len(self._intel.get("login_pages",[])) > 0,
+            "result":  (web_analysis.get("critical_findings")
+                        or f"Web testing complete: {len(all_findings)} findings"),
+            "detail":  (f"Paths: {len(self._intel.get('web_paths', []))} | "
+                        f"Login pages: {len(self._intel.get('login_pages', []))} | "
+                        f"Technologies: {', '.join(technologies[:5])}"),
+            "found":   len(all_findings) > 0,
             "ts":      datetime.utcnow().isoformat()
         })
-
-        # ── Fire web subagents for deep fuzzing / injection testing ────
-        web_urls = [
-            f"http{'s' if int(str(p)) in (443, 8443) else ''}://{target}:{p}"
-            for p in web_ports
-        ]
-        await self._run_phase_subagents("web", target, web_urls=web_urls)
 
     async def _run_web_tasks_with_timeout(self, agent, target: str, tasks: List) -> Dict:
         """

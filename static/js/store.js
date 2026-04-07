@@ -78,6 +78,11 @@ const INIT = {
   graphNodes: [],
   graphEdges: [],
 
+  // ── Neo4j semantic graph (Phase 2) ─────────────────────────
+  neo4jGraph: { nodes: [], edges: [] },   // typed relationship graph
+  neo4jPaths: [],                          // attack path objects [{length, nodes, rels}]
+  neo4jAvailable: null,                    // null=unknown, true/false after first fetch
+
   // Attack chain analyses produced by AttackGraphAgent
   chainAnalysis:      null,   // latest full analysis object
   chainAnalysisStatus: null,  // {status, message} from agent
@@ -316,6 +321,17 @@ function reducer(state, action) {
     }
     case 'SET_GRAPH':
       return { ...state, graphNodes: action.payload.nodes || [], graphEdges: action.payload.edges || [] };
+
+    case 'SET_NEO4J_GRAPH':
+      return {
+        ...state,
+        neo4jGraph:     { nodes: action.payload.nodes || [], edges: action.payload.edges || [] },
+        neo4jAvailable: true,
+      };
+    case 'SET_NEO4J_PATHS':
+      return { ...state, neo4jPaths: action.payload || [] };
+    case 'NEO4J_UNAVAILABLE':
+      return { ...state, neo4jAvailable: false };
 
     // ── New architecture ──────────────────────────────────
     case 'ATTACK_TREE_READY':
@@ -900,6 +916,28 @@ function StoreProvider({ children }) {
     } catch {}
   }, []);
 
+  const loadNeo4jGraph = useCallback(async (sessionId) => {
+    try {
+      const g = await window.API.graphNeo4j(sessionId);
+      if (g && !g.error) {
+        dispatch({ type: 'SET_NEO4J_GRAPH', payload: g });
+      } else {
+        dispatch({ type: 'NEO4J_UNAVAILABLE' });
+      }
+    } catch {
+      dispatch({ type: 'NEO4J_UNAVAILABLE' });
+    }
+  }, []);
+
+  const loadNeo4jPaths = useCallback(async (sessionId, fromType='Host', toType='Access') => {
+    try {
+      const r = await window.API.graphPaths(sessionId, fromType, toType);
+      if (r && !r.error) {
+        dispatch({ type: 'SET_NEO4J_PATHS', payload: r.paths || [] });
+      }
+    } catch {}
+  }, []);
+
   // System status poll
   useEffect(() => {
     const poll = async () => {
@@ -922,7 +960,8 @@ function StoreProvider({ children }) {
   useEffect(() => { refreshSessions(); }, []);
 
   const value = { state, dispatch, connectWS, disconnectWS, sendWS,
-                  registerShellListener, refreshSessions, loadGraph };
+                  registerShellListener, refreshSessions, loadGraph,
+                  loadNeo4jGraph, loadNeo4jPaths };
   return React.createElement(StoreCtx.Provider, { value }, children);
 }
 
@@ -1678,6 +1717,12 @@ function routeWsEvent(msg, dispatch, shellListeners) {
           nodes: data.graph.nodes || [],
           edges: data.graph.edges || []
         }});
+      }
+
+      // Load Neo4j semantic graph (fire-and-forget; graceful if unavailable)
+      if (sessionId) {
+        loadNeo4jGraph(sessionId);
+        loadNeo4jPaths(sessionId);
       }
 
       // Restore current phase and completed phases

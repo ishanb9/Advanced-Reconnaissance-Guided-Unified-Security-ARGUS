@@ -31,6 +31,32 @@ from db.schemas import (
 )
 import db.mongo_client as db
 
+# ── Neo4j semantic graph (optional) ──────────────────────────────────────────
+try:
+    import db.neo4j_client as _neo4j
+    _NEO4J_AVAILABLE = True
+except ImportError:
+    _neo4j = None
+    _NEO4J_AVAILABLE = False
+
+# ── Knowledge-graph semantic inference (optional) ─────────────────────────────
+try:
+    from agents.knowledge_graph import infer_and_write as _kg_infer
+    _KG_AVAILABLE = True
+except ImportError:
+    _kg_infer = None
+    _KG_AVAILABLE = False
+
+# ── Auto-ingest to RAG KB (optional) ─────────────────────────────────────────
+try:
+    _auto_ingest_dir = os.path.join(os.path.dirname(__file__), "..", "knowledge")
+    sys.path.insert(0, _auto_ingest_dir)
+    from auto_ingest import capture_finding as _capture_finding
+    _AUTO_INGEST_AVAILABLE = True
+except ImportError:
+    _capture_finding = None
+    _AUTO_INGEST_AVAILABLE = False
+
 # ── RAG Knowledge Base (shared by all agents) ─────────────────────────────────
 try:
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "knowledge"))
@@ -92,8 +118,9 @@ MCP_URL    = "http://localhost:3000"
 OLLAMA_URL = "http://192.168.0.100:11434"   # ← Ollama host
 MODEL_NAME = "glm-5:cloud"          # ← Update to your model name
 
-LLM_CHECK_TIMEOUT = 10   # Seconds to wait for Ollama health check
-LLM_THINK_TIMEOUT = 120  # Seconds to wait for LLM response
+LLM_CHECK_TIMEOUT  = 10   # Seconds to wait for Ollama health check
+LLM_THINK_TIMEOUT  = 600  # Per-chunk read timeout when streaming (tokens arrive continuously)
+_LLM_MAX_RETRIES   = 2    # Retry attempts before giving up on a single think() call
 
 # ─── Type aliases ────────────────────────────────────────────
 BroadcastFn = Callable[[WebSocketMessage], Awaitable[None]]
@@ -175,6 +202,36 @@ _AGENT_REGISTRY: Dict[str, "BaseAgent"] = {}
 def get_agent(name: str) -> "Optional[BaseAgent]":
     """Return the live BaseAgent instance registered under *name*, or None."""
     return _AGENT_REGISTRY.get(name)
+
+
+# ── Neo4j relationship type helper ────────────────────────────────────────────
+
+def _label_to_rel_type(label: str) -> str:
+    """Convert a human-readable edge label to a Neo4j relationship type."""
+    import re as _re
+    low = (label or "").lower()
+    if any(k in low for k in ("vuln", "vulnerable", "exploit")):
+        return "VULNERABLE_TO"
+    if any(k in low for k in ("cve", "references", "ref")):
+        return "REFERENCES"
+    if any(k in low for k in ("leads", "enable", "allow", "grant")):
+        return "LEADS_TO"
+    if any(k in low for k in ("credential", "password", "hash")):
+        return "HAS_CREDENTIAL"
+    if any(k in low for k in ("compromis", "pwned", "breach")):
+        return "COMPROMISED_VIA"
+    if any(k in low for k in ("escalat", "privesc")):
+        return "ESCALATES_TO"
+    if any(k in low for k in ("pivot", "lateral")):
+        return "PIVOTS_TO"
+    if any(k in low for k in ("exposes", "open port", "port")):
+        return "EXPOSES"
+    if any(k in low for k in ("runs", "serves", "hosts")):
+        return "RUNS"
+    if any(k in low for k in ("finding", "has", "affect")):
+        return "AFFECTS"
+    # fallback: UPPER_SNAKE from label
+    return _re.sub(r"[^a-z0-9]+", "_", low).upper().strip("_") or "RELATED_TO"
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -548,6 +605,25 @@ class BaseAgent(ABC):
                            "stderr": "", "exit_code": 0, "output_id": None}
                 return (task, skipped)
 
+            # ── Shared cross-agent tool cache ──────────────────────────────
+            # MasterAgent injects self._instruction_cache into intel["_tool_cache"]
+            # so every slave agent can check it before re-running a tool.
+            # This prevents gobuster/nmap/nikto from running twice when both
+            # recon and vuln agents plan the same command.
+            _tool_cache = context.get("_tool_cache")
+            if _tool_cache is not None:
+                _cache_key = f"{tool_name}:{tool_args}"
+                if _cache_key in _tool_cache:
+                    cached = _tool_cache[_cache_key]
+                    await self.emit_reasoning(
+                        step       = f"{phase_label}_cache_hit",
+                        reasoning  = f"{tool_name} with identical args already ran — reusing cached result",
+                        decision   = "Skip duplicate execution, return cached output",
+                        next_action= "Next task",
+                        data       = {"tool": tool_name, "cached": True}
+                    )
+                    return (task, cached)
+
             # Update status for each tool so UI shows what's running
             await self.set_status(AgentStatus.RUNNING, f"▶ {tool_name}", tool=tool_name)
             await self.emit_reasoning(
@@ -566,6 +642,28 @@ class BaseAgent(ABC):
                 timeout   = timeout
             )
             result = await self.execute_instruction(instr)
+
+            # Store result in shared cross-agent cache so other agents skip this tool
+            if _tool_cache is not None and result is not None:
+                _tool_cache[f"{tool_name}:{tool_args}"] = result
+
+            # ── Fire-and-forget semantic triple extraction to Neo4j ────────
+            if _KG_AVAILABLE and result and isinstance(result, str) and len(result) > 50:
+                try:
+                    _target = context.get("target") or getattr(self, "_target", "unknown")
+                    _llm_url   = getattr(self, "_llm_url",   "http://localhost:11434")
+                    _llm_model = getattr(self, "_llm_model", "llama3")
+                    asyncio.create_task(_kg_infer(
+                        session_id = self._session_id,
+                        tool_name  = tool_name,
+                        target     = str(_target),
+                        raw_output = result,
+                        llm_url    = _llm_url,
+                        llm_model  = _llm_model,
+                    ))
+                except Exception:
+                    pass  # never block on inference failure
+
             return (task, result)
 
         # Run parallel batch
@@ -862,13 +960,36 @@ Return JSON:
                         decoded = line_b.decode(errors="replace").rstrip()
                         if decoded:
                             await _emit_line(decoded, ltype)
-                await asyncio.gather(
+
+                # Wrap the drain gather in a Task and register it in _active_tool_tasks.
+                # This is critical: kill_current_tool() cancels _active_tool_tasks, which
+                # immediately unblocks the drain even if readline() hasn't returned EOF yet.
+                # Without this, killing the process (proc.kill()) may not release the pipe
+                # quickly (child procs holding it open, Windows buffering, etc.) and the
+                # scan hangs waiting for drain to finish.
+                drain_task = asyncio.create_task(asyncio.gather(
                     _drain(proc.stdout, "stdout"),
                     _drain(proc.stderr, "stderr"),
-                )
-                # Process was killed by kill_current_tool() → readline returned EOF
+                    return_exceptions=True,
+                ))
+                self._active_tool_tasks.add(drain_task)
+                try:
+                    await drain_task
+                except asyncio.CancelledError:
+                    # kill_current_tool() cancelled us — note it and exit cleanly
+                    pass
+                finally:
+                    self._active_tool_tasks.discard(drain_task)
+
+                # Process was killed by kill_current_tool() → flag is set
                 if self._kill_current_tool_flag:
                     await _emit_line(f"[CANCELLED] Tool '{tool_name}' stopped by operator", "stderr")
+                    # Make sure process is dead (it may still be running if drain was cancelled
+                    # before readline() naturally returned EOF)
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
                     return -2
                 await proc.wait()
                 return proc.returncode or 0
@@ -986,22 +1107,48 @@ Return JSON:
 
     async def think(self, prompt: str, system_context: str = "", timeout: int = LLM_THINK_TIMEOUT) -> str:
         """
-        Query the LLM. Called by ANY agent — master OR specialist.
-        Each agent has its own domain-specific system prompt.
-        Raises RuntimeError if LLM is unavailable.
+        Query the LLM via STREAMING so no wall-clock timeout ever fires.
+
+        With stream=True Ollama sends one JSON line per token. httpx's per-chunk
+        read timeout (default 600 s) applies to the gap between *tokens*, not the
+        entire generation. A model that generates at even 0.1 tok/s will never
+        trigger a timeout, so slow local models on CPU are fully supported.
+
+        Availability rules
+        ──────────────────
+        • _llm_available = True   → proceed immediately
+        • _llm_available = None   → first use; call check_llm_available()
+        • _llm_available = False  → was offline; auto-recheck before giving up
+          (Ollama may have restarted since the last failure)
+
+        Error handling
+        ──────────────
+        • ConnectError  → Ollama is genuinely down; set _llm_available=False; raise
+        • TimeoutError  → Ollama is slow but running; emit llm_slow warning; retry;
+                          after _LLM_MAX_RETRIES return "" so caller uses defaults —
+                          NEVER sets _llm_available=False (scan continues)
+        • Other errors  → raise RuntimeError with context
         """
-        # Ensure LLM availability is checked (cached after first check)
-        if self._llm_available is None:
+        # ── Availability gate ───────────────────────────────────
+        if not self._llm_available:   # covers both None and False
             await self.check_llm_available()
-        if not self._llm_available:
-            raise RuntimeError(
-                f"LLM unavailable at {OLLAMA_URL}. Cannot proceed."
-            )
+            if not self._llm_available:
+                # LLM is offline — emit warning and return "" so the scan
+                # continues with built-in fallback defaults.  We NEVER halt.
+                await self._emit("llm_slow", {
+                    "agent":   str(self.name),
+                    "message": (
+                        f"LLM unreachable at {OLLAMA_URL} — "
+                        "this step will use built-in defaults. "
+                        "Start Ollama to enable AI-guided planning."
+                    )
+                })
+                return ""
 
         await self.set_status(AgentStatus.THINKING, "Consulting LLM...")
         await self._emit("agent_thinking", {
             "agent":  str(self.name),
-            "prompt": prompt,
+            "prompt": prompt[:300],
             "ts":     datetime.utcnow().isoformat()
         })
 
@@ -1030,23 +1177,43 @@ Return JSON:
             {"role": "user",   "content": prompt}
         ]
 
-        try:
-            async with httpx.AsyncClient(
-                # per-chunk read timeout keeps individual sockets from stalling
-                timeout=httpx.Timeout(connect=10, read=timeout, write=10, pool=5)
-            ) as client:
-                # Hard wall-clock timeout via asyncio — guarantees the ENTIRE call
-                # (including cloud LLM think time) completes within `timeout` seconds.
-                # httpx.Timeout alone is per-TCP-chunk and can be defeated by keepalives.
-                resp = await asyncio.wait_for(
-                    client.post(
+        # ── Retry loop ──────────────────────────────────────────
+        for attempt in range(1, _LLM_MAX_RETRIES + 1):
+            try:
+                async with httpx.AsyncClient(
+                    # connect: max time to establish TCP connection
+                    # read:    max time between consecutive *tokens* (not full response)
+                    #          600 s gives plenty of slack even for slow CPU inference
+                    # write:   max time to send the request body
+                    timeout=httpx.Timeout(connect=15, read=timeout, write=30, pool=10)
+                ) as client:
+                    tokens: list[str] = []
+                    # stream=True: Ollama sends one JSON obj per line per token
+                    async with client.stream(
+                        "POST",
                         f"{OLLAMA_URL}/api/chat",
-                        json={"model": MODEL_NAME, "messages": messages, "stream": False}
-                    ),
-                    timeout=float(timeout),
-                )
-                resp.raise_for_status()
-                content = resp.json()["message"]["content"]
+                        json={"model": MODEL_NAME, "messages": messages, "stream": True},
+                    ) as resp:
+                        resp.raise_for_status()
+                        async for raw_line in resp.aiter_lines():
+                            # Respect a scan-stop request even mid-generation
+                            if self._stop_requested:
+                                break
+                            if not raw_line.strip():
+                                continue
+                            try:
+                                chunk = json.loads(raw_line)
+                                tok = chunk.get("message", {}).get("content", "")
+                                if tok:
+                                    tokens.append(tok)
+                                if chunk.get("done"):
+                                    break
+                            except (json.JSONDecodeError, KeyError):
+                                pass
+
+                content = "".join(tokens)
+                self._llm_available = True   # confirmed responsive
+
                 _phase = str(self.phase) if hasattr(self, "phase") and self.phase else ""
                 await self._emit("llm_response", {
                     "agent":    str(self.name),
@@ -1062,14 +1229,70 @@ Return JSON:
                     "ts":       datetime.utcnow().isoformat()
                 })
                 return content
-        except (httpx.TimeoutException, asyncio.TimeoutError):
-            self._llm_available = False
-            raise RuntimeError(f"LLM timed out after {timeout}s. Pentest halted.")
-        except httpx.ConnectError:
-            self._llm_available = False
-            raise RuntimeError(f"LLM connection lost. Check Ollama at {OLLAMA_URL}.")
-        except Exception as e:
-            raise RuntimeError(f"LLM error: {type(e).__name__}: {e}")
+
+            except httpx.ConnectError:
+                # Ollama is genuinely unreachable — mark offline and retry
+                self._llm_available = False
+                await self._emit("llm_slow", {
+                    "agent":   str(self.name),
+                    "attempt": attempt,
+                    "of":      _LLM_MAX_RETRIES,
+                    "message": (
+                        f"LLM connection failed (attempt {attempt}/{_LLM_MAX_RETRIES}) — "
+                        f"retrying in 10 s…" if attempt < _LLM_MAX_RETRIES else
+                        f"LLM offline ({OLLAMA_URL}) — using built-in defaults for this step."
+                    )
+                })
+                if attempt < _LLM_MAX_RETRIES:
+                    await asyncio.sleep(10)
+                    # Recheck — allows recovery if Ollama restarted between attempts
+                    await self.check_llm_available()
+                    if self._llm_available:
+                        continue
+                # Exhausted retries — return "" so scan continues with fallback defaults.
+                # We NEVER raise here; scan resilience is more important than LLM planning.
+                return ""
+
+            except (httpx.TimeoutException, asyncio.TimeoutError):
+                # Ollama is running but hasn't produced a token in `timeout` seconds.
+                # Do NOT set _llm_available=False — the server is up, just busy.
+                await self._emit("llm_slow", {
+                    "agent":   str(self.name),
+                    "attempt": attempt,
+                    "of":      _LLM_MAX_RETRIES,
+                    "timeout": timeout,
+                    "message": (
+                        f"LLM token timeout (attempt {attempt}/{_LLM_MAX_RETRIES}) — "
+                        f"no token received in {timeout}s. Retrying..."
+                        if attempt < _LLM_MAX_RETRIES else
+                        "LLM unresponsive after all retries — scan continues with built-in defaults for this step."
+                    )
+                })
+                if attempt < _LLM_MAX_RETRIES:
+                    await asyncio.sleep(5)
+                    continue
+                # Exhausted retries — return "" so think_json → _safe_llm_result → {}
+                # and each phase method falls through to its hardcoded fallback task list.
+                return ""
+
+            except Exception as exc:
+                # Unexpected error (bad response format, etc.) — log and return ""
+                # so the scan continues.  Never raise here.
+                import logging as _llm_log
+                _llm_log.getLogger(__name__).warning(
+                    "think() unexpected error (attempt %d): %s: %s",
+                    attempt, type(exc).__name__, exc
+                )
+                await self._emit("llm_slow", {
+                    "agent":   str(self.name),
+                    "message": f"LLM unexpected error ({type(exc).__name__}) — using built-in defaults for this step."
+                })
+                if attempt < _LLM_MAX_RETRIES:
+                    await asyncio.sleep(5)
+                    continue
+                return ""
+
+        return ""   # unreachable but satisfies type checker
 
     async def think_json(self, prompt: str, system_context: str = "", timeout: int = LLM_THINK_TIMEOUT) -> Dict:
         """Query LLM expecting a JSON response. Extracts and parses JSON."""
@@ -1181,6 +1404,17 @@ Return JSON:
         except Exception:
             pass  # graph update failure never blocks finding storage
 
+        # ── Auto-ingest high/critical findings into RAG KB ────────────────
+        if _AUTO_INGEST_AVAILABLE:
+            try:
+                asyncio.create_task(_capture_finding(
+                    finding    = finding,
+                    session_id = self._session_id,
+                    phase      = str(self.phase),
+                ))
+            except Exception:
+                pass  # never block on auto-ingest failure
+
         return finding
 
     async def store_flag(self, flag_type: str, value: str, location: str, context: Optional[str] = None) -> Dict:
@@ -1256,6 +1490,20 @@ Return JSON:
             "phase":     str(self.phase),
             "metadata":  metadata or {}
         })
+        # ── dual-write to Neo4j ───────────────────────────────────────────
+        if _NEO4J_AVAILABLE:
+            try:
+                props = {**(metadata or {}), "host": host, "port": port,
+                         "severity": severity, "phase": str(self.phase)}
+                await _neo4j.upsert_node(
+                    session_id = self._session_id,
+                    node_id    = node_id,
+                    node_type  = type,
+                    label      = label,
+                    properties = {k: v for k, v in props.items() if v is not None},
+                )
+            except Exception:
+                pass
 
     async def add_edge(self, source: str, target: str, label: str, tool: Optional[str] = None):
         """Add an edge between nodes in attack graph."""
@@ -1275,6 +1523,19 @@ Return JSON:
             "label":   label,
             "tool":    tool
         })
+        # ── dual-write to Neo4j ───────────────────────────────────────────
+        if _NEO4J_AVAILABLE:
+            try:
+                rel_type = _label_to_rel_type(label)
+                await _neo4j.upsert_edge(
+                    session_id = self._session_id,
+                    source_id  = source,
+                    target_id  = target,
+                    rel_type   = rel_type,
+                    properties = {"label": label, "tool": tool or ""},
+                )
+            except Exception:
+                pass
 
     # ─── Utility Parsers ──────────────────────────────────────
 

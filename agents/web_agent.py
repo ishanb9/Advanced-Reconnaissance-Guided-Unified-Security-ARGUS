@@ -59,17 +59,21 @@ class WebAgent(BaseAgent):
 
     async def run(
         self,
-        session_id: str,
-        target:     str,
-        web_ports:  List[int] = None,
+        session_id:   str,
+        target:       str,
+        web_ports:    List[int] = None,
         technologies: List[str] = None,
-        known_paths: List[str] = None,
+        known_paths:  List[str] = None,
+        intel:        dict = None,
         **kwargs
     ) -> Dict:
         self._session_id = session_id
         web_ports    = web_ports or [80]
         technologies = technologies or []
         known_paths  = known_paths or []
+        intel        = intel or {}
+        os_guess     = intel.get("os_guess", "unknown").lower()
+        is_windows   = "windows" in os_guess
 
         result = {
             "web_vulns":     [],
@@ -97,7 +101,14 @@ class WebAgent(BaseAgent):
             )
 
             # ── A05: Security Misconfiguration — Directory enum ──
-            await self._test_directory_enum(target, port, proto, base_url, result)
+            tech_info = {
+                "is_windows": is_windows,
+                "is_wordpress": "wordpress" in technologies or any("wordpress" in str(t).lower() for t in technologies),
+                "is_php": "php" in technologies,
+                "is_dotnet": any(t in technologies for t in ["asp.net", "iis"]),
+                "is_java": any(t in technologies for t in ["java", "spring", "servlet"]),
+            }
+            await self._test_directory_enum(target, port, proto, base_url, result, tech_info)
 
             # ── A05: Nikto comprehensive scan ────────────────────
             await self._test_nikto(target, port, proto, base_url, result)
@@ -135,14 +146,19 @@ class WebAgent(BaseAgent):
                     await self._test_drupal_vulns(target, port, proto, base_url, result)
                     break
 
+            # ── Windows/IIS-specific testing ──────────────────────
+            if is_windows or any(t in ["iis", "asp.net"] for t in technologies):
+                await self._test_windows_iis(target, port, proto, base_url, result)
+
         await self.set_status(AgentStatus.DONE,
             f"Web testing complete: {len(result['web_vulns'])} findings, {len(result['paths'])} paths")
         return result
 
     # ─── OWASP Test Methods ───────────────────────────────────
 
-    async def _test_directory_enum(self, target, port, proto, base_url, result):
-        """A05 + A01: Find hidden files, backup files, admin panels."""
+    async def _test_directory_enum(self, target, port, proto, base_url, result, tech_info=None):
+        """A05 + A01: Find hidden files, backup files, admin panels — tech-aware."""
+        tech_info = tech_info or {}
         await self.emit_reasoning(
             step       = "directory_enum",
             reasoning  = "Directory enumeration reveals hidden endpoints, admin panels, backup files",
@@ -160,11 +176,21 @@ class WebAgent(BaseAgent):
                 )
         except Exception:
             pass
-        # gobuster — fast enumeration
+        # Choose extensions based on detected technology stack
+        if tech_info.get("is_windows") or tech_info.get("is_dotnet"):
+            exts = "asp,aspx,ashx,asmx,config,xml,html,bak,old,zip"
+        elif tech_info.get("is_java"):
+            exts = "jsp,jspx,do,action,xml,properties,html,bak,zip"
+        elif tech_info.get("is_php") or tech_info.get("is_wordpress"):
+            exts = "php,php5,html,txt,bak,old,zip,sql,conf,xml,json"
+        else:
+            exts = "html,txt,bak,old,zip,conf,xml,json,js,yaml"
+
+        # gobuster — fast tech-aware enumeration
         gob = await self.run_tool(
             "gobuster",
             f"dir -u {base_url} -w /usr/share/wordlists/dirb/common.txt "
-            f"-x php,html,txt,bak,old,zip,tar.gz,sql,conf,config,xml,json -t 50 -q --no-error",
+            f"-x {exts} -t 30 -q --no-error --timeout 10s",
             target=target, phase=AttackPhase.VULN_ID, timeout=120
         )
         paths = self._parse_gobuster(gob["stdout"])
@@ -650,3 +676,47 @@ class WebAgent(BaseAgent):
                 sev = FindingSeverity.MEDIUM
             findings.append({"severity": sev, "title": text[:80], "description": text, "evidence": text})
         return findings
+
+    async def _test_windows_iis(self, target, port, proto, base_url, result):
+        """Windows/IIS-specific vulnerability checks."""
+        await self.emit_reasoning(
+            step       = "windows_iis_test",
+            reasoning  = "Windows/IIS target detected — running IIS-specific vulnerability checks",
+            decision   = "Test: IIS short-name, WebDAV, NTLM auth, .NET deserialization hints",
+            next_action= f"nmap IIS scripts against {base_url}"
+        )
+        # IIS short-name vulnerability
+        iis_short = await self.run_tool(
+            "nmap",
+            f"--script http-iis-short-name-brute,http-iis-webdav-vuln -p {port} {target}",
+            target=target, phase=AttackPhase.VULN_ID, timeout=60
+        )
+        if any(k in iis_short["stdout"].lower() for k in ["vulnerable", "webdav enabled", "write access"]):
+            await self.store_finding(
+                severity    = FindingSeverity.HIGH,
+                title       = f"IIS Vulnerability: {base_url}",
+                description = "IIS WebDAV or short-name vulnerability detected",
+                host        = target, port=port, service="http/iis",
+                tool_used   = "nmap",
+                evidence    = iis_short["stdout"][:1000],
+                remediation = "Disable WebDAV if not needed. Patch IIS. Disable 8.3 filename creation."
+            )
+
+        # Check for exposed ASP.NET error pages (verbose error disclosure)
+        err_check = await self.run_tool(
+            "curl",
+            f"-s -m 10 {base_url}/nope-does-not-exist-12345.aspx",
+            target=target, phase=AttackPhase.VULN_ID, timeout=15
+        )
+        if any(k in err_check.get("stdout", "").lower() for k in
+               ["stack trace", "system.web", "exception", "at system.", "runtime error"]):
+            await self.store_finding(
+                severity    = FindingSeverity.MEDIUM,
+                title       = f"ASP.NET Verbose Error Disclosure: {base_url}",
+                description = "ASP.NET exposes detailed stack traces — aids attacker reconnaissance",
+                host        = target, port=port, service="http/iis",
+                tool_used   = "curl",
+                evidence    = err_check["stdout"][:500],
+                remediation = "Set customErrors mode='On' in web.config. Disable debug mode."
+            )
+        result["web_vulns"].extend([{"type": "iis_check", "severity": "medium", "url": base_url}])

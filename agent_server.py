@@ -17,6 +17,14 @@ import asyncio, json, os, re, subprocess, time, traceback, uuid
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
 
+# Load .env file at startup so NEO4J_URI / NEO4J_USER / NEO4J_PASSWORD
+# and any other env vars are available before any module reads os.environ.
+try:
+    from dotenv import load_dotenv
+    load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
+except ImportError:
+    pass  # python-dotenv not installed — rely on system env vars
+
 import httpx, netifaces, psutil
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -531,6 +539,48 @@ async def get_flags(session_id: str):
 @app.get("/sessions/{session_id}/graph")
 async def get_attack_graph(session_id: str):
     return await db.get_attack_graph(session_id)
+
+
+@app.get("/sessions/{session_id}/graph/neo4j")
+async def get_neo4j_graph(session_id: str):
+    """Return the Neo4j-backed semantic relationship graph for a session."""
+    try:
+        import db.neo4j_client as neo4j
+        if not await neo4j.ping():
+            return JSONResponse(
+                {"error": "Neo4j not available", "nodes": [], "edges": []},
+                status_code=503,
+            )
+        graph = await neo4j.get_graph(session_id)
+        return graph
+    except Exception as exc:
+        return JSONResponse({"error": str(exc), "nodes": [], "edges": []}, status_code=500)
+
+
+@app.get("/sessions/{session_id}/graph/paths")
+async def get_attack_paths(
+    session_id: str,
+    from_type:  str = "Host",
+    to_type:    str = "Access",
+    max_depth:  int = 10,
+):
+    """Return shortest attack paths from from_type nodes to to_type nodes."""
+    try:
+        import db.neo4j_client as neo4j
+        if not await neo4j.ping():
+            return JSONResponse(
+                {"error": "Neo4j not available", "paths": []},
+                status_code=503,
+            )
+        paths = await neo4j.get_attack_paths(
+            session_id=session_id,
+            from_type=from_type,
+            to_type=to_type,
+            max_depth=max_depth,
+        )
+        return {"paths": paths, "count": len(paths)}
+    except Exception as exc:
+        return JSONResponse({"error": str(exc), "paths": []}, status_code=500)
 
 
 @app.get("/sessions/{session_id}/chain_analyses")
@@ -1207,6 +1257,83 @@ async def status():
         "active_sessions": [sid for sid, t in active_tasks.items() if not t.done()],
         "agent_count":     len(active_agents),
         "shell_sessions":  sum(len(a._shells) for a in active_shell_agents.values()),
+    }
+
+
+# ══════════════════════════════════════════════════════════════
+#  SETTINGS — NEO4J / INTEGRATIONS
+# ══════════════════════════════════════════════════════════════
+
+class Neo4jSettingsRequest(BaseModel):
+    uri:      str
+    user:     str
+    password: str
+
+@app.get("/settings/neo4j")
+async def get_neo4j_settings():
+    """Return current Neo4j connection settings (password masked)."""
+    import db.neo4j_client as _neo4j
+    connected = await _neo4j.ping()
+    return {
+        "uri":       os.environ.get("NEO4J_URI",      "bolt://localhost:7687"),
+        "user":      os.environ.get("NEO4J_USER",     "neo4j"),
+        "password":  "***" if os.environ.get("NEO4J_PASSWORD") else "",
+        "connected": connected,
+    }
+
+@app.post("/settings/neo4j")
+async def save_neo4j_settings(req: Neo4jSettingsRequest):
+    """
+    Save Neo4j credentials to .env file and hot-reload the driver.
+    The server does NOT need a restart — the new settings take effect immediately.
+    """
+    env_path = os.path.join(os.path.dirname(__file__), ".env")
+
+    # Read existing .env lines, replace or append the three Neo4j vars
+    try:
+        with open(env_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+    except FileNotFoundError:
+        lines = []
+
+    def _set_var(lines, key, value):
+        for i, line in enumerate(lines):
+            if line.strip().startswith(f"{key}=") or line.strip().startswith(f"# {key}="):
+                lines[i] = f"{key}={value}\n"
+                return lines
+        lines.append(f"{key}={value}\n")
+        return lines
+
+    lines = _set_var(lines, "NEO4J_URI",      req.uri)
+    lines = _set_var(lines, "NEO4J_USER",     req.user)
+    lines = _set_var(lines, "NEO4J_PASSWORD", req.password)
+
+    with open(env_path, "w", encoding="utf-8") as f:
+        f.writelines(lines)
+
+    # Update live environment and hot-reload the driver
+    os.environ["NEO4J_URI"]      = req.uri
+    os.environ["NEO4J_USER"]     = req.user
+    os.environ["NEO4J_PASSWORD"] = req.password
+
+    import db.neo4j_client as _neo4j
+    # Patch the module-level vars and force driver reconnect
+    _neo4j.NEO4J_URI      = req.uri
+    _neo4j.NEO4J_USER     = req.user
+    _neo4j.NEO4J_PASSWORD = req.password
+    await _neo4j.close()          # tear down old driver
+    _neo4j._available = None      # reset availability flag
+    _neo4j._driver    = None
+
+    connected = await _neo4j.ping()
+    if connected:
+        await _neo4j.ensure_schema()
+
+    return {
+        "saved":     True,
+        "connected": connected,
+        "message":   "Connected to Neo4j successfully." if connected else
+                     f"Settings saved but could not connect to {req.uri} — check Neo4j is running and the password is correct.",
     }
 
 

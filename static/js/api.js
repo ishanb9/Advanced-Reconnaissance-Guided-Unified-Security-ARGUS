@@ -29,6 +29,10 @@ const API = (() => {
   }
 
   return {
+    // ── Raw helpers (used by inline forms / settings panels) ──────────
+    get,
+    post,
+
     // ── Status / metrics ──────────────────────────────────────────────
     status:  () => get('/status'),
     metrics: () => get('/metrics'),
@@ -58,6 +62,9 @@ const API = (() => {
     toolOutputs: (id, q={}) => get(`/sessions/${id}/tool-outputs${qstr(q)}`),
     flags:       (id)       => get(`/sessions/${id}/flags`),
     graph:          (id)       => get(`/sessions/${id}/graph`),
+    graphNeo4j:     (id)       => get(`/sessions/${id}/graph/neo4j`),
+    graphPaths:     (id, fromType='Host', toType='Access', maxDepth=10) =>
+      get(`/sessions/${id}/graph/paths?from_type=${fromType}&to_type=${toType}&max_depth=${maxDepth}`),
     chainAnalyses:  (id)       => get(`/sessions/${id}/chain_analyses`),
     // Multi-host: returns {hosts:[{ip,status,findings_count,severity_counts}], session_mode}
     hosts:       (id)       => get(`/sessions/${id}/hosts`),
