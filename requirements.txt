@@ -32,3 +32,7 @@ python-dotenv==1.0.1
 # Graph database (Neo4j — optional, Phase 2 semantic graph)
 # Install Neo4j Community Edition separately; driver auto-detects availability
 neo4j==5.20.0
+
+# Phase 4 — Caching, Storage & Performance
+# Provides TTLCache (LRU + per-entry TTL) used by db.cache and MasterAgent
+cachetools==5.3.3

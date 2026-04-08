@@ -542,15 +542,32 @@ async def get_findings(
     severity:   Optional[str] = None,
     phase:      Optional[str] = None,
     host:       Optional[str] = None,
+    limit:      int = 1000,
+    skip:       int = 0,
 ) -> List[Dict]:
-    """Get all findings for a session, optionally filtered by severity, phase, or host."""
+    """Get findings for a session with optional pagination (skip/limit)."""
     db = get_db()
     query = {"session_id": session_id}
     if severity: query["severity"] = severity
     if phase:    query["phase"]    = phase
     if host:     query["host"]     = host
-    cursor = db.findings.find(query).sort("found_at", DESCENDING)
-    return _serialize_list(await cursor.to_list(length=1000))
+    cursor = db.findings.find(query).sort("found_at", DESCENDING).skip(skip).limit(limit)
+    return _serialize_list(await cursor.to_list(length=limit))
+
+
+async def get_findings_count(
+    session_id: str,
+    severity:   Optional[str] = None,
+    phase:      Optional[str] = None,
+    host:       Optional[str] = None,
+) -> int:
+    """Return the total count of findings matching the given filters."""
+    db = get_db()
+    query = {"session_id": session_id}
+    if severity: query["severity"] = severity
+    if phase:    query["phase"]    = phase
+    if host:     query["host"]     = host
+    return await db.findings.count_documents(query)
 
 
 async def get_findings_summary(session_id: str, host: Optional[str] = None) -> Dict:
@@ -679,12 +696,17 @@ async def finalize_tool_output(
         pass
 
 
-async def get_tool_outputs(session_id: str, agent: Optional[str] = None, limit: int = 100) -> List[Dict]:
-    """Get tool outputs for a session."""
+async def get_tool_outputs(
+    session_id: str,
+    agent:      Optional[str] = None,
+    limit:      int = 100,
+    skip:       int = 0,
+) -> List[Dict]:
+    """Get tool outputs for a session with optional pagination (skip/limit)."""
     db = get_db()
     query = {"session_id": session_id}
     if agent: query["agent"] = agent
-    cursor = db.tool_outputs.find(query).sort("started_at", DESCENDING).limit(limit)
+    cursor = db.tool_outputs.find(query).sort("started_at", DESCENDING).skip(skip).limit(limit)
     return _serialize_list(await cursor.to_list(length=limit))
 
 
@@ -745,12 +767,17 @@ async def log_agent_action(
     return _serialize(doc)
 
 
-async def get_agent_logs(session_id: str, agent: Optional[str] = None, limit: int = 200) -> List[Dict]:
-    """Get agent logs, newest first."""
+async def get_agent_logs(
+    session_id: str,
+    agent:      Optional[str] = None,
+    limit:      int = 200,
+    skip:       int = 0,
+) -> List[Dict]:
+    """Get agent logs, newest first, with optional pagination (skip/limit)."""
     db = get_db()
     query = {"session_id": session_id}
     if agent: query["agent"] = agent
-    cursor = db.agent_logs.find(query).sort("timestamp", DESCENDING).limit(limit)
+    cursor = db.agent_logs.find(query).sort("timestamp", DESCENDING).skip(skip).limit(limit)
     return _serialize_list(await cursor.to_list(length=limit))
 
 

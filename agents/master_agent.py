@@ -26,6 +26,13 @@ import sys
 from typing import Optional, Dict, List
 from datetime import datetime
 
+# Phase 4 — bounded instruction cache (replaces unbounded plain dict)
+try:
+    from db.cache import BoundedInstructionCache as _BIC
+    _BOUNDED_CACHE = True
+except ImportError:
+    _BOUNDED_CACHE = False
+
 from agents.base_agent import BaseAgent, Instruction, agent_bus, BroadcastFn
 from db.schemas import (
     AgentName, AgentStatus, AttackPhase, FindingSeverity,
@@ -326,7 +333,10 @@ class MasterAgent(BaseAgent):
         self._guidance_queue: asyncio.Queue = asyncio.Queue()
 
         # Results cache — avoids re-running identical instructions
-        self._instruction_cache: Dict[str, Dict] = {}  # hash(tool+args) → result
+        # Phase 4: bounded to 500 entries with 4-hour TTL to prevent memory bloat
+        # on long engagements.  Falls back to plain dict if db.cache unavailable.
+        self._instruction_cache = _BIC(maxsize=500, ttl=14_400.0) if _BOUNDED_CACHE \
+                                   else {}  # type: ignore[assignment]
 
         # Background tasks — fire-and-forget asyncio.Task objects.
         # Tracked here so _wait_for_agents_idle can properly drain them before

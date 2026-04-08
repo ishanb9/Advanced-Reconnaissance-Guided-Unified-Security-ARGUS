@@ -38,6 +38,10 @@ from db.schemas import (
     FindingSeverity, WebSocketMessage, StartPentestRequest, SessionMode
 )
 import db.mongo_client as db
+from db.cache import (
+    findings_cache, graph_cache, tool_outputs_cache, session_meta_cache,
+    stats as cache_stats,
+)
 from agents.master_agent       import MasterAgent
 from agents.shell_agent        import ShellAgent
 from agents.payload_agent      import PayloadAgent
@@ -488,10 +492,32 @@ async def get_findings(
     severity:   Optional[str] = None,
     phase:      Optional[str] = None,
     host:       Optional[str] = None,   # filter to a single IP (multi-host sessions)
+    limit:      int = 200,              # page size  (max 1000)
+    skip:       int = 0,                # offset for pagination
 ):
-    findings = await db.get_findings(session_id, severity, phase, host)
-    summary  = await db.get_findings_summary(session_id, host)
-    return {"findings": findings, "summary": summary}
+    limit = min(limit, 1000)
+
+    # Summary is cheap aggregation — cache with 20 s TTL
+    summary_key = f"summary:{session_id}:{host or ''}"
+    hit, summary = await findings_cache.get(summary_key)
+    if not hit:
+        summary = await db.get_findings_summary(session_id, host)
+        await findings_cache.set(summary_key, summary)
+
+    # Paginated findings fetch (not cached — always fresh)
+    findings = await db.get_findings(session_id, severity, phase, host,
+                                     limit=limit, skip=skip)
+    total = await db.get_findings_count(session_id, severity, phase, host)
+    return {
+        "findings": findings,
+        "summary":  summary,
+        "pagination": {
+            "total": total,
+            "limit": limit,
+            "skip":  skip,
+            "has_more": (skip + len(findings)) < total,
+        },
+    }
 
 
 @app.get("/sessions/{session_id}/hosts")
@@ -520,15 +546,33 @@ async def get_session_hosts(session_id: str):
 
 
 @app.get("/sessions/{session_id}/logs")
-async def get_logs(session_id: str, agent: Optional[str] = None):
-    logs = await db.get_agent_logs(session_id, agent, limit=200)
-    return {"logs": logs, "count": len(logs)}
+async def get_logs(
+    session_id: str,
+    agent:      Optional[str] = None,
+    limit:      int = 200,
+    skip:       int = 0,
+):
+    limit = min(limit, 1000)
+    logs = await db.get_agent_logs(session_id, agent, limit=limit, skip=skip)
+    return {"logs": logs, "count": len(logs), "skip": skip, "limit": limit}
 
 
 @app.get("/sessions/{session_id}/tool-outputs")
-async def get_tool_outputs(session_id: str, agent: Optional[str] = None):
-    outputs = await db.get_tool_outputs(session_id, agent)
-    return {"outputs": outputs, "count": len(outputs)}
+async def get_tool_outputs(
+    session_id: str,
+    agent:      Optional[str] = None,
+    limit:      int = 50,
+    skip:       int = 0,
+):
+    limit = min(limit, 500)
+    cache_key = f"tool-outputs:{session_id}:{agent or ''}:{skip}:{limit}"
+    hit, cached = await tool_outputs_cache.get(cache_key)
+    if hit:
+        return cached
+    outputs = await db.get_tool_outputs(session_id, agent, limit=limit, skip=skip)
+    result = {"outputs": outputs, "count": len(outputs), "skip": skip, "limit": limit}
+    await tool_outputs_cache.set(cache_key, result)
+    return result
 
 
 @app.get("/sessions/{session_id}/flags")
@@ -538,7 +582,13 @@ async def get_flags(session_id: str):
 
 @app.get("/sessions/{session_id}/graph")
 async def get_attack_graph(session_id: str):
-    return await db.get_attack_graph(session_id)
+    cache_key = f"graph:{session_id}"
+    hit, cached = await graph_cache.get(cache_key)
+    if hit:
+        return cached
+    result = await db.get_attack_graph(session_id)
+    await graph_cache.set(cache_key, result)
+    return result
 
 
 @app.get("/sessions/{session_id}/graph/neo4j")
@@ -1221,10 +1271,54 @@ async def get_metrics():
             "network": {"bytes_sent": net.bytes_sent, "bytes_recv": net.bytes_recv,
                         "packets_sent": net.packets_sent, "packets_recv": net.packets_recv},
             "processes": len(list(psutil.process_iter())),
-            "uptime_sec": time.time() - psutil.boot_time()
+            "uptime_sec": time.time() - psutil.boot_time(),
+            # Phase 4 — cache summary inline for dashboard widgets
+            "cache": cache_stats.to_dict(),
         }
     except Exception as e:
         return {"error": str(e)}
+
+
+@app.get("/metrics/cache")
+@app.get("/api/metrics/cache")
+async def get_cache_metrics():
+    """
+    Phase 4 — In-process cache performance metrics.
+    Reports hit/miss rates and per-cache entry counts.
+    """
+    return {
+        "global": cache_stats.to_dict(),
+        "caches": {
+            "findings":    {"size": findings_cache.size(),     "ttl_sec": 20,  "maxsize": 256},
+            "graph":       {"size": graph_cache.size(),        "ttl_sec": 60,  "maxsize": 64},
+            "tool_outputs":{"size": tool_outputs_cache.size(), "ttl_sec": 15,  "maxsize": 256},
+            "session_meta":{"size": session_meta_cache.size(), "ttl_sec": 10,  "maxsize": 128},
+        },
+        # Per-session instruction cache stats from active agents
+        "instruction_caches": {
+            sid: agent._instruction_cache.cache_stats()
+            for sid, agent in active_agents.items()
+            if hasattr(agent, "_instruction_cache")
+               and hasattr(agent._instruction_cache, "cache_stats")
+        },
+    }
+
+
+@app.post("/metrics/cache/flush")
+async def flush_cache(prefix: Optional[str] = None):
+    """
+    Phase 4 — Flush in-process caches.
+    Optional ?prefix= to only evict matching keys (e.g. a session_id).
+    """
+    if prefix:
+        for cache in (findings_cache, graph_cache, tool_outputs_cache, session_meta_cache):
+            await cache.invalidate_prefix(prefix)
+        return {"flushed": "prefix", "prefix": prefix}
+    findings_cache.clear()
+    graph_cache.clear()
+    tool_outputs_cache.clear()
+    session_meta_cache.clear()
+    return {"flushed": "all"}
 
 
 @app.get("/status")

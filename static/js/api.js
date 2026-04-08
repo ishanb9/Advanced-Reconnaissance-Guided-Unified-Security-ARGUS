@@ -34,8 +34,10 @@ const API = (() => {
     post,
 
     // ── Status / metrics ──────────────────────────────────────────────
-    status:  () => get('/status'),
-    metrics: () => get('/metrics'),
+    status:       () => get('/status'),
+    metrics:      () => get('/metrics'),
+    cacheMetrics: () => get('/metrics/cache'),
+    flushCache:   (prefix) => post('/metrics/cache/flush' + (prefix ? `?prefix=${encodeURIComponent(prefix)}` : ''), {}),
 
     // ── Session management ────────────────────────────────────────────
     sessions: {
