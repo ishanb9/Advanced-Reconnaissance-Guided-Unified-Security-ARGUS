@@ -143,7 +143,8 @@ def main():
     parser.add_argument("--add-tip", metavar="TEXT",       help="Add a manual tip/trick to the KB")
     parser.add_argument("--category", default="general",  help="Category for --add-tip (default: general)")
     parser.add_argument("--dir",     metavar="PATH",       help="Ingest from a custom directory instead of data/")
-    parser.add_argument("--list-sources", action="store_true", help="List all data source directories")
+    parser.add_argument("--list-sources",  action="store_true", help="List all data source directories")
+    parser.add_argument("--seed-redteam", action="store_true", help="Ingest built-in red-team attack playbooks (75+ playbooks)")
 
     args = parser.parse_args()
 
@@ -190,6 +191,13 @@ def main():
             print(f"✅ Tip added to KB (category: {args.category})")
         else:
             print("⚠ Tip already exists in KB (duplicate)")
+        return
+
+    # ── Seed red-team playbooks ──
+    if args.seed_redteam:
+        print("\n🗺  Seeding red-team attack playbooks...")
+        from knowledge.redteam_kb_seed import ingest_all
+        ingest_all(kb=kb_module)
         return
 
     # ── Add single file ──

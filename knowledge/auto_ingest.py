@@ -87,12 +87,13 @@ def _ingest_sync(text: str, source: str, metadata: Dict):
         if kb_dir not in sys.path:
             sys.path.insert(0, kb_dir)
         import knowledge_base as kb
-        doc_id = _stable_id(text)
+        import hashlib
+        chunk_index = int(hashlib.sha256(text.encode()).hexdigest(), 16) % 9_999_999
         kb.ingest(
             text        = text,
             source_file = source,
+            chunk_index = chunk_index,
             metadata    = metadata,
-            doc_id      = doc_id,
         )
         return True
     except Exception as exc:
