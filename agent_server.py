@@ -55,7 +55,7 @@ from report.generator          import ReportGenerator
 
 MCP_URL    = "http://localhost:3000"
 OLLAMA_URL = os.environ.get("OLLAMA_URL",   "http://192.168.0.100:11434")
-MODEL_NAME = os.environ.get("OLLAMA_MODEL", "glm-5:cloud")
+MODEL_NAME = os.environ.get("OLLAMA_MODEL", "deepseek-v3.1:671b-cloud")
 MONGO_URI  = os.environ.get("MONGO_URI",    "mongodb://localhost:27017")
 
 
@@ -246,6 +246,7 @@ async def create_session(body: StartPentestRequest):
         phases             = body.phases,
         notes              = getattr(body, "notes", "") or "",
         scope              = getattr(body, "scope", "")  or "",
+        use_reasoning_loop = True,  # Always enabled — reasoning-driven approach
     )
 
     if session_mode == SessionMode.SINGLE:
@@ -427,6 +428,26 @@ async def inject_guidance(session_id: str, request: Request):
         "message": f"Guidance queued: {body.get('note') or body.get('directive', 'unknown')}"
     })
     return {"status": "queued", "guidance": body}
+
+
+@app.post("/sessions/{session_id}/operator-response")
+async def operator_response(session_id: str, request: Request):
+    """
+    Submit operator answers to clarifying questions raised by the engagement context parser.
+    Body: { "answers": {"question text": "answer text", ...} }
+    """
+    master = active_agents.get(session_id)
+    if not master:
+        raise HTTPException(status_code=404, detail="No active session")
+    body  = await request.json()
+    answers = body.get("answers") or {}
+    if not isinstance(answers, dict):
+        raise HTTPException(status_code=422, detail="'answers' must be a dict of {question: answer}")
+    master.answer_operator_question(answers)
+    await ws_manager.broadcast_raw(session_id, "operator_questions_cleared", {
+        "message": f"Received {len(answers)} operator answer(s). Scan context updated."
+    })
+    return {"status": "ok", "answers_received": len(answers)}
 
 
 @app.post("/sessions/{session_id}/activate")
@@ -715,7 +736,7 @@ Be concise but actionable. Use actual tool names and techniques. Format clearly 
     try:
         import httpx as _httpx
         llm_url = os.environ.get("OLLAMA_URL", "http://192.168.0.100:11434")
-        model = os.environ.get("OLLAMA_MODEL", "glm-5:cloud")
+        model = os.environ.get("OLLAMA_MODEL", "deepseek-v3.1:671b-cloud")
         resp = await _httpx.AsyncClient(timeout=60.0).post(
             f"{llm_url}/api/generate",
             json={"model": model, "prompt": prompt, "stream": False}
@@ -1911,16 +1932,17 @@ async def resume_session(session_id: str):
     # Restore run-config from checkpoint
     mc = cp.get("master_config", {})
     task = asyncio.create_task(master.run(
-        session_id        = session_id,
-        target            = session.get("target_ip", ""),
-        target_type       = mc.get("target_type", session.get("target_type", "unknown")),
-        auto_exploit      = mc.get("auto_exploit", False),
-        threading_enabled = mc.get("threading_enabled", False),
-        max_threads       = mc.get("max_threads", 3),
-        phases            = mc.get("phases") or None,
-        notes             = mc.get("notes", ""),
-        scope             = mc.get("scope", ""),
-        checkpoint_id     = cp.get("id"),
+        session_id         = session_id,
+        target             = session.get("target_ip", ""),
+        target_type        = mc.get("target_type", session.get("target_type", "unknown")),
+        auto_exploit       = mc.get("auto_exploit", False),
+        threading_enabled  = mc.get("threading_enabled", False),
+        max_threads        = mc.get("max_threads", 3),
+        phases             = mc.get("phases") or None,
+        notes              = mc.get("notes", ""),
+        scope              = mc.get("scope", ""),
+        checkpoint_id      = cp.get("id"),
+        use_reasoning_loop = True,  # Always enabled
     ))
     active_tasks[session_id] = task
     await db.update_session(session_id, {"status": "active"})

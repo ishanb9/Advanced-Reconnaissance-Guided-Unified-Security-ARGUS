@@ -124,9 +124,152 @@ function SeverityDonut({ findings, findingsSummary }) {
   );
 }
 
+// ── CTF Objectives panel ─────────────────────────────────────────────────────
+// Engagement-type metadata for the objectives panel
+const ENG_META = {
+  ctf:              { icon: '🏁', label: 'CTF Objectives',          answeredLabel: 'flags found',   itemLabel: 'objective' },
+  forensics:        { icon: '🔎', label: 'Forensic Objectives',     answeredLabel: 'artifacts found', itemLabel: 'artifact' },
+  network_analysis: { icon: '📡', label: 'Traffic Analysis Goals',  answeredLabel: 'IOCs found',    itemLabel: 'indicator' },
+  malware_analysis: { icon: '🦠', label: 'Malware Analysis Goals',  answeredLabel: 'IOCs found',    itemLabel: 'indicator' },
+  compliance:       { icon: '✅', label: 'Compliance Checks',       answeredLabel: 'checks passed', itemLabel: 'check' },
+  bug_bounty:       { icon: '🐛', label: 'Bug Bounty Targets',      answeredLabel: 'bugs found',    itemLabel: 'target' },
+  red_team:         { icon: '🎯', label: 'Red Team Objectives',     answeredLabel: 'objectives met', itemLabel: 'objective' },
+  pentest:          { icon: '🔓', label: 'Pentest Objectives',      answeredLabel: 'confirmed',     itemLabel: 'objective' },
+  custom:           { icon: '🎯', label: 'Objectives',              answeredLabel: 'completed',     itemLabel: 'task' },
+};
+
+function ObjectivesPanel({ objectives, answers, engagementType }) {
+  const [collapsed, setCollapsed] = useState(false);
+  if (!objectives || objectives.length === 0) return null;
+
+  const engType     = engagementType || 'pentest';
+  const meta        = ENG_META[engType] || ENG_META.custom;
+  const answeredCount = Object.keys(answers || {}).length;
+  const pct           = Math.round(answeredCount / objectives.length * 100);
+
+  // Group objectives by section
+  const sections = [];
+  let currentSection = { label: '', items: [] };
+  objectives.forEach((obj, i) => {
+    const q   = typeof obj === 'object' ? (obj.task || obj.question || '') : String(obj);
+    const sec = typeof obj === 'object' ? (obj.section || '') : '';
+    if (sec && sec !== currentSection.label) {
+      if (currentSection.items.length) sections.push({ ...currentSection });
+      currentSection = { label: sec, items: [] };
+    }
+    const ansData = (answers || {})[String(i)];
+    currentSection.items.push({ index: i, question: q, ansData });
+  });
+  if (currentSection.items.length) sections.push(currentSection);
+
+  return React.createElement('div', {
+    style: {
+      background: 'rgba(0,229,160,0.03)',
+      border: '1px solid rgba(0,229,160,0.2)',
+      borderRadius: 10, marginBottom: 14, flexShrink: 0,
+    }
+  },
+    // Header row
+    React.createElement('div', {
+      onClick: () => setCollapsed(c => !c),
+      style: {
+        display: 'flex', alignItems: 'center', gap: 10,
+        padding: '10px 16px', cursor: 'pointer',
+        borderBottom: collapsed ? 'none' : '1px solid rgba(0,229,160,0.15)',
+      }
+    },
+      React.createElement('span', { style: { fontSize: 14 } }, meta.icon),
+      React.createElement('span', { style: { fontSize: 12, fontWeight: 700, color: 'var(--accent)', flex: 1 } },
+        meta.label),
+      // Progress bar
+      React.createElement('div', { style: { flex: 1, maxWidth: 160, height: 5, background: 'var(--bg-card)', borderRadius: 3, overflow: 'hidden' } },
+        React.createElement('div', { style: { width: `${pct}%`, height: '100%', background: 'var(--accent)', borderRadius: 3, transition: 'width 0.4s' } })
+      ),
+      React.createElement('span', {
+        style: { fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--accent)', minWidth: 60, textAlign: 'right' }
+      }, `${answeredCount}/${objectives.length}`),
+      React.createElement('span', { style: { fontSize: 10, color: 'var(--text-muted)', marginLeft: 4 } }, collapsed ? '▶' : '▼')
+    ),
+
+    // Objectives list
+    !collapsed && React.createElement('div', { style: { padding: '8px 0' } },
+      sections.map((sec, si) =>
+        React.createElement('div', { key: si },
+          // Section header
+          sec.label && React.createElement('div', {
+            style: {
+              padding: '5px 16px 3px',
+              fontSize: 9, fontWeight: 700, color: 'var(--text-muted)',
+              textTransform: 'uppercase', letterSpacing: 0.8,
+              borderTop: si > 0 ? '1px solid var(--border)' : 'none',
+              marginTop: si > 0 ? 4 : 0,
+            }
+          }, sec.label),
+          // Items
+          sec.items.map(({ index, question, ansData }) => {
+            const answered = !!ansData;
+            const answer   = ansData?.answer || (typeof ansData === 'string' ? ansData : '');
+            const tool     = ansData?.tool   || '';
+            return React.createElement('div', {
+              key: index,
+              style: {
+                display: 'flex', alignItems: 'flex-start', gap: 10,
+                padding: '6px 16px',
+                background: answered ? 'rgba(0,229,160,0.04)' : 'transparent',
+                borderLeft: answered ? '2px solid var(--accent)' : '2px solid transparent',
+              }
+            },
+              // Check / pending dot
+              React.createElement('span', {
+                style: {
+                  fontSize: 12, flexShrink: 0, marginTop: 1,
+                  color: answered ? 'var(--accent)' : 'var(--text-muted)',
+                }
+              }, answered ? '✓' : '○'),
+              React.createElement('div', { style: { flex: 1, minWidth: 0 } },
+                // Item number + text
+                React.createElement('div', {
+                  style: {
+                    fontSize: 11,
+                    color: answered ? 'var(--text-primary)' : 'var(--text-secondary)',
+                    fontWeight: answered ? 600 : 400,
+                  }
+                },
+                  React.createElement('span', {
+                    style: { fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-muted)', marginRight: 6 }
+                  }, `[${index + 1}]`),
+                  question
+                ),
+                // Answer / artifact (if found)
+                answered && React.createElement('div', {
+                  style: { marginTop: 3, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }
+                },
+                  React.createElement('span', {
+                    style: {
+                      fontSize: 12, fontWeight: 700, fontFamily: 'var(--font-mono)',
+                      color: 'var(--accent)',
+                      background: 'rgba(0,229,160,0.1)', border: '1px solid rgba(0,229,160,0.3)',
+                      borderRadius: 4, padding: '1px 8px',
+                    }
+                  }, answer),
+                  tool && React.createElement('span', {
+                    style: { fontSize: 9, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }
+                  }, `via ${tool}`)
+                )
+              )
+            );
+          })
+        )
+      )
+    )
+  );
+}
+
 function FindingsBoard() {
   const { state } = window.useStore();
-  const { sessionId, findingsSummary, discoveredHosts, hostFilter, dispatch } = state;
+  const { sessionId, findingsSummary, discoveredHosts, hostFilter, dispatch,
+          ctfObjectives, ctfAnswers, engagementContext } = state;
+  const engType = (engagementContext?.engagement_type) || 'pentest';
 
   // All findings loaded from DB + appended from WS
   const [findings,    setFindings]    = useState([]);
@@ -211,9 +354,15 @@ function FindingsBoard() {
     // ── Header ──────────────────────────────────────────────
     React.createElement('div', { className: 'page-header', style: { flexShrink: 0 } },
       React.createElement('div', null,
-        React.createElement('div', { className: 'page-title' }, '⚠ Findings Board'),
+        React.createElement('div', { className: 'page-title' },
+          ctfObjectives && ctfObjectives.length
+            ? `${(ENG_META[engType] || ENG_META.custom).icon} ${(ENG_META[engType] || ENG_META.custom).label.replace(' Objectives','').replace(' Goals','').replace(' Checks','').replace(' Targets','')} Findings`
+            : '⚠ Findings Board'
+        ),
         React.createElement('div', { className: 'page-subtitle' },
-          `${findings.length} findings` + (loading ? ' — refreshing...' : ' — updates live')
+          ctfObjectives && ctfObjectives.length
+            ? `${Object.keys(ctfAnswers||{}).length}/${ctfObjectives.length} ${(ENG_META[engType]||ENG_META.custom).answeredLabel} · ${findings.length} findings` + (loading ? ' — refreshing...' : '')
+            : `${findings.length} findings` + (loading ? ' — refreshing...' : ' — updates live')
         )
       ),
       React.createElement('button', {
@@ -224,6 +373,9 @@ function FindingsBoard() {
         }
       }, '⟳ Refresh')
     ),
+
+    // ── Objectives panel (adapts to engagement type) ─────────
+    React.createElement(ObjectivesPanel, { objectives: ctfObjectives, answers: ctfAnswers, engagementType: engType }),
 
     // ── Severity Donut ───────────────────────────────────────
     React.createElement(SeverityDonut, { findings, findingsSummary: sevCounts }),
@@ -277,13 +429,27 @@ function FindingsBoard() {
             ? React.createElement('div', { style: { color: 'var(--text-muted)', textAlign: 'center', padding: 40 } },
                 findings.length > 0 ? 'No findings match filter' : 'No findings yet — findings appear here as agents discover vulnerabilities')
             : displayed.map((f, i) => {
-                const isOpen = expanded === i;
-                const sev = f.severity || 'info';
+                const isOpen  = expanded === i;
+                const sev     = f.severity || 'info';
+                const isCtf   = (f.title || '').startsWith('[CTF #') || (f.title || '').startsWith('[CTF]') ||
+                                (f.title || '').startsWith('[OBJ #') || (f.title || '').match(/^\[(FORENSIC|IOC|ARTIFACT|CHECK|BUG) #\d+\]/i);
+                const engIcon = (ENG_META[engType] || ENG_META.custom).icon;
+
+                // For objective-answer findings, extract the inline answer from description
+                let ctfAnswerText = '';
+                if (isCtf && f.description) {
+                  const m = f.description.match(/Answer:\s*\*?\*?([^\n*]+)\*?\*?/i);
+                  if (m) ctfAnswerText = m[1].trim();
+                }
+
                 return React.createElement('div', {
                   key: f.id || f._id || i,
                   style: {
                     borderBottom: '1px solid var(--border)',
-                    background: isOpen ? (SEV_BG[sev] || 'transparent') : 'transparent'
+                    background: isCtf
+                      ? (isOpen ? 'rgba(0,229,160,0.07)' : 'rgba(0,229,160,0.03)')
+                      : (isOpen ? (SEV_BG[sev] || 'transparent') : 'transparent'),
+                    borderLeft: isCtf ? '3px solid var(--accent)' : '3px solid transparent',
                   }
                 },
                   // Summary row
@@ -293,16 +459,26 @@ function FindingsBoard() {
                       display: 'flex', alignItems: 'center', gap: 10,
                       padding: '11px 16px', cursor: 'pointer',
                       transition: 'background 0.1s',
-                      ':hover': { background: 'rgba(0,229,160,0.03)' }
                     }
                   },
-                    React.createElement('span', { style: { fontSize: 12, flexShrink: 0, color: 'var(--text-muted)' } },
-                      isOpen ? '▼' : '▶'),
+                    React.createElement('span', { style: { fontSize: 12, flexShrink: 0, color: isCtf ? 'var(--accent)' : 'var(--text-muted)' } },
+                      isOpen ? '▼' : (isCtf ? engIcon : '▶')),
                     React.createElement(SevBadge, { sev }),
                     React.createElement('span', {
-                      style: { flex: 1, fontSize: 12, color: 'var(--text-primary)',
-                               overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }
+                      style: { flex: 1, fontSize: 12, color: isCtf ? 'var(--accent)' : 'var(--text-primary)',
+                               overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                               fontWeight: isCtf ? 600 : 400 }
                     }, f.title || '(untitled)'),
+                    // CTF answer preview badge — shown inline in the row
+                    isCtf && ctfAnswerText && React.createElement('span', {
+                      style: {
+                        fontSize: 11, fontFamily: 'var(--font-mono)', fontWeight: 700,
+                        color: 'var(--accent)',
+                        background: 'rgba(0,229,160,0.12)', border: '1px solid rgba(0,229,160,0.35)',
+                        borderRadius: 4, padding: '1px 8px', flexShrink: 0, maxWidth: 220,
+                        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                      }
+                    }, ctfAnswerText),
                     // HOST badge (clickable in multi-host mode to filter)
                     isMultiHost && f.host && React.createElement('span', {
                       onClick: e => { e.stopPropagation(); setFilterHost(filterHost === f.host ? 'all' : f.host); },

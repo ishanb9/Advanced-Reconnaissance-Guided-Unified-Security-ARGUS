@@ -1907,8 +1907,12 @@ def ingest_all(kb=None):
     sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
     if kb is None:
-        from knowledge.knowledge_base import KnowledgeBase
-        kb = KnowledgeBase()
+        import importlib.util, pathlib
+        _kb_path = pathlib.Path(__file__).parent / "knowledge_base.py"
+        _spec = importlib.util.spec_from_file_location("knowledge_base", _kb_path)
+        _kb_mod = importlib.util.module_from_spec(_spec)
+        _spec.loader.exec_module(_kb_mod)
+        kb = _kb_mod.KnowledgeBase()
 
     all_playbooks = (
         AD_PLAYBOOKS

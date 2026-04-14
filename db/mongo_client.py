@@ -212,6 +212,31 @@ async def _create_indexes():
     await db.session_archives.create_index([("session_id", ASCENDING)], unique=True)
     await db.session_archives.create_index([("archived_at", DESCENDING)])
 
+    # ── hypotheses (reasoning engine) ───────────────────────────────────────
+    await db.hypotheses.create_index(
+        [("session_id", ASCENDING), ("host", ASCENDING), ("confidence", DESCENDING)]
+    )
+    await db.hypotheses.create_index(
+        [("session_id", ASCENDING), ("hypothesis_id", ASCENDING)], unique=True
+    )
+
+    # ── negative_memory (reasoning engine) ──────────────────────────────────
+    await db.negative_memory.create_index(
+        [("session_id", ASCENDING), ("tool", ASCENDING), ("target_service", ASCENDING)],
+        unique=True,
+        name="neg_mem_unique_attempt"
+    )
+
+    # ── action_scores (reasoning engine) ────────────────────────────────────
+    await db.action_scores.create_index(
+        [("session_id", ASCENDING), ("created_at", DESCENDING)]
+    )
+
+    # ── ranked_paths (reasoning engine) ─────────────────────────────────────
+    await db.ranked_paths.create_index(
+        [("session_id", ASCENDING), ("iteration", DESCENDING)]
+    )
+
     # ── agent_logs_realtime (capped ring-buffer for sync-gate diagnostics) ──
     # Create only if it doesn't already exist — capped collections cannot be
     # converted after creation, so we guard with a try/except.
@@ -361,6 +386,10 @@ async def delete_session(session_id: str) -> bool:
         db.mitre_mappings.delete_many({"session_id": session_id}),
         db.attack_tree.delete_many({"session_id": session_id}),
         db.rag_history.delete_many({"session_id": session_id}),
+        db.hypotheses.delete_many({"session_id": session_id}),
+        db.negative_memory.delete_many({"session_id": session_id}),
+        db.action_scores.delete_many({"session_id": session_id}),
+        db.ranked_paths.delete_many({"session_id": session_id}),
         return_exceptions=True  # don't fail if a collection doesn't exist
     )
 
@@ -1793,3 +1822,255 @@ async def list_archived_sessions(limit: int = 50) -> List[Dict]:
     db = get_db()
     cursor = db.session_archives.find().sort("archived_at", DESCENDING).limit(limit)
     return _serialize_list(await cursor.to_list(length=limit))
+
+
+# ═══════════════════════════════════════════════════════════
+#  REASONING ENGINE — HYPOTHESES
+# ═══════════════════════════════════════════════════════════
+
+async def store_hypothesis(
+    session_id: str,
+    host: str,
+    hypothesis_id: str,
+    statement: str,
+    confidence: float,
+    evidence_supporting: List[str],
+    required_evidence: List[str],
+    recommended_next_actions: List[str],
+    attack_phase: str,
+    mitre_technique: Optional[str] = None,
+    iteration_number: int = 0,
+) -> str:
+    """Upsert a hypothesis document. Returns the document id."""
+    db_conn = get_db()
+    now = datetime.utcnow()
+    doc = {
+        "session_id":              session_id,
+        "host":                    host,
+        "hypothesis_id":           hypothesis_id,
+        "statement":               statement,
+        "confidence":              confidence,
+        "evidence_supporting":     evidence_supporting,
+        "required_evidence":       required_evidence,
+        "recommended_next_actions": recommended_next_actions,
+        "attack_phase":            attack_phase,
+        "mitre_technique":         mitre_technique,
+        "iteration_number":        iteration_number,
+        "validated":               False,
+        "invalidated":             False,
+        "agent":                   "master",
+        "phase":                   "hypothesis",
+        "schema_version":          1,
+        "extra":                   {},
+        "created_at":              now,
+    }
+    result = await db_conn.hypotheses.update_one(
+        {"session_id": session_id, "hypothesis_id": hypothesis_id},
+        {"$set": doc},
+        upsert=True,
+    )
+    if result.upserted_id:
+        return str(result.upserted_id)
+    existing = await db_conn.hypotheses.find_one(
+        {"session_id": session_id, "hypothesis_id": hypothesis_id},
+        {"_id": 1}
+    )
+    return str(existing["_id"]) if existing else hypothesis_id
+
+
+async def update_hypothesis_status(
+    session_id: str,
+    hypothesis_id: str,
+    validated: Optional[bool] = None,
+    invalidated: Optional[bool] = None,
+    confidence: Optional[float] = None,
+) -> bool:
+    """Patch validation status and/or confidence of an existing hypothesis."""
+    db_conn = get_db()
+    updates: Dict[str, Any] = {}
+    if validated is not None:
+        updates["validated"] = validated
+    if invalidated is not None:
+        updates["invalidated"] = invalidated
+    if confidence is not None:
+        updates["confidence"] = confidence
+    if not updates:
+        return False
+    result = await db_conn.hypotheses.update_one(
+        {"session_id": session_id, "hypothesis_id": hypothesis_id},
+        {"$set": updates},
+    )
+    return result.modified_count > 0
+
+
+async def get_hypotheses(session_id: str, host: Optional[str] = None) -> List[Dict]:
+    """Fetch all hypotheses for a session sorted by confidence descending."""
+    db_conn = get_db()
+    query: Dict[str, Any] = {"session_id": session_id}
+    if host:
+        query["host"] = host
+    cursor = db_conn.hypotheses.find(query).sort("confidence", DESCENDING)
+    return _serialize_list(await cursor.to_list(length=200))
+
+
+# ═══════════════════════════════════════════════════════════
+#  REASONING ENGINE — NEGATIVE MEMORY
+# ═══════════════════════════════════════════════════════════
+
+async def store_negative_memory(
+    session_id: str,
+    host: str,
+    attempt_id: str,
+    tool: str,
+    args: str,
+    target_service: str,
+    failure_reason: str,
+    evidence: str = "",
+    hypothesis_id: str = "",
+) -> str:
+    """
+    Upsert a failed attempt. If the same (session_id, tool, target_service)
+    combination already exists, increments attempt_count.
+    Returns the document id.
+    """
+    db_conn = get_db()
+    now = datetime.utcnow()
+    base_doc = {
+        "session_id":     session_id,
+        "host":           host,
+        "attempt_id":     attempt_id,
+        "tool":           tool,
+        "args":           args,
+        "target_service": target_service,
+        "failure_reason": failure_reason,
+        "evidence":       evidence[:500] if evidence else "",
+        "hypothesis_id":  hypothesis_id,
+        "agent":          "master",
+        "phase":          "decision",
+        "schema_version": 1,
+        "extra":          {},
+        "created_at":     now,
+    }
+    result = await db_conn.negative_memory.update_one(
+        {"session_id": session_id, "tool": tool, "target_service": target_service},
+        {
+            "$set":  base_doc,
+            "$inc":  {"attempt_count": 1},
+            "$setOnInsert": {"attempt_count": 1},
+        },
+        upsert=True,
+    )
+    if result.upserted_id:
+        return str(result.upserted_id)
+    existing = await db_conn.negative_memory.find_one(
+        {"session_id": session_id, "tool": tool, "target_service": target_service},
+        {"_id": 1}
+    )
+    return str(existing["_id"]) if existing else attempt_id
+
+
+async def load_negative_memory(session_id: str) -> List[Dict]:
+    """Fetch all failed attempts for a session."""
+    db_conn = get_db()
+    cursor = db_conn.negative_memory.find(
+        {"session_id": session_id}
+    ).sort("attempt_count", DESCENDING)
+    return _serialize_list(await cursor.to_list(length=500))
+
+
+# ═══════════════════════════════════════════════════════════
+#  REASONING ENGINE — ACTION SCORES
+# ═══════════════════════════════════════════════════════════
+
+async def store_action_score_event(
+    session_id: str,
+    host: str,
+    action_id: str,
+    delta: int,
+    reason: str,
+    running_total: int,
+    tool: str,
+    hypothesis_id: str = "",
+) -> str:
+    """Append a score change event. Returns the new document id."""
+    db_conn = get_db()
+    doc = {
+        "_id":            ObjectId(),
+        "session_id":     session_id,
+        "host":           host,
+        "action_id":      action_id,
+        "delta":          delta,
+        "reason":         reason,
+        "running_total":  running_total,
+        "tool":           tool,
+        "hypothesis_id":  hypothesis_id,
+        "agent":          "master",
+        "phase":          "decision",
+        "schema_version": 1,
+        "extra":          {},
+        "created_at":     datetime.utcnow(),
+    }
+    result = await db_conn.action_scores.insert_one(doc)
+    return str(result.inserted_id)
+
+
+async def get_action_score_total(session_id: str) -> int:
+    """Return the latest running_total for a session (0 if no events)."""
+    db_conn = get_db()
+    doc = await db_conn.action_scores.find_one(
+        {"session_id": session_id},
+        sort=[("created_at", DESCENDING)],
+    )
+    return doc.get("running_total", 0) if doc else 0
+
+
+# ═══════════════════════════════════════════════════════════
+#  REASONING ENGINE — RANKED PATHS
+# ═══════════════════════════════════════════════════════════
+
+async def store_ranked_paths(
+    session_id: str,
+    host: str,
+    iteration: int,
+    paths: List[Dict],
+    top_path_score: float = 0.0,
+    top_path_id: str = "",
+) -> str:
+    """Upsert the ranked-path snapshot for a given iteration."""
+    db_conn = get_db()
+    now = datetime.utcnow()
+    doc = {
+        "session_id":     session_id,
+        "host":           host,
+        "iteration":      iteration,
+        "paths":          paths,
+        "top_path_score": top_path_score,
+        "top_path_id":    top_path_id,
+        "agent":          "master",
+        "phase":          "decision",
+        "schema_version": 1,
+        "extra":          {},
+        "created_at":     now,
+    }
+    result = await db_conn.ranked_paths.update_one(
+        {"session_id": session_id, "iteration": iteration},
+        {"$set": doc},
+        upsert=True,
+    )
+    if result.upserted_id:
+        return str(result.upserted_id)
+    existing = await db_conn.ranked_paths.find_one(
+        {"session_id": session_id, "iteration": iteration},
+        {"_id": 1}
+    )
+    return str(existing["_id"]) if existing else ""
+
+
+async def get_latest_ranked_paths(session_id: str) -> Optional[Dict]:
+    """Return the most recent ranked-paths snapshot for a session."""
+    db_conn = get_db()
+    doc = await db_conn.ranked_paths.find_one(
+        {"session_id": session_id},
+        sort=[("iteration", DESCENDING)],
+    )
+    return _serialize(doc) if doc else None

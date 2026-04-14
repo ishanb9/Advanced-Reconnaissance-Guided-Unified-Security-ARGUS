@@ -76,6 +76,7 @@ const PAGES = [
   { key: 'report',    icon: '◧',  label: 'Report',                 group: 'Reporting'    },
   { key: 'metrics',   icon: '◫',  label: 'Metrics',                group: 'Reporting'    },
   { key: 'knowledge', icon: '◉',  label: 'Knowledge Base',         group: 'Knowledge'    },
+  { key: 'reasoning', icon: '🧠', label: 'Reasoning Engine',        group: 'Analysis'     },
 ];
 
 // Map keys to actual component references (preserving original window.* names)
@@ -96,6 +97,7 @@ const PAGE_COMPONENT = {
   report:    () => window.ReportPage,
   metrics:   () => window.MetricsDash,
   knowledge: () => window.KnowledgePage,
+  reasoning: () => window.ReasoningEnginePage,
 };
 
 const GROUP_ORDER = ['Operations', 'Analysis', 'Exploitation', 'Reporting', 'Knowledge'];

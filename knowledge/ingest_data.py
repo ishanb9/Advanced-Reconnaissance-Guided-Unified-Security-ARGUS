@@ -196,8 +196,12 @@ def main():
     # ── Seed red-team playbooks ──
     if args.seed_redteam:
         print("\n🗺  Seeding red-team attack playbooks...")
-        from knowledge.redteam_kb_seed import ingest_all
-        ingest_all(kb=kb_module)
+        import importlib.util, pathlib
+        _seed_path = pathlib.Path(__file__).parent / "redteam_kb_seed.py"
+        _spec = importlib.util.spec_from_file_location("redteam_kb_seed", _seed_path)
+        _seed_mod = importlib.util.module_from_spec(_spec)
+        _spec.loader.exec_module(_seed_mod)
+        _seed_mod.ingest_all(kb=kb_module)
         return
 
     # ── Add single file ──

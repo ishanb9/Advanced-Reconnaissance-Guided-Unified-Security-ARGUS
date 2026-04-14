@@ -507,6 +507,67 @@ function TargetConfig() {
       )
     ),
 
+    // Reasoning Engine — always-on info card
+    React.createElement('div', {
+      style: {
+        ...card,
+        background: 'rgba(0,229,160,0.04)',
+        border: '1px solid rgba(0,229,160,0.25)',
+      }
+    },
+      React.createElement('div', { style: { display: 'flex', alignItems: 'flex-start', gap: 12 } },
+        // Pulsing indicator
+        React.createElement('div', {
+          style: {
+            width: 8, height: 8, borderRadius: '50%', flexShrink: 0, marginTop: 3,
+            background: 'var(--accent)',
+            boxShadow: '0 0 8px var(--accent)',
+            animation: 'pulse 2s infinite',
+          }
+        }),
+        React.createElement('div', { style: { flex: 1 } },
+          React.createElement('div', {
+            style: { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }
+          },
+            React.createElement('span', { style: { fontSize: 12, fontWeight: 700, color: 'var(--accent)' } },
+              '🧠 Adaptive Reasoning Engine'
+            ),
+            React.createElement('span', {
+              style: {
+                fontSize: 8, padding: '1px 6px', borderRadius: 3,
+                background: 'rgba(0,229,160,0.15)', color: 'var(--accent)',
+                border: '1px solid rgba(0,229,160,0.3)',
+                fontFamily: 'var(--font-mono)', letterSpacing: 0.6,
+              }
+            }, 'ALWAYS ON')
+          ),
+          React.createElement('div', {
+            style: { fontSize: 10, color: 'var(--text-muted)', lineHeight: 1.6 }
+          }, 'ARGUS thinks like a human attacker: start with full recon → form hypotheses about attack vectors → execute the most promising path → validate → chain post-exploitation automatically. All dashboards update in real time.'),
+          React.createElement('div', {
+            style: { marginTop: 8, display: 'flex', gap: 6, flexWrap: 'wrap' }
+          },
+            ...[
+              { label: '🔍 Full Recon',       color: 'var(--cyan)'   },
+              { label: '🧠 Hypothesis Loop',   color: 'var(--accent)' },
+              { label: '⚡ Parallel Evidence', color: 'var(--violet)' },
+              { label: '🎯 Auto Post-Exploit', color: 'var(--amber)'  },
+              { label: '↔️ Lateral Movement',  color: 'var(--green)'  },
+            ].map(({ label: l, color }) =>
+              React.createElement('span', {
+                key: l,
+                style: {
+                  fontSize: 9, padding: '2px 7px', borderRadius: 4,
+                  background: color + '18', color,
+                  border: `1px solid ${color}40`,
+                }
+              }, l)
+            )
+          )
+        )
+      )
+    ),
+
     // Error
     error && React.createElement('div', {
       style: {

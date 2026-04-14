@@ -116,7 +116,7 @@ def _kb_procedures(query: str, top_k: int = 3) -> str:
 # ─── Configuration ────────────────────────────────────────────
 MCP_URL    = "http://localhost:3000"
 OLLAMA_URL = "http://192.168.0.100:11434"   # ← Ollama host
-MODEL_NAME = "glm-5:cloud"          # ← Update to your model name
+MODEL_NAME = "deepseek-v3.1:671b-cloud"   # ← Ollama model name
 
 LLM_CHECK_TIMEOUT  = 10   # Seconds to wait for Ollama health check
 LLM_THINK_TIMEOUT  = 600  # Per-chunk read timeout when streaming (tokens arrive continuously)

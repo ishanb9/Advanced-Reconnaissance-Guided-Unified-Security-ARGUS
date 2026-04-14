@@ -141,6 +141,29 @@ const INIT = {
 
   // Web testing confirmation gate — set when confirm_web=true and web phase is ready
   webConfirmPending:  false,
+
+  // ── Reasoning Engine state (use_reasoning_loop=true) ────────────────────────
+  reasoningEngineActive: false,      // true while reasoning loop is running
+  reasoningIteration:    0,          // current loop iteration (0..50)
+  hypotheses:            [],         // [{hypothesis_id, statement, confidence, evidence_supporting,
+                                     //   required_evidence, recommended_next_actions, attack_phase,
+                                     //   mitre_technique, validated, invalidated, iteration_number}]
+  rankedPaths:           [],         // [{path_id, description, entry_point, objective, total_score,
+                                     //   path_confidence, estimated_effort, nodes:[...]}]
+  actionScore:           0,          // cumulative engagement score (+10/-5 etc.)
+  justifiedActions:      [],         // [{action_id, tool, args, target_service, reason,
+                                     //   expected_outcome, success_criteria, confidence,
+                                     //   requires_confirmation, plan, created_at}]
+  negativeMemory:        [],         // [{attempt_id, tool, target_service, failure_reason,
+                                     //   attempt_count, ts}]
+
+  // ── CTF mode ────────────────────────────────────────────────────────────────
+  ctfObjectives:         [],         // [{question, section}] — parsed from operator notes
+  ctfAnswers:            {},         // {index: {answer, evidence, tool, iteration}}
+
+  // ── Engagement intelligence ──────────────────────────────────────────────────
+  engagementContext:     null,       // {engagement_type, title, context_summary, objectives, ...}
+  operatorQuestions:     [],         // clarifying questions waiting for operator response
 };
 
 // ─── Selectors / derived state helpers ─────────────────────
@@ -199,7 +222,12 @@ function reducer(state, action) {
       };
 
     case 'SET_SESSION':
-      return { ...state, activeSession: action.payload, sessionId: action.payload?.id || null };
+      return {
+        ...state,
+        activeSession:       action.payload,
+        sessionId:           action.payload?.id || null,
+        reasoningEngineActive: !!action.payload,   // always on when session is active
+      };
 
     // Patch only the status field of the active session without needing full state access
     case 'UPDATE_SESSION_STATUS':
@@ -276,6 +304,85 @@ function reducer(state, action) {
       const entries = [action.payload, ...state.reasoningLog].slice(0, 200);
       return { ...state, reasoningLog: entries };
     }
+
+    // ── Reasoning Engine ────────────────────────────────────
+    case 'REASONING_ENGINE_STATUS':
+      return { ...state, reasoningEngineActive: !!action.payload };
+
+    case 'REASONING_ITERATION':
+      return { ...state, reasoningIteration: action.payload };
+
+    case 'HYPOTHESIS_UPSERT': {
+      const h = action.payload;
+      const existing = state.hypotheses.findIndex(x => x.hypothesis_id === h.hypothesis_id);
+      let updated;
+      if (existing >= 0) {
+        updated = state.hypotheses.map((x, i) => i === existing ? { ...x, ...h } : x);
+      } else {
+        updated = [h, ...state.hypotheses].slice(0, 50);
+      }
+      return { ...state, hypotheses: updated };
+    }
+
+    case 'HYPOTHESES_REPLACE':
+      return { ...state, hypotheses: (action.payload || []).slice(0, 50) };
+
+    case 'RANKED_PATHS_UPDATE':
+      return { ...state, rankedPaths: (action.payload || []).slice(0, 10) };
+
+    case 'ACTION_SCORE_UPDATE':
+      return { ...state, actionScore: action.payload };
+
+    case 'JUSTIFIED_ACTION': {
+      const actions = [action.payload, ...state.justifiedActions].slice(0, 100);
+      return { ...state, justifiedActions: actions };
+    }
+
+    case 'NEGATIVE_MEMORY_ADD': {
+      const nm = action.payload;
+      const existingIdx = state.negativeMemory.findIndex(
+        x => x.tool === nm.tool && x.target_service === nm.target_service
+      );
+      let updated;
+      if (existingIdx >= 0) {
+        updated = state.negativeMemory.map((x, i) =>
+          i === existingIdx ? { ...x, attempt_count: (x.attempt_count || 1) + 1, ts: nm.ts || x.ts } : x
+        );
+      } else {
+        updated = [nm, ...state.negativeMemory].slice(0, 200);
+      }
+      return { ...state, negativeMemory: updated };
+    }
+
+    case 'REASONING_STATE_RESTORE':
+      return {
+        ...state,
+        hypotheses:         action.payload.hypotheses         || state.hypotheses,
+        rankedPaths:        action.payload.rankedPaths        || state.rankedPaths,
+        actionScore:        action.payload.actionScore        ?? state.actionScore,
+        negativeMemory:     action.payload.negativeMemory     || state.negativeMemory,
+        reasoningIteration: action.payload.reasoningIteration ?? state.reasoningIteration,
+        ctfObjectives:      action.payload.ctfObjectives      || state.ctfObjectives,
+        ctfAnswers:         action.payload.ctfAnswers         || state.ctfAnswers,
+      };
+
+    case 'CTF_OBJECTIVES_SET':
+      return { ...state, ctfObjectives: action.payload || [] };
+
+    case 'CTF_ANSWER': {
+      const { objective_index, answer, evidence, tool, iteration } = action.payload;
+      const updated = {
+        ...state.ctfAnswers,
+        [String(objective_index)]: { answer, evidence, tool, iteration },
+      };
+      return { ...state, ctfAnswers: updated };
+    }
+
+    case 'ENGAGEMENT_CONTEXT_SET':
+      return { ...state, engagementContext: action.payload || null };
+
+    case 'OPERATOR_QUESTIONS_SET':
+      return { ...state, operatorQuestions: action.payload || [] };
 
     case 'TOOL_LINE': {
       const { agent, line, lineType } = action.payload;
@@ -882,7 +989,7 @@ function StoreProvider({ children }) {
     ws.onmessage = (e) => {
       let msg;
       try { msg = JSON.parse(e.data); } catch { return; }
-      routeWsEvent(msg, dispatch, shellListenersRef.current);
+      routeWsEvent(msg, dispatch, shellListenersRef.current, sessionId);
     };
   }, []);
 
@@ -966,7 +1073,7 @@ function StoreProvider({ children }) {
 }
 
 // ─── WebSocket Event Router ────────────────────────────────
-function routeWsEvent(msg, dispatch, shellListeners) {
+function routeWsEvent(msg, dispatch, shellListeners, sessionId) {
   const { type, data, timestamp } = msg;
   // Normalize agent name from enum string
   const rawAgent = msg.agent || data?.agent || '';
@@ -1069,6 +1176,19 @@ function routeWsEvent(msg, dispatch, shellListeners) {
       break;
 
     // ── Reasoning ────────────────────────────────────────
+    // reasoning_loop: emitted by ReasoningLoop._emit_reasoning() — log to feed
+    case 'reasoning_loop':
+      dispatch({ type: 'REASONING_ENTRY', payload: {
+        ts, agent: 'master', phase: 'exploit',
+        step: 'reasoning_loop', reasoning: data?.message || '',
+        decision: data?.message || '', next_action: '', data,
+      }});
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'master', eventType: 'reasoning_loop',
+        message: `🧠 [${data?.iteration ?? '?'}] ${(data?.message || '').slice(0, 120)}`, data,
+      }});
+      break;
+
     case 'agent_reasoning':
       dispatch({ type: 'REASONING_ENTRY', payload: {
         ts,
@@ -1265,8 +1385,9 @@ function routeWsEvent(msg, dispatch, shellListeners) {
 
     case 'graph_refresh':
       // Backend added new chain nodes — reload graph from API
-      if (state.sessionId) {
-        window.API.graph(state.sessionId).then(g => {
+      // Use the sessionId passed to routeWsEvent (state is not in scope here)
+      if (sessionId) {
+        window.API.graph(sessionId).then(g => {
           dispatch({ type: 'SET_GRAPH', payload: { nodes: g.nodes || [], edges: g.edges || [] } });
         }).catch(() => {});
       }
@@ -1774,6 +1895,47 @@ function routeWsEvent(msg, dispatch, shellListeners) {
         data.persistence.forEach(p => dispatch({ type: 'PERSISTENCE_PLANTED', payload: p }));
       }
 
+      // Restore reasoning engine state from intel snapshot (if session used reasoning loop)
+      // The backend embeds intel_snapshot directly on the session payload when available,
+      // OR it may be a top-level key on data. Check both paths.
+      const intel = data?.intel_snapshot || data?.session?.intel_snapshot || {};
+      if ((intel.hypotheses && intel.hypotheses.length) ||
+          (intel.ranked_attack_paths && intel.ranked_attack_paths.length) ||
+          intel.action_score) {
+        dispatch({ type: 'REASONING_STATE_RESTORE', payload: {
+          hypotheses:         intel.hypotheses          || [],
+          rankedPaths:        intel.ranked_attack_paths || [],
+          actionScore:        intel.action_score        ?? 0,
+          negativeMemory:     intel.negative_memory     || [],
+          reasoningIteration: intel.reasoning_iteration ?? 0,
+          ctfObjectives:      intel.ctf_objectives      || [],
+          ctfAnswers:         intel.ctf_answers         || {},
+        }});
+        dispatch({ type: 'REASONING_ENGINE_STATUS', payload: true });
+      }
+      // Restore CTF objectives even if no reasoning state yet (set at scan start)
+      if (intel.ctf_objectives && intel.ctf_objectives.length) {
+        dispatch({ type: 'CTF_OBJECTIVES_SET', payload: intel.ctf_objectives });
+        if (intel.ctf_answers) {
+          Object.entries(intel.ctf_answers).forEach(([idx, ans]) => {
+            dispatch({ type: 'CTF_ANSWER', payload: {
+              objective_index: parseInt(idx),
+              ...( typeof ans === 'object' ? ans : { answer: ans, evidence: '', tool: '' }),
+            }});
+          });
+        }
+      }
+
+      // Restore engagement context
+      if (intel.engagement_context) {
+        dispatch({ type: 'ENGAGEMENT_CONTEXT_SET', payload: intel.engagement_context });
+        // Also mirror objectives if present and ctf_objectives not already set
+        const engObjs = intel.engagement_context.objectives || [];
+        if (engObjs.length && !(intel.ctf_objectives && intel.ctf_objectives.length)) {
+          dispatch({ type: 'CTF_OBJECTIVES_SET', payload: engObjs });
+        }
+      }
+
       break;
     }
 
@@ -1874,6 +2036,193 @@ function routeWsEvent(msg, dispatch, shellListeners) {
       break;
     }
 
+    // ── Reasoning Engine events ──────────────────────────────────────────────
+    case 'reasoning_loop_start':
+      dispatch({ type: 'REASONING_ENGINE_STATUS', payload: true });
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'master', eventType: 'reasoning_loop_start',
+        message: `🧠 Reasoning engine started — hypothesis-driven mode`, data
+      }});
+      break;
+
+    case 'reasoning_loop_complete':
+      dispatch({ type: 'REASONING_ENGINE_STATUS', payload: false });
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'master', eventType: 'reasoning_loop_complete',
+        message: `🧠 Reasoning engine complete — iteration ${data?.iteration || '?'}`, data
+      }});
+      break;
+
+    case 'reasoning_loop_iteration':
+    case 'reasoning_iteration_start':
+    case 'reasoning_iteration_complete':
+      dispatch({ type: 'REASONING_ITERATION', payload: data?.iteration || 0 });
+      break;
+
+    case 'reasoning_decision': {
+      // Emitted by DecisionEngine — decision about which action to take
+      const msg_text = data?.message || '';
+      dispatch({ type: 'REASONING_ENTRY', payload: {
+        ts, agent: 'master', phase: 'exploit',
+        step: 'decision', reasoning: msg_text, decision: msg_text,
+        next_action: '', data
+      }});
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'master', eventType: 'reasoning_decision',
+        message: `🎯 ${msg_text.slice(0, 120)}`, data
+      }});
+      break;
+    }
+
+    case 'justified_action': {
+      // Emitted by DecisionEngine — a justified action is about to execute
+      const ja = data || {};
+      dispatch({ type: 'JUSTIFIED_ACTION', payload: {
+        action_id:             ja.action_id             || `ja_${Date.now()}`,
+        tool:                  ja.tool                  || '',
+        args:                  ja.args                  || '',
+        target_service:        ja.target_service        || '',
+        reason:                ja.reason                || '',
+        expected_outcome:      ja.expected_outcome      || '',
+        success_criteria:      ja.success_criteria      || '',
+        hypothesis_id:         ja.hypothesis_id         || '',
+        confidence:            ja.confidence            ?? 0,
+        requires_confirmation: !!ja.requires_confirmation,
+        plan:                  ja.plan                  || null,
+        created_at:            ja.created_at            || new Date().toISOString(),
+      }});
+      dispatch({ type: 'AGENT_STATUS', payload: {
+        agent: 'master', status: 'running',
+        message: `▶ ${ja.tool} — ${(ja.reason || '').slice(0, 80)}`
+      }});
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'master', eventType: 'justified_action',
+        message: `▶ ${ja.tool} [conf=${(ja.confidence||0).toFixed(2)}] — ${(ja.reason||'').slice(0,80)}`, data
+      }});
+      break;
+    }
+
+    case 'hypothesis_update': {
+      // Single hypothesis validated/invalidated or confidence update
+      const hu = data || {};
+      dispatch({ type: 'HYPOTHESIS_UPSERT', payload: hu });
+      if (hu.validated) {
+        dispatch({ type: 'FEED_ENTRY', payload: {
+          ts, agent: 'master', eventType: 'hypothesis_update',
+          message: `✅ Hypothesis validated: ${(hu.statement || '').slice(0, 80)}`, data
+        }});
+      } else if (hu.invalidated) {
+        dispatch({ type: 'FEED_ENTRY', payload: {
+          ts, agent: 'master', eventType: 'hypothesis_update',
+          message: `❌ Hypothesis invalidated: ${(hu.statement || '').slice(0, 80)}`, data
+        }});
+      }
+      break;
+    }
+
+    case 'hypotheses_generated': {
+      // Full hypotheses list from HypothesisEngine.generate_hypotheses()
+      const hyps = data?.hypotheses || data || [];
+      if (Array.isArray(hyps)) {
+        dispatch({ type: 'HYPOTHESES_REPLACE', payload: hyps });
+        dispatch({ type: 'FEED_ENTRY', payload: {
+          ts, agent: 'master', eventType: 'hypotheses_generated',
+          message: `🧠 ${hyps.length} hypotheses generated`, data
+        }});
+      }
+      break;
+    }
+
+    case 'ranked_paths_update': {
+      // Fresh ranked attack paths from AttackPlanner
+      const paths = data?.paths || data || [];
+      if (Array.isArray(paths)) {
+        dispatch({ type: 'RANKED_PATHS_UPDATE', payload: paths });
+      }
+      break;
+    }
+
+    case 'action_score_update': {
+      // Engagement score delta event
+      dispatch({ type: 'ACTION_SCORE_UPDATE', payload: data?.total ?? data?.score ?? 0 });
+      if (data?.delta !== undefined && data.delta !== 0) {
+        const sign = data.delta > 0 ? '+' : '';
+        dispatch({ type: 'FEED_ENTRY', payload: {
+          ts, agent: 'master', eventType: 'action_score_update',
+          message: `Score ${sign}${data.delta} → ${data.total ?? 0} — ${data.reason || ''}`, data
+        }});
+      }
+      break;
+    }
+
+    case 'negative_memory_added': {
+      // A failed attempt recorded in NegativeMemory
+      const nm = data || {};
+      dispatch({ type: 'NEGATIVE_MEMORY_ADD', payload: {
+        attempt_id:     nm.attempt_id     || `nm_${Date.now()}`,
+        tool:           nm.tool           || '',
+        target_service: nm.target_service || '',
+        failure_reason: nm.failure_reason || nm.reason || '',
+        attempt_count:  nm.attempt_count  || 1,
+        ts,
+      }});
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'master', eventType: 'negative_memory_added',
+        message: `🚫 ${nm.tool} on ${nm.target_service} failed — recorded in negative memory`, data
+      }});
+      break;
+    }
+
+    case 'ctf_answer': {
+      // A CTF objective has been answered
+      const ca = data || {};
+      dispatch({ type: 'CTF_ANSWER', payload: ca });
+      const answered = ca.answered_count || '?';
+      const total    = ca.total || '?';
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'master', eventType: 'ctf_answer',
+        message: `🏁 CTF [${(ca.objective_index||0)+1}/${total}] ${ca.objective} → ${ca.answer}`,
+        data,
+      }});
+      break;
+    }
+
+    case 'ctf_objectives_set': {
+      dispatch({ type: 'CTF_OBJECTIVES_SET', payload: data?.objectives || [] });
+      break;
+    }
+
+    case 'engagement_context': {
+      const ctx = data?.context || data || {};
+      dispatch({ type: 'ENGAGEMENT_CONTEXT_SET', payload: ctx });
+      // Mirror objectives into ctfObjectives for unified objectives panel
+      if (ctx.objectives && ctx.objectives.length > 0) {
+        dispatch({ type: 'CTF_OBJECTIVES_SET', payload: ctx.objectives });
+      }
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'master', eventType: 'engagement_context',
+        message: `🎯 Engagement: ${ctx.title || ctx.engagement_type || 'unknown'} — ${ctx.context_summary || ''}`,
+        data,
+      }});
+      break;
+    }
+
+    case 'operator_question': {
+      const questions = data?.questions || [];
+      dispatch({ type: 'OPERATOR_QUESTIONS_SET', payload: questions });
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'master', eventType: 'operator_question',
+        message: `❓ System needs clarification (${questions.length} question${questions.length !== 1 ? 's' : ''})`,
+        data,
+      }});
+      break;
+    }
+
+    case 'operator_questions_cleared': {
+      dispatch({ type: 'OPERATOR_QUESTIONS_SET', payload: [] });
+      break;
+    }
+
     default: break;
   }
 }
@@ -1919,8 +2268,18 @@ function extractFeedMessage(type, agent, data) {
     case 'persistence_planted':   return `Persistence: ${data?.mechanism} on ${data?.host}`;
     case 'burp_scan_complete':    return `Burp: ${data?.issue_count || 0} issues`;
     case 'chain_exploit_success': return `Chain success: ${data?.chain_id || data?.step_id}`;
-    case 'privesc_success':       return `PRIVESC: ${data?.new_user || 'root'} on ${data?.shell_id}`;
-    default:                      return data?.message || null;
+    case 'privesc_success':         return `PRIVESC: ${data?.new_user || 'root'} on ${data?.shell_id}`;
+    case 'reasoning_loop':          return `🧠 [${data?.iteration ?? '?'}] ${(data?.message||'').slice(0,100)}`;
+    // Reasoning engine events
+    case 'reasoning_loop_start':    return `🧠 Reasoning engine started`;
+    case 'reasoning_loop_complete': return `🧠 Reasoning engine complete`;
+    case 'reasoning_decision':      return `🎯 ${(data?.message||'').slice(0,100)}`;
+    case 'justified_action':        return `▶ ${data?.tool} [conf=${(data?.confidence||0).toFixed(2)}]`;
+    case 'hypothesis_update':       return data?.validated ? `✅ ${(data?.statement||'').slice(0,80)}` : `❌ ${(data?.statement||'').slice(0,80)}`;
+    case 'hypotheses_generated':    return `🧠 ${(data?.hypotheses||[]).length} hypotheses generated`;
+    case 'action_score_update':     return `Score ${data?.delta >= 0 ? '+' : ''}${data?.delta ?? 0} → ${data?.total ?? 0}`;
+    case 'negative_memory_added':   return `🚫 ${data?.tool} on ${data?.target_service} failed`;
+    default:                        return data?.message || null;
   }
 }
 

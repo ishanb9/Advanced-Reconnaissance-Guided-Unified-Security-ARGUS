@@ -33,6 +33,17 @@ try:
 except ImportError:
     _BOUNDED_CACHE = False
 
+# Phase 5 — Hypothesis-driven reasoning engine (opt-in, graceful degradation)
+try:
+    from agents.reasoning.hypothesis_engine import HypothesisEngine
+    from agents.reasoning.attack_planner    import AttackPlanner
+    from agents.reasoning.decision_engine   import DecisionEngine
+    from agents.reasoning.negative_memory   import NegativeMemory
+    from agents.reasoning.reasoning_loop    import ReasoningLoop
+    _REASONING_AVAILABLE = True
+except ImportError:
+    _REASONING_AVAILABLE = False
+
 from agents.base_agent import BaseAgent, Instruction, agent_bus, BroadcastFn
 from db.schemas import (
     AgentName, AgentStatus, AttackPhase, FindingSeverity,
@@ -298,6 +309,14 @@ class MasterAgent(BaseAgent):
             "evidence":           [],   # captured evidence items
             "long_term_hits":     [],   # memories recalled and used this session
             "state":              "INIT",  # current state machine state
+            # ── Phase 5 reasoning engine fields (safe defaults) ────
+            "hypotheses":          [],    # list[dict] — Hypothesis objects
+            "negative_memory":     [],    # list[dict] — FailedAttempt objects
+            "confidence_scores":   {},    # {hypothesis_id: float}
+            "action_score":        0,     # running engagement score
+            "failed_attempts":     {},    # {"tool:service": count}
+            "ranked_attack_paths": [],    # list[dict] — RankedAttackPath objects
+            "reasoning_journal":   [],    # list[str] — situation assessments
         }
 
         # ── Pentest State Machine ────────────────────────────
@@ -337,6 +356,16 @@ class MasterAgent(BaseAgent):
         # on long engagements.  Falls back to plain dict if db.cache unavailable.
         self._instruction_cache = _BIC(maxsize=500, ttl=14_400.0) if _BOUNDED_CACHE \
                                    else {}  # type: ignore[assignment]
+
+        # ── Phase 5: Hypothesis-driven reasoning engine ──────────────────
+        # All fields default to None / False so the existing linear path is
+        # completely unaffected when use_reasoning_loop=False (the default).
+        self._use_reasoning_loop:  bool = False
+        self._reasoning_loop_inst: Optional[ReasoningLoop] = None  # type: ignore[name-defined]
+        self._hypothesis_engine:   Optional[HypothesisEngine] = None   # type: ignore[name-defined]
+        self._decision_engine:     Optional[DecisionEngine] = None     # type: ignore[name-defined]
+        self._attack_planner:      Optional[AttackPlanner] = None      # type: ignore[name-defined]
+        self._negative_memory:     Optional[NegativeMemory] = None     # type: ignore[name-defined]
 
         # Background tasks — fire-and-forget asyncio.Task objects.
         # Tracked here so _wait_for_agents_idle can properly drain them before
@@ -415,20 +444,22 @@ class MasterAgent(BaseAgent):
 
     async def run(
         self,
-        session_id:        str,
-        target:            str,
-        target_type:       str  = "unknown",
-        auto_exploit:      bool = False,
-        confirm_web:       bool = False,
-        web_phase_timeout: int  = 600,
-        threading_enabled: bool = False,
-        max_threads:       int  = 3,
-        phases:            List[str] = None,
-        notes:             str  = "",
-        scope:             str  = "",
-        checkpoint_id:     Optional[str] = None,   # resume from checkpoint
+        session_id:         str,
+        target:             str,
+        target_type:        str  = "unknown",
+        auto_exploit:       bool = False,
+        confirm_web:        bool = False,
+        web_phase_timeout:  int  = 600,
+        threading_enabled:  bool = False,
+        max_threads:        int  = 3,
+        phases:             List[str] = None,
+        notes:              str  = "",
+        scope:              str  = "",
+        checkpoint_id:      Optional[str] = None,   # resume from checkpoint
+        use_reasoning_loop: bool = False,            # enable hypothesis-driven engine
         **kwargs
     ) -> Dict:
+        self._use_reasoning_loop = _REASONING_AVAILABLE  # Always use reasoning if available
         self._session_id     = session_id
         self._target         = target
         self._target_type    = target_type
@@ -441,13 +472,14 @@ class MasterAgent(BaseAgent):
 
         # Snapshot run config for checkpoint restore
         self._master_config = {
-            "target_type":       target_type,
-            "auto_exploit":      auto_exploit,
-            "threading_enabled": threading_enabled,
-            "max_threads":       max_threads,
-            "phases":            list(self._phases_to_run),
-            "notes":             notes,
-            "scope":             scope,
+            "target_type":        target_type,
+            "auto_exploit":       auto_exploit,
+            "threading_enabled":  threading_enabled,
+            "max_threads":        max_threads,
+            "phases":             list(self._phases_to_run),
+            "notes":              notes,
+            "scope":              scope,
+            "use_reasoning_loop": use_reasoning_loop,
         }
 
         # ── Restore from checkpoint if resuming ──────────────────────────
@@ -1195,6 +1227,387 @@ class MasterAgent(BaseAgent):
                 pass   # never crash the drain loop
             await asyncio.sleep(2.0)
 
+    # ═══════════════════════════════════════════════════════════════
+    #  PHASE 5 — REASONING ENGINE METHODS
+    #  These methods are only called when use_reasoning_loop=True.
+    #  They have zero effect on the existing code paths.
+    # ═══════════════════════════════════════════════════════════════
+
+    async def _init_reasoning_components(
+        self,
+        session_id: str,
+        target:     str,
+    ) -> None:
+        """
+        Instantiate all reasoning-engine components.
+        Called once at the start of _execute_phases when the loop is enabled.
+        Loads negative_memory from DB on session resume.
+        """
+        if not _REASONING_AVAILABLE:
+            return
+
+        # NegativeMemory — loads from DB to restore after pause/resume
+        self._negative_memory = NegativeMemory(
+            session_id  = session_id,
+            db_store_fn = db.store_negative_memory,
+            db_load_fn  = db.load_negative_memory,
+        )
+        await self._negative_memory.load_from_db()
+
+        # Restore from intel snapshot if this is a resume
+        stored_nm = self._intel.get("negative_memory", [])
+        if stored_nm and len(self._negative_memory) == 0:
+            for attempt_dict in stored_nm:
+                from agents.reasoning.negative_memory import FailedAttempt
+                attempt = FailedAttempt.from_dict(attempt_dict)
+                self._negative_memory._attempts.append(attempt)
+                key = f"{attempt.tool}:{attempt.target_service}"
+                self._negative_memory._index[key] = attempt.attempt_count
+
+        # HypothesisEngine — uses master's think_json and KB
+        self._hypothesis_engine = HypothesisEngine(
+            think_json_fn = self.think_json,
+            kb_fn         = _kb_context,
+            session_id    = session_id,
+        )
+
+        # AttackPlanner — uses master's think_json and KB
+        self._attack_planner = AttackPlanner(
+            think_json_fn = self.think_json,
+            kb_fn         = _kb_context,
+            session_id    = session_id,
+        )
+        # Restore ranked paths from checkpoint
+        stored_paths = self._intel.get("ranked_attack_paths", [])
+        if stored_paths:
+            self._attack_planner.restore_from_dicts(stored_paths)
+
+        # DecisionEngine — uses master's think_json and broadcast
+        self._decision_engine = DecisionEngine(
+            think_json_fn          = self.think_json,
+            emit_fn                = self._broadcast_raw,
+            session_id             = session_id,
+            auto_execute_threshold = 0.70,
+        )
+        # Restore score from checkpoint
+        self._decision_engine.set_score(self._intel.get("action_score", 0))
+
+    async def _reasoning_loop_run(
+        self,
+        session_id:  str,
+        target:      str,
+        plan:        Dict,
+        resume_from: Optional[str] = None,
+    ) -> None:
+        """
+        Run the hypothesis-driven reasoning loop.
+        Called from _execute_phases() when use_reasoning_loop=True.
+        Propagates final intel back to self._intel for reporting.
+        """
+        if not _REASONING_AVAILABLE:
+            return
+
+        loop = ReasoningLoop(
+            master_agent       = self,
+            session_id         = session_id,
+            target             = target,
+            intel              = self._intel,
+            hypothesis_engine  = self._hypothesis_engine,
+            decision_engine    = self._decision_engine,
+            attack_planner     = self._attack_planner,
+            negative_memory    = self._negative_memory,
+            emit_fn            = self._broadcast_raw,
+            check_pause_fn     = self._check_pause_requested,
+            save_checkpoint_fn = self._save_reasoning_checkpoint,
+        )
+        self._reasoning_loop_inst = loop
+
+        # Run the loop — returns updated intel
+        final_intel = await loop.run()
+
+        # Merge final reasoning state back into self._intel
+        for key in [
+            "hypotheses", "negative_memory", "confidence_scores",
+            "action_score", "failed_attempts", "ranked_attack_paths",
+            "reasoning_journal",
+        ]:
+            if key in final_intel:
+                self._intel[key] = final_intel[key]
+
+        # After loop: run reporting phase
+        await self._emit("phase_update", {
+            "phase":  "reporting",
+            "status": "active",
+            "label":  "Report Generation",
+        })
+
+    # ── Tool-to-phase classification tables ──────────────────────────────────
+    _RECON_TOOLS: frozenset = frozenset({
+        "nmap", "masscan", "rustscan", "whatweb", "wkhtmltoimage",
+        "dnsrecon", "dnsx", "subfinder", "amass", "dig", "host",
+        "ping", "traceroute", "whois", "wafw00f", "testssl", "sslscan",
+        "enum4linux", "enum4linux-ng", "smbclient", "rpcclient", "smbmap",
+        "nbtscan", "snmpwalk", "snmpcheck", "onesixtyone", "ldapsearch",
+    })
+    _WEB_TOOLS: frozenset = frozenset({
+        "sqlmap", "nuclei", "wfuzz", "feroxbuster", "gobuster", "dirsearch",
+        "ffuf", "nikto", "xsstrike", "dalfox", "arjun", "jwt_tool",
+        "wapiti", "zap", "commix", "burpsuite", "dirb", "wpscan",
+        "droopescan", "joomscan", "cmseek",
+    })
+    _EXPLOIT_TOOLS: frozenset = frozenset({
+        "msfconsole", "msfvenom", "metasploit", "searchsploit",
+        "hydra", "medusa", "ncrack", "patator",
+        "crackmapexec", "cme", "evil-winrm", "impacket",
+        "responder", "john", "hashcat",
+    })
+    _PRIVESC_TOOLS: frozenset = frozenset({
+        "linpeas", "winpeas", "pspy", "linenum", "les", "lse", "les2",
+        "suid3num", "sudo_killer", "deepce", "wesng", "powerup",
+        "sherlock", "beroot", "privesccheck",
+    })
+    _VULN_TOOLS: frozenset = frozenset({
+        "openvas", "nessus", "vulners", "vulscan",
+        "smtp-user-enum", "finger", "ident-user-enum",
+    })
+
+    def _classify_tool_to_phase(self, tool: str) -> str:
+        """Map a tool name to the phase agent that should execute it."""
+        tl = tool.lower().split()[0]      # normalise: strip args if present
+        if tl in self._RECON_TOOLS:        return "recon"
+        if tl in self._WEB_TOOLS:          return "web"
+        if tl in self._EXPLOIT_TOOLS:      return "exploit"
+        if tl in self._PRIVESC_TOOLS:      return "privesc"
+        if tl in self._VULN_TOOLS:         return "vuln"
+        # Heuristic fallbacks
+        if any(k in tl for k in ("scan", "map", "enum", "recon", "dns", "whois")):
+            return "recon"
+        if any(k in tl for k in ("fuzz", "brute", "spider", "crawl", "web", "http")):
+            return "web"
+        if any(k in tl for k in ("exploit", "payload", "shell", "msf", "msfconsole")):
+            return "exploit"
+        if any(k in tl for k in ("priv", "esc", "peas", "enum_linux")):
+            return "privesc"
+        return "generic"
+
+    async def _dispatch_to_agent(
+        self,
+        tool:    str,
+        args:    str,
+        purpose: str,
+        phase:   str,
+        timeout: int = 300,
+    ) -> dict:
+        """
+        Route a single tool execution through the appropriate specialist agent.
+        This ensures ALL agent events (tool_start, tool_output, finding,
+        graph_node, graph_edge) flow to the frontend dashboards exactly as
+        they do during normal phase execution.
+
+        Returns a dict with: stdout, stderr, exit_code, output_id.
+        """
+        agent_type = self._classify_tool_to_phase(tool)
+        task = {
+            "tool":         tool,
+            "args":         args or self._target,
+            "purpose":      purpose or f"Reasoning engine: {tool}",
+            "timeout":      timeout,
+            "can_parallel": False,
+        }
+
+        try:
+            if agent_type == "recon":
+                from agents.recon_agent import ReconAgent
+                agent_obj = ReconAgent(broadcast=self.broadcast)
+                agent_obj._session_id = self._session_id
+                result = await agent_obj.execute_tasks(
+                    self._target, [task], "RECON", self._intel
+                )
+                # Merge recon findings into intel
+                for key in ("open_ports", "services", "os_guess", "web_paths",
+                            "technologies", "domain_info", "web_targets"):
+                    if result.get(key) is not None:
+                        self._intel[key] = result[key]
+                return {
+                    "stdout":    str(result.get("raw_output", result))[:65536],
+                    "stderr":    "",
+                    "exit_code": 0,
+                    "output_id": "",
+                    "tool":      tool,
+                    "args":      args,
+                    "findings":  result.get("findings", []),
+                }
+
+            elif agent_type == "vuln":
+                from agents.vuln_agent import VulnAgent
+                agent_obj = VulnAgent(broadcast=self.broadcast)
+                agent_obj._session_id = self._session_id
+                result = await agent_obj.execute_tasks(
+                    self._target, [task], "VULN_ID", self._intel
+                )
+                for key in ("vulnerabilities", "cves"):
+                    if result.get(key) is not None:
+                        existing = self._intel.get(key, [])
+                        self._intel[key] = list({
+                            *existing, *result[key]
+                        }) if isinstance(result[key], list) else result[key]
+                return {
+                    "stdout":    str(result.get("raw_output", result))[:65536],
+                    "stderr":    "",
+                    "exit_code": 0,
+                    "output_id": "",
+                    "tool":      tool,
+                    "args":      args,
+                }
+
+            elif agent_type == "web":
+                from agents.web_agent import WebAgent
+                agent_obj = WebAgent(broadcast=self.broadcast)
+                agent_obj._session_id = self._session_id
+                result = await agent_obj.execute_tasks(
+                    self._target, [task], "WEB_TESTING", self._intel
+                )
+                for key in ("web_vulns", "web_paths", "web_targets"):
+                    if result.get(key) is not None:
+                        self._intel[key] = result[key]
+                return {
+                    "stdout":    str(result.get("raw_output", result))[:65536],
+                    "stderr":    "",
+                    "exit_code": 0,
+                    "output_id": "",
+                    "tool":      tool,
+                    "args":      args,
+                }
+
+            elif agent_type == "exploit":
+                from agents.exploit_agent import ExploitAgent
+                agent_obj = ExploitAgent(broadcast=self.broadcast)
+                agent_obj._session_id = self._session_id
+                result = await agent_obj.execute_tasks(
+                    self._target, [task], "EXPLOITATION", self._intel
+                )
+                for key in ("shells", "credentials", "shell_access"):
+                    if result.get(key) is not None:
+                        self._intel[key] = result[key]
+                return {
+                    "stdout":    str(result.get("raw_output", result))[:65536],
+                    "stderr":    "",
+                    "exit_code": 0 if result.get("shell_access") else 1,
+                    "output_id": "",
+                    "tool":      tool,
+                    "args":      args,
+                }
+
+            elif agent_type == "privesc":
+                from agents.privesc_agent import PrivescAgent
+                agent_obj = PrivescAgent(broadcast=self.broadcast)
+                agent_obj._session_id = self._session_id
+                result = await agent_obj.execute_tasks(
+                    self._target, [task], "PRIVILEGE_ESCALATION", self._intel
+                )
+                for key in ("current_user", "root_flag", "elevated_shell"):
+                    if result.get(key) is not None:
+                        self._intel[key] = result[key]
+                return {
+                    "stdout":    str(result.get("raw_output", result))[:65536],
+                    "stderr":    "",
+                    "exit_code": 0 if result.get("elevated_shell") else 1,
+                    "output_id": "",
+                    "tool":      tool,
+                    "args":      args,
+                }
+
+            else:
+                # Generic fallback — use master's run_tool directly
+                exit_code, stdout, stderr = await self.run_tool(
+                    tool_name = tool,
+                    target    = self._target,
+                    options   = {"args": args, "timeout": timeout},
+                )
+                output_id = await db.store_tool_output(
+                    session_id = self._session_id,
+                    host       = self._target,
+                    agent      = "master",
+                    phase      = phase or "reasoning",
+                    tool_name  = tool,
+                    command    = f"{tool} {args}",
+                    target     = self._target,
+                )
+                await db.finalize_tool_output(
+                    output_id,
+                    stdout[:65536] if stdout else "",
+                    stderr[:4096]  if stderr else "",
+                    exit_code,
+                )
+                return {
+                    "stdout":    stdout or "",
+                    "stderr":    stderr or "",
+                    "exit_code": exit_code,
+                    "output_id": output_id or "",
+                    "tool":      tool,
+                    "args":      args,
+                }
+
+        except Exception as e:
+            import logging as _log
+            _log.getLogger(__name__).warning("_dispatch_to_agent error (%s): %s", tool, e)
+            return {
+                "stdout":    "",
+                "stderr":    str(e),
+                "exit_code": -1,
+                "output_id": "",
+                "error":     str(e),
+            }
+
+    async def _check_pause_requested(self) -> bool:
+        """Return True if the operator has requested a pause."""
+        return not self._pause_event.is_set()
+
+    async def _save_reasoning_checkpoint(self, iteration: int) -> None:
+        """Save a checkpoint with reasoning engine state included."""
+        try:
+            # Merge reasoning state into intel before saving
+            if self._reasoning_loop_inst:
+                state = self._reasoning_loop_inst.serialize_state()
+                self._intel.update(state)
+            # Tag iteration in intel so it survives the checkpoint round-trip
+            self._intel["reasoning_iteration"] = iteration
+            await self._save_checkpoint("auto")
+        except Exception:
+            pass
+
+    async def _broadcast_raw(self, event: dict) -> None:
+        """
+        Emit a raw event dict to the WebSocket broadcast system.
+        Used by reasoning components which build their own event dicts.
+        """
+        try:
+            event_type = event.get("type", "reasoning_event")
+            data       = event.get("data", event)
+            await self._emit(event_type, data)
+        except Exception:
+            pass
+
+    async def _db_update_hypothesis(
+        self,
+        session_id:    str,
+        hypothesis_id: str,
+        validated:     bool  = None,
+        invalidated:   bool  = None,
+        confidence:    float = None,
+    ) -> None:
+        """Update hypothesis status in MongoDB. Called by ReasoningLoop._update()."""
+        try:
+            await db.update_hypothesis_status(
+                session_id    = session_id,
+                hypothesis_id = hypothesis_id,
+                validated     = validated,
+                invalidated   = invalidated,
+                confidence    = confidence,
+            )
+        except Exception:
+            pass
+
     async def _execute_phases(
         self,
         session_id:   str,
@@ -1209,7 +1622,51 @@ class MasterAgent(BaseAgent):
 
         resume_from: if set, skip every phase that appears in _phases_completed
                      until we reach the phase AFTER resume_from.
+
+        Phase 5: when use_reasoning_loop=True, delegates to _reasoning_loop_run()
+        which replaces linear phase execution with hypothesis-driven evidence loop.
         """
+        # ── REASONING LOOP ROUTING ──────────────────────────────────────────
+        # When the reasoning engine is enabled, skip the linear phase executor
+        # and use the hypothesis-driven loop instead.
+        # Default (use_reasoning_loop=False) runs the original code unchanged.
+        if self._use_reasoning_loop and _REASONING_AVAILABLE:
+            # ── Parse operator context via LLM (replaces regex CTF parser) ──
+            # Only parse if notes or scope provided and not already parsed
+            if not self._intel.get("engagement_context"):
+                ctx = await self._parse_operator_context(
+                    notes       = self._notes,
+                    scope       = self._scope,
+                    target_type = self._target_type,
+                )
+                self._intel["engagement_context"] = ctx.to_dict()
+                # Back-compat: also populate ctf_objectives/ctf_answers for
+                # any code that still reads those keys
+                if ctx.has_objectives:
+                    self._intel["ctf_objectives"] = ctx.objectives
+                    self._intel.setdefault("ctf_answers", {})
+                # Broadcast context to frontend so dashboards know the type
+                await self._emit("engagement_context", {
+                    "engagement_type":     ctx.engagement_type,
+                    "title":               ctx.title,
+                    "context_summary":     ctx.context_summary,
+                    "objectives_count":    len(ctx.objectives),
+                    "approach_summary":    ctx.approach_summary,
+                    "clarifying_questions": ctx.clarifying_questions,
+                })
+                # If LLM needs clarification, ask the operator without blocking
+                if ctx.needs_clarification:
+                    await self._emit("operator_question", {
+                        "questions":       ctx.clarifying_questions,
+                        "context_so_far":  ctx.context_summary,
+                        "engagement_type": ctx.engagement_type,
+                        "note":            "Scan is proceeding with best-guess assumptions. Answer to improve accuracy.",
+                    })
+
+            await self._init_reasoning_components(session_id, target)
+            await self._reasoning_loop_run(session_id, target, plan, resume_from)
+            return
+        # ── END REASONING LOOP ROUTING ──────────────────────────────────────
         phases = self._phases_to_run
 
         def phase_enabled(p: str) -> bool:
@@ -3524,6 +3981,128 @@ Overall risk: [Critical/High/Medium/Low] — one paragraph justification based o
         })
 
     # ─── LLM Planning Methods ─────────────────────────────────
+
+    async def _parse_operator_context(
+        self,
+        notes:       str,
+        scope:       str,
+        target_type: str = "unknown",
+    ):
+        """
+        Use the LLM to understand operator intent from free-form notes.
+
+        Returns an EngagementContext with:
+          - engagement_type  (pentest / ctf / forensics / network_analysis / …)
+          - objectives       (ordered list of tasks/questions)
+          - constraints      (rules of engagement)
+          - tools_preferred / tools_excluded
+          - approach_summary (how to tackle this)
+          - clarifying_questions (ask operator if ambiguous)
+
+        Falls back to a default pentest context if LLM is unavailable.
+        """
+        from agents.reasoning.engagement_context import EngagementContext
+
+        all_text = "\n".join(filter(None, [notes, scope]))
+        if not all_text.strip():
+            return EngagementContext.default_pentest()
+
+        prompt = f"""You are an intelligent engagement planner for ARGUS, an adaptive security operations platform.
+Analyze the operator's notes and derive a precise, structured engagement context.
+
+=== OPERATOR NOTES ===
+{notes or "(none)"}
+
+=== SCOPE / ADDITIONAL CONTEXT ===
+{scope or "(none)"}
+
+=== TARGET TYPE ===
+{target_type}
+
+Determine:
+1. What TYPE of engagement this is
+2. What SPECIFIC objectives need to be achieved (ordered by priority)
+3. What TOOLS make sense vs. should be avoided
+4. What APPROACH to take
+5. Any CLARIFYING QUESTIONS needed (only if genuinely ambiguous — max 3)
+
+Respond with JSON only — no markdown, no prose:
+{{
+  "engagement_type": "pentest|ctf|forensics|network_analysis|malware_analysis|compliance|bug_bounty|red_team|custom",
+  "title": "One-line description of this engagement",
+  "context_summary": "2-3 sentence explanation of what the operator wants",
+  "objectives": [
+    {{"task": "Specific task or question to answer", "section": "Optional phase label", "priority": 1}}
+  ],
+  "constraints": ["Any rules of engagement, scope limits, or restrictions mentioned"],
+  "tools_preferred": ["Tools that are appropriate for this engagement"],
+  "tools_excluded": ["Tools that must NOT be used"],
+  "approach_summary": "How ARGUS should approach this — what to look for, in what order",
+  "clarifying_questions": ["Question if critical info is missing"]
+}}
+
+RULES:
+- engagement_type MUST be one of the listed values
+- For CTF: extract every question/flag/puzzle as a separate objective, preserve order and section groupings
+- For forensics: objectives = artifacts to extract, timeline events, IOCs to find
+- For network_analysis: objectives = anomalies, suspicious hosts/protocols, C2 indicators
+- For malware_analysis: objectives = capabilities, IOCs, persistence mechanisms, C2
+- For compliance: objectives = specific controls to check
+- tools_excluded for forensics/malware/network_analysis MUST include: nmap, metasploit, hydra, sqlmap, gobuster
+- tools_excluded for compliance MUST include: metasploit, sqlmap, hydra
+- Only include clarifying_questions if the engagement type or a key objective is genuinely unclear"""
+
+        system = (
+            "You are an expert security engagement planner. "
+            "Read operator instructions precisely and produce structured JSON. "
+            "JSON only — no markdown fences, no prose."
+        )
+
+        import logging as _log
+        try:
+            raw = await self.think_json(prompt, system)
+            if raw and isinstance(raw, dict):
+                ctx = EngagementContext.from_dict(raw)
+                _log.getLogger(__name__).info(
+                    "Engagement context: type=%s, objectives=%d, questions=%d",
+                    ctx.engagement_type, len(ctx.objectives), len(ctx.clarifying_questions)
+                )
+                return ctx
+        except Exception as e:
+            _log.getLogger(__name__).warning("Operator context parsing failed: %s", e)
+
+        # Fallback: try basic regex extraction so we never return empty for CTF notes
+        return EngagementContext.default_pentest()
+
+    def answer_operator_question(self, answers: dict) -> None:
+        """
+        Called when the operator submits answers to clarifying questions.
+        Injects the answers as operator guidance so the reasoning loop picks them up.
+        answers = {"0": "answer to question 0", "1": "answer to question 1", ...}
+        """
+        ctx_dict = self._intel.get("engagement_context", {})
+        questions = ctx_dict.get("clarifying_questions", [])
+        if not questions:
+            return
+
+        note_parts = ["Operator answered clarifying questions:"]
+        for idx_str, answer in answers.items():
+            try:
+                q = questions[int(idx_str)]
+                note_parts.append(f"  Q: {q}")
+                note_parts.append(f"  A: {answer}")
+            except (IndexError, ValueError):
+                note_parts.append(f"  Additional note: {answer}")
+
+        # Clear questions so the banner disappears
+        ctx_dict["clarifying_questions"] = []
+        self._intel["engagement_context"] = ctx_dict
+
+        # Inject as high-priority guidance
+        self.inject_guidance({
+            "directive": "add_note",
+            "note":      "\n".join(note_parts),
+        })
 
     def _safe_llm_result(self, result: any, default: dict = None) -> dict:
         """

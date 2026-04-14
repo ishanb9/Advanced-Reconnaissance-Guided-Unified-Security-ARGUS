@@ -1224,6 +1224,99 @@ function HostSelector({ hosts, hostFilter, dispatch }) {
   );
 }
 
+// ── Operator Q&A Banner ──────────────────────────────────────────────────────
+// Shown when the engagement context parser raised clarifying questions.
+// Operator fills in answers and submits — scan proceeds with full context.
+function OperatorQABanner({ questions, sessionId, dispatch }) {
+  const [answers,    setAnswers]    = useState({});
+  const [submitting, setSubmitting] = useState(false);
+  const [dismissed,  setDismissed]  = useState(false);
+
+  if (dismissed) return null;
+
+  const handleSubmit = async () => {
+    if (!sessionId) return;
+    setSubmitting(true);
+    try {
+      await fetch(`/sessions/${sessionId}/operator-response`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ answers }),
+      });
+      dispatch({ type: 'OPERATOR_QUESTIONS_SET', payload: [] });
+    } catch (e) {
+      console.error('operator-response error:', e);
+    }
+    setSubmitting(false);
+  };
+
+  return React.createElement('div', {
+    style: {
+      background: 'rgba(255,204,0,0.06)', border: '1px solid rgba(255,204,0,0.35)',
+      borderRadius: 8, padding: '12px 16px', marginBottom: 12, flexShrink: 0,
+    }
+  },
+    // Header
+    React.createElement('div', {
+      style: { display: 'flex', alignItems: 'center', gap: 10, marginBottom: 10 }
+    },
+      React.createElement('span', { style: { fontSize: 14 } }, '❓'),
+      React.createElement('span', {
+        style: { fontSize: 12, fontWeight: 700, color: 'var(--amber)', flex: 1 }
+      }, 'Clarification Needed'),
+      React.createElement('span', {
+        style: { fontSize: 10, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }
+      }, 'Scan is running with best-guess assumptions — answer to improve accuracy'),
+      React.createElement('button', {
+        onClick: () => setDismissed(true),
+        style: { background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', fontSize: 14, lineHeight: 1, marginLeft: 8 }
+      }, '✕')
+    ),
+    // Questions
+    React.createElement('div', { style: { display: 'flex', flexDirection: 'column', gap: 8 } },
+      questions.map((q, i) =>
+        React.createElement('div', { key: i, style: { display: 'flex', flexDirection: 'column', gap: 4 } },
+          React.createElement('label', {
+            style: { fontSize: 11, color: 'var(--text-secondary)', fontWeight: 500 }
+          },
+            React.createElement('span', {
+              style: { fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-muted)', marginRight: 6 }
+            }, `[${i + 1}]`),
+            q
+          ),
+          React.createElement('input', {
+            type: 'text',
+            placeholder: 'Your answer…',
+            value: answers[q] || '',
+            onChange: e => setAnswers(prev => ({ ...prev, [q]: e.target.value })),
+            style: {
+              background: 'var(--bg-panel)', border: '1px solid var(--border)',
+              borderRadius: 5, color: 'var(--text-primary)', fontSize: 11,
+              padding: '5px 10px', outline: 'none', fontFamily: 'var(--font-mono)',
+              width: '100%',
+            }
+          })
+        )
+      )
+    ),
+    // Submit row
+    React.createElement('div', {
+      style: { display: 'flex', justifyContent: 'flex-end', marginTop: 10 }
+    },
+      React.createElement('button', {
+        onClick: handleSubmit,
+        disabled: submitting,
+        style: {
+          padding: '6px 18px', borderRadius: 5, cursor: 'pointer', fontWeight: 700,
+          border: '1px solid rgba(255,204,0,0.45)', background: 'rgba(255,204,0,0.12)',
+          color: 'var(--amber)', fontSize: 11, fontFamily: 'var(--font-mono)',
+          opacity: submitting ? 0.6 : 1,
+        }
+      }, submitting ? 'Sending…' : 'Submit Answers')
+    )
+  );
+}
+
 // ── Main MissionControl ──────────────────────────────────────────────────────
 function MissionControl() {
   const { state, dispatch } = window.useStore();
@@ -1234,6 +1327,8 @@ function MissionControl() {
     planSteps, planHypothesis, planAssessment,
     credentials, sessionMode, discoveredHosts, hostFilter,
     webConfirmPending, phaseTimeExtension,
+    reasoningEngineActive, reasoningIteration, hypotheses, actionScore,
+    operatorQuestions, engagementContext,
   } = state;
 
   const [confirmVisible, setConfirmVisible] = useState(false);
@@ -1456,6 +1551,66 @@ function MissionControl() {
       }, '✕')
     ),
 
+    // ── Reasoning Engine status banner (always shown during active sessions) ─
+    activeSession && React.createElement('div', {
+      style: {
+        display: 'flex', alignItems: 'center', gap: 12,
+        padding: '10px 16px', borderRadius: 8, marginBottom: 12,
+        background: 'rgba(0,229,160,0.05)', border: '1px solid rgba(0,229,160,0.25)',
+        fontSize: 12, fontFamily: 'var(--font-mono)',
+      }
+    },
+      React.createElement('span', {
+        style: {
+          width: 8, height: 8, borderRadius: '50%',
+          background: 'var(--accent)', boxShadow: '0 0 8px var(--accent)',
+          animation: 'pulse 1.5s infinite', display: 'inline-block', flexShrink: 0,
+        }
+      }),
+      React.createElement('span', { style: { color: 'var(--accent)', fontWeight: 700 } }, '🧠 Reasoning Engine'),
+      React.createElement('span', { style: { color: 'var(--text-muted)' } }, '—'),
+      React.createElement('span', { style: { color: 'var(--text-secondary)' } },
+        `Iteration ${reasoningIteration || 0} / 50`),
+      React.createElement('span', { style: { color: 'var(--text-muted)' } }, '·'),
+      // Hypothesis count
+      (hypotheses || []).length > 0 && React.createElement('span', { style: { color: 'var(--cyan)' } },
+        `${(hypotheses || []).filter(h => !h.invalidated).length} active hypotheses`),
+      (hypotheses || []).length > 0 && React.createElement('span', { style: { color: 'var(--text-muted)' } }, '·'),
+      // Action score
+      React.createElement('span', {
+        style: {
+          color: (actionScore || 0) >= 0 ? '#4ADE80' : '#FF4560',
+          fontWeight: 700,
+        }
+      }, `Score: ${(actionScore || 0) >= 0 ? '+' : ''}${actionScore || 0}`),
+      // Top hypothesis preview
+      (hypotheses || []).length > 0 && (() => {
+        const top = (hypotheses || []).filter(h => !h.invalidated).sort((a, b) => b.confidence - a.confidence)[0];
+        return top ? React.createElement('span', {
+          style: {
+            marginLeft: 4, color: 'var(--text-muted)', overflow: 'hidden',
+            textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 300,
+          }
+        }, `· ${(top.statement || '').slice(0, 80)}`) : null;
+      })(),
+      React.createElement('button', {
+        onClick: () => window.dispatchEvent(new CustomEvent('navigate', { detail: 'reasoning' })),
+        style: {
+          marginLeft: 'auto', padding: '4px 10px', borderRadius: 5, cursor: 'pointer',
+          border: '1px solid rgba(0,229,160,0.35)', background: 'rgba(0,229,160,0.08)',
+          color: 'var(--accent)', fontSize: 10, fontFamily: 'var(--font-mono)',
+        }
+      }, '→ View Engine')
+    ),
+
+    // ── Operator Q&A banner (shown when system needs clarification) ────────
+    activeSession && operatorQuestions && operatorQuestions.length > 0 &&
+      React.createElement(OperatorQABanner, {
+        questions: operatorQuestions,
+        sessionId: state.sessionId,
+        dispatch,
+      }),
+
     // ── No session ────────────────────────────────────────────────────────
     !activeSession && React.createElement('div', {
       style: {
@@ -1478,6 +1633,107 @@ function MissionControl() {
           boxShadow: '0 0 16px var(--accent-glow)', letterSpacing: 0.3,
         }
       }, '⊕ Configure Target')
+    ),
+
+    // ── Reasoning Engine live panel (3-col) ──────────────────────────────
+    (hypotheses || []).length > 0 && React.createElement('div', {
+      style: { display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8, marginBottom: 12 }
+    },
+      // Col 1 — Top hypothesis
+      React.createElement('div', {
+        style: {
+          background: 'var(--bg-surface)', border: '1px solid var(--border)',
+          borderRadius: 10, padding: '12px 14px',
+        }
+      },
+        React.createElement('div', { style: { fontSize: 10, fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 8 } }, 'Top Hypothesis'),
+        (() => {
+          const topH = (hypotheses || [])
+            .filter(h => h.status !== 'invalidated')
+            .sort((a, b) => (b.confidence || 0) - (a.confidence || 0))[0];
+          if (!topH) return React.createElement('div', { style: { fontSize: 11, color: 'var(--text-muted)' } }, 'Awaiting hypotheses…');
+          const conf = Math.round((topH.confidence || 0) * 100);
+          const barColor = conf >= 70 ? 'var(--green)' : conf >= 40 ? 'var(--amber)' : 'var(--red)';
+          return React.createElement(React.Fragment, null,
+            React.createElement('div', { style: { fontSize: 12, fontWeight: 600, color: 'var(--text-primary)', marginBottom: 6, lineHeight: 1.4 } },
+              topH.description || topH.title || 'Unnamed hypothesis'
+            ),
+            topH.mitre_technique && React.createElement('div', {
+              style: { display: 'inline-block', padding: '2px 6px', borderRadius: 4, background: 'rgba(0,229,160,0.1)', color: 'var(--accent)', fontSize: 9, fontWeight: 700, letterSpacing: 0.5, marginBottom: 8 }
+            }, topH.mitre_technique),
+            React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6 } },
+              React.createElement('div', { style: { flex: 1, height: 5, background: 'var(--bg-card)', borderRadius: 3, overflow: 'hidden' } },
+                React.createElement('div', { style: { width: `${conf}%`, height: '100%', background: barColor, borderRadius: 3, transition: 'width 0.4s ease' } })
+              ),
+              React.createElement('div', { style: { fontSize: 10, fontWeight: 700, color: barColor, minWidth: 28, textAlign: 'right' } }, `${conf}%`)
+            )
+          );
+        })()
+      ),
+      // Col 2 — Engagement score + iteration
+      React.createElement('div', {
+        style: {
+          background: 'var(--bg-surface)', border: '1px solid var(--border)',
+          borderRadius: 10, padding: '12px 14px', textAlign: 'center',
+          display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 4
+        }
+      },
+        React.createElement('div', { style: { fontSize: 10, fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: 0.8 } }, 'Engagement Score'),
+        React.createElement('div', {
+          style: {
+            fontSize: 36, fontWeight: 900, lineHeight: 1.1,
+            color: actionScore >= 0 ? 'var(--green)' : 'var(--red)',
+            fontFamily: 'var(--font-mono)'
+          }
+        }, `${actionScore >= 0 ? '+' : ''}${actionScore}`),
+        React.createElement('div', { style: { fontSize: 10, color: 'var(--text-muted)' } }, `Iteration ${reasoningIteration}`),
+        React.createElement('div', { style: { display: 'flex', gap: 12, marginTop: 6 } },
+          React.createElement('div', { style: { textAlign: 'center' } },
+            React.createElement('div', { style: { fontSize: 14, fontWeight: 700, color: 'var(--green)' } },
+              (hypotheses || []).filter(h => h.status === 'confirmed').length
+            ),
+            React.createElement('div', { style: { fontSize: 9, color: 'var(--text-muted)' } }, 'Confirmed')
+          ),
+          React.createElement('div', { style: { textAlign: 'center' } },
+            React.createElement('div', { style: { fontSize: 14, fontWeight: 700, color: 'var(--red)' } },
+              (hypotheses || []).filter(h => h.status === 'invalidated').length
+            ),
+            React.createElement('div', { style: { fontSize: 9, color: 'var(--text-muted)' } }, 'Ruled Out')
+          )
+        )
+      ),
+      // Col 3 — Hypothesis breakdown
+      React.createElement('div', {
+        style: {
+          background: 'var(--bg-surface)', border: '1px solid var(--border)',
+          borderRadius: 10, padding: '12px 14px',
+        }
+      },
+        React.createElement('div', { style: { fontSize: 10, fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: 0.8, marginBottom: 8 } }, 'Hypothesis Status'),
+        (() => {
+          const hyps = hypotheses || [];
+          const active    = hyps.filter(h => h.status === 'active' || !h.status).length;
+          const confirmed = hyps.filter(h => h.status === 'confirmed').length;
+          const ruledOut  = hyps.filter(h => h.status === 'invalidated').length;
+          const total     = hyps.length || 1;
+          return React.createElement('div', { style: { display: 'flex', flexDirection: 'column', gap: 6 } },
+            [
+              { label: 'Active',     count: active,    color: 'var(--cyan)' },
+              { label: 'Confirmed',  count: confirmed, color: 'var(--green)' },
+              { label: 'Ruled Out',  count: ruledOut,  color: 'var(--red)' },
+            ].map(({ label, count, color }) =>
+              React.createElement('div', { key: label, style: { display: 'flex', alignItems: 'center', gap: 6 } },
+                React.createElement('div', { style: { width: 7, height: 7, borderRadius: '50%', background: color, flexShrink: 0 } }),
+                React.createElement('div', { style: { flex: 1, fontSize: 11, color: 'var(--text-secondary)' } }, label),
+                React.createElement('div', { style: { fontSize: 11, fontWeight: 700, color, fontFamily: 'var(--font-mono)' } }, count),
+                React.createElement('div', { style: { flex: 1, height: 3, background: 'var(--bg-card)', borderRadius: 2, overflow: 'hidden', marginLeft: 4 } },
+                  React.createElement('div', { style: { width: `${Math.round(count / total * 100)}%`, height: '100%', background: color, borderRadius: 2 } })
+                )
+              )
+            )
+          );
+        })()
+      )
     ),
 
     // ── Stats row ─────────────────────────────────────────────────────────
