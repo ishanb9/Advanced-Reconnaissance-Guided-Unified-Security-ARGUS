@@ -58,13 +58,26 @@ class AhmiaSubagent(OsintSubagentBase):
     # ── Query builder ─────────────────────────────────────────────
 
     def _build_queries(self, target: str) -> List[str]:
-        queries = [target]
+        queries: List[str] = [target]
         if not self._is_ip(target):
             parts = target.split(".")
-            # Add the organisation name (second-level domain)
             if len(parts) >= 2:
                 queries.append(parts[-2])
-        return queries
+        # Pivot on discovered artefacts: org name, SSL CN roots, harvested
+        # emails, each discovered hostname. Dark-web mentions of *any* of
+        # these are actionable — a leak for one subdomain is just as bad as
+        # a leak for apex.
+        org = (self._disco("org") or "").strip()
+        if org:
+            queries.append(org)
+        for dom in self._target_domains():
+            if dom not in queries:
+                queries.append(dom)
+        for email in (self._disco("emails") or [])[:5]:
+            if email not in queries:
+                queries.append(email)
+        # Cap — Ahmia is rate-limited.
+        return list(dict.fromkeys(queries))[:10]
 
     # ── Search ────────────────────────────────────────────────────
 

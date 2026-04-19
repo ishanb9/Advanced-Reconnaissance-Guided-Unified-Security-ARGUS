@@ -44,6 +44,28 @@ class CensysSubagent(OsintSubagentBase):
             await self._search_certificates(target)
             await self._search_hosts(target)
 
+        # Also query any additional IPs discovered during recon — Censys's
+        # host data is often richer than Shodan on internal service banners.
+        # If the account is out of quota we'll stop early.
+        extra_ips = [ip for ip in self._target_ips() if ip != target]
+        for ip in extra_ips[:3]:
+            if self._stopped or getattr(self, "_quota_exhausted", False):
+                break
+            await self._query_host(ip)
+
+        # And search certs for any SSL CN/SAN we already know — surfaces sister
+        # infrastructure sharing the same CA or wildcard. Cap at 2 extras.
+        seen_doms = set()
+        for dom in self._target_domains():
+            if self._stopped or getattr(self, "_quota_exhausted", False):
+                break
+            apex = ".".join(dom.split(".")[-2:]) if dom.count(".") >= 1 else dom
+            if apex != target and apex not in seen_doms:
+                seen_doms.add(apex)
+                await self._search_certificates(apex)
+                if len(seen_doms) >= 2:
+                    break
+
         return self._results
 
     # ── Host lookup (IP) ──────────────────────────────────────────
@@ -54,6 +76,10 @@ class CensysSubagent(OsintSubagentBase):
             headers=self._auth_headers(),
             timeout=TIMEOUTS.get("censys", 20),
         )
+        if resp is not None and resp.status_code in (401, 402, 403, 429):
+            # Plan/quota issue — remember so the caller stops iterating.
+            self._quota_exhausted = True
+            return
         if not resp or resp.status_code != 200:
             return
         try:
@@ -120,6 +146,10 @@ class CensysSubagent(OsintSubagentBase):
             headers=self._auth_headers(),
             timeout=TIMEOUTS.get("censys", 20),
         )
+        if resp is not None and resp.status_code in (401, 402, 403, 429):
+            # Plan/quota issue — remember so the caller stops iterating.
+            self._quota_exhausted = True
+            return
         if not resp or resp.status_code != 200:
             return
         try:
@@ -167,6 +197,10 @@ class CensysSubagent(OsintSubagentBase):
             headers=self._auth_headers(),
             timeout=TIMEOUTS.get("censys", 20),
         )
+        if resp is not None and resp.status_code in (401, 402, 403, 429):
+            # Plan/quota issue — remember so the caller stops iterating.
+            self._quota_exhausted = True
+            return
         if not resp or resp.status_code != 200:
             return
         try:

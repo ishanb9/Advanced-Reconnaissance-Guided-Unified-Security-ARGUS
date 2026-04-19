@@ -26,10 +26,11 @@ from typing import Any, Callable, Coroutine, Dict, List, Optional, TYPE_CHECKING
 if TYPE_CHECKING:
     from agents.master_agent import MasterAgent
 
-from agents.reasoning.hypothesis_engine import HypothesisEngine, Hypothesis
-from agents.reasoning.attack_planner    import AttackPlanner, RankedAttackPath
-from agents.reasoning.decision_engine   import DecisionEngine, JustifiedAction
-from agents.reasoning.negative_memory   import NegativeMemory
+from agents.reasoning.hypothesis_engine  import HypothesisEngine, Hypothesis
+from agents.reasoning.attack_planner     import AttackPlanner, RankedAttackPath
+from agents.reasoning.decision_engine    import DecisionEngine, JustifiedAction
+from agents.reasoning.negative_memory    import NegativeMemory
+from agents.reasoning.question_engine    import QuestionEngine
 
 
 class ReasoningLoop:
@@ -90,6 +91,14 @@ class ReasoningLoop:
         self._journal:        List[str]               = []
         # Tracks last validated hypothesis node for graph edge chaining
         self._last_validated_node_id: Optional[str]  = None
+
+        # ── Question Engine (3-layer extraction + discovery pass) ─────────
+        self._question_engine = QuestionEngine(
+            master_agent = master_agent,
+            session_id   = session_id,
+            target       = target,
+            emit_fn      = emit_fn,
+        )
 
     # ------------------------------------------------------------------
     # Main loop
@@ -159,6 +168,22 @@ class ReasoningLoop:
                         f"obj_section_{i}", f"{emoji} {sec[:50]}", "pending", "", "exploit"
                     )
 
+        # ── Load objectives into QuestionEngine ──────────────────────────
+        # Restore any previously answered questions from checkpoint first
+        self._question_engine.load_from_intel(self._intel)
+        # Register all unanswered objectives as questions
+        _qe_objectives = (
+            (self._intel.get("engagement_context") or {}).get("objectives")
+            or self._intel.get("ctf_objectives")
+            or []
+        )
+        for _qi, _obj in enumerate(_qe_objectives):
+            _q_text = (
+                (_obj.get("task") or _obj.get("question") or str(_obj))
+                if isinstance(_obj, dict) else str(_obj)
+            )
+            self._question_engine.add_question(_q_text, objective_idx=_qi)
+
         # Restore from checkpoint if reasoning_journal already populated
         self._journal = list(self._intel.get("reasoning_journal", []))
         self._decision_eng.set_score(self._intel.get("action_score", 0))
@@ -173,6 +198,10 @@ class ReasoningLoop:
         # so the hypothesis engine has evidence to work with.
         if not self._intel.get("open_ports"):
             await self._bootstrap_recon()
+
+        # --- POST-BOOTSTRAP ANSWER EXTRACTION ---
+        # Run QuestionEngine against all gathered intel (no raw output yet).
+        await self._question_engine.answer_all(self._intel, "")
 
         for iteration in range(self.MAX_ITERATIONS):
             self._iteration = iteration
@@ -212,6 +241,8 @@ class ReasoningLoop:
             if not self._hypotheses:
                 await self._emit_reasoning("No hypotheses generated — gathering more evidence")
                 await self._gather_more_evidence()
+                # Re-run QE after fresh evidence
+                await self._question_engine.answer_all(self._intel, "")
                 continue
 
             # Emit attack tree skeleton from fresh hypotheses
@@ -277,8 +308,10 @@ class ReasoningLoop:
                 await self._emit_reasoning(
                     "No actionable hypothesis found — exhausting more evidence paths"
                 )
-                result = await self._gather_more_evidence()
-                if not result:
+                gather_result = await self._gather_more_evidence()
+                # Re-run QE after fresh evidence
+                await self._question_engine.answer_all(self._intel, "")
+                if not gather_result:
                     await self._emit_status("No more actions available — loop complete", "DONE")
                     break
                 continue
@@ -425,11 +458,18 @@ class ReasoningLoop:
             # ── UPDATE STATE ──────────────────────────────────────────────
             await self._update(action, result, validated, active_hyp)
 
-            # ── CTF ANSWER EXTRACTION ─────────────────────────────────────
-            # After every tool execution, check if the output answers any
-            # CTF objectives that the operator provided in notes.
-            if self._intel.get("ctf_objectives"):
-                await self._extract_ctf_answers(action, result)
+            # ── QUESTION ENGINE: answer extraction + discovery pass ────────
+            # Layer 1 (deterministic) + Layer 2 (LLM) + Layer 3 (tool) against
+            # this tool's output. Works for both CTF objectives and ad-hoc questions.
+            _tool_stdout = (result.get("stdout") or result.get("output") or "")
+            await self._question_engine.answer_all(self._intel, _tool_stdout)
+            # Discovery pass: surface interesting facts for real pentests
+            await self._question_engine.run_discovery_pass(
+                raw_output = _tool_stdout,
+                phase      = action.hypothesis_id or "exploit",
+                tool       = action.tool,
+                intel      = self._intel,
+            )
 
             # ── AUTO POST-EXPLOITATION ────────────────────────────────────
             # If shell access was just gained this iteration, immediately
@@ -555,6 +595,32 @@ class ReasoningLoop:
             "recon", found=total_ports > 0
         )
 
+        # ── Exploit phase ─────────────────────────────────────────────────
+        # The reasoning loop previously never invoked the exploit phase, so
+        # no exploitation attempts were ever made. Invoke it here if we have
+        # any vuln/port evidence. `_phase_exploit` itself respects the
+        # `_auto_exploit` gate — when False it will await confirmation.
+        if port_nums:
+            await self._emit_plan_step(
+                "bootstrap_exploit", "💥 Exploitation", "active",
+                f"Attempting exploitation on {len(port_nums)} open ports", "exploit"
+            )
+            try:
+                await self._master._phase_exploit(target=self._target)
+                await self._emit_plan_step(
+                    "bootstrap_exploit", "💥 Exploitation", "done",
+                    f"{len(self._intel.get('shells',[]))} shells | "
+                    f"{len(self._intel.get('credentials',[]))} creds",
+                    "exploit",
+                    found=bool(self._intel.get("shells") or self._intel.get("credentials")),
+                )
+            except Exception as e:
+                await self._emit_reasoning(f"Exploit phase error: {e}")
+                await self._emit_plan_step(
+                    "bootstrap_exploit", "💥 Exploitation", "failed",
+                    f"error: {e}", "exploit", found=False
+                )
+
     async def _bootstrap_file_analysis(self) -> None:
         """Bootstrap for forensics / malware_analysis — run file analysis tools."""
         eng_ctx  = self._intel.get("engagement_context") or {}
@@ -672,12 +738,46 @@ class ReasoningLoop:
             return f"Iteration {self._iteration}: {ports} ports, {vulns} vulns, shell={shell}"
 
     async def _hypothesize(self, evidence: dict) -> List[Hypothesis]:
-        """Delegate to HypothesisEngine."""
-        return await self._hypothesis_eng.generate_hypotheses(
+        """
+        Delegate to HypothesisEngine and emit expert-methodology reasoning events.
+
+        The HypothesisEngine stores temporary observation/interpretation/avoid
+        in intel under '_tmp_*' keys.  We pop them here, emit them as visible
+        reasoning traces for the operator, then delete them so they don't
+        pollute checkpoints.
+        """
+        hypotheses = await self._hypothesis_eng.generate_hypotheses(
             intel           = self._intel,
             negative_memory = self._neg_memory,
             iteration       = self._iteration,
         )
+
+        # ── Emit expert OBSERVE / INTERPRET / AVOID events ───────────────────
+        observation    = self._intel.pop("_tmp_observation",    "")
+        interpretation = self._intel.pop("_tmp_interpretation", "")
+        avoid_list     = self._intel.pop("_tmp_avoid",          [])
+
+        if observation:
+            await self._emit_reasoning(f"🔍 OBSERVE [{self._iteration}]: {observation}")
+        if interpretation:
+            await self._emit_reasoning(f"💡 INTERPRET [{self._iteration}]: {interpretation}")
+        if avoid_list:
+            avoid_str = " | ".join(str(a)[:80] for a in avoid_list[:4])
+            await self._emit_reasoning(f"🚫 AVOID: {avoid_str}")
+
+        # ── Emit DECIDE event showing the 1-2 chosen actions ─────────────────
+        if hypotheses:
+            action_strs = []
+            for h in hypotheses[:2]:
+                if h.recommended_next_actions:
+                    action_strs.append(h.recommended_next_actions[0][:100])
+            if action_strs:
+                await self._emit_reasoning(
+                    f"⚡ DECIDE [{self._iteration}]: "
+                    + " | ".join(f"({i+1}) {a}" for i, a in enumerate(action_strs))
+                )
+
+        return hypotheses
 
     async def _prioritize(self) -> List[RankedAttackPath]:
         """Delegate to AttackPlanner."""
@@ -908,7 +1008,16 @@ class ReasoningLoop:
                                            target=self._target, web_ports=web_ports)))
 
         # ── Vulnerability scan ──────────────────────────────────────────────
-        if not is_passive and "nikto" not in tools_excl and intel.get("open_ports") and not intel.get("vulnerabilities"):
+        # Run if: ports exist AND (no vulns yet OR fewer than expected based on port count)
+        vuln_count = len(intel.get("vulnerabilities") or [])
+        port_count = len(intel.get("open_ports") or [])
+        vuln_scan_needed = intel.get("open_ports") and (
+            vuln_count == 0 or                                    # no vulns at all
+            (port_count > 3 and vuln_count < 3) or                # many ports but few vulns
+            not intel.get("_vuln_agent_ran")                      # vuln agent hasn't run yet
+        )
+        if not is_passive and "nikto" not in tools_excl and vuln_scan_needed:
+            intel["_vuln_agent_ran"] = True  # prevent re-running
             tasks.append(("Vulnerability Scan", "vuln_scan", "vuln_id",
                           self._safe_phase(self._master._phase_vuln_id,
                                            target=self._target)))
@@ -963,6 +1072,125 @@ class ReasoningLoop:
         return True
 
     # ------------------------------------------------------------------
+    # Intel-based answer extraction (post-bootstrap)
+    # ------------------------------------------------------------------
+
+    async def _extract_answers_from_intel(self) -> None:
+        """
+        After bootstrap, build a comprehensive text summary of everything we
+        know (open ports, services, vulnerabilities, technologies, etc.) and
+        run answer extraction against it.  This catches easy wins like
+        'How many ports are open?' or 'What web server is running?'
+        """
+        intel = self._intel
+        lines: list[str] = []
+
+        # Ports + services
+        ports = intel.get("open_ports") or []
+        if ports:
+            lines.append(f"Open ports ({len(ports)} total):")
+            for p in ports[:60]:
+                if isinstance(p, dict):
+                    lines.append(
+                        f"  {p.get('port','')} / {p.get('protocol','tcp')} "
+                        f"— {p.get('service','')} {p.get('version','')}"
+                    )
+                else:
+                    lines.append(f"  {p}")
+
+        # Services list
+        services = intel.get("services") or []
+        if services:
+            lines.append(f"\nServices ({len(services)}):")
+            for s in services[:30]:
+                if isinstance(s, dict):
+                    lines.append(
+                        f"  {s.get('port','')}: {s.get('name','')} "
+                        f"{s.get('product','')} {s.get('version','')}"
+                    )
+                else:
+                    lines.append(f"  {s}")
+
+        # OS guess
+        if intel.get("os_guess"):
+            lines.append(f"\nOS guess: {intel['os_guess']}")
+
+        # Vulnerabilities
+        vulns = intel.get("vulnerabilities") or []
+        if vulns:
+            lines.append(f"\nVulnerabilities ({len(vulns)}):")
+            for v in vulns[:30]:
+                if isinstance(v, dict):
+                    lines.append(
+                        f"  [{v.get('severity','?')}] {v.get('title','')} "
+                        f"{v.get('cve','')} — {v.get('description','')[:120]}"
+                    )
+                else:
+                    lines.append(f"  {v}")
+
+        # CVEs
+        cves = intel.get("cves") or []
+        if cves:
+            lines.append(f"\nCVEs: {', '.join(str(c) for c in cves[:30])}")
+
+        # Technologies
+        techs = intel.get("technologies") or []
+        if techs:
+            lines.append(f"\nTechnologies: {', '.join(str(t) for t in techs[:30])}")
+
+        # Web targets
+        webs = intel.get("web_targets") or []
+        if webs:
+            lines.append(f"\nWeb targets: {', '.join(str(w) for w in webs[:20])}")
+
+        # Web paths
+        paths = intel.get("web_paths") or []
+        if paths:
+            lines.append(f"\nWeb paths ({len(paths)}):")
+            for wp in paths[:40]:
+                if isinstance(wp, dict):
+                    lines.append(f"  {wp.get('path','')} [{wp.get('status','')}] {wp.get('title','')}")
+                else:
+                    lines.append(f"  {wp}")
+
+        # Web vulns
+        wvulns = intel.get("web_vulns") or []
+        if wvulns:
+            lines.append(f"\nWeb vulnerabilities ({len(wvulns)}):")
+            for wv in wvulns[:20]:
+                if isinstance(wv, dict):
+                    lines.append(f"  {wv.get('type','')}: {wv.get('url','')} — {wv.get('detail','')[:100]}")
+                else:
+                    lines.append(f"  {wv}")
+
+        # Credentials
+        creds = intel.get("credentials") or []
+        if creds:
+            lines.append(f"\nCredentials ({len(creds)}):")
+            for c in creds[:15]:
+                if isinstance(c, dict):
+                    lines.append(f"  {c.get('user','')}:{c.get('secret','')} ({c.get('service','')})")
+                else:
+                    lines.append(f"  {c}")
+
+        # Domain info
+        domain = intel.get("domain_info")
+        if domain:
+            lines.append(f"\nDomain info: {domain}")
+
+        if not lines:
+            return
+
+        summary = "\n".join(lines)
+
+        # Create a synthetic action and result for the standard extraction method
+        class _SyntheticAction:
+            tool = "bootstrap_recon"
+            args = ""
+            reason = "Intelligence bootstrap"
+        await self._extract_ctf_answers(_SyntheticAction(), {"stdout": summary})
+
+    # ------------------------------------------------------------------
     # CTF answer extraction
     # ------------------------------------------------------------------
 
@@ -994,13 +1222,15 @@ class ReasoningLoop:
         if not stdout.strip():
             return
 
-        # Only send first 3000 chars to LLM to stay within context
-        stdout_snippet = stdout[:3000]
+        # Send generous chunk to LLM — tool outputs with port/service data
+        # need enough context for the LLM to count/identify items
+        stdout_snippet = stdout[:8000]
 
-        # Build compact objective list for the LLM
+        # Build compact objective list for the LLM — include ALL unanswered
+        # (up to 30) so nothing is missed just because it's low-priority
         q_lines = "\n".join(
             f"{i+1}. {obj.get('task') or obj.get('question') or str(obj)}"
-            for i, obj in unanswered[:10]
+            for i, obj in unanswered[:30]
         )
 
         # Engagement-type-specific extraction hints
@@ -1015,18 +1245,25 @@ class ReasoningLoop:
         prompt = (
             f"Engagement type: {eng_type}\n"
             f"Tool executed: {action.tool}\n"
-            f"Tool output:\n{stdout_snippet}\n\n"
-            f"Objectives to answer (find exact answers in the output above):\n{q_lines}\n\n"
+            f"Tool output / intelligence summary:\n{stdout_snippet}\n\n"
+            f"Objectives to answer:\n{q_lines}\n\n"
             f"Extraction guidance: {extraction_hints}\n\n"
-            "For each objective whose answer is DIRECTLY visible in the output, return it.\n"
-            "Only report answers explicitly present — never guess or infer.\n"
-            "Respond with JSON only — no prose:\n"
-            '{{"answers": [{{"index": 1, "question": "...", "answer": "exact value from output", "evidence": "verbatim line"}}]}}\n'
-            'If nothing matches, return: {{"answers": []}}'
+            "INSTRUCTIONS:\n"
+            "- For each objective, check if the output above contains enough data to answer it.\n"
+            "- Answers CAN be derived by counting items, reading version strings, identifying services, etc.\n"
+            "- For 'how many' questions, COUNT the relevant items in the output.\n"
+            "- For 'what is' questions, extract the exact value from the output.\n"
+            "- Be precise — give the specific value, number, name, or string.\n"
+            "- Do NOT fabricate data not supported by the output.\n"
+            "- Include evidence: the actual line(s) from the output that support your answer.\n\n"
+            "Respond with JSON only — no markdown fences, no prose:\n"
+            '{{"answers": [{{"index": <objective_number>, "question": "...", "answer": "the answer", "evidence": "supporting line(s) from output"}}]}}\n'
+            'If no objectives can be answered from this output, return: {{"answers": []}}'
         )
         system = (
-            f"You extract precise answers to {eng_type} objectives from tool output. "
-            "Only report what is explicitly present in the output. Never guess. If unsure, omit."
+            f"You are a {eng_type} expert extracting precise answers from tool output. "
+            "You can count items, read versions, identify services, and derive answers from data. "
+            "Be accurate and specific. Only answer what the data supports."
         )
 
         try:

@@ -2011,7 +2011,10 @@ function MissionControl() {
       feedEntries,
       findingsSummary,
       credentials,
-    })
+    }),
+
+    // ── Ask Bar (bottom-left, always available during active session) ─────
+    React.createElement(AskBar, { sessionId: activeSession && activeSession.id })
   );
 }
 
@@ -2319,4 +2322,292 @@ function OperatorConsole({ sessionId, currentPhase, onClose, planSteps, agents, 
   );
 }
 
+// ══════════════════════════════════════════════════════════════════════════════
+// AskBar — draggable, minimizable "Ask ARGUS" floating panel
+// Drag by the header. Minimize to a compact pill. Expand to show answers.
+// ══════════════════════════════════════════════════════════════════════════════
+function AskBar({ sessionId }) {
+  const { state, dispatch } = window.useStore();
+  const { lastQuestionResult, questionHistory, activeSession } = state;
+
+  const [question,  setQuestion]  = React.useState('');
+  const [loading,   setLoading]   = React.useState(false);
+  const [error,     setError]     = React.useState('');
+  const [expanded,  setExpanded]  = React.useState(false);
+  const [minimized, setMinimized] = React.useState(false);
+
+  // Drag state — stored in refs to avoid re-render loops during drag
+  const [pos, setPos] = React.useState({ x: 20, y: null, fromBottom: 20 });
+  const dragging  = React.useRef(false);
+  const dragStart = React.useRef({ mx: 0, my: 0, px: 0, py: 0 });
+  const panelRef  = React.useRef(null);
+
+  if (!activeSession) return null;
+
+  // ── Drag handlers ─────────────────────────────────────────────────────────
+  function onMouseDown(e) {
+    // Only drag from header, ignore button clicks inside header
+    if (e.target.closest('button')) return;
+    e.preventDefault();
+    dragging.current = true;
+    const rect = panelRef.current.getBoundingClientRect();
+    dragStart.current = { mx: e.clientX, my: e.clientY, px: rect.left, py: rect.top };
+    // Switch from bottom-anchor to top-anchor when dragging starts
+    setPos(p => {
+      const currentTop = p.y !== null ? p.y : window.innerHeight - rect.height - p.fromBottom;
+      return { x: p.x, y: currentTop, fromBottom: null };
+    });
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup',   onMouseUp);
+  }
+
+  function onMouseMove(e) {
+    if (!dragging.current) return;
+    const dx = e.clientX - dragStart.current.mx;
+    const dy = e.clientY - dragStart.current.my;
+    const newX = Math.max(0, Math.min(window.innerWidth  - 390, dragStart.current.px + dx));
+    const newY = Math.max(0, Math.min(window.innerHeight - 50,  dragStart.current.py + dy));
+    setPos({ x: newX, y: newY, fromBottom: null });
+  }
+
+  function onMouseUp() {
+    dragging.current = false;
+    window.removeEventListener('mousemove', onMouseMove);
+    window.removeEventListener('mouseup',   onMouseUp);
+  }
+
+  // ── Ask logic ─────────────────────────────────────────────────────────────
+  async function ask() {
+    const q = question.trim();
+    if (!q || !sessionId || loading) return;
+    setLoading(true); setError('');
+    try {
+      const res = await window.API.sessions.ask(sessionId, q);
+      dispatch({ type: 'QUESTION_ANSWERED', payload: { ...res, question: q } });
+      setQuestion('');
+      setExpanded(true);
+      if (minimized) setMinimized(false);
+    } catch (e) {
+      setError(`✗ ${e.message}`);
+    }
+    setLoading(false);
+  }
+
+  function handleKey(e) {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); ask(); }
+  }
+
+  const layerColor = (l) => l === 1 ? 'var(--green)' : l === 2 ? 'var(--cyan)' : 'var(--yellow)';
+  const layerLabel = (l) => l === 1 ? 'L1·Det' : l === 2 ? 'L2·LLM' : 'L3·Tool';
+
+  // Position style — use bottom-anchor until first drag
+  const posStyle = pos.fromBottom !== null
+    ? { left: pos.x, bottom: pos.fromBottom }
+    : { left: pos.x, top: pos.y };
+
+  // ── Minimized pill ────────────────────────────────────────────────────────
+  if (minimized) {
+    return React.createElement('div', {
+      ref: panelRef,
+      onMouseDown,
+      style: {
+        position: 'fixed', ...posStyle, zIndex: 490,
+        background: 'var(--bg-surface)',
+        border: '1px solid rgba(0,255,136,0.35)',
+        borderRadius: 20, boxShadow: '0 8px 30px rgba(0,0,0,0.7)',
+        display: 'flex', alignItems: 'center', gap: 7,
+        padding: '6px 12px', cursor: 'grab', userSelect: 'none',
+      }
+    },
+      React.createElement('span', { style: { fontSize: 11 } }, '🔎'),
+      React.createElement('span', {
+        style: { fontSize: 10, fontWeight: 700, color: 'var(--green)',
+                 fontFamily: 'var(--font-mono)', letterSpacing: 0.5 }
+      }, 'ASK ARGUS'),
+      questionHistory.length > 0 && React.createElement('span', {
+        style: { fontSize: 8, padding: '1px 5px', borderRadius: 10,
+                 background: 'rgba(0,255,136,0.12)', color: 'var(--green)',
+                 fontFamily: 'var(--font-mono)' }
+      }, `${questionHistory.length}`),
+      React.createElement('button', {
+        onClick: (e) => { e.stopPropagation(); setMinimized(false); },
+        style: {
+          background: 'none', border: 'none', color: 'var(--text-muted)',
+          cursor: 'pointer', fontSize: 11, lineHeight: 1, padding: '0 2px',
+        }
+      }, '⬆')
+    );
+  }
+
+  // ── Full panel ────────────────────────────────────────────────────────────
+  return React.createElement('div', {
+    ref: panelRef,
+    style: {
+      position: 'fixed', ...posStyle, width: 380, zIndex: 490,
+      background: 'var(--bg-base)',
+      border: '1px solid rgba(0,255,136,0.25)',
+      borderRadius: 10, boxShadow: '0 20px 60px rgba(0,0,0,0.85)',
+      display: 'flex', flexDirection: 'column', overflow: 'hidden',
+    }
+  },
+
+    // ── Header (drag handle) ──────────────────────────────────────────────
+    React.createElement('div', {
+      onMouseDown,
+      style: {
+        padding: '8px 12px', background: 'var(--bg-surface)',
+        borderBottom: '1px solid var(--border)',
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        cursor: 'grab', userSelect: 'none', flexShrink: 0,
+      }
+    },
+      // Left: title + badge
+      React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 7 } },
+        React.createElement('span', { style: { fontSize: 11 } }, '🔎'),
+        React.createElement('span', {
+          style: { fontSize: 11, fontWeight: 700, color: 'var(--green)', letterSpacing: 0.5 }
+        }, 'ASK ARGUS'),
+        questionHistory.length > 0 && React.createElement('span', {
+          style: { fontSize: 8, padding: '1px 5px', borderRadius: 3,
+                   fontFamily: 'var(--font-mono)',
+                   background: 'rgba(0,255,136,0.08)', color: 'var(--green)' }
+        }, `${questionHistory.length} answered`),
+        // Drag hint
+        React.createElement('span', {
+          style: { fontSize: 8, color: 'var(--border)', fontFamily: 'var(--font-mono)', opacity: 0.5 }
+        }, '⠿ drag')
+      ),
+      // Right: expand toggle + minimize
+      React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6 } },
+        React.createElement('button', {
+          onClick: (e) => { e.stopPropagation(); setExpanded(!expanded); },
+          title: expanded ? 'Collapse history' : 'Expand history',
+          style: {
+            background: 'none', border: 'none', color: 'var(--text-muted)',
+            cursor: 'pointer', fontSize: 10, fontFamily: 'var(--font-mono)',
+            padding: '0 3px',
+          }
+        }, expanded ? '▲' : '▼'),
+        React.createElement('button', {
+          onClick: (e) => { e.stopPropagation(); setMinimized(true); },
+          title: 'Minimize to pill',
+          style: {
+            background: 'none', border: 'none', color: 'var(--text-muted)',
+            cursor: 'pointer', fontSize: 12, lineHeight: 1, padding: '0 2px',
+          }
+        }, '–')
+      )
+    ),
+
+    // ── Input row ─────────────────────────────────────────────────────────
+    React.createElement('div', {
+      style: { padding: '8px 10px', display: 'flex', gap: 6, alignItems: 'center', flexShrink: 0 }
+    },
+      React.createElement('input', {
+        value:       question,
+        onChange:    e => setQuestion(e.target.value),
+        onKeyDown:   handleKey,
+        placeholder: 'Ask a question… (Enter to send)',
+        style: {
+          flex: 1, background: 'var(--bg-surface)', border: '1px solid var(--border)',
+          borderRadius: 5, color: 'var(--text-primary)', fontSize: 10,
+          padding: '6px 8px', outline: 'none', fontFamily: 'var(--font-mono)',
+        }
+      }),
+      React.createElement('button', {
+        onClick:  ask,
+        disabled: !question.trim() || loading,
+        style: {
+          padding: '6px 10px', borderRadius: 5, border: 'none', cursor: 'pointer',
+          fontSize: 10, fontFamily: 'var(--font-mono)', fontWeight: 700,
+          background: (!question.trim() || loading) ? 'var(--bg-surface)' : 'rgba(0,255,136,0.15)',
+          color:      (!question.trim() || loading) ? 'var(--text-muted)' : 'var(--green)',
+          transition: 'all 0.15s',
+        }
+      }, loading ? '…' : 'Ask')
+    ),
+
+    // ── Error ─────────────────────────────────────────────────────────────
+    error && React.createElement('div', {
+      style: { padding: '0 10px 6px', fontSize: 9, color: 'var(--red)', fontFamily: 'var(--font-mono)' }
+    }, error),
+
+    // ── Latest result (always shown when available, below input) ──────────
+    lastQuestionResult && React.createElement('div', {
+      style: {
+        margin: '0 8px 8px', padding: '7px 9px', borderRadius: 6,
+        background: lastQuestionResult.state === 'answered'
+          ? 'rgba(0,255,136,0.06)' : 'rgba(255,255,255,0.03)',
+        border: `1px solid ${lastQuestionResult.state === 'answered'
+          ? 'rgba(0,255,136,0.2)' : 'var(--border)'}`,
+      }
+    },
+      React.createElement('div', {
+        style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }
+      },
+        React.createElement('span', {
+          style: { fontSize: 9, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)',
+                   flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                   marginRight: 6 }
+        }, lastQuestionResult.question),
+        lastQuestionResult.layer_used && React.createElement('span', {
+          style: {
+            fontSize: 8, padding: '1px 5px', borderRadius: 3, flexShrink: 0,
+            background: 'rgba(0,0,0,0.35)',
+            color: layerColor(lastQuestionResult.layer_used),
+            fontFamily: 'var(--font-mono)',
+          }
+        }, layerLabel(lastQuestionResult.layer_used))
+      ),
+      lastQuestionResult.answer
+        ? React.createElement('div', {
+            style: { fontSize: 12, color: 'var(--green)', fontFamily: 'var(--font-mono)',
+                     fontWeight: 700, wordBreak: 'break-all', lineHeight: 1.4 }
+          }, lastQuestionResult.answer)
+        : React.createElement('div', {
+            style: { fontSize: 10, color: 'var(--text-muted)', fontStyle: 'italic' }
+          }, 'No answer found — try running more tools first'),
+      lastQuestionResult.evidence && React.createElement('div', {
+        style: { fontSize: 8, color: 'var(--text-muted)', marginTop: 3,
+                 fontFamily: 'var(--font-mono)', opacity: 0.65,
+                 whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }
+      }, `↳ ${lastQuestionResult.evidence}`)
+    ),
+
+    // ── Expanded history ──────────────────────────────────────────────────
+    expanded && questionHistory.length > 1 && React.createElement('div', {
+      style: { borderTop: '1px solid var(--border)', maxHeight: 220, overflowY: 'auto' }
+    },
+      React.createElement('div', {
+        style: { padding: '5px 10px 3px', fontSize: 8, color: 'var(--border)',
+                 fontFamily: 'var(--font-mono)', textTransform: 'uppercase', letterSpacing: 1 }
+      }, 'History'),
+      ...questionHistory.slice(1, 8).map((q, i) =>
+        React.createElement('div', {
+          key: i,
+          style: { padding: '5px 10px', borderTop: '1px solid var(--border)',
+                   display: 'flex', gap: 6, alignItems: 'flex-start' }
+        },
+          React.createElement('span', {
+            style: { fontSize: 9, flexShrink: 0, marginTop: 1,
+                     color: q.state === 'answered' ? 'var(--green)' : 'var(--text-muted)' }
+          }, q.state === 'answered' ? '✓' : '·'),
+          React.createElement('div', { style: { flex: 1, minWidth: 0 } },
+            React.createElement('div', {
+              style: { fontSize: 9, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)',
+                       whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }
+            }, q.question),
+            q.answer && React.createElement('div', {
+              style: { fontSize: 9, color: 'var(--text-primary)', fontFamily: 'var(--font-mono)',
+                       whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', marginTop: 1 }
+            }, q.answer)
+          )
+        )
+      )
+    )
+  );
+}
+
+
 window.MissionControl = MissionControl;
+window.AskBar = AskBar;

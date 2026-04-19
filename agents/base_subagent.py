@@ -46,6 +46,18 @@ from motor.motor_asyncio import AsyncIOMotorDatabase
 
 logger = logging.getLogger(__name__)
 
+# Per-session scan logger proxies — safe no-op if no active session logger.
+try:
+    from utils.scan_logger import (
+        log_finding as _slog_finding,
+        log_error   as _slog_error,
+        log_info    as _slog_info,
+    )
+except Exception:  # pragma: no cover
+    def _slog_finding(*a, **kw): pass
+    def _slog_error(*a, **kw):   pass
+    def _slog_info(*a, **kw):    pass
+
 # ── Global subagent registry — allows agent_server to cancel by name ──────────
 _SUBAGENT_REGISTRY: dict[str, "BaseSubagent"] = {}
 
@@ -713,12 +725,25 @@ class BaseSubagent(ABC):
         self._tool_deadline_sec = 600.0   # reset to 10 min for each tool call
 
         watchdog = asyncio.create_task(self._tool_watchdog(tool_name))
+        lines: list[str] = []
         try:
-            lines: list[str] = []
-            async for line in self.run_tool(tool_name, target, options):
-                lines.append(line)
-                if self._stop_requested:
-                    break
+            try:
+                async for line in self.run_tool(tool_name, target, options):
+                    lines.append(line)
+                    if self._stop_requested:
+                        break
+            except (asyncio.TimeoutError, asyncio.CancelledError) as exc:
+                # Preserve partial output on timeout/cancellation so parsers
+                # still see whatever ports/findings were collected before kill.
+                logger.warning(
+                    "[%s] collect_tool %s interrupted (%s) — keeping %d partial lines",
+                    self.SUBAGENT_NAME, tool_name, type(exc).__name__, len(lines),
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "[%s] collect_tool %s raised %s — keeping %d partial lines",
+                    self.SUBAGENT_NAME, tool_name, exc, len(lines),
+                )
             output = "\n".join(lines)
             self._tool_outputs[tool_name] = output
             return output
@@ -782,10 +807,56 @@ class BaseSubagent(ABC):
         doc["session_id"] = self.session_id
         doc["agent"] = self.AGENT_NAME
         doc["subagent"] = self.SUBAGENT_NAME
+        # Derive canonical phase label for legacy schema compatibility.
+        # AGENT_NAME may be "recon" / "ReconAgent" / "vuln" etc.; normalise.
+        _an = (self.AGENT_NAME or "").lower().replace("agent", "").strip()
+        _PHASE_MAP = {
+            "recon": "recon", "osint": "osint", "vuln": "vuln",
+            "exploit": "exploit", "privesc": "privesc", "lateral": "lateral",
+            "persistence": "persistence", "exfil": "exfil", "cleanup": "cleanup",
+            "web": "vuln", "cred": "credential", "credential": "credential",
+        }
+        doc.setdefault("phase", _PHASE_MAP.get(_an, _an or "unknown"))
+        # Normalise cve (singular string, may contain comma-separated ids) into
+        # cves (list[str]) so the indexed MongoDB schema and UI queries work.
+        _cve_raw = doc.get("cve")
+        if _cve_raw:
+            if isinstance(_cve_raw, str):
+                doc["cves"] = [c.strip().upper() for c in _cve_raw.split(",") if c.strip()]
+            elif isinstance(_cve_raw, (list, tuple)):
+                doc["cves"] = [str(c).strip().upper() for c in _cve_raw if str(c).strip()]
+            else:
+                doc["cves"] = []
+        else:
+            doc.setdefault("cves", [])
         try:
             await self.db["findings"].insert_one(doc)
         except Exception as exc:  # noqa: BLE001
             logger.error("MongoDB insert failed for finding %s: %s", finding.finding_id, exc)
+            try:
+                _slog_error(self.session_id, "mongo_insert_finding",
+                            f"{type(exc).__name__}: {exc}",
+                            finding_id=getattr(finding, "finding_id", None))
+            except Exception:
+                pass
+        # Per-session scan log record (best-effort, never raises).
+        try:
+            _slog_finding(
+                self.session_id,
+                finding_id=getattr(finding, "finding_id", None),
+                title=getattr(finding, "title", "") or "",
+                severity=getattr(finding, "severity", "") or doc.get("severity", ""),
+                phase=doc.get("phase", ""),
+                agent=self.AGENT_NAME,
+                subagent=self.SUBAGENT_NAME,
+                host=getattr(finding, "host", None) or doc.get("host"),
+                port=getattr(finding, "port", None) or doc.get("port"),
+                service=getattr(finding, "service", None) or doc.get("service"),
+                cves=doc.get("cves", []),
+                description=(getattr(finding, "description", "") or "")[:500],
+            )
+        except Exception:
+            pass
         await self._emit_finding(finding)
 
     # ------------------------------------------------------------------

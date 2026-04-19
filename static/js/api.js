@@ -52,6 +52,7 @@ const API = (() => {
       extend:      (id, phase) => post(`/sessions/${id}/extend/${phase}`),
       activate:    (id)        => post(`/sessions/${id}/activate`),
       guidance:    (id, body)  => post(`/sessions/${id}/guidance`, body),
+      ask:         (id, question, context) => post(`/sessions/${id}/ask`, { question, context }),
       delete:      (id)        => del(`/sessions/${id}`),
       checkpoints: (id)        => get(`/sessions/${id}/checkpoints`),
       archive:     (id)        => post(`/sessions/${id}/archive`),

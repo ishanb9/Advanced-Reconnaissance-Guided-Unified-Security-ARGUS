@@ -133,6 +133,10 @@ const INIT = {
   operatorMode:     'guided',   // 'guided' | 'auto'
   guidanceHistory:  [],         // [{directive, note, tool, dns_host, ts}] — last 20
 
+  // Ask bar state — last answered question result
+  lastQuestionResult: null,     // { question, answer, evidence, layer, state, finding_id } | null
+  questionHistory:    [],       // last 20 question/answer pairs
+
   // Tool timeout popup — set when a tool exceeds its deadline
   toolTimeoutWarning: null,     // null | {tool, subagent, elapsed_sec, deadline_sec}
 
@@ -833,6 +837,15 @@ function reducer(state, action) {
     case 'GUIDANCE_SENT': {
       const entry = { ...action.payload, ts: new Date().toLocaleTimeString([], { hour12: false }) };
       return { ...state, guidanceHistory: [entry, ...state.guidanceHistory].slice(0, 20) };
+    }
+
+    case 'QUESTION_ANSWERED': {
+      const qEntry = { ...action.payload, ts: new Date().toLocaleTimeString([], { hour12: false }) };
+      return {
+        ...state,
+        lastQuestionResult: qEntry,
+        questionHistory: [qEntry, ...state.questionHistory].slice(0, 20),
+      };
     }
 
     // ── v3: Credentials ───────────────────────────────────
@@ -1548,6 +1561,15 @@ function routeWsEvent(msg, dispatch, shellListeners, sessionId) {
       dispatch({ type: 'FEED_ENTRY', payload: {
         ts, agent: 'master', eventType: 'guidance',
         message: `Guidance: ${data.message}`, data
+      }});
+      break;
+
+    case 'question_answered':
+      // Store the latest answered question for the Ask bar to display
+      dispatch({ type: 'QUESTION_ANSWERED', payload: data });
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'master', eventType: 'question_answered',
+        message: `Q: ${data.question} → ${data.answer || 'unanswerable'}`, data
       }});
       break;
 

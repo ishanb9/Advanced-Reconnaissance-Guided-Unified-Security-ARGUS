@@ -470,17 +470,53 @@ function parseArgs(optionsStr) {
   return args;
 }
 
+// Tool names that must NEVER be resolved dynamically (protects host).
+const _DYNAMIC_BLOCKLIST = new Set([
+  'sh','bash','zsh','cmd','powershell','pwsh','eval','exec',
+  'rm','mkfs','dd','shutdown','reboot','halt','init',
+  'fork','kill','pkill','killall',
+]);
+const _dynamicBinCache = new Map();
+
+function _lookupBinaryOnPath(name) {
+  if (_dynamicBinCache.has(name)) return _dynamicBinCache.get(name);
+  // Strict allowlist on tool-name characters — regex prevents shell metachars
+  // from ever reaching the lookup, and the lookup itself uses execFileSync so
+  // there is no shell expansion.
+  if (!/^[A-Za-z0-9_.+-]+$/.test(name) || _DYNAMIC_BLOCKLIST.has(name)) {
+    _dynamicBinCache.set(name, null);
+    return null;
+  }
+  try {
+    const { execFileSync } = require('child_process');
+    const lookupBin = process.platform === 'win32' ? 'where' : 'which';
+    const out = execFileSync(lookupBin, [name], {
+      stdio: ['pipe','pipe','ignore'],
+    }).toString().trim().split('\n')[0];
+    const bin = out || null;
+    _dynamicBinCache.set(name, bin);
+    return bin;
+  } catch (_) {
+    _dynamicBinCache.set(name, null);
+    return null;
+  }
+}
+
 function resolveBin(toolName) {
   const t = TOOLS[toolName];
-  if (!t) return null;
-  if (t.fallback) {
-    try {
-      const fs = require('fs');
-      fs.accessSync(t.fallback, fs.constants.X_OK);
-      return t.fallback;
-    } catch (_) {}
+  if (t) {
+    if (t.fallback) {
+      try {
+        const fs = require('fs');
+        fs.accessSync(t.fallback, fs.constants.X_OK);
+        return t.fallback;
+      } catch (_) {}
+    }
+    return t.bin;
   }
-  return t.bin;
+  // Dynamic fallback — any Kali binary found on PATH can be invoked.
+  // This is the bridge that lets the LLM run tools outside the curated TOOLS list.
+  return _lookupBinaryOnPath(toolName);
 }
 
 function checkToolAvailable(toolName) {
@@ -499,15 +535,25 @@ function checkToolAvailable(toolName) {
 // ─────────────────────────────────────────────────────────────
 
 function executeTool(toolName, target, options, res) {
-  const tool = TOOLS[toolName];
-  if (!tool) {
-    sseMsg(res, 'error', `Unknown tool: ${toolName}. Check /tools/list for available tools.`);
-    sse(res, 'exit', 1);
-    res.end();
-    return;
-  }
-
+  let tool = TOOLS[toolName];
   const bin  = resolveBin(toolName);
+  if (!tool) {
+    // Tool not in curated TOOLS map but found on PATH — allow it.
+    // This is how the platform runs arbitrary Kali binaries the LLM picks.
+    if (bin) {
+      tool = {
+        bin: toolName,
+        category: 'dynamic',
+        description: `Dynamically resolved tool '${toolName}' (not in curated registry)`,
+      };
+      console.log(`[MCP] DYN   tool=${toolName}  resolved=${bin}`);
+    } else {
+      sseMsg(res, 'error', `Unknown tool: ${toolName} (not in registry and not found on PATH). Check /tools/list for available tools.`);
+      sse(res, 'exit', 127);
+      res.end();
+      return;
+    }
+  }
   const args = parseArgs(options);
 
   console.log(`[MCP] EXEC  tool=${toolName}  bin=${bin}  target=${target || '(none)'}  args="${args.join(' ')}"`);
@@ -528,6 +574,17 @@ function executeTool(toolName, target, options, res) {
 
   activeProcs.add(proc);
   sseMsg(res, 'info', `${toolName} started, pid: ${proc.pid}`);
+
+  // Hard timeout watchdog — prevent zombie tools running forever.
+  // Per-tool override via TOOLS[name].timeoutMs; default 15 minutes.
+  const timeoutMs = (tool && tool.timeoutMs) || parseInt(process.env.MCP_TOOL_TIMEOUT_MS || '900000', 10);
+  let timedOut = false;
+  const timeoutTimer = setTimeout(() => {
+    timedOut = true;
+    sseMsg(res, 'error', `Tool '${toolName}' exceeded ${Math.round(timeoutMs/1000)}s timeout — killing pid ${proc.pid}`);
+    try { proc.kill('SIGTERM'); } catch (_) {}
+    setTimeout(() => { try { proc.kill('SIGKILL'); } catch (_) {} }, 5000);
+  }, timeoutMs);
 
   proc.stdout.on('data', chunk => {
     chunk.toString().split('\n').forEach(line => {
@@ -553,13 +610,15 @@ function executeTool(toolName, target, options, res) {
   });
 
   proc.on('close', code => {
+    clearTimeout(timeoutTimer);
     activeProcs.delete(proc);
-    console.log(`[MCP] DONE  tool=${toolName}  pid=${proc.pid}  exit=${code}`);
-    sse(res, 'exit', code ?? 0);
+    console.log(`[MCP] DONE  tool=${toolName}  pid=${proc.pid}  exit=${code}${timedOut ? ' (TIMEOUT)' : ''}`);
+    sse(res, 'exit', timedOut ? 124 : (code ?? 0));
     if (!res.writableEnded) res.end();
   });
 
   res.on('close', () => {
+    clearTimeout(timeoutTimer);
     if (proc && !proc.killed) {
       proc.kill('SIGTERM');
       setTimeout(() => { try { proc.kill('SIGKILL'); } catch (_) {} }, 2000);

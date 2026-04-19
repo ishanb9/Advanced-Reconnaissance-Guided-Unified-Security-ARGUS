@@ -51,6 +51,11 @@ from db.schemas import (
 )
 import db.mongo_client as db
 
+# Per-session end-to-end scan logger (file-based). Never raises.
+from utils.scan_logger import (
+    start_scan_logger, close_scan_logger, get_scan_logger,
+)
+
 # ── RAG Knowledge Base (graceful degradation if not installed) ─────────────────
 try:
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "knowledge"))
@@ -263,6 +268,12 @@ class MasterAgent(BaseAgent):
         self._confirm_web:        bool = False   # Gate web testing behind a confirmation popup
         self._web_phase_timeout:  int  = 600     # Seconds; 0 = unlimited
         self._phases_to_run:      List[str] = []
+
+        # MCP tool catalog cache — fetched once per session, injected into LLM
+        # planning prompts so the model can pick from the full Kali arsenal
+        # rather than the small hardcoded hints embedded in each prompt.
+        self._tool_catalog:       Dict[str, Dict] = {}     # {name: {bin, category, description}}
+        self._tool_catalog_text:  str = ""                  # pre-formatted for prompt injection
 
         # Phase extension events — SET = user granted extension; cleared on each wait
         self._extend_events: Dict[str, asyncio.Event] = {}
@@ -529,6 +540,30 @@ class MasterAgent(BaseAgent):
                 "ts":   datetime.utcnow().isoformat()
             })
 
+        # ── Per-session file logger — captures every tool call, LLM call,
+        # phase transition, finding and error into logs/<timestamp>_<sid>/
+        # for post-scan troubleshooting.  Never raises.
+        self._scan_logger = start_scan_logger(
+            session_id      = session_id,
+            target          = target,
+            engagement_type = target_type,
+        )
+        try:
+            self._scan_logger.log_info(
+                "session_init",
+                f"target={target} type={target_type} auto_exploit={auto_exploit} "
+                f"reasoning_loop={self._use_reasoning_loop}",
+            )
+        except Exception:
+            pass
+
+        # ── Fetch the full MCP tool catalog once — makes every subsequent
+        # LLM planning prompt aware of the complete Kali arsenal exposed by
+        # mcp-server.js (hydra, sqlmap, gobuster, john, hashcat, wfuzz,
+        # nikto, wpscan, smbclient, enum4linux, crackmapexec, impacket-*,
+        # ffuf, medusa, ncrack, responder, bloodhound, …).
+        await self._load_tool_catalog()
+
         # ── Step 1: LLM check — warn if offline but NEVER halt ───
         # Scan always starts regardless of LLM state.  Each phase has hardcoded
         # fallback tool lists so recon/vuln/web phases run even without an LLM.
@@ -708,6 +743,12 @@ class MasterAgent(BaseAgent):
             # Explicit user cancellation (tool_stop / request_stop) — respect it
             await self.set_status(AgentStatus.IDLE, "Pentest cancelled by user")
             await db.update_session(session_id, {"status": SessionStatus.PAUSED})
+            try:
+                if getattr(self, "_scan_logger", None):
+                    self._scan_logger.log_info("session_cancel", "User cancelled scan")
+            except Exception:
+                pass
+            close_scan_logger(session_id)
             return {"status": "cancelled"}
         except Exception as e:
             # Any other error (including any stray RuntimeError) — log and continue
@@ -718,6 +759,11 @@ class MasterAgent(BaseAgent):
             })
             import logging as _log
             _log.getLogger(__name__).error("_execute_phases error (non-fatal): %s", e, exc_info=True)
+            try:
+                if getattr(self, "_scan_logger", None):
+                    self._scan_logger.log_error("_execute_phases", exc=e)
+            except Exception:
+                pass
 
         # Complete
         await self.set_status(AgentStatus.DONE, "Pentest lifecycle complete")
@@ -730,6 +776,11 @@ class MasterAgent(BaseAgent):
             "intel":      self._intel,
             "message":    "Pentest complete — review Findings Board and generate report."
         })
+        # Flush and close the per-session scan log
+        try:
+            close_scan_logger(session_id)
+        except Exception:
+            pass
         return {"status": "done", "intel": self._intel}
 
     # ─── State Machine ────────────────────────────────────────
@@ -1071,12 +1122,23 @@ class MasterAgent(BaseAgent):
             from agents.vuln.smb_vuln_subagent       import SmbVulnSubagent
             from agents.vuln.service_vuln_subagent   import ServiceVulnSubagent
             kw    = dict(session_id=sid, target=target, broadcast=sa_broadcast, db=_db.get_db())
+            # Transform intel services dict {port: {service, version, ...}} into
+            # list of dicts expected by CveLookup / ServiceVuln subagents.
+            _svc_map = self._intel.get("services", {}) or {}
+            _svc_list: list[dict] = []
+            for _p, _s in _svc_map.items():
+                if isinstance(_s, dict):
+                    _entry = dict(_s)
+                    _entry.setdefault("port", _p)
+                    _svc_list.append(_entry)
+                else:
+                    _svc_list.append({"port": _p, "service": str(_s), "version": ""})
             coros = [
                 CveLookupSubagent(**kw).execute(
-                    services=self._intel.get("services", {}),
+                    services_list=_svc_list,
                     cves=self._intel.get("cves", []),
                 ),
-                ServiceVulnSubagent(**kw).execute(services=self._intel.get("services", {})),
+                ServiceVulnSubagent(**kw).execute(services_list=_svc_list),
             ]
             ports = set(str(p) for p in self._intel.get("open_ports", []))
             if ports & {"443", "8443", "8080", "80"}:
@@ -1321,6 +1383,8 @@ class MasterAgent(BaseAgent):
             save_checkpoint_fn = self._save_reasoning_checkpoint,
         )
         self._reasoning_loop_inst = loop
+        # Expose QuestionEngine on master for guidance-question routing
+        self._question_engine = loop._question_engine
 
         # Run the loop — returns updated intel
         final_intel = await loop.run()
@@ -1445,12 +1509,19 @@ class MasterAgent(BaseAgent):
                 result = await agent_obj.execute_tasks(
                     self._target, [task], "VULN_ID", self._intel
                 )
-                for key in ("vulnerabilities", "cves"):
+                for key in ("vulnerabilities", "cves", "exploits"):
                     if result.get(key) is not None:
                         existing = self._intel.get(key, [])
-                        self._intel[key] = list({
-                            *existing, *result[key]
-                        }) if isinstance(result[key], list) else result[key]
+                        if isinstance(result[key], list):
+                            # Deduplicate by converting dicts to frozensets for set operations
+                            merged = list(existing)
+                            existing_strs = {str(e) for e in existing}
+                            for item in result[key]:
+                                if str(item) not in existing_strs:
+                                    merged.append(item)
+                            self._intel[key] = merged
+                        else:
+                            self._intel[key] = result[key]
                 return {
                     "stdout":    str(result.get("raw_output", result))[:65536],
                     "stderr":    "",
@@ -1467,9 +1538,19 @@ class MasterAgent(BaseAgent):
                 result = await agent_obj.execute_tasks(
                     self._target, [task], "WEB_TESTING", self._intel
                 )
-                for key in ("web_vulns", "web_paths", "web_targets"):
+                for key in ("web_vulns", "web_paths", "web_targets", "paths",
+                            "technologies", "interesting_files", "credentials"):
                     if result.get(key) is not None:
-                        self._intel[key] = result[key]
+                        existing = self._intel.get(key, [])
+                        if isinstance(result[key], list) and isinstance(existing, list):
+                            merged = list(existing)
+                            existing_strs = {str(e) for e in existing}
+                            for item in result[key]:
+                                if str(item) not in existing_strs:
+                                    merged.append(item)
+                            self._intel[key] = merged
+                        else:
+                            self._intel[key] = result[key]
                 return {
                     "stdout":    str(result.get("raw_output", result))[:65536],
                     "stderr":    "",
@@ -4189,6 +4270,74 @@ Return JSON:
 }}"""
         return await self.think_json(prompt)
 
+    # ─────────────────────────────────────────────────────────────────
+    #  MCP TOOL CATALOG LOADER
+    # ─────────────────────────────────────────────────────────────────
+
+    async def _load_tool_catalog(self) -> None:
+        """Fetch the full tool list from mcp-server.js and cache it.
+
+        Populates ``self._tool_catalog`` (dict) and ``self._tool_catalog_text``
+        (pre-formatted string ready to drop into LLM planning prompts).
+        Called once at session start.  Failure is non-fatal — planning
+        prompts fall back to their hardcoded hint lists if the catalog is
+        empty.
+        """
+        import httpx
+        try:
+            from agents.base_agent import MCP_URL
+        except Exception:
+            MCP_URL = "http://localhost:3000"
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                r = await client.get(f"{MCP_URL}/tools/list")
+                data = r.json() if r.status_code == 200 else {}
+        except Exception as exc:
+            await self.emit_reasoning(
+                step="tool_catalog_load",
+                reasoning=f"MCP catalog unreachable: {exc}",
+                decision="Planning prompts will use hardcoded tool hints",
+                next_action="Continue without full catalog"
+            )
+            return
+
+        # MCP /tools/list returns {"tools": [{name, bin, category, description}, ...]}
+        raw = data.get("tools") or data if isinstance(data, (list, dict)) else []
+        if isinstance(raw, dict):
+            raw = raw.get("tools", [])
+        self._tool_catalog = {
+            (t.get("name") or "").strip(): t
+            for t in raw if isinstance(t, dict) and t.get("name")
+        }
+
+        # Group by category for compact LLM context
+        by_cat: Dict[str, List[str]] = {}
+        for name, meta in self._tool_catalog.items():
+            cat = (meta.get("category") or "misc").lower()
+            by_cat.setdefault(cat, []).append(name)
+        lines = [f"AVAILABLE KALI TOOLS ({len(self._tool_catalog)} total, via MCP server):"]
+        for cat in sorted(by_cat):
+            tools = sorted(by_cat[cat])
+            lines.append(f"  [{cat}] " + ", ".join(tools))
+        self._tool_catalog_text = "\n".join(lines)
+
+        await self.emit_reasoning(
+            step="tool_catalog_loaded",
+            reasoning=f"Loaded {len(self._tool_catalog)} tools across {len(by_cat)} categories",
+            decision="LLM planners will see the full Kali arsenal",
+            next_action="Proceed to pentest phases",
+            data={"tool_count": len(self._tool_catalog), "categories": sorted(by_cat.keys())}
+        )
+
+    def _tools_hint(self, max_chars: int = 3500) -> str:
+        """Return the cached tool catalog text, truncated for prompt safety."""
+        if not self._tool_catalog_text:
+            return ""
+        txt = self._tool_catalog_text
+        if len(txt) > max_chars:
+            txt = txt[:max_chars] + "\n  ... (truncated — full list available)"
+        return txt
+
     async def _llm_plan_recon(self, target: str, plan: Dict) -> Dict:
         already_run = list(self._used_tools.keys())
         _svc_hint = _safe_join(plan.get("priority_services", []))
@@ -4327,14 +4476,20 @@ LOGIN PAGES FOUND (test for auth bypass, default creds, SQLi):
 
 Tools already run (DO NOT repeat): {already_run}
 
-AVAILABLE TOOLS AND WHEN TO USE THEM:
+{self._tools_hint()}
+
+TOOL-SELECTION HINTS (pick from the catalog above — you are NOT limited to these):
 - searchsploit: ALWAYS run for each exact service version found (e.g. "Apache 2.4.49", "vsftpd 2.3.4")
 - nmap --script vuln: for open ports with known vuln scripts
 - nikto: for HTTP services — finds misconfigurations, default files, known CVEs
-- sslscan: ONLY if HTTPS/TLS found
+- sslscan / testssl.sh: ONLY if HTTPS/TLS found
 - wpscan: ONLY if WordPress detected
-- enum4linux / smbmap: ONLY if SMB found and not yet enumerated
-- hydra: ONLY if login pages or SSH/FTP found AND usernames are known
+- enum4linux / smbmap / crackmapexec: ONLY if SMB found
+- hydra / medusa / ncrack: ONLY if login pages or SSH/FTP found AND usernames are known
+- wfuzz / ffuf / feroxbuster / gobuster: for web content discovery
+- sqlmap / commix: for injection testing
+- impacket-secretsdump / bloodhound: for AD enumeration
+- any other tool listed in the catalog is fair game — use the best one for the job
 
 Max 4 checks. Pick what gives the most signal for THIS specific target.
 {f"OPERATOR NOTES: {self._notes}" if getattr(self, '_notes', '') else ""}
@@ -4410,7 +4565,10 @@ Tools already run (DO NOT repeat): {already_run}
 {intel_ctx}
 {kb}
 {kb_cmds}
-Available web tools: nikto, gobuster, ffuf, sqlmap, wfuzz, commix, wapiti, dirb, wpscan, davtest, wafw00f
+{self._tools_hint()}
+
+Pick from the catalog above — common picks for web: nikto, gobuster, ffuf, feroxbuster, sqlmap,
+wfuzz, commix, wapiti, dirb, wpscan, nuclei, dalfox, davtest, wafw00f, whatweb, katana, arjun.
 Pick tools NOT already used. Max 4 tools.
 
 Return JSON:
@@ -4464,29 +4622,82 @@ Return JSON:
         return await self.think_json(prompt)
 
     async def _llm_plan_osint(self, target: str) -> Dict:
-        _svcs = [_fmt_svc(v) for v in list(self._intel["services"].values())[:5]]
-        _os   = self._intel.get('os_guess', 'unknown')
+        # Pull ALL relevant recon/vuln/web artefacts so OSINT planning is
+        # discovery-driven, not a generic "search the target IP" exercise.
+        intel = self._intel or {}
+        _svcs = [_fmt_svc(v) for v in list(intel.get("services", {}).values())[:8]]
+        _svc_versions = []
+        for p, v in (intel.get("service_versions", {}) or {}).items():
+            if isinstance(v, str) and v.strip():
+                _svc_versions.append(f"{p}:{v}")
+        _os         = intel.get("os_guess", "unknown")
+        _hostnames  = list(dict.fromkeys((intel.get("hostnames") or []) +
+                                         (intel.get("subdomains") or []) +
+                                         (intel.get("virtual_hosts") or [])))[:15]
+        _ssl_cns    = list(dict.fromkeys((intel.get("ssl_cns") or []) +
+                                         (intel.get("ssl_sans") or [])))[:15]
+        _web_tech   = list(dict.fromkeys(intel.get("web_tech") or
+                                         intel.get("technologies") or []))[:15]
+        _titles     = list(dict.fromkeys(intel.get("http_titles") or []))[:8]
+        _logins     = list(dict.fromkeys(intel.get("login_pages") or []))[:8]
+        _emails     = list(dict.fromkeys(intel.get("emails") or []))[:10]
+        _users      = list(dict.fromkeys(intel.get("users") or []))[:10]
+        _org        = intel.get("org") or intel.get("organization") or ""
+
         _svc_str = " ".join(_svcs)
         kb = await self._kb(
             f"OSINT CVE searchsploit {_svc_str} {_os} exploit database",
             top_k=3,
         )
-        prompt = f"""Plan OSINT for target: {target}
-Known services: {_svcs}
-OS: {_os}
+
+        prompt = f"""You are the OSINT planner for an ACTIVE penetration test.
+Your job is to turn RECON DISCOVERIES into targeted intelligence queries —
+NOT to do a generic Google search for the target string.
+
+Target: {target}
+OS guess: {_os}
+Org: {_org or 'unknown'}
+
+──── DISCOVERED ARTEFACTS (use these to drive searches) ────
+Services (port → product/version):
+  {_svcs or 'none'}
+Service versions: {_svc_versions or 'none'}
+Hostnames / subdomains / vhosts: {_hostnames or 'none'}
+SSL certificate CNs / SANs: {_ssl_cns or 'none'}
+Web technologies: {_web_tech or 'none'}
+HTTP titles: {_titles or 'none'}
+Login pages: {_logins or 'none'}
+Emails already harvested: {_emails or 'none'}
+Usernames already discovered: {_users or 'none'}
+
 {kb}
-Return JSON:
+
+──── PLANNING GUIDANCE ────
+Produce searches that PIVOT on the artefacts above. Prefer, in priority order:
+1. CVE lookup per `product version` pair — one searchsploit/NVD query per pair.
+2. Subdomain enumeration using discovered hostnames/SSL SANs as seeds.
+3. Tech-stack-specific dorks (e.g. "site:{{domain}} inurl:wp-admin" if WordPress
+   in web_tech).
+4. Breach lookups for discovered emails / usernames (HIBP).
+5. Org-level pivots using SSL CN / org name (Shodan org:, Censys autonomous_system).
+6. Historical URLs via Wayback for each discovered subdomain.
+7. GitHub/pastebin dorks on org name, domain, and distinctive banner strings.
+Do NOT simply "search {target}" — every search should mention a CONCRETE artefact
+from the list above.
+
+Return JSON with this exact shape:
 {{
-  "reasoning": "what intel would help exploitation",
+  "reasoning": "1-3 sentences on which artefacts drove your choices",
   "searches": [
     {{
-      "tool": "searchsploit",
-      "args": "{self._intel.get('os_guess', '')}",
-      "purpose": "Find OS exploits",
+      "tool":    "searchsploit|nvd|shodan|google_dorks|wayback|theharvester|recon_ng|builtwith|security_trails|censys|bgpview|spiderfoot|hibp",
+      "args":    "concrete search string (product+version, subdomain, email, CN, tech name)",
+      "purpose": "what vuln/intel this is expected to surface",
       "timeout": 30
     }}
   ]
-}}"""
+}}
+Emit between 4 and 10 searches — quality over quantity."""
         return await self.think_json(prompt)
 
     async def _llm_plan_exploitation(self, target: str) -> Dict:
@@ -4533,6 +4744,8 @@ Return JSON:
 DO NOT just try generic exploits. Use EXACTLY what the recon phase found to drive your plan.
 
 {intel_ctx}
+
+{self._tools_hint()}
 
 {kb}
 {kb_broad}
@@ -4599,10 +4812,12 @@ Return JSON:
         prompt = f"""Build the EXACT runnable command for this exploitation step against {target}.
 Use REAL values from the intelligence gathered — NO placeholders like <target> or <wordlist>.
 
+{self._tools_hint()}
+
 ATTACK VECTOR:
 - Type: {_type}
 - Description: {_desc}
-- Suggested tool: {_tool}
+- Suggested tool (must be a name from the catalog above): {_tool}
 
 AVAILABLE INTELLIGENCE TO USE IN THE COMMAND:
 - Web paths found: {web_paths[:10]}
@@ -5242,6 +5457,12 @@ Return JSON with enumeration goals: {{
             "message": f"→ {str(phase).upper().replace('_',' ')}",
             "ts":      datetime.utcnow().isoformat()
         })
+        try:
+            slog = get_scan_logger(self._session_id)
+            if slog:
+                slog.log_phase(str(phase), "start")
+        except Exception:
+            pass
 
     async def _wait_for_confirmation(self, phase: str, timeout: int = 3600) -> bool:
         evt = asyncio.Event()
@@ -5324,9 +5545,22 @@ Return JSON with enumeration goals: {{
 
         # 3. Note — injected into _intel so next LLM call sees it
         if note:
-            existing = self._intel.get("operator_notes", [])
-            existing.append({"note": note, "ts": datetime.utcnow().isoformat()})
-            self._intel["operator_notes"] = existing[-5:]  # keep last 5
+            # ── Question intent detection ──────────────────────────────────
+            # If the note looks like a question, route it through QuestionEngine
+            # for immediate 3-layer extraction against current intel.
+            _qe = getattr(self, "_question_engine", None)
+            if _qe is None and _REASONING_AVAILABLE:
+                # QuestionEngine may live on ReasoningLoop — try to get it
+                _rl = getattr(self, "_reasoning_loop_instance", None)
+                if _rl is not None:
+                    _qe = getattr(_rl, "_question_engine", None)
+
+            if _qe is not None and _qe.is_question(note):
+                asyncio.create_task(self._answer_question_from_guidance(note, _qe))
+            else:
+                existing = self._intel.get("operator_notes", [])
+                existing.append({"note": note, "ts": datetime.utcnow().isoformat()})
+                self._intel["operator_notes"] = existing[-5:]  # keep last 5
 
         # 4. DNS entry — hostname→IP mapping for better web testing
         dns_host = guidance.get("dns_host", "")
@@ -5343,6 +5577,40 @@ Return JSON with enumeration goals: {{
                 next_action= "Inject hostname into next web/recon tool calls",
                 data       = {"dns_host": dns_host, "dns_ip": dns_ip}
             ))
+
+    async def _answer_question_from_guidance(self, question: str, qe) -> None:
+        """
+        Fire-and-forget coroutine: run the 3-layer QuestionEngine pipeline
+        for a question detected in the operator guidance text.
+        Emits a question_answered finding visible in FindingsBoard.
+        """
+        try:
+            await self.emit_reasoning(
+                step       = "question_from_guidance",
+                reasoning  = f"Operator question detected: {question}",
+                decision   = "Running 3-layer extraction against current intel",
+                next_action= "Emit answer as finding",
+                data       = {"question": question},
+            )
+            q_obj = await qe.answer_single(question, self._intel, "")
+            if q_obj.state.value == "answered":
+                await self.emit_reasoning(
+                    step       = "question_answered",
+                    reasoning  = f"Answer found: {q_obj.answer}",
+                    decision   = f"Layer {q_obj.layer_used} ({q_obj.layer_used})",
+                    next_action= "Displayed as finding in FindingsBoard",
+                    data       = {"answer": q_obj.answer, "layer": q_obj.layer_used},
+                )
+            else:
+                await self.emit_reasoning(
+                    step       = "question_unanswerable",
+                    reasoning  = f"Could not answer: {question}",
+                    decision   = "All 3 layers exhausted",
+                    next_action= "Continue scan — more data may answer later",
+                    data       = {"question": question},
+                )
+        except Exception as e:
+            pass  # never crash guidance processing
 
     def inject_guidance(self, guidance: Dict):
         """

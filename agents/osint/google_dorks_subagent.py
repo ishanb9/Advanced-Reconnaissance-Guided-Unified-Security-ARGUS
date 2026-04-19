@@ -17,6 +17,7 @@ Add / remove dorks by editing DOMAIN_DORKS or GENERAL_DORKS below.
 from __future__ import annotations
 
 import asyncio
+import os
 from typing import Dict, List, Tuple
 
 from agents.osint.base_osint_subagent import OsintSubagentBase
@@ -73,23 +74,119 @@ class GoogleDorksSubagent(OsintSubagentBase):
             return []
 
         target = self._target
-        await self._emit("osint_status", {
-            "message": f"Google Dorks: running {len(DOMAIN_DORKS) + len(GENERAL_DORKS)} queries for {target}"
-        })
 
         dorks: List[Tuple[str, str, FindingSeverity]] = []
 
-        if not self._is_ip(target):
-            dorks += [(d.format(target=target), desc, sev) for d, desc, sev in DOMAIN_DORKS]
-            dorks += [(d.format(target=target), desc, sev) for d, desc, sev in GENERAL_DORKS]
-        else:
-            dorks = [
-                (f'"{target}" inurl:admin',   f'Admin interfaces mentioning {target}', FindingSeverity.HIGH),
-                (f'"{target}" intext:"password"', f'Pages with passwords for {target}', FindingSeverity.HIGH),
-                (f'"{target}" site:pastebin.com', f'Pastes with IP {target}',           FindingSeverity.MEDIUM),
+        # ── Base dorks per discovered domain ──────────────────────
+        all_domains = self._target_domains() or ([target] if not self._is_ip(target) else [])
+        # Primary domain gets the full catalogue; subdomains get a subset.
+        primary = all_domains[0] if all_domains else ""
+        if primary:
+            dorks += [(d.format(target=primary), desc, sev) for d, desc, sev in DOMAIN_DORKS]
+            dorks += [(d.format(target=primary), desc, sev) for d, desc, sev in GENERAL_DORKS]
+        # Subdomain-specific: focus on high-value patterns per subdomain.
+        _SUB_PATTERNS = [
+            ('site:{target} inurl:admin',      'Admin panels on subdomain',      FindingSeverity.HIGH),
+            ('site:{target} inurl:login',      'Login pages on subdomain',       FindingSeverity.MEDIUM),
+            ('site:{target} intitle:"index of"','Directory listings on subdomain',FindingSeverity.HIGH),
+            ('site:{target} filetype:log OR filetype:bak', 'Log/backup on subdomain', FindingSeverity.HIGH),
+        ]
+        for sub in all_domains[1:6]:
+            for d, desc, sev in _SUB_PATTERNS:
+                dorks.append((d.format(target=sub), f"{desc} ({sub})", sev))
+
+        # ── Tech-stack-specific dorks ─────────────────────────────
+        # Pull WordPress/Drupal/Joomla/phpMyAdmin/Jenkins hints from the
+        # discovered web_tech list and inject targeted dorks. This is the
+        # core "discovery-driven" pivot — we only ask questions that fit the
+        # stack recon actually found.
+        web_tech = [str(t).lower() for t in (self._disco("web_tech") or [])]
+        products = [str(p).lower() for p in (self._disco("products") or [])]
+        tech_blob = " ".join(web_tech + products)
+
+        def _has(*keys): return any(k in tech_blob for k in keys)
+
+        tech_dorks: List[Tuple[str, str, FindingSeverity]] = []
+        for dom in (all_domains[:3] or [target]):
+            if _has("wordpress", "wp-", "wp "):
+                tech_dorks += [
+                    (f'site:{dom} inurl:wp-content/uploads filetype:sql',    'WordPress SQL dumps',      FindingSeverity.CRITICAL),
+                    (f'site:{dom} inurl:wp-config',                          'WordPress config exposed', FindingSeverity.CRITICAL),
+                    (f'site:{dom} inurl:wp-json/wp/v2/users',                'WordPress user enum API',  FindingSeverity.HIGH),
+                ]
+            if _has("drupal"):
+                tech_dorks += [
+                    (f'site:{dom} inurl:user/register',                      'Drupal registration page', FindingSeverity.MEDIUM),
+                    (f'site:{dom} inurl:?q=admin',                           'Drupal admin path',        FindingSeverity.HIGH),
+                ]
+            if _has("joomla"):
+                tech_dorks += [
+                    (f'site:{dom} inurl:administrator/index.php',            'Joomla admin login',       FindingSeverity.HIGH),
+                ]
+            if _has("jenkins"):
+                tech_dorks += [
+                    (f'site:{dom} intitle:"Dashboard [Jenkins]"',            'Jenkins dashboard exposed', FindingSeverity.HIGH),
+                ]
+            if _has("jira", "confluence", "atlassian"):
+                tech_dorks += [
+                    (f'site:{dom} inurl:plugins/servlet',                    'Atlassian servlet exposed', FindingSeverity.HIGH),
+                ]
+            if _has("tomcat"):
+                tech_dorks += [
+                    (f'site:{dom} inurl:manager/html',                       'Tomcat manager',            FindingSeverity.CRITICAL),
+                ]
+        dorks += tech_dorks
+
+        # ── Emails/usernames already harvested → credential-leak dorks ──
+        for email in (self._disco("emails") or [])[:5]:
+            dorks += [
+                (f'"{email}" site:pastebin.com',  f'Leaked credentials for {email} on pastebin', FindingSeverity.HIGH),
+                (f'"{email}" site:github.com',    f'Credentials/code referencing {email}',        FindingSeverity.MEDIUM),
+            ]
+        for user in (self._disco("users") or [])[:3]:
+            dorks += [
+                (f'"{user}" site:pastebin.com',   f'Paste mentioning user {user}',                FindingSeverity.MEDIUM),
+                (f'"{user}" password site:github.com', f'Possible leaked password for {user}',    FindingSeverity.HIGH),
             ]
 
+        # ── IP-only fallback ──────────────────────────────────────
+        if self._is_ip(target) and not all_domains:
+            dorks += [
+                (f'"{target}" inurl:admin',        f'Admin interfaces mentioning {target}', FindingSeverity.HIGH),
+                (f'"{target}" intext:"password"',  f'Pages with passwords for {target}',    FindingSeverity.HIGH),
+                (f'"{target}" site:pastebin.com',  f'Pastes with IP {target}',              FindingSeverity.MEDIUM),
+            ]
+
+        # Dedup in case multiple doms produced the same dork.
+        seen = set()
+        unique: List[Tuple[str, str, FindingSeverity]] = []
+        for d, desc, sev in dorks:
+            if d not in seen:
+                seen.add(d)
+                unique.append((d, desc, sev))
+
+        # Google CSE free tier = 100 queries/day. Prioritise CRITICAL/HIGH
+        # severity dorks and cap total. Override with GOOGLE_DORKS_MAX env var.
+        sev_rank = {
+            FindingSeverity.CRITICAL: 0,
+            FindingSeverity.HIGH:     1,
+            FindingSeverity.MEDIUM:   2,
+            FindingSeverity.INFO:     3,
+        }
+        unique.sort(key=lambda x: sev_rank.get(x[2], 9))
+        max_dorks = int(os.environ.get("GOOGLE_DORKS_MAX", "60"))
+        dorks = unique[:max_dorks]
+
+        await self._emit("osint_status", {
+            "message": (
+                f"Google Dorks: running {len(dorks)} discovery-driven queries "
+                f"for {target} (cap={max_dorks}, sev-prioritised)"
+            )
+        })
+
         for dork, desc, severity in dorks:
+            if getattr(self, "_quota_exhausted", False):
+                break
             if self._stopped:
                 break
             await self._run_dork(dork, desc, severity)
@@ -116,12 +213,39 @@ class GoogleDorksSubagent(OsintSubagentBase):
             timeout=TIMEOUTS.get("google_dorks", 15),
         )
 
-        if not resp or resp.status_code != 200:
+        if not resp:
+            return
+        # 429 = rate limit, 403 = daily quota exhausted ("quotaExceeded").
+        if resp.status_code in (403, 429):
+            self._quota_exhausted = True
+            await self._emit("osint_warning", {
+                "message": (
+                    f"Google Dorks: HTTP {resp.status_code} — free-tier daily "
+                    "quota (100/day) likely exhausted. Stopping further dorks."
+                )
+            })
+            return
+        if resp.status_code != 200:
             return
 
         try:
             data = resp.json()
         except Exception:
+            return
+
+        # Even on HTTP 200 the API sometimes returns {"error": {...}}.
+        if isinstance(data, dict) and data.get("error"):
+            err = data["error"]
+            reason = ""
+            try:
+                reason = (err.get("errors") or [{}])[0].get("reason", "")
+            except Exception:
+                pass
+            if reason in ("quotaExceeded", "dailyLimitExceeded", "rateLimitExceeded"):
+                self._quota_exhausted = True
+                await self._emit("osint_warning", {
+                    "message": f"Google Dorks: {reason} — stopping further dorks."
+                })
             return
 
         items = data.get("items", [])

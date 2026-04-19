@@ -29,28 +29,52 @@ class TheHarvesterSubagent(OsintSubagentBase):
     async def run(self) -> List[Dict]:
         if not SOURCES_ENABLED.get("theharvester"):
             return []
-        if self._is_ip(self._target):
-            return []   # theHarvester is domain-focused
 
-        target = self._target
-        await self._emit("osint_status", {
-            "message": f"theHarvester: gathering emails, subdomains, IPs for {target}"
-        })
-
-        output = await self._run_cli(
-            [
-                "theHarvester",
-                "-d", target,
-                "-l", "200",
-                "-b", THEHARVESTER_SOURCES,
-            ],
-            timeout=TIMEOUTS.get("theharvester", 180),
-        )
-
-        if not output:
+        # Build domain list from discovery: apex target + harvested subdomains +
+        # SSL CN/SANs. If the primary target is an IP, pivot to any domains that
+        # recon/SSL handshakes turned up — we never want to query theHarvester
+        # with a bare IP (it's domain-focused).
+        domains = self._target_domains()
+        if not domains:
             return []
 
-        await self._parse_and_store(target, output)
+        # Deduplicate apex domains so we don't probe "api.example.com" after
+        # "example.com" has already returned its subdomains.
+        apex = []
+        seen = set()
+        for d in domains:
+            parts = d.split(".")
+            a = ".".join(parts[-2:]) if len(parts) >= 2 else d
+            if a not in seen:
+                seen.add(a)
+                apex.append(a)
+            # Always probe the exact host too when different from apex (some
+            # vhosts have their own MX/emails).
+            if d != a and d not in seen:
+                seen.add(d)
+                apex.append(d)
+
+        # Cap to avoid runaway; 180-sec timeout each adds up fast.
+        apex = apex[:4]
+
+        for dom in apex:
+            if self._stopped:
+                break
+            await self._emit("osint_status", {
+                "message": f"theHarvester: gathering emails/subdomains/IPs for {dom}"
+            })
+            output = await self._run_cli(
+                [
+                    "theHarvester",
+                    "-d", dom,
+                    "-l", "200",
+                    "-b", THEHARVESTER_SOURCES,
+                ],
+                timeout=TIMEOUTS.get("theharvester", 180),
+            )
+            if output:
+                await self._parse_and_store(dom, output)
+
         return self._results
 
     # ── Output parser ─────────────────────────────────────────────

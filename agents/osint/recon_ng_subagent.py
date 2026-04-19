@@ -56,9 +56,24 @@ class ReconNgSubagent(OsintSubagentBase):
 
     def _domain_commands(self, domain: str) -> List[str]:
         safe = domain.replace(".", "_")
-        return [
+        cmds = [
             f"workspaces create argus_{safe}",
             f"db insert domains name={domain}",
+        ]
+        # Seed the workspace with EVERY subdomain/host/SSL CN recon found so
+        # recon-ng's modules can pivot on real discovered surface instead of
+        # re-discovering from scratch.
+        for host in (self._disco_list("hostnames", "subdomains", "virtual_hosts",
+                                      "ssl_cns", "ssl_sans"))[:30]:
+            if self._is_domain(host):
+                cmds.append(f"db insert hosts host={host}")
+        for ip in (self._disco_list("ips", "a_records", "resolved_ips"))[:20]:
+            if self._is_ip(ip):
+                cmds.append(f"db insert hosts ip_address={ip}")
+        for email in (self._disco_list("emails"))[:15]:
+            cmds.append(f"db insert contacts email={email}")
+
+        cmds += [
             "modules load recon/domains-hosts/hackertarget",
             "run",
             "modules load recon/domains-hosts/threatcrowd",
@@ -69,17 +84,29 @@ class ReconNgSubagent(OsintSubagentBase):
             "show contacts",
             "exit",
         ]
+        return cmds
 
     def _ip_commands(self, ip: str) -> List[str]:
         safe = ip.replace(".", "_")
-        return [
+        cmds = [
             f"workspaces create argus_{safe}",
             f"db insert hosts ip_address={ip}",
+        ]
+        # Seed any additional IPs recon pulled in (resolved subdomains, etc.).
+        for extra in (self._disco_list("ips", "a_records", "resolved_ips"))[:10]:
+            if self._is_ip(extra) and extra != ip:
+                cmds.append(f"db insert hosts ip_address={extra}")
+        for host in (self._disco_list("hostnames", "ssl_cns"))[:10]:
+            if self._is_domain(host):
+                cmds.append(f"db insert hosts host={host}")
+
+        cmds += [
             "modules load recon/hosts-hosts/reverse_resolve",
             "run",
             "show hosts",
             "exit",
         ]
+        return cmds
 
     # ── Resource file runner ──────────────────────────────────────
 

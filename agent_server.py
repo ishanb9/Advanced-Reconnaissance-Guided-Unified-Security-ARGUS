@@ -430,6 +430,63 @@ async def inject_guidance(session_id: str, request: Request):
     return {"status": "queued", "guidance": body}
 
 
+@app.post("/sessions/{session_id}/ask")
+async def ask_question(session_id: str, request: Request):
+    """
+    Ask ARGUS a specific question against the current session intel.
+    Runs the 3-layer QuestionEngine pipeline: deterministic → LLM → tool dispatch.
+    Works for active sessions (tools can be dispatched) and paused/completed sessions
+    (Layer 1 + 2 only — no new tool execution).
+
+    Body: { "question": "what web server is running?", "context": "(optional)" }
+    Response: { "answer": "...", "evidence": "...", "layer_used": 1|2|3,
+                "finding_id": "...", "state": "answered|unanswerable" }
+    """
+    body = await request.json()
+    question = (body.get("question") or "").strip()
+    if not question:
+        raise HTTPException(status_code=422, detail="'question' field is required")
+
+    master = active_agents.get(session_id)
+    if not master:
+        raise HTTPException(status_code=404, detail="No active session found for this id")
+
+    # Get or create QuestionEngine from master agent
+    qe = getattr(master, "_question_engine", None)
+    if qe is None:
+        # Session may use reasoning loop but hasn't started yet, or is legacy mode
+        # Fall back to guidance injection so the question is answered when possible
+        master.inject_guidance({"directive": "note", "note": question})
+        await ws_manager.broadcast_raw(session_id, "guidance_queued", {
+            "message": f"Question queued (reasoning loop not active): {question}"
+        })
+        return {"status": "queued", "message": "Question queued via guidance (reasoning loop not yet active)"}
+
+    # Run extraction immediately against current intel
+    intel = getattr(master, "_intel", {})
+    q_obj = await qe.answer_single(question, intel, "")
+
+    # Broadcast result over WebSocket so Ask bar can show it
+    await ws_manager.broadcast_raw(session_id, "question_answered", {
+        "question_id":  q_obj.id,
+        "question":     q_obj.text,
+        "answer":       q_obj.answer,
+        "evidence":     q_obj.evidence,
+        "layer":        q_obj.layer_used,
+        "state":        q_obj.state.value,
+        "finding_id":   q_obj.finding_id,
+    })
+
+    return {
+        "question":   q_obj.text,
+        "answer":     q_obj.answer,
+        "evidence":   q_obj.evidence,
+        "layer_used": q_obj.layer_used,
+        "state":      q_obj.state.value,
+        "finding_id": q_obj.finding_id,
+    }
+
+
 @app.post("/sessions/{session_id}/operator-response")
 async def operator_response(session_id: str, request: Request):
     """

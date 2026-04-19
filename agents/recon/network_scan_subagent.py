@@ -158,14 +158,75 @@ def _parse_nmap_ports(output: str) -> list[dict]:
     banner extraction (e.g. ssh-hostkey, http-server-header).
     """
     ports: list[dict] = []
+    # Accept leading whitespace and states: open, open|filtered.
     port_re = re.compile(
-        r"^(\d{1,5})/(tcp|udp)\s+open\s+(\S+)\s*(.*)",
+        r"^\s*(\d{1,5})/(tcp|udp)\s+(open(?:\|filtered)?)\s+(\S+)\s*(.*)",
         re.IGNORECASE,
     )
     banner_script_re = re.compile(
         r"^\|[_\s]+(\S.*?):\s*(.*)",
         re.IGNORECASE,
     )
+    # Grepable/-oG fallback:  Host: 1.2.3.4 ()  Ports: 22/open/tcp//ssh//OpenSSH 7.4//, 80/open/tcp//http//Apache 2.4.49//
+    grepable_ports_re = re.compile(r"Ports:\s*(.+)", re.IGNORECASE)
+    # XML fallback: <port protocol="tcp" portid="22"><state state="open" .../><service name="ssh" product="OpenSSH" version="7.4" .../></port>
+    xml_port_re = re.compile(
+        r'<port[^>]*protocol="(tcp|udp)"[^>]*portid="(\d+)"[^>]*>'
+        r'.*?<state[^>]*state="(open(?:\|filtered)?)"[^>]*/?>'
+        r'(?:.*?<service(?P<svc>[^/]*)/?>)?',
+        re.IGNORECASE | re.DOTALL,
+    )
+    svc_attr_re = re.compile(r'(\w+)="([^"]*)"')
+
+    # Try XML parse first if output looks like XML.
+    if "<nmaprun" in output or "<port " in output:
+        for xm in xml_port_re.finditer(output):
+            proto   = xm.group(1).lower()
+            port_num = int(xm.group(2))
+            attrs = dict(svc_attr_re.findall(xm.group("svc") or ""))
+            service = (attrs.get("name") or "unknown").lower()
+            version = " ".join(
+                v for v in (attrs.get("product"), attrs.get("version"), attrs.get("extrainfo"))
+                if v
+            ).strip()
+            ports.append({
+                "port": port_num,
+                "protocol": proto,
+                "service": service,
+                "version": version,
+                "banner": attrs.get("banner", ""),
+                "os_guess": "",
+            })
+        if ports:
+            return ports
+
+    # Try grepable parse
+    for gm in grepable_ports_re.finditer(output):
+        for entry in gm.group(1).split(","):
+            parts = [p.strip() for p in entry.strip().split("/")]
+            # portid / state / proto / owner / service / rpc_info / version
+            if len(parts) < 3:
+                continue
+            try:
+                port_num = int(parts[0])
+            except ValueError:
+                continue
+            state = parts[1].lower()
+            if "open" not in state:
+                continue
+            proto   = parts[2].lower() if parts[2] else "tcp"
+            service = parts[4].lower() if len(parts) > 4 and parts[4] else "unknown"
+            version = parts[6] if len(parts) > 6 else ""
+            ports.append({
+                "port": port_num,
+                "protocol": proto,
+                "service": service,
+                "version": version,
+                "banner": "",
+                "os_guess": "",
+            })
+    if ports:
+        return ports
 
     current_port: Optional[dict] = None
     for line in output.splitlines():
@@ -176,8 +237,9 @@ def _parse_nmap_ports(output: str) -> list[dict]:
                 ports.append(current_port)
             port_num  = int(m.group(1))
             proto     = m.group(2).lower()
-            service   = m.group(3).lower().strip()
-            version   = m.group(4).strip()
+            # group 3 is state ("open" or "open|filtered"); service/version shift.
+            service   = m.group(4).lower().strip()
+            version   = m.group(5).strip()
             current_port = {
                 "port":     port_num,
                 "protocol": proto,

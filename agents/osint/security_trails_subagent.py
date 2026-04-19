@@ -44,15 +44,43 @@ class SecurityTrailsSubagent(OsintSubagentBase):
 
         if self._is_ip(target):
             await self._query_ip_neighbours(target)
-        else:
-            # Run all domain queries with small gaps to respect free-tier rate limit
-            await self._query_domain(target)
+
+        # Enumerate every known domain (apex + subdomains + SSL CNs). Cap the
+        # fan-out to stay within the 50-call/month free tier.
+        domains = self._target_domains()
+        # Keep only one-or-two-label roots for the expensive queries.
+        apexes = []
+        seen   = set()
+        for d in domains:
+            parts = d.split(".")
+            apex  = ".".join(parts[-2:]) if len(parts) >= 2 else d
+            if apex not in seen:
+                seen.add(apex)
+                apexes.append(apex)
+        apexes = apexes[:3]
+
+        for i, dom in enumerate(apexes):
+            if self._stopped:
+                break
+            await self._query_domain(dom)
             await asyncio.sleep(0.5)
-            await self._query_subdomains(target)
+            await self._query_subdomains(dom)
             await asyncio.sleep(0.5)
-            await self._query_dns_history(target)
-            await asyncio.sleep(0.5)
-            await self._query_associated_domains(target)
+            # DNS history + associated domains are budget-heavy — only for
+            # the primary apex.
+            if i == 0:
+                await self._query_dns_history(dom)
+                await asyncio.sleep(0.5)
+                await self._query_associated_domains(dom)
+                await asyncio.sleep(0.5)
+
+        # Also IP-neighbour any additional IPs recon discovered.
+        for ip in self._target_ips()[:3]:
+            if self._stopped:
+                break
+            if ip != target:
+                await self._query_ip_neighbours(ip)
+                await asyncio.sleep(0.3)
 
         return self._results
 

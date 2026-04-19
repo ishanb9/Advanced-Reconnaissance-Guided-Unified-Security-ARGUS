@@ -31,6 +31,18 @@ from db.schemas import (
 )
 import db.mongo_client as db
 
+# Per-session scan logger proxies — safe no-op if no active session logger.
+try:
+    from utils.scan_logger import (
+        log_tool_call as _slog_tool,
+        log_llm       as _slog_llm,
+        log_error     as _slog_error,
+    )
+except Exception:  # pragma: no cover
+    def _slog_tool(*a, **kw):  pass
+    def _slog_llm(*a, **kw):   pass
+    def _slog_error(*a, **kw): pass
+
 # ── Neo4j semantic graph (optional) ──────────────────────────────────────────
 try:
     import db.neo4j_client as _neo4j
@@ -1101,6 +1113,29 @@ Return JSON:
             "ts":        datetime.utcnow().isoformat()
         })
 
+        # ── Per-session scan log ───────────────────────────────────────
+        try:
+            _source = "mcp"
+            if stderr and "[MCP OFFLINE]" in stderr:
+                _source = "local"
+            elif stderr and "not found in MCP" in stderr:
+                _source = "local"
+            _duration = time.monotonic() - self._tool_run_start
+            _slog_tool(
+                self._session_id,
+                tool_name,
+                args,
+                duration    = _duration,
+                exit_code   = exit_code,
+                stdout_tail = stdout,
+                stderr_tail = stderr,
+                source      = _source,
+                target      = target or "",
+                phase       = str(phase_to_use) if phase_to_use else "",
+            )
+        except Exception:
+            pass
+
         return {"stdout": stdout, "stderr": stderr, "exit_code": exit_code, "output_id": output_id}
 
     # ─── LLM Reasoning (Master Agent Only) ────────────────────
@@ -1296,27 +1331,59 @@ Return JSON:
 
     async def think_json(self, prompt: str, system_context: str = "", timeout: int = LLM_THINK_TIMEOUT) -> Dict:
         """Query LLM expecting a JSON response. Extracts and parses JSON."""
+        _t0 = time.monotonic()
         raw = await self.think(prompt + "\n\nRespond ONLY with valid JSON. No markdown, no explanation.", system_context, timeout)
+        _latency = time.monotonic() - _t0
+        # Derive a short step label from the first line of the prompt
+        _step_label = ""
+        try:
+            first_line = (prompt.strip().splitlines() or [""])[0]
+            _step_label = first_line[:60]
+        except Exception:
+            pass
+
+        def _log(result: Dict, parse_error: bool) -> Dict:
+            try:
+                decision = (
+                    result.get("decision")
+                    or result.get("primary_strategy")
+                    or result.get("reasoning", "")[:200]
+                ) if isinstance(result, dict) else ""
+                _slog_llm(
+                    self._session_id,
+                    _step_label or "think_json",
+                    prompt_chars   = len(prompt),
+                    response_chars = len(raw),
+                    latency        = _latency,
+                    model          = MODEL_NAME,
+                    decision       = str(decision),
+                    reasoning      = str(result.get("reasoning", "")) if isinstance(result, dict) else "",
+                    parse_error    = parse_error,
+                )
+            except Exception:
+                pass
+            return result
+
         # Try direct parse
         try:
-            return json.loads(raw)
+            return _log(json.loads(raw), False)
         except json.JSONDecodeError:
             pass
         # Extract from code block
         m = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', raw, re.DOTALL)
         if m:
             try:
-                return json.loads(m.group(1))
+                return _log(json.loads(m.group(1)), False)
             except json.JSONDecodeError:
                 pass
         # Extract first { ... }
         m = re.search(r'\{.*\}', raw, re.DOTALL)
         if m:
             try:
-                return json.loads(m.group())
+                return _log(json.loads(m.group()), False)
             except json.JSONDecodeError:
                 pass
-        return {"raw_response": raw, "parse_error": True}
+        return _log({"raw_response": raw, "parse_error": True}, True)
 
     # ─── Finding Storage ──────────────────────────────────────
 

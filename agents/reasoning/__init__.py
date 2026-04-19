@@ -12,11 +12,13 @@ Activation: enabled via use_reasoning_loop=True in StartPentestRequest.
 When disabled (default), MasterAgent runs the legacy linear phase flow unchanged.
 """
 
-from agents.reasoning.negative_memory   import NegativeMemory, FailedAttempt
-from agents.reasoning.hypothesis_engine import HypothesisEngine, Hypothesis
-from agents.reasoning.attack_planner    import AttackPlanner, RankedAttackPath, AttackPathNode
-from agents.reasoning.decision_engine   import DecisionEngine, JustifiedAction, PreExecutionPlan
-from agents.reasoning.reasoning_loop    import ReasoningLoop
+from agents.reasoning.negative_memory        import NegativeMemory, FailedAttempt
+from agents.reasoning.hypothesis_engine      import HypothesisEngine, Hypothesis
+from agents.reasoning.attack_planner         import AttackPlanner, RankedAttackPath, AttackPathNode
+from agents.reasoning.decision_engine        import DecisionEngine, JustifiedAction, PreExecutionPlan
+from agents.reasoning.reasoning_loop         import ReasoningLoop
+from agents.reasoning.deterministic_extractor import DeterministicExtractor, ExtractorResult, DiscoveryFinding
+from agents.reasoning.question_engine        import QuestionEngine, Question, QuestionState
 
 __all__ = [
     "NegativeMemory", "FailedAttempt",
@@ -24,4 +26,6 @@ __all__ = [
     "AttackPlanner", "RankedAttackPath", "AttackPathNode",
     "DecisionEngine", "JustifiedAction", "PreExecutionPlan",
     "ReasoningLoop",
+    "DeterministicExtractor", "ExtractorResult", "DiscoveryFinding",
+    "QuestionEngine", "Question", "QuestionState",
 ]

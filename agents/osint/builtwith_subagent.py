@@ -21,6 +21,7 @@ Set env:   BUILTWITH_API_KEY
 
 from __future__ import annotations
 
+import os
 from typing import Dict, List
 
 from agents.osint.base_osint_subagent import OsintSubagentBase
@@ -47,28 +48,58 @@ class BuiltWithSubagent(OsintSubagentBase):
     async def run(self) -> List[Dict]:
         if not SOURCES_ENABLED.get("builtwith") or not BUILTWITH_API_KEY:
             return []
-        if self._is_ip(self._target):
-            return []   # BuiltWith is domain-focused
 
-        target = self._target
-        await self._emit("osint_status", {
-            "message": f"BuiltWith: profiling technology stack for {target}"
-        })
-
-        resp = await self._get(
-            BASE_URL,
-            params={"KEY": BUILTWITH_API_KEY, "LOOKUP": target},
-            timeout=TIMEOUTS.get("builtwith", 20),
-        )
-
-        if not resp or resp.status_code != 200:
+        # Build domain set from discovery. Free tier = 1 domain/day so cap hard.
+        domains = self._target_domains()
+        if not domains:
             return []
-        try:
-            data = resp.json()
-        except Exception:
-            return []
+        # Prefer apex first so the most valuable profile is used.
+        apex_first, rest = [], []
+        for d in domains:
+            parts = d.split(".")
+            (apex_first if len(parts) == 2 else rest).append(d)
+        ordered = list(dict.fromkeys(apex_first + rest))
 
-        await self._parse_and_store(target, data)
+        # BuiltWith's free tier is 1 lookup PER DAY. Higher tiers allow more,
+        # but we can't know the plan from the key alone. Start with the
+        # highest-value apex; if the response reports quota exhaustion or a
+        # non-200, stop immediately instead of burning repeat errors.
+        MAX_DOMAINS = int(os.environ.get("BUILTWITH_MAX_DOMAINS", "3"))
+        ordered = ordered[:MAX_DOMAINS]
+
+        for dom in ordered:
+            if self._stopped:
+                break
+            await self._emit("osint_status", {
+                "message": f"BuiltWith: profiling technology stack for {dom}"
+            })
+            resp = await self._get(
+                BASE_URL,
+                params={"KEY": BUILTWITH_API_KEY, "LOOKUP": dom},
+                timeout=TIMEOUTS.get("builtwith", 20),
+            )
+            if not resp or resp.status_code != 200:
+                # Could be quota exhaustion — stop the loop so we don't
+                # waste calls across the remaining domains.
+                await self._emit("osint_warning", {
+                    "message": f"BuiltWith: HTTP {getattr(resp,'status_code','?')} "
+                               f"for {dom} — stopping further lookups (likely quota)."
+                })
+                break
+            try:
+                data = resp.json()
+            except Exception:
+                break
+            # BuiltWith returns 200 even for over-quota with {"Errors":[...]}.
+            errors = data.get("Errors") if isinstance(data, dict) else None
+            if errors:
+                await self._emit("osint_warning", {
+                    "message": f"BuiltWith: {errors[0].get('Message', errors)} — "
+                               "stopping further lookups."
+                })
+                break
+            await self._parse_and_store(dom, data)
+
         return self._results
 
     # ── Response parser ───────────────────────────────────────────

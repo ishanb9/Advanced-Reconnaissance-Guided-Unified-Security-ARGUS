@@ -89,7 +89,10 @@ async def _create_indexes():
         [("session_id", ASCENDING), ("host", ASCENDING), ("severity", ASCENDING)]
     )
     await db.findings.create_index([("session_id", ASCENDING), ("phase", ASCENDING)])
+    await db.findings.create_index([("session_id", ASCENDING), ("agent", ASCENDING)])
+    await db.findings.create_index([("session_id", ASCENDING), ("subagent", ASCENDING)])
     await db.findings.create_index([("cves", ASCENDING)])
+    await db.findings.create_index([("finding_id", ASCENDING)], sparse=True)
 
     # ── tool_outputs ────────────────────────────────────────────────────────
     await db.tool_outputs.create_index(

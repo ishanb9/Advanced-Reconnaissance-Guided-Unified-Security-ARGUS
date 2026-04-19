@@ -79,11 +79,16 @@ class OsintAgent(BaseAgent):
         target:       str,
         search_terms: List[str] = None,
         services:     Dict      = None,
+        discovery:    Dict      = None,
         **kwargs
     ) -> Dict:
         self._session_id = session_id
         search_terms     = search_terms or []
         services         = services or {}
+        # Discovery context — EVERYTHING recon/vuln/web have already found.
+        # Subagents use these artefacts to drive targeted queries instead of
+        # just searching the bare IP/domain.
+        self._discovery  = discovery or {}
 
         result: Dict = {
             "exploit_modules": [],
@@ -130,10 +135,15 @@ class OsintAgent(BaseAgent):
         result["technologies"] = list(dict.fromkeys(result["technologies"]))
 
         # ── Wave 4: HIBP with harvested emails ────────────────────
-        if result["emails"] and SOURCES_ENABLED.get("hibp"):
-            hibp = HIBPSubagent(session_id, target, self.broadcast)
+        # Combine harvested emails with any emails already known in discovery.
+        all_emails = list(dict.fromkeys(
+            (result.get("emails") or []) + (self._discovery.get("emails") or [])
+        ))
+        if all_emails and SOURCES_ENABLED.get("hibp"):
+            hibp = HIBPSubagent(session_id, target, self.broadcast,
+                                discovery=self._discovery)
             try:
-                await hibp.run(emails=result["emails"][:15])
+                await hibp.run(emails=all_emails[:20])
             except Exception as exc:
                 await self._emit("osint_warning", {
                     "message": f"HIBP email check error: {exc}"
@@ -174,43 +184,35 @@ class OsintAgent(BaseAgent):
         """Run all enabled OSINT subagents concurrently."""
 
         named_coros: List[tuple] = []
+        disco = getattr(self, "_discovery", {}) or {}
+
+        def _mk(cls):
+            return cls(session_id, target, self.broadcast, discovery=disco)
 
         if SOURCES_ENABLED.get("theharvester"):
-            named_coros.append(("theHarvester",
-                TheHarvesterSubagent(session_id, target, self.broadcast).run()))
+            named_coros.append(("theHarvester", _mk(TheHarvesterSubagent).run()))
         if SOURCES_ENABLED.get("recon_ng"):
-            named_coros.append(("recon-ng",
-                ReconNgSubagent(session_id, target, self.broadcast).run()))
+            named_coros.append(("recon-ng",     _mk(ReconNgSubagent).run()))
         if SOURCES_ENABLED.get("wayback"):
-            named_coros.append(("wayback",
-                WaybackSubagent(session_id, target, self.broadcast).run()))
+            named_coros.append(("wayback",      _mk(WaybackSubagent).run()))
         if SOURCES_ENABLED.get("ahmia"):
-            named_coros.append(("ahmia",
-                AhmiaSubagent(session_id, target, self.broadcast).run()))
+            named_coros.append(("ahmia",        _mk(AhmiaSubagent).run()))
         if SOURCES_ENABLED.get("bgpview"):
-            named_coros.append(("bgpview",
-                BGPViewSubagent(session_id, target, self.broadcast).run()))
+            named_coros.append(("bgpview",      _mk(BGPViewSubagent).run()))
         if SOURCES_ENABLED.get("shodan"):
-            named_coros.append(("shodan",
-                ShodanSubagent(session_id, target, self.broadcast).run()))
+            named_coros.append(("shodan",       _mk(ShodanSubagent).run()))
         if SOURCES_ENABLED.get("security_trails"):
-            named_coros.append(("securitytrails",
-                SecurityTrailsSubagent(session_id, target, self.broadcast).run()))
+            named_coros.append(("securitytrails", _mk(SecurityTrailsSubagent).run()))
         if SOURCES_ENABLED.get("google_dorks"):
-            named_coros.append(("googledorks",
-                GoogleDorksSubagent(session_id, target, self.broadcast).run()))
+            named_coros.append(("googledorks",  _mk(GoogleDorksSubagent).run()))
         if SOURCES_ENABLED.get("builtwith"):
-            named_coros.append(("builtwith",
-                BuiltWithSubagent(session_id, target, self.broadcast).run()))
+            named_coros.append(("builtwith",    _mk(BuiltWithSubagent).run()))
         if SOURCES_ENABLED.get("tineye"):
-            named_coros.append(("tineye",
-                TinEyeSubagent(session_id, target, self.broadcast).run()))
+            named_coros.append(("tineye",       _mk(TinEyeSubagent).run()))
         if SOURCES_ENABLED.get("spiderfoot"):
-            named_coros.append(("spiderfoot",
-                SpiderFootSubagent(session_id, target, self.broadcast).run()))
+            named_coros.append(("spiderfoot",   _mk(SpiderFootSubagent).run()))
         if SOURCES_ENABLED.get("censys"):
-            named_coros.append(("censys",
-                CensysSubagent(session_id, target, self.broadcast).run()))
+            named_coros.append(("censys",       _mk(CensysSubagent).run()))
 
         if not named_coros:
             return []
@@ -485,25 +487,141 @@ Be specific and actionable. Focus on realistic initial access paths.
     ) -> Dict:
         """
         Called by master_agent._phase_osint().
-        Extracts service/version search terms from task list then runs full OSINT suite.
+
+        Builds two things from the accumulated scan intel:
+          1. `discovery_context` — rich dict of artefacts (subdomains, SSL CNs,
+             emails, web tech, service versions, banners) passed down to every
+             subagent so they can pivot on real findings instead of just the
+             bare target string.
+          2. `search_terms` — product+version strings for NVD/ExploitDB queries
+             derived from actual recon output, plus LLM-suggested args.
         """
+        intel = intel or {}
+
+        # ── Pull LLM-suggested args from planned tasks ───────────────
         search_terms: List[str] = []
         for t in tasks:
             args = t.get("args", "")
-            if isinstance(args, str) and args:
-                search_terms.append(args)
+            if isinstance(args, str) and args.strip():
+                search_terms.append(args.strip())
 
-        services = intel.get("services", {})
-        for svc in services.values():
-            if isinstance(svc, str) and svc:
-                search_terms.append(svc)
+        # ── Convert services dict into usable search strings ─────────
+        # `services` is {port: {service, version, product, banner, ...}}, not a
+        # flat map of strings. Earlier code checked isinstance(str) which was
+        # always False → NVD got NO service-derived queries. Fixed here.
+        services = intel.get("services", {}) or {}
+        product_versions: List[str] = []          # "apache 2.4.49"
+        products_only:    List[str] = []          # "OpenSSH"
+        banners:          List[str] = []
+
+        for port, svc in (services.items() if isinstance(services, dict) else []):
+            if isinstance(svc, dict):
+                product = (svc.get("product") or svc.get("service") or "").strip()
+                version = (svc.get("version") or "").strip()
+                banner  = (svc.get("banner")  or svc.get("extrainfo") or "").strip()
+                if product and version:
+                    product_versions.append(f"{product} {version}")
+                if product:
+                    products_only.append(product)
+                if banner:
+                    banners.append(banner[:120])
+            elif isinstance(svc, str) and svc.strip():
+                product_versions.append(svc.strip())
+
+        # Also consider the flat service_versions map if present.
+        sv_map = intel.get("service_versions", {}) or {}
+        if isinstance(sv_map, dict):
+            for ver in sv_map.values():
+                if isinstance(ver, str) and ver.strip():
+                    product_versions.append(ver.strip())
+
+        # Web-tech discovered during web_testing (WhatWeb, Wappalyzer, …)
+        web_tech = intel.get("web_tech") or intel.get("technologies") or []
+        if isinstance(web_tech, dict):
+            web_tech = list(web_tech.values())
+        web_tech = [str(t).strip() for t in (web_tech or []) if str(t).strip()]
+
+        # Compose search_terms: LLM args + product+version + web tech + OS.
+        search_terms.extend(dict.fromkeys(product_versions))
+        search_terms.extend(dict.fromkeys(web_tech))
+        os_guess = (intel.get("os_guess") or "").strip()
+        if os_guess and os_guess.lower() not in ("unknown", ""):
+            search_terms.append(os_guess)
+        # Dedup preserving order; cap to avoid NVD rate limits.
+        search_terms = list(dict.fromkeys(search_terms))[:20]
+
+        # ── Collect domain/host artefacts ────────────────────────────
+        hostnames = list(dict.fromkeys(
+            (intel.get("hostnames") or []) +
+            (intel.get("subdomains") or []) +
+            (intel.get("virtual_hosts") or [])
+        ))
+        ssl_cns = list(dict.fromkeys(
+            (intel.get("ssl_cns") or []) +
+            (intel.get("ssl_sans") or [])
+        ))
+        emails = list(dict.fromkeys(
+            (intel.get("emails") or []) +
+            (intel.get("harvested_emails") or [])
+        ))
+        users = list(dict.fromkeys(intel.get("users") or []))
+        # Collect any IPs discovered beyond the primary target.
+        ips = list(dict.fromkeys(
+            (intel.get("resolved_ips") or []) +
+            (intel.get("a_records")    or []) +
+            (intel.get("ips")          or [])
+        ))
+
+        discovery_context: Dict = {
+            # Network-level
+            "open_ports":        intel.get("open_ports", []),
+            "services":          services,
+            "service_versions":  sv_map,
+            "product_versions":  product_versions[:20],
+            "products":          list(dict.fromkeys(products_only))[:20],
+            "banners":           banners[:15],
+            "os_guess":          os_guess,
+            # Host/DNS-level
+            "hostnames":         hostnames[:60],
+            "subdomains":        list(dict.fromkeys(intel.get("subdomains") or []))[:60],
+            "virtual_hosts":     list(dict.fromkeys(intel.get("virtual_hosts") or []))[:30],
+            "ssl_cns":           list(dict.fromkeys(intel.get("ssl_cns") or []))[:30],
+            "ssl_sans":          list(dict.fromkeys(intel.get("ssl_sans") or []))[:60],
+            "ips":               ips[:20],
+            # Web-level
+            "web_tech":          web_tech[:30],
+            "http_titles":       list(dict.fromkeys(intel.get("http_titles") or []))[:20],
+            "login_pages":       list(dict.fromkeys(intel.get("login_pages") or []))[:20],
+            "admin_panels":      list(dict.fromkeys(intel.get("admin_panels") or []))[:20],
+            "interesting_files": list(dict.fromkeys(intel.get("interesting_files") or []))[:20],
+            # People-level
+            "emails":            emails[:30],
+            "users":             users[:30],
+            # Org-level
+            "org":               intel.get("org") or intel.get("organization") or "",
+            "asn":               intel.get("asn") or "",
+            # Keep a reference so subagents can dig further if needed.
+            "_target":           target,
+            "_target_type":      intel.get("target_type", ""),
+        }
 
         result = await self.run(
             session_id   = self._session_id or "",
             target       = target,
             search_terms = search_terms,
             services     = services,
+            discovery    = discovery_context,
         )
+
+        # Fold any newly-harvested artefacts back into master's intel so
+        # downstream phases (vuln/exploit) see them.
+        for key in ("emails", "subdomains", "technologies"):
+            vals = result.get(key) or []
+            if vals:
+                intel.setdefault(key, [])
+                existing = intel[key] if isinstance(intel[key], list) else []
+                merged = list(dict.fromkeys(list(existing) + list(vals)))
+                intel[key] = merged
 
         return {
             "cves":            [r["cve_id"] for r in result.get("cve_details", [])],

@@ -42,12 +42,68 @@ class OsintSubagentBase:
         target:       str,
         broadcast_fn  = None,
         stop_event:   asyncio.Event = None,
+        discovery:    Optional[Dict] = None,
     ):
         self._session_id  = session_id
         self._target      = target
         self._broadcast   = broadcast_fn
         self._stop_event  = stop_event
+        # Discovery context populated by recon/vuln/web phases. Subagents read
+        # from here to drive queries with real artefacts (subdomains, SSL CNs,
+        # web tech, emails, banners, service versions, etc.) rather than just
+        # the root target string. Keys are optional; subagents degrade gracefully.
+        self._discovery:  Dict         = discovery or {}
         self._results:    List[Dict] = []
+
+    # ── Discovery accessors ────────────────────────────────────────
+
+    def _disco(self, key: str, default=None):
+        """Safe getter for discovery context."""
+        return self._discovery.get(key, default) if isinstance(self._discovery, dict) else default
+
+    def _disco_list(self, *keys: str) -> List[str]:
+        """Aggregate list-valued discovery keys, dedup preserving order."""
+        out: List[str] = []
+        seen = set()
+        for k in keys:
+            v = self._disco(k, []) or []
+            if isinstance(v, dict):
+                v = list(v.values())
+            if not isinstance(v, (list, tuple, set)):
+                continue
+            for item in v:
+                s = str(item).strip()
+                if s and s not in seen:
+                    seen.add(s)
+                    out.append(s)
+        return out
+
+    def _target_domains(self) -> List[str]:
+        """
+        Return all domain/host strings worth querying: the primary target (if
+        domain), plus hostnames, subdomains, SSL CNs/SANs, virtual hosts.
+        De-duplicated, IPs excluded.
+        """
+        seeds: List[str] = []
+        if self._is_domain(self._target):
+            seeds.append(self._target)
+        for item in self._disco_list(
+            "hostnames", "subdomains", "virtual_hosts",
+            "ssl_cns", "ssl_sans", "associated_domains",
+        ):
+            if self._is_domain(item) and item not in seeds:
+                seeds.append(item)
+        return seeds
+
+    def _target_ips(self) -> List[str]:
+        """Primary IP target + any additional IPs discovered during recon."""
+        seeds: List[str] = []
+        if self._is_ip(self._target):
+            seeds.append(self._target)
+        for item in self._disco_list("ips", "a_records", "resolved_ips"):
+            if self._is_ip(item) and item not in seeds:
+                seeds.append(item)
+        return seeds
 
     # ── Abstract interface ─────────────────────────────────────────
 

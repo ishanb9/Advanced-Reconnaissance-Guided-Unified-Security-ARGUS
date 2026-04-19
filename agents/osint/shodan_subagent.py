@@ -42,12 +42,96 @@ class ShodanSubagent(OsintSubagentBase):
             "message": f"Shodan: querying host/service data for {target}"
         })
 
+        # Primary target first.
         if self._is_ip(target):
             await self._query_host(target)
-        else:
+        elif self._is_domain(target):
             await self._query_domain(target)
 
+        # Deep-dive any additional IPs discovered during recon (e.g. resolved
+        # from hostnames or found by Censys/SecurityTrails).
+        extra_ips = [ip for ip in self._target_ips() if ip != target]
+        for ip in extra_ips[:4]:
+            if self._stopped:
+                break
+            await self._query_host(ip)
+
+        # Pivot on each discovered domain for DNS → host graph.
+        for dom in [d for d in self._target_domains() if d != target][:3]:
+            if self._stopped:
+                break
+            await self._query_domain(dom)
+
+        # Org/CN search — finds sibling infrastructure Shodan indexed under
+        # the same organisation or certificate common name. Very useful when
+        # the operator only provided one IP but the org runs a fleet.
+        org_seeds: List[str] = []
+        org = (self._disco("org") or "").strip()
+        if org:
+            org_seeds.append(f'org:"{org}"')
+        for cn in (self._disco("ssl_cns") or [])[:3]:
+            cn = str(cn).strip().lstrip("*.")
+            if cn:
+                org_seeds.append(f'ssl.cert.subject.cn:"{cn}"')
+        for seed in org_seeds[:3]:
+            if self._stopped:
+                break
+            await self._search_query(seed)
+
         return self._results
+
+    # ── Arbitrary host search (org / ssl CN / tech pivots) ────────
+    # NOTE: /shodan/host/search is a MEMBERSHIP-ONLY endpoint. Free API keys
+    # get 401/403 here. We detect that once and skip further search calls
+    # for the rest of this run instead of spamming warnings.
+    _search_disabled = False
+
+    async def _search_query(self, query: str):
+        if self.__class__._search_disabled:
+            return
+        resp = await self._get(
+            f"{BASE_URL}/shodan/host/search",
+            params={"key": SHODAN_API_KEY, "query": query, "limit": 20},
+            timeout=TIMEOUTS.get("shodan", 15),
+        )
+        if resp is not None and resp.status_code in (401, 402, 403):
+            # Free-tier key — search endpoint not available. Disable for the
+            # rest of the run so we don't repeat the failure.
+            self.__class__._search_disabled = True
+            await self._emit("osint_status", {
+                "message": "Shodan: org/CN search requires paid membership — "
+                           "skipping host.search pivots (host lookups still work)."
+            })
+            return
+        if not resp or resp.status_code != 200:
+            return
+        try:
+            data = resp.json()
+        except Exception:
+            return
+        matches = data.get("matches", [])
+        total   = data.get("total", 0)
+        if not matches:
+            return
+        sample_ips = list(dict.fromkeys(m.get("ip_str") for m in matches if m.get("ip_str")))[:15]
+        await self._store(
+            query     = query,
+            title     = f"Shodan search: {total} result(s) for {query}",
+            summary   = (
+                f"Query: {query}\n"
+                f"Total matches: {total}\n"
+                f"Sample IPs:\n  " + "\n  ".join(sample_ips)
+            ),
+            url       = f"https://www.shodan.io/search?query={query}",
+            severity  = FindingSeverity.INFO,
+            relevance = 0.60,
+            raw       = {
+                "query":      query,
+                "total":      total,
+                "sample_ips": sample_ips,
+                "data_type":  "shodan_search",
+            },
+        )
 
     # ── Host lookup ───────────────────────────────────────────────
 

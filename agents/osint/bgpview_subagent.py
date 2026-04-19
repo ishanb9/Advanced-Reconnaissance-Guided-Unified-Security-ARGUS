@@ -40,10 +40,30 @@ class BGPViewSubagent(OsintSubagentBase):
             "message": f"BGPView: querying BGP/ASN routing data for {target}"
         })
 
+        # Primary target first.
         if self._is_ip(target):
             await self._query_ip(target)
-        else:
+        elif self._is_domain(target):
             await self._search_target(target)
+
+        # Pivot on every additional IP recon resolved — each gives us the ASN
+        # and prefixes of that host, often revealing adjacent infrastructure.
+        for ip in self._target_ips():
+            if self._stopped:
+                break
+            if ip != target:
+                await self._query_ip(ip)
+
+        # And org/apex lookups for any SSL CN / apex hostname we saw.
+        apex_seen = set()
+        for dom in self._target_domains():
+            parts = dom.split(".")
+            apex  = ".".join(parts[-2:]) if len(parts) >= 2 else dom
+            if apex != target and apex not in apex_seen:
+                apex_seen.add(apex)
+                await self._search_target(apex)
+                if len(apex_seen) >= 3:
+                    break
 
         return self._results
 

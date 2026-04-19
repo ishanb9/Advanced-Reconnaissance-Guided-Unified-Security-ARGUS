@@ -166,6 +166,22 @@ class CveLookupSubagent(BaseSubagent):
             if s.get("version") and str(s.get("version")).strip()
         ]
 
+        # If no versioned services, emit a diagnostic finding so the user
+        # knows why no CVE findings appeared (instead of silent nothing).
+        if not versioned_services:
+            await self.store_finding(Finding(
+                title="CVE lookup skipped — no versioned services",
+                description=(
+                    f"CveLookupSubagent received {len(services_list)} services but none had "
+                    "a version string. Ensure recon ran `nmap -sV` and the service parser "
+                    "populated the `version` field."
+                ),
+                severity="INFO",
+                evidence=f"services_list={services_list[:5]}",
+                tool="cve_lookup",
+                host=target,
+            ))
+
         # ── Step 1: searchsploit per service ─────────────────────────────
         for svc in versioned_services:
             port    = svc.get("port", "")
@@ -224,6 +240,23 @@ class CveLookupSubagent(BaseSubagent):
                     await self.store_finding(finding)
             except Exception as exc:
                 logger.warning("[cve_lookup] searchsploit error for %s: %s", query, exc)
+                # Emit a visible diagnostic so the UI shows the missing tool,
+                # rather than silently producing zero CVE findings.
+                _msg = str(exc).lower()
+                if "not found" in _msg or "enoent" in _msg or "no such" in _msg:
+                    await self.store_finding(Finding(
+                        title="searchsploit unavailable — CVE lookup degraded",
+                        description=(
+                            "The MCP server could not execute `searchsploit` "
+                            f"(error: {exc}). Install exploitdb on the MCP host "
+                            "to enable ExploitDB correlation."
+                        ),
+                        severity="INFO",
+                        evidence=str(exc)[:500],
+                        tool="searchsploit",
+                        host=target,
+                    ))
+                    break   # no point retrying for every versioned service
 
         # ── Step 2: nmap --script=vulners ────────────────────────────────
         if versioned_services:
@@ -319,6 +352,62 @@ class CveLookupSubagent(BaseSubagent):
                 logger.info(
                     "[cve_lookup] vulscan not available or error (non-fatal): %s", exc
                 )
+
+        # ── Step 4: nmap NSE `vuln` category (always available) ───────────
+        # This runs whether or not vulners/vulscan scripts are installed —
+        # it uses built-in NSE vuln scripts shipped with nmap.
+        if versioned_services:
+            ports_csv = ",".join(
+                str(s["port"]) for s in versioned_services if s.get("port")
+            )
+            logger.info("[cve_lookup] nmap --script vuln on ports: %s", ports_csv)
+            try:
+                vuln_out = await self.collect_tool(
+                    "nmap",
+                    target,
+                    {"options": f"--script vuln -sV -p {ports_csv} {target}"},
+                )
+                # Extract every CVE + the preceding line as evidence
+                nse_cves = set(_CVE_RE.findall(vuln_out))
+                if nse_cves:
+                    # Emit one aggregated finding so user sees built-in NSE results
+                    top_score = max(
+                        (float(s) for s in _CVSS_RE.findall(vuln_out)),
+                        default=7.0,
+                    )
+                    await self.store_finding(Finding(
+                        title=f"NSE vuln scripts: {len(nse_cves)} CVEs on {target}",
+                        description=(
+                            f"nmap --script vuln flagged {len(nse_cves)} CVE references. "
+                            f"Top CVSS: {top_score}. Review evidence for specific scripts "
+                            "(e.g. smb-vuln-*, http-vuln-*, ssl-*)."
+                        ),
+                        severity=_score_to_severity(top_score, has_public_exploit=False),
+                        evidence=vuln_out[:3000],
+                        tool="nmap_nse_vuln",
+                        host=target,
+                        cve=", ".join(sorted(nse_cves)[:10]),
+                        mitre_technique="T1190",
+                        exploit_suggestion="Cross-reference CVEs with Metasploit/ExploitDB.",
+                    ))
+                # Also surface any "VULNERABLE:" banners (scripts like
+                # smb-vuln-ms17-010, http-shellshock) even if no CVE present.
+                for _m in re.finditer(
+                    r"VULNERABLE:\s*\n(.+?)(?:\n\n|\n\|_)", vuln_out, re.DOTALL
+                ):
+                    banner = _m.group(1).strip()[:500]
+                    title_line = banner.splitlines()[0][:80] if banner else "NSE reported VULNERABLE"
+                    await self.store_finding(Finding(
+                        title=f"NSE: {title_line}",
+                        description=f"nmap NSE script reported VULNERABLE on {target}.",
+                        severity="HIGH",
+                        evidence=banner,
+                        tool="nmap_nse_vuln",
+                        host=target,
+                        mitre_technique="T1190",
+                    ))
+            except Exception as exc:
+                logger.warning("[cve_lookup] NSE vuln scripts error: %s", exc)
 
         # ── Finalise result ───────────────────────────────────────────────
         result.findings      = self._findings

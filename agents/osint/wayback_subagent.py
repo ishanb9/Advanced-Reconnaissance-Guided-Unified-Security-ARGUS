@@ -39,10 +39,21 @@ class WaybackSubagent(OsintSubagentBase):
     async def run(self) -> List[Dict]:
         if not SOURCES_ENABLED.get("wayback"):
             return []
-        if self._is_ip(self._target):
-            return []   # Wayback is domain-focused
 
-        target = self._target
+        # Query once per discovered domain — apex target PLUS every subdomain
+        # and SSL CN/SAN recon turned up. Each gets its own archive sweep so
+        # we find historical admin panels / backups per-host, not just root.
+        domains = self._target_domains()
+        if not domains:
+            return []
+
+        for dom in domains[:8]:
+            if self._stopped:
+                break
+            await self._query_domain(dom)
+        return self._results
+
+    async def _query_domain(self, target: str):
         await self._emit("osint_status", {
             "message": f"Wayback Machine: querying Archive.org for {target}"
         })
@@ -61,15 +72,13 @@ class WaybackSubagent(OsintSubagentBase):
         )
 
         if not resp or resp.status_code != 200:
-            return []
-
+            return
         try:
             rows = resp.json()
         except Exception:
-            return []
-
+            return
         if len(rows) <= 1:          # Only the header row returned
-            return []
+            return
 
         urls       = [r[0] for r in rows[1:] if r and len(r) >= 1]
         timestamps = [r[2] for r in rows[1:] if r and len(r) >= 3 and r[2]]
@@ -124,5 +133,3 @@ class WaybackSubagent(OsintSubagentBase):
                 relevance = 0.70,
                 raw       = {"url": url, "data_type": "interesting_archived_url"},
             )
-
-        return self._results

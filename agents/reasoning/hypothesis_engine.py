@@ -113,9 +113,11 @@ class HypothesisEngine:
     """
 
     # How many tokens to budget for the evidence summary
-    _EVIDENCE_MAX_CHARS: int = 3000
+    _EVIDENCE_MAX_CHARS: int = 4000
     # How many tokens to budget for the negative-memory block
-    _NEG_MEM_MAX_CHARS:  int = 1500
+    _NEG_MEM_MAX_CHARS:  int = 2000
+    # How many tokens to budget for state summary (prev actions + collected items)
+    _STATE_MAX_CHARS:    int = 1500
 
     def __init__(
         self,
@@ -171,6 +173,7 @@ class HypothesisEngine:
         evidence_summary = self._build_evidence_summary(intel)
         neg_mem_block    = negative_memory.to_context_block()
         kb_context       = await self._get_kb_context(intel)
+        state_summary    = self._build_state_summary(intel)
 
         system_prompt = self._build_system_prompt(
             eng_type=eng_type,
@@ -186,6 +189,7 @@ class HypothesisEngine:
             objectives=objectives,
             obj_answers=obj_answers,
             tools_excluded=tools_excl,
+            state_summary=state_summary,
         )
 
         try:
@@ -193,7 +197,7 @@ class HypothesisEngine:
         except Exception:
             return []
 
-        hypotheses = self._parse_hypotheses(raw, iteration)
+        hypotheses = self._parse_hypotheses(raw, iteration, intel=intel)
         # Sort by confidence descending
         hypotheses.sort(key=lambda h: h.confidence, reverse=True)
         return hypotheses[:max_hypotheses]
@@ -202,68 +206,30 @@ class HypothesisEngine:
     # Prompt building
     # ------------------------------------------------------------------
 
-    # ── Per-engagement-type expert personas ──────────────────────────────────
-    _PERSONAS: dict = {
-        "pentest": (
-            "You are an elite penetration tester with deep expertise in vulnerability "
-            "research, exploit development, and offensive security. "
-            "Think like a red team operator: correlate weak signals, identify the most "
-            "likely path to compromise based on specific service versions and configurations. "
-            "Prioritise hypotheses by realistic likelihood of success, not textbook severity."
-        ),
-        "ctf": (
-            "You are an expert CTF (Capture The Flag) solver. "
-            "Your mission is to answer specific challenge questions in order by running "
-            "the minimum tools necessary. Think like a CTF player: look carefully for "
-            "hidden flags (flag{...}), usernames, passwords, and paths in tool output, "
-            "FTP servers, web directories, and config files. "
-            "Map every hypothesis to the specific objective number it will answer."
-        ),
+    # ── Engagement-type flavour additions (injected into base persona) ─────────
+    _ENG_ADDENDUM: dict = {
         "forensics": (
-            "You are a digital forensics expert and incident responder. "
-            "Your role is to extract evidence, build timelines, and identify IOCs from "
-            "files, disk images, memory dumps, or logs — WITHOUT modifying the evidence. "
-            "Think like an investigator: identify artifacts, recover deleted data, "
-            "analyse metadata, and correlate timestamps. "
-            "Never suggest exploitation tools — this is a read-only analysis."
+            "\nFORENSICS MODE: Analyse evidence WITHOUT modifying it. "
+            "Focus on file metadata, deleted data recovery, timestamps, and IOC correlation. "
+            "Never suggest exploitation tools — read-only analysis only."
         ),
         "network_analysis": (
-            "You are a network security analyst specialising in packet capture analysis. "
-            "Your role is to identify anomalies, suspicious traffic patterns, protocol "
-            "violations, C2 beacons, data exfiltration, and lateral movement in pcap files. "
+            "\nNETWORK ANALYSIS MODE: Analyse pcap/traffic only. "
             "Use tshark/Wireshark filters, protocol dissection, and statistical analysis. "
-            "Never suggest port scanning or exploitation — analyse what you have."
+            "Do NOT suggest port scanning or exploitation."
         ),
         "malware_analysis": (
-            "You are a malware analyst with expertise in reverse engineering and threat intelligence. "
-            "Your role is to analyse suspicious files to identify capabilities, persistence "
-            "mechanisms, C2 infrastructure, IOCs, and MITRE ATT&CK techniques. "
-            "Use static analysis (strings, binwalk, xxd, file) and dynamic analysis indicators. "
-            "Never execute the sample against live systems without isolation."
+            "\nMALWARE ANALYSIS MODE: Static analysis only (strings, binwalk, xxd, file, objdump). "
+            "Identify capabilities, C2 infrastructure, IOCs, MITRE ATT&CK techniques. "
+            "Do NOT execute the sample against live systems."
         ),
         "compliance": (
-            "You are a security compliance auditor with expertise in CIS benchmarks, "
-            "PCI-DSS, SOC2, ISO 27001, and NIST frameworks. "
-            "Your role is to check specific controls, identify misconfigurations, "
-            "and verify security baselines — passively and without exploitation. "
-            "Map findings to specific compliance controls."
-        ),
-        "bug_bounty": (
-            "You are a bug bounty hunter specialising in web and API security. "
-            "Focus on OWASP Top 10, business logic flaws, authentication bypasses, "
-            "and high-impact vulnerabilities. Work within the defined scope only. "
-            "Think like an attacker but document clearly for triage."
+            "\nCOMPLIANCE MODE: Passively check controls against CIS/PCI-DSS/NIST. "
+            "Map findings to specific compliance controls. No exploitation."
         ),
         "red_team": (
-            "You are a red team operator running a full adversary simulation. "
-            "Think like an APT: use living-off-the-land techniques, maintain stealth, "
-            "establish persistence, and move laterally to reach the crown jewels. "
-            "Prioritise detection evasion and operational security."
-        ),
-        "custom": (
-            "You are an adaptive security analyst. "
-            "Follow the operator's specific instructions precisely. "
-            "Derive your approach from the engagement objectives provided."
+            "\nRED TEAM MODE: Think like an APT. "
+            "Use living-off-the-land techniques, maintain stealth, prioritise detection evasion."
         ),
     }
 
@@ -276,12 +242,46 @@ class HypothesisEngine:
         obj_answers: dict  = None,
         constraints: list  = None,
     ) -> str:
-        persona     = self._PERSONAS.get(eng_type, self._PERSONAS["custom"])
         obj_answers = obj_answers or {}
         objectives  = objectives  or []
         constraints = constraints or []
 
-        parts = [persona]
+        parts = [
+            "You are an expert penetration tester and CTF solver.",
+            "",
+            "Your objective is NOT to run tools blindly. Your objective is to THINK, REASON, "
+            "and PROGRESS toward a foothold and final compromise using minimal, high-value actions.",
+            "You must behave like a human penetration tester, not an automated scanner.",
+            "",
+            "CORE RULES:",
+            "1. Never suggest tools without specific reasoning backed by evidence.",
+            "2. Always base every action on observable facts from the current state.",
+            "3. Prioritize high-probability attack paths over exhaustive scanning.",
+            "4. Never repeat failed techniques — check FAILED ATTEMPTS before proposing.",
+            "5. Think in terms of footholds and pivots, not sequential phases.",
+            "6. Correlate findings across services — a username on FTP may work on SSH.",
+            "7. Revisit previously discovered paths when new credentials or access is gained.",
+            "8. Treat engagements as puzzles — hidden clues, narrative hints, and correlations matter.",
+            "",
+            "TOOL DISCIPLINE:",
+            "- Run nmap ONCE for initial discovery — do not repeat broad port scans.",
+            "- Run directory brute force ONLY if a web service is confirmed.",
+            "- Run brute force ONLY if specific credential indicators exist (usernames, hash format).",
+            "- Prefer targeted single-tool commands over parallel scanner storms.",
+            "- A single focused gobuster is worth more than 10 unfocused nmap scripts.",
+            "",
+            "CTF & PUZZLE BEHAVIOR (always apply when objectives are given):",
+            "- Look for hidden files, directories, comments in source, and steganography.",
+            "- Interpret narrative hints — names, items, story elements often encode clues.",
+            "- Correlate collected items (keys, tokens, emblems) with services that accept them.",
+            "- Revisit earlier access points after gaining new credentials or artifacts.",
+            "- Many answers require reading output carefully, not running more tools.",
+            "- A flag may be in a file, a web comment, an FTP file, or a service banner.",
+        ]
+
+        # Engagement-type specific addendum
+        if eng_type in self._ENG_ADDENDUM:
+            parts.append(self._ENG_ADDENDUM[eng_type])
 
         if ctx_summary:
             parts.append(f"\nENGAGEMENT CONTEXT:\n{ctx_summary}")
@@ -296,7 +296,6 @@ class HypothesisEngine:
             answered = len(obj_answers)
             total    = len(objectives)
             parts.append(f"\nOBJECTIVES PROGRESS: {answered}/{total} completed")
-            # Show first unanswered
             for i, obj in enumerate(objectives):
                 if str(i) not in obj_answers:
                     q = obj.get("task") or obj.get("question") or str(obj)
@@ -305,7 +304,8 @@ class HypothesisEngine:
                     break
 
         parts.append(
-            "\nYou must respond ONLY with valid JSON. No markdown fences. No prose."
+            "\nYou MUST respond ONLY with valid JSON in the exact format specified. "
+            "No markdown fences. No prose. No explanations outside the JSON."
         )
         return "\n".join(parts)
 
@@ -319,103 +319,152 @@ class HypothesisEngine:
         objectives:       list = None,
         obj_answers:      dict = None,
         tools_excluded:   set  = None,
+        state_summary:    str  = "",
     ) -> str:
-        objectives    = objectives    or []
-        obj_answers   = obj_answers   or {}
-        tools_excluded= tools_excluded or set()
+        objectives     = objectives     or []
+        obj_answers    = obj_answers    or {}
+        tools_excluded = tools_excluded or set()
 
+        # ── Section 1: Current State ─────────────────────────────────────────
         sections = [
-            f"=== CURRENT EVIDENCE ({eng_type.upper()}) ===",
+            f"=== TARGET STATE ({eng_type.upper()}) ===",
             evidence_summary,
         ]
 
-        # ── Objectives checklist (works for any engagement type) ──────────────
+        # ── Section 2: Objectives checklist ──────────────────────────────────
         if objectives:
-            obj_lines = [f"=== OBJECTIVES ({len(obj_answers)}/{len(objectives)} complete) ==="]
+            obj_lines = [f"\n=== OBJECTIVES ({len(obj_answers)}/{len(objectives)} complete) ==="]
             for i, obj in enumerate(objectives):
-                q   = obj.get("task") or obj.get("question") or str(obj)
-                sec = obj.get("section", "") if isinstance(obj, dict) else ""
+                q        = obj.get("task") or obj.get("question") or str(obj)
+                sec      = obj.get("section", "") if isinstance(obj, dict) else ""
                 ans_data = obj_answers.get(str(i))
                 if ans_data:
                     ans = ans_data.get("answer", "") if isinstance(ans_data, dict) else str(ans_data)
                     obj_lines.append(f"  [{i+1}] ✓ {q} → {ans}")
                 else:
                     obj_lines.append(f"  [{i+1}] ○ {('(' + sec + ') ') if sec else ''}{q}")
-            sections += ["", "\n".join(obj_lines)]
+            sections += ["\n".join(obj_lines)]
 
+        # ── Section 3: State awareness (previous actions + collected items) ──
+        if state_summary:
+            sections += ["", state_summary]
+
+        # ── Section 4: Failed attempts ───────────────────────────────────────
         if neg_mem_block:
-            sections += ["", neg_mem_block]
+            sections += ["", "=== FAILED ATTEMPTS (DO NOT REPEAT THESE) ===", neg_mem_block]
 
-        if kb_context:
-            sections += ["", "=== RELEVANT KNOWLEDGE ===", kb_context]
-
-        # ── Tool exclusion reminder ───────────────────────────────────────────
+        # ── Section 5: Excluded tools ─────────────────────────────────────────
         if tools_excluded:
             sections += [
                 "",
-                "=== EXCLUDED TOOLS (DO NOT USE) ===",
+                "=== EXCLUDED TOOLS (NEVER USE) ===",
                 ", ".join(sorted(tools_excluded)),
             ]
 
-        # ── Objective-first instruction (when objectives exist) ──────────────
+        # ── Section 6: Knowledge base context ────────────────────────────────
+        if kb_context:
+            sections += ["", "=== RELEVANT KNOWLEDGE ===", kb_context]
+
+        # ── Section 7: Immediate priority objective ───────────────────────────
+        first_pending = None
         if objectives:
-            first_pending = None
             for i, obj in enumerate(objectives):
                 if str(i) not in obj_answers:
                     q = obj.get("task") or obj.get("question") or str(obj)
                     first_pending = f"[{i+1}] {q}"
                     break
 
-            action_label = {
-                "ctf":              "answer CTF objectives",
-                "forensics":        "extract the requested evidence/artifacts",
-                "network_analysis": "identify the requested network anomalies/IOCs",
-                "malware_analysis": "extract the requested malware indicators",
-                "compliance":       "verify the requested compliance controls",
-            }.get(eng_type, "complete the requested objectives")
+        # ── Section 8: Required reasoning loop + output format ───────────────
+        sections += [
+            "",
+            "=== REQUIRED REASONING LOOP ===",
+            "Follow this exact 7-step methodology:",
+            "",
+            "1. OBSERVE   — Summarize ALL known information (ports, services, technologies,",
+            "               findings, credentials, files, banners, hints).",
+            "2. INTERPRET — Explain what the findings mean in a real-world pentesting context.",
+            "               What attack surface does this expose? What is unusual?",
+            "3. HYPOTHESIZE — Generate 2–3 specific foothold/answer paths based ONLY on evidence.",
+            "               Each must be tied to a specific finding, not a generic idea.",
+            "4. PRIORITIZE — Rank hypotheses by realistic probability of success.",
+            "               Consider: service version, known vulns, objective alignment.",
+            "5. DECIDE    — Choose ONLY 1 or 2 next actions. No more.",
+            "               Each must directly test the top hypothesis.",
+            "6. JUSTIFY   — Explain exactly WHY each action was chosen over alternatives.",
+            "7. SUCCESS   — Define precisely what result would confirm success.",
+        ]
 
+        if first_pending:
             sections += [
                 "",
-                f"Generate up to {max_hypotheses} hypotheses to {action_label}.",
-                f"IMMEDIATE PRIORITY: {first_pending}" if first_pending else "All objectives complete — consider deeper investigation.",
-                "",
-                "Each hypothesis statement MUST reference the objective number it targets.",
-                "recommended_next_actions must be EXACT tool commands — no vague descriptions.",
-            ]
-        else:
-            sections += [
-                "",
-                f"Generate up to {max_hypotheses} hypotheses about the best next action.",
-                "Prioritise actions most likely to advance the engagement given the evidence.",
+                f"IMMEDIATE PRIORITY: Answer objective {first_pending}",
+                "Your next_actions MUST directly progress toward answering this objective.",
             ]
 
         sections += [
             "",
-            "Respond with a JSON object in EXACTLY this format:",
+            "=== STRICT OUTPUT FORMAT ===",
+            "Return ONLY this JSON object. No other text:",
             "{",
+            '  "observation": "complete summary of what you know right now — ports, services, banners, files, creds, flags",',
+            '  "interpretation": "what these findings mean as attack surface — be specific, not generic",',
             '  "hypotheses": [',
             '    {',
-            '      "statement": "Objective [N]: <specific theory or approach>",',
+            '      "idea": "specific attack or enumeration path tied to a real finding",',
             '      "confidence": 0.85,',
-            '      "evidence_supporting": ["facts that support this approach"],',
-            '      "required_evidence": ["what the tool output must show to confirm this"],',
-            '      "recommended_next_actions": ["exact command, e.g. tshark -r file.pcap -Y http"],',
-            '      "attack_phase": "initial_access|privesc|lateral|post_exploit|exfil|analysis|forensics",',
-            '      "mitre_technique": "T1046"',
+            '      "reason": "why this path is likely — cite specific evidence"',
             '    }',
+            '  ],',
+            '  "priority": [',
+            '    "highest confidence hypothesis statement",',
+            '    "second hypothesis statement"',
+            '  ],',
+            '  "next_actions": [',
+            '    {',
+            '      "action": "EXACT complete shell command with real IP/URL — e.g. gobuster dir -u http://10.10.10.5 -w /usr/share/wordlists/dirb/common.txt",',
+            '      "tool": "tool name only — e.g. gobuster",',
+            '      "target": "specific host/URL/service — e.g. http://10.10.10.5:80",',
+            '      "reason": "why this specific command tests the top hypothesis",',
+            '      "expected_result": "what the output will look like on success",',
+            '      "success_criteria": "exact string, file, or output that confirms the hypothesis"',
+            '    }',
+            '  ],',
+            '  "avoid": [',
+            '    "specific tool/technique to avoid and the reason — e.g. do not run nmap again, already have port map"',
             '  ]',
             "}",
             "",
-            "RULES:",
-            "- confidence is a float 0.0–1.0",
-            "- Do NOT repeat techniques in FAILED ATTEMPTS unless new evidence changes the approach",
-            "- recommended_next_actions are verbatim shell commands",
-            "- attack_phase for forensics/analysis: use 'analysis' or 'forensics'",
-            "- Rank highest-confidence first",
+            "HARD RULES FOR next_actions:",
+            "- MAXIMUM 2 actions. If 1 is sufficient, use 1.",
+            "- The 'action' field MUST be a complete executable shell command with actual IPs/URLs substituted in.",
+            "- Do NOT use placeholder text like TARGET or VICTIM — use the real IP from the target state.",
+            "- Do NOT repeat any tool+target combo that appears in FAILED ATTEMPTS.",
+            "- Each action must test a different hypothesis (no redundant tool runs).",
+            "- If objectives are pending, at least one action must target answering the next objective.",
+            "",
+            "AVAILABLE KALI TOOLS:",
+            "  Recon:    nmap, rustscan, masscan, whatweb, dnsrecon, dig, whois, curl",
+            "  Web:      gobuster, ffuf, dirb, nikto, wpscan, droopescan, joomscan, davtest, wapiti",
+            "  Exploit:  sqlmap, commix, dalfox, wfuzz, arjun, nuclei",
+            "  Auth:     hydra, medusa, crackmapexec, evil-winrm, impacket-psexec",
+            "  Enum:     enum4linux, smbmap, smbclient, snmpwalk, ldapsearch, rpcclient, smtp-user-enum",
+            "  Post:     linpeas, winpeas, pspy, bloodhound-python, find, id, cat, ls",
+            "  Crypto:   john, hashcat, openssl",
+            "  Analysis: tshark, strings, binwalk, foremost, xxd, file, exiftool",
+            "",
+            "GOOD EXAMPLES:",
+            "  'gobuster dir -u http://10.10.10.5 -w /usr/share/wordlists/dirb/big.txt -x php,txt,html'",
+            "  'curl -s http://10.10.10.5/robots.txt'",
+            "  'enum4linux -a 10.10.10.5'",
+            "  'hydra -l admin -P /usr/share/wordlists/rockyou.txt 10.10.10.5 ftp'",
+            "  'nmap --script smb-vuln-ms17-010 -p 445 10.10.10.5'",
+            "  'sqlmap -u http://10.10.10.5/login.php --data=\"user=a&pass=b\" --batch --level=3'",
         ]
 
         if tools_excluded:
-            sections.append(f"- NEVER suggest these tools: {', '.join(sorted(tools_excluded))}")
+            sections.append(
+                f"\nNEVER suggest these tools under any circumstances: {', '.join(sorted(tools_excluded))}"
+            )
 
         return "\n".join(sections)
 
@@ -607,20 +656,241 @@ class HypothesisEngine:
             return ""
 
     # ------------------------------------------------------------------
+    # State awareness helper
+    # ------------------------------------------------------------------
+
+    def _build_state_summary(self, intel: dict) -> str:
+        """
+        Build a compact STATE AWARENESS block for the prompt.
+        Includes: last N reasoning journal entries (previous actions) and
+        collected items (flags, credentials, interesting files, artifacts).
+        """
+        lines: List[str] = []
+
+        # Previous actions from reasoning journal (last 5 entries)
+        journal = intel.get("reasoning_journal", [])
+        if journal:
+            lines.append("=== PREVIOUS ACTIONS ===")
+            for entry in journal[-5:]:
+                lines.append(f"  {str(entry)[:120]}")
+
+        # Collected items
+        collected: List[str] = []
+
+        # Flags and objective answers
+        if intel.get("user_flag"):
+            collected.append(f"user_flag captured: {intel['user_flag']}")
+        if intel.get("root_flag"):
+            collected.append(f"root_flag captured: {intel['root_flag']}")
+        for k, v in (intel.get("ctf_answers") or {}).items():
+            ans = v.get("answer", "") if isinstance(v, dict) else str(v)
+            if ans:
+                collected.append(f"objective_{k} answered: {ans[:60]}")
+
+        # Credentials
+        for c in (intel.get("credentials") or [])[:5]:
+            if isinstance(c, dict):
+                u = c.get("username", "") or c.get("user", "")
+                p = c.get("password", "") or c.get("pass", "")
+                if u or p:
+                    collected.append(f"credential: {u}:{p[:30]}")
+            elif c:
+                collected.append(f"credential: {str(c)[:60]}")
+
+        # Interesting files
+        for f in (intel.get("interesting_files") or [])[:4]:
+            collected.append(f"found_file: {str(f)[:60]}")
+
+        # Shell access
+        if intel.get("shell_access"):
+            user = intel.get("current_user", "unknown")
+            collected.append(f"shell_access: YES (user={user})")
+
+        if collected:
+            if lines:
+                lines.append("")
+            lines.append("=== COLLECTED ITEMS ===")
+            for item in collected:
+                lines.append(f"  {item}")
+
+        summary = "\n".join(lines)
+        if len(summary) > self._STATE_MAX_CHARS:
+            summary = summary[:self._STATE_MAX_CHARS] + "\n[... truncated ...]"
+        return summary
+
+    # ------------------------------------------------------------------
+    # Attack phase inference
+    # ------------------------------------------------------------------
+
+    def _infer_attack_phase(self, tool: str) -> str:
+        """Infer MITRE-aligned attack phase from tool name."""
+        t = (tool or "").lower().split()[0]  # first word of command
+        if t in {"linpeas", "winpeas", "pspy", "sudo", "find", "id", "uname"}:
+            return "privesc"
+        if t in {"bloodhound-python", "impacket-secretsdump", "impacket-psexec",
+                 "mimikatz", "rubeus", "kerbrute", "crackmapexec", "evil-winrm"}:
+            return "lateral"
+        if t in {"msfconsole", "msfvenom", "sqlmap", "commix", "dalfox",
+                 "hydra", "medusa", "xsstrike", "wfuzz"}:
+            return "initial_access"
+        if t in {"tshark", "wireshark", "strings", "binwalk", "foremost",
+                 "xxd", "file", "exiftool", "volatility"}:
+            return "forensics"
+        if t in {"cat", "ls", "wget", "curl", "nc", "python3", "bash", "sh"}:
+            return "post_exploit"
+        # Default: reconnaissance / initial access
+        return "initial_access"
+
+    # ------------------------------------------------------------------
     # Response parsing
     # ------------------------------------------------------------------
 
-    def _parse_hypotheses(self, raw: Any, iteration: int) -> List[Hypothesis]:
+    def _parse_hypotheses(
+        self,
+        raw:       Any,
+        iteration: int,
+        intel:     dict = None,
+    ) -> List[Hypothesis]:
         """
         Parse the LLM JSON response into Hypothesis objects.
-        Gracefully handles malformed responses.
+
+        Handles both the new expert-methodology format:
+            {observation, interpretation, hypotheses[], priority[], next_actions[], avoid[]}
+        and the legacy format:
+            {hypotheses: [{statement, confidence, recommended_next_actions, ...}]}
+
+        Each next_action becomes one Hypothesis so the DecisionEngine can
+        pick them sequentially (max 2 from the new format).
         """
         hypotheses: List[Hypothesis] = []
 
         if not raw:
             return hypotheses
 
-        # Unwrap {"hypotheses": [...]} or bare list
+        # ── New expert format ────────────────────────────────────────────────
+        if isinstance(raw, dict) and (
+            "next_actions" in raw or "observation" in raw or "avoid" in raw
+        ):
+            observation    = str(raw.get("observation")    or "").strip()
+            interpretation = str(raw.get("interpretation") or "").strip()
+            avoid_list     = [str(a) for a in (raw.get("avoid") or [])]
+            hyp_list       = raw.get("hypotheses") or []
+            next_actions   = raw.get("next_actions") or []
+
+            # Store temporary context into intel for the reasoning loop to emit
+            if intel is not None:
+                if observation:
+                    intel["_tmp_observation"]    = observation
+                if interpretation:
+                    intel["_tmp_interpretation"] = interpretation
+                if avoid_list:
+                    intel["_tmp_avoid"]          = avoid_list
+
+            # Build confidence map: hypothesis idea → confidence
+            hyp_conf: dict = {}
+            for h in hyp_list:
+                if isinstance(h, dict):
+                    idea = (h.get("idea") or "").strip().lower()
+                    try:
+                        conf = float(h.get("confidence", 0.75))
+                    except (TypeError, ValueError):
+                        conf = 0.75
+                    if idea:
+                        hyp_conf[idea] = max(0.0, min(1.0, conf))
+
+            # Default confidence from top hypothesis
+            default_conf = max(hyp_conf.values()) if hyp_conf else 0.75
+
+            # Convert each next_action into a Hypothesis object
+            for idx, act in enumerate(next_actions[:2]):   # hard cap: 2 actions
+                if not isinstance(act, dict):
+                    continue
+
+                action_cmd = str(act.get("action") or "").strip()
+                tool_name  = str(act.get("tool")   or "").strip()
+                target_str = str(act.get("target") or "").strip()
+                reason     = str(act.get("reason") or "").strip()
+                expected   = str(act.get("expected_result")  or "").strip()
+                success_c  = str(act.get("success_criteria") or "").strip()
+
+                # Require at minimum a command or a tool
+                if not action_cmd and not tool_name:
+                    continue
+
+                # Build the executable command
+                cmd = action_cmd if action_cmd else f"{tool_name} {target_str}".strip()
+                if not cmd:
+                    continue
+
+                # Extract tool from command if tool_name blank
+                if not tool_name:
+                    tool_name = cmd.split()[0]
+
+                # Determine confidence — try to match to a hypothesis idea
+                conf = default_conf * (0.95 ** idx)
+                for idea, c in hyp_conf.items():
+                    if (
+                        tool_name.lower() in idea
+                        or (reason and reason.lower()[:40] in idea)
+                    ):
+                        conf = c
+                        break
+                # First action gets a small priority bump
+                if idx == 0:
+                    conf = min(0.95, conf + 0.02)
+
+                # Statement from reason, trimmed
+                stmt = (reason or f"Run {tool_name} on {target_str}")[:160]
+
+                # Evidence from observation + interpretation
+                evidence: List[str] = []
+                if observation:
+                    evidence.append(observation[:200])
+                if interpretation:
+                    evidence.append(interpretation[:200])
+
+                h = Hypothesis(
+                    hypothesis_id            = str(uuid.uuid4()),
+                    statement                = stmt,
+                    confidence               = max(0.0, min(1.0, conf)),
+                    evidence_supporting      = evidence,
+                    required_evidence        = [success_c] if success_c else [],
+                    recommended_next_actions = [cmd],
+                    attack_phase             = self._infer_attack_phase(tool_name),
+                    mitre_technique          = None,
+                    iteration_number         = iteration,
+                )
+                hypotheses.append(h)
+
+            # If no next_actions provided, fall back to converting hypotheses[]
+            # (gives the decision engine something to work with)
+            if not hypotheses:
+                for h_dict in hyp_list[:2]:
+                    if not isinstance(h_dict, dict):
+                        continue
+                    idea = str(h_dict.get("idea") or "").strip()
+                    if not idea:
+                        continue
+                    try:
+                        conf = float(h_dict.get("confidence", 0.5))
+                    except (TypeError, ValueError):
+                        conf = 0.5
+                    h = Hypothesis(
+                        hypothesis_id            = str(uuid.uuid4()),
+                        statement                = idea[:160],
+                        confidence               = max(0.0, min(1.0, conf)),
+                        evidence_supporting      = [observation] if observation else [],
+                        required_evidence        = [],
+                        recommended_next_actions = [],
+                        attack_phase             = "initial_access",
+                        mitre_technique          = None,
+                        iteration_number         = iteration,
+                    )
+                    hypotheses.append(h)
+
+            return hypotheses
+
+        # ── Legacy format: {"hypotheses": [...]} or bare list ────────────────
         if isinstance(raw, dict):
             items = raw.get("hypotheses", raw.get("hypothesis", []))
             if isinstance(items, dict):
@@ -636,7 +906,6 @@ class HypothesisEngine:
             statement = (item.get("statement") or "").strip()
             if not statement:
                 continue
-
             try:
                 confidence = float(item.get("confidence", 0.5))
                 confidence = max(0.0, min(1.0, confidence))
