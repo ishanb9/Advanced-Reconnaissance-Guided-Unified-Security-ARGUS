@@ -753,12 +753,26 @@ class MasterAgent(BaseAgent):
         except Exception as e:
             # Any other error (including any stray RuntimeError) — log and continue
             # to the completion block so a partial scan is still saved.
+            import traceback as _tb
+            tb_str = _tb.format_exc()
+            # Extract the innermost frame so the operator sees WHICH line blew up.
+            _last_frame = ""
+            try:
+                frames = _tb.extract_tb(e.__traceback__)
+                if frames:
+                    f = frames[-1]
+                    _last_frame = f"{f.filename}:{f.lineno} in {f.name}"
+            except Exception:
+                pass
             await self._emit("scan_error", {
-                "error":   str(e),
-                "message": f"Non-fatal error during phases: {e} — saving partial results."
+                "error":     str(e),
+                "error_type": type(e).__name__,
+                "where":     _last_frame,
+                "traceback": tb_str[-2000:],
+                "message":   f"Non-fatal error during phases: {e} at {_last_frame} — saving partial results."
             })
             import logging as _log
-            _log.getLogger(__name__).error("_execute_phases error (non-fatal): %s", e, exc_info=True)
+            _log.getLogger(__name__).error("_execute_phases error (non-fatal): %s\n%s", e, tb_str)
             try:
                 if getattr(self, "_scan_logger", None):
                     self._scan_logger.log_error("_execute_phases", exc=e)
@@ -1013,6 +1027,13 @@ class MasterAgent(BaseAgent):
         if not self._session_id:
             return None
         try:
+            # MongoDB requires all document keys to be strings. The services dict
+            # uses port numbers as keys (e.g. {21: {...}, 80: {...}}); stringify them.
+            _intel_snap = dict(self._intel)
+            if isinstance(_intel_snap.get("services"), dict):
+                _intel_snap["services"] = {
+                    str(k): v for k, v in _intel_snap["services"].items()
+                }
             cid = await db.store_checkpoint(
                 session_id            = self._session_id,
                 host                  = self._target,
@@ -1021,7 +1042,7 @@ class MasterAgent(BaseAgent):
                 current_phase         = str(self.phase or ""),
                 phases_completed      = list(self._phases_completed),
                 phases_to_run         = list(self._phases_to_run),
-                intel_snapshot        = dict(self._intel),
+                intel_snapshot        = _intel_snap,
                 used_tools            = dict(self._used_tools),
                 pending_confirmations = list(self._confirm_events.keys()),
                 in_flight_subagents   = [
@@ -1098,8 +1119,42 @@ class MasterAgent(BaseAgent):
             from agents.recon.service_banner_subagent   import ServiceBannerSubagent
             from agents.recon.web_fingerprint_subagent  import WebFingerprintSubagent
             kw  = dict(session_id=sid, target=target, broadcast=sa_broadcast, db=_db.get_db())
+
+            # NetworkScanSubagent's parsed_data is the authoritative port list.
+            # Sync its findings back to self._intel once it completes so later
+            # phases / hypothesis engine don't show "no open ports" when the
+            # LLM-planned master scan missed any.
+            async def _run_network_scan_and_sync():
+                try:
+                    res = await NetworkScanSubagent(**kw).execute()
+                    pd  = getattr(res, "parsed_data", {}) or {}
+                    new_ports = pd.get("open_ports") or []
+                    if new_ports:
+                        existing = self._intel.get("open_ports") or []
+                        merged = list(dict.fromkeys(list(existing) + list(new_ports)))
+                        self._intel["open_ports"] = merged
+                    for p in pd.get("ports") or []:
+                        if isinstance(p, dict) and p.get("port") is not None:
+                            self._intel.setdefault("services", {})[p["port"]] = {
+                                "service":  p.get("service", ""),
+                                "version":  p.get("version", ""),
+                                "protocol": p.get("protocol", "tcp"),
+                                "port":     p["port"],
+                                "banner":   p.get("banner", ""),
+                            }
+                    if pd.get("os_guess") and pd["os_guess"] != "unknown":
+                        if self._intel.get("os_guess", "unknown") in ("", "unknown"):
+                            self._intel["os_guess"] = pd["os_guess"]
+                except Exception as exc:
+                    await self.emit_reasoning(
+                        step       = "subagent_err_recon_network_scan",
+                        reasoning  = f"NetworkScanSubagent error (non-fatal): {exc}",
+                        decision   = "Continuing pentest",
+                        next_action= "Main flow unaffected",
+                    )
+
             coros = [
-                NetworkScanSubagent(**kw).execute(),
+                _run_network_scan_and_sync(),
                 DnsReconSubagent(**kw).execute(),
                 ServiceBannerSubagent(**kw).execute(
                     ports=self._intel.get("open_ports", []),
@@ -1416,8 +1471,13 @@ class MasterAgent(BaseAgent):
     _WEB_TOOLS: frozenset = frozenset({
         "sqlmap", "nuclei", "wfuzz", "feroxbuster", "gobuster", "dirsearch",
         "ffuf", "nikto", "xsstrike", "dalfox", "arjun", "jwt_tool",
-        "wapiti", "zap", "commix", "burpsuite", "dirb", "wpscan",
+        "wapiti", "zap", "zaproxy", "commix", "burpsuite", "dirb", "wpscan",
         "droopescan", "joomscan", "cmseek",
+    })
+    _VULN_TOOLS: frozenset = frozenset({
+        "openvas", "gvm-cli", "gvm-start", "openvas-scanner",
+        "openvas-nasl", "nessus", "vulners", "vulscan",
+        "smtp-user-enum", "finger", "ident-user-enum",
     })
     _EXPLOIT_TOOLS: frozenset = frozenset({
         "msfconsole", "msfvenom", "metasploit", "searchsploit",
@@ -1430,11 +1490,6 @@ class MasterAgent(BaseAgent):
         "suid3num", "sudo_killer", "deepce", "wesng", "powerup",
         "sherlock", "beroot", "privesccheck",
     })
-    _VULN_TOOLS: frozenset = frozenset({
-        "openvas", "nessus", "vulners", "vulscan",
-        "smtp-user-enum", "finger", "ident-user-enum",
-    })
-
     def _classify_tool_to_phase(self, tool: str) -> str:
         """Map a tool name to the phase agent that should execute it."""
         tl = tool.lower().split()[0]      # normalise: strip args if present
@@ -1599,32 +1654,18 @@ class MasterAgent(BaseAgent):
                 }
 
             else:
-                # Generic fallback — use master's run_tool directly
-                exit_code, stdout, stderr = await self.run_tool(
-                    tool_name = tool,
-                    target    = self._target,
-                    options   = {"args": args, "timeout": timeout},
-                )
-                output_id = await db.store_tool_output(
-                    session_id = self._session_id,
-                    host       = self._target,
-                    agent      = "master",
-                    phase      = phase or "reasoning",
-                    tool_name  = tool,
-                    command    = f"{tool} {args}",
-                    target     = self._target,
-                )
-                await db.finalize_tool_output(
-                    output_id,
-                    stdout[:65536] if stdout else "",
-                    stderr[:4096]  if stderr else "",
-                    exit_code,
+                # Generic fallback — route via recon agent (most tools are recon-adjacent)
+                from agents.recon_agent import ReconAgent
+                agent_obj = ReconAgent(broadcast=self.broadcast)
+                agent_obj._session_id = self._session_id
+                result = await agent_obj.execute_tasks(
+                    self._target, [task], phase or "RECON", self._intel
                 )
                 return {
-                    "stdout":    stdout or "",
-                    "stderr":    stderr or "",
-                    "exit_code": exit_code,
-                    "output_id": output_id or "",
+                    "stdout":    str(result.get("raw_output", result))[:65536],
+                    "stderr":    "",
+                    "exit_code": 0,
+                    "output_id": "",
                     "tool":      tool,
                     "args":      args,
                 }
@@ -2185,6 +2226,22 @@ class MasterAgent(BaseAgent):
             {"tool":"whatweb","args":f"-a 3 http://{target}",
              "purpose":"Web tech detection","timeout":60,"can_parallel":True},
         ]
+        # GUARANTEE a port scan runs. If the LLM's plan omitted nmap/masscan,
+        # findings and intel stay empty → hypothesis engine shows "no open
+        # ports" even when subagents later find them. Always prepend a full
+        # scan when no scanner is in the plan.
+        _has_port_scanner = any(
+            (t.get("tool") or "").lower() in ("nmap", "masscan", "rustscan", "naabu")
+            for t in tasks
+        )
+        if not _has_port_scanner:
+            tasks.insert(0, {
+                "tool":    "nmap",
+                "args":    f"-sS -sV -sC --open -p- --min-rate 3000 {target}",
+                "purpose": "Mandatory full port scan (LLM plan missed one)",
+                "timeout": 600,
+                "can_parallel": True,
+            })
         result = await agent.execute_tasks(target, tasks, "RECON", self._intel)
 
         self._intel["open_ports"]  = result.get("open_ports",[])
@@ -2416,6 +2473,13 @@ class MasterAgent(BaseAgent):
         Each stage feeds the next; no fire-and-forget background tasks.
         All tool output is visible in the event feed in real time.
         """
+        # Defensive coercion — callers (bootstrap, reasoning_loop) occasionally
+        # pass a set/tuple. Slicing/indexing below requires a list.
+        if not isinstance(web_ports, list):
+            try:
+                web_ports = sorted(int(str(p).split("/")[0]) for p in (web_ports or []))
+            except Exception:
+                web_ports = list(web_ports or [])
         await self._advance_phase(AttackPhase.VULN_ID)
         await self._emit("phase_start", {
             "phase":   "WEB_TESTING",

@@ -129,9 +129,9 @@ class FlagCaptureSubagent(BaseSubagent):
         if all_flags:
             await self.store_finding(Finding(
                 title=f"Evidence Summary: {len(set(all_flags))} Unique Flag(s) Captured",
-                description=f"All captured flags:\n" + "\n".join(set(all_flags)[:20]),
+                description=f"All captured flags:\n" + "\n".join(sorted(set(all_flags))[:20]),
                 severity="CRITICAL",
-                evidence="\n".join(set(all_flags)[:20]), tool="bash", host=target,
+                evidence="\n".join(sorted(set(all_flags))[:20]), tool="bash", host=target,
                 mitre_technique="T1005",
             ))
         else:
@@ -199,8 +199,8 @@ class FlagCaptureSubagent(BaseSubagent):
         if all_flags:
             await self.store_finding(Finding(
                 title=f"Evidence Summary: {len(set(all_flags))} Unique Flag(s) Captured (Windows)",
-                description="\n".join(set(all_flags)[:20]),
+                description="\n".join(sorted(set(all_flags))[:20]),
                 severity="CRITICAL",
-                evidence="\n".join(set(all_flags)[:20]), tool="powershell", host=target,
+                evidence="\n".join(sorted(set(all_flags))[:20]), tool="powershell", host=target,
                 mitre_technique="T1005",
             ))

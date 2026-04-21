@@ -979,11 +979,15 @@ Return JSON:
                 # Without this, killing the process (proc.kill()) may not release the pipe
                 # quickly (child procs holding it open, Windows buffering, etc.) and the
                 # scan hangs waiting for drain to finish.
-                drain_task = asyncio.create_task(asyncio.gather(
-                    _drain(proc.stdout, "stdout"),
-                    _drain(proc.stderr, "stderr"),
-                    return_exceptions=True,
-                ))
+                # asyncio.gather() returns a Future, not a coroutine.
+                # create_task() only accepts coroutines — wrap in an async def.
+                async def _drain_both():
+                    await asyncio.gather(
+                        _drain(proc.stdout, "stdout"),
+                        _drain(proc.stderr, "stderr"),
+                        return_exceptions=True,
+                    )
+                drain_task = asyncio.create_task(_drain_both())
                 self._active_tool_tasks.add(drain_task)
                 try:
                     await drain_task

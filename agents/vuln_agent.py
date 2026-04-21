@@ -110,9 +110,30 @@ class VulnAgent(BaseAgent):
         # 1c. searchsploit for each service version
         phase1.append(("searchsploit", self._searchsploit_all(target, services, result)))
 
-        # Run Phase 1 in parallel
+        # ─── Phase 1b: SQLMap on HTTP ports (runs alongside NSE/Nuclei) ─
+        http_ports_found = []
+        for p in open_ports:
+            pn = p.get("port") if isinstance(p, dict) else p
+            if pn and int(str(pn).split("/")[0]) in _HTTP_PORTS:
+                http_ports_found.append(int(str(pn).split("/")[0]))
+        if not http_ports_found and open_ports:
+            http_ports_found = [80]   # default if no HTTP detected yet
+
+        if http_ports_found:
+            phase1.append(("sqlmap", self._sqlmap_scan(target, list(dict.fromkeys(http_ports_found)), result)))
+
+        # Run Phase 1 in parallel (NSE + Nuclei + Searchsploit + SQLMap)
         if phase1:
             await self._run_parallel(phase1, "Phase 1: Broad vulnerability scans")
+
+        # ─── Phase 1c: OWASP ZAP + OpenVAS (heavy, run after phase 1) ────
+        # These take longer and are best run sequentially after the fast scans
+        # so port/service info is already available.
+        phase1_heavy: list = [
+            ("openvas", self._openvas_scan(target, open_ports, result)),
+            ("zap",     self._zap_scan(target, list(dict.fromkeys(http_ports_found)) or [80], result)),
+        ]
+        await self._run_parallel(phase1_heavy, "Phase 1c: Deep scanners (OpenVAS, ZAP)")
 
         # ─── Phase 2: Service-specific deep checks (parallel) ───
         phase2: list = []
@@ -747,6 +768,430 @@ class VulnAgent(BaseAgent):
                                        f"{title} — encryption weakness on port {port}",
                                        target, port, "ssl", sev, stdout, "sslscan",
                                        remediation=remediation)
+
+    # ═══════════════════════════════════════════════════════════════
+    #  PHASE 1b/1c — HEAVY SCANNERS: SQLMap, OpenVAS, ZAP
+    # ═══════════════════════════════════════════════════════════════
+
+    async def _sqlmap_scan(self, target: str, http_ports: list, result: dict):
+        """SQLMap automated SQL injection detection — crawls forms on all HTTP ports."""
+        await self.emit_reasoning(
+            step="sqlmap",
+            reasoning="SQLMap detects SQL injection in GET/POST params, forms, cookies",
+            decision=f"Crawl + inject on {len(http_ports)} HTTP port(s)",
+            next_action=f"sqlmap crawl against {target}"
+        )
+        for port in http_ports[:3]:
+            proto    = "https" if port in _HTTPS_PORTS else "http"
+            base_url = f"{proto}://{target}:{port}/"
+            out_dir  = f"/tmp/sqlmap_argus_{target.replace('.','_')}_{port}"
+            out = await self.run_tool(
+                "sqlmap",
+                f"-u {base_url} --crawl=3 --forms --level=3 --risk=2 --batch "
+                f"--random-agent --tamper=space2comment "
+                f"--output-dir={out_dir} --flush-session "
+                f"--threads=4 --timeout=10 --retries=2 "
+                f"--technique=BEUSTQ --answers='follow=Y'",
+                target=target, phase=AttackPhase.VULN_ID, timeout=600
+            )
+            stdout = out.get("stdout", "")
+            result["raw_output"] += "\n" + stdout
+            await self._parse_sqlmap_output(stdout, target, port, result)
+
+    async def _parse_sqlmap_output(self, output: str, target: str, port: int, result: dict):
+        """Parse sqlmap stdout for confirmed injection points and store findings."""
+        if not output:
+            return
+        confirmed = (
+            "identified the following injection" in output or
+            "is vulnerable" in output.lower() or
+            "sql injection vulnerability" in output.lower()
+        )
+        potential = any(k in output.lower() for k in (
+            "error-based", "union-based", "time-based", "boolean-based", "stacked queries"
+        ))
+        if confirmed:
+            db_match  = re.search(r'back-end DBMS:\s*(.+)', output)
+            db_info   = f"\nDatabase: {db_match.group(1).strip()}" if db_match else ""
+            params    = re.findall(r"Parameter:\s*(.+?)\s*\((.+?)\)\s*\n\s+Type:\s*(.+)", output)
+            detail    = db_info
+            if params:
+                detail += "\n\nInjection points:\n" + "\n".join(
+                    f"  {p[0]} ({p[1]}): {p[2]}" for p in params[:10]
+                )
+            await self._store_vuln(
+                result, "SQLI-CONFIRMED", "[SQLMap] SQL Injection Confirmed",
+                f"SQLMap confirmed SQLi at {target}:{port}.{detail}",
+                target, port, "http", "critical", output[:2000], "sqlmap",
+                remediation="Use parameterised queries/prepared statements. Validate all user input."
+            )
+        elif potential:
+            await self._store_vuln(
+                result, "SQLI-POTENTIAL", "[SQLMap] Potential SQL Injection Indicators",
+                f"SQLMap found SQLi indicators at {target}:{port}. Manual verification recommended.",
+                target, port, "http", "high", output[:1500], "sqlmap",
+                remediation="Review SQL query construction. Use ORM or prepared statements."
+            )
+
+    # ── OpenVAS ──────────────────────────────────────────────────────────
+
+    async def _ensure_openvas_running(self) -> bool:
+        """Check if GVM/OpenVAS services are up; start them if not. Returns True when ready."""
+        check = await self.run_tool(
+            "bash", "-c 'systemctl is-active gvmd 2>/dev/null; echo RC:$?'",
+            target=self._target, phase=AttackPhase.VULN_ID, timeout=10
+        )
+        if "active" in check.get("stdout", "") and "RC:0" in check.get("stdout", ""):
+            return True
+
+        await self.emit_reasoning(
+            step="openvas_start",
+            reasoning="GVM/OpenVAS services not running — starting now",
+            decision="sudo gvm-start (may take 60–120 s for NVT feeds to load)",
+            next_action="gvm-start"
+        )
+        # Start GVM and wait for gvmd socket to accept connections
+        await self.run_tool(
+            "bash",
+            "-c 'sudo gvm-start 2>&1 | tail -5; sleep 5; "
+            "for i in $(seq 1 36); do "
+            "  gvm-cli socket --xml \"<get_version/>\" 2>/dev/null | grep -q version "
+            "  && echo GVM_READY && break; sleep 5; "
+            "done'",
+            target=self._target, phase=AttackPhase.VULN_ID, timeout=210
+        )
+        return True
+
+    async def _openvas_scan(self, target: str, open_ports: list, result: dict):
+        """OpenVAS/GVM comprehensive scan — 70,000+ NVT checks with auto-start."""
+        await self.emit_reasoning(
+            step="openvas",
+            reasoning="OpenVAS runs 70,000+ NVTs covering CVEs, misconfigs, default creds, deep service checks",
+            decision="Start GVM if needed → create target → Full and Fast scan → parse XML results",
+            next_action=f"OpenVAS scan against {target}"
+        )
+        await self._ensure_openvas_running()
+
+        # Read GMP credentials — gvm-setup stores them in /etc/gvm/setup_vars
+        cred_out = await self.run_tool(
+            "bash",
+            "-c 'sudo cat /etc/gvm/setup_vars 2>/dev/null || "
+            "sudo grep -r \"admin\" /etc/gvm/ 2>/dev/null | head -3 || echo CRED_MISSING'",
+            target=self._target, phase=AttackPhase.VULN_ID, timeout=10
+        )
+        gvm_user, gvm_pass = "admin", "admin"
+        pm = re.search(r'(?:PASSWORD|PASS|GVM_PASSWORD)[=:\s]+["\']?(\S+?)["\']?(?:\s|$)',
+                       cred_out.get("stdout", ""), re.IGNORECASE)
+        if pm:
+            gvm_pass = pm.group(1)
+
+        # Helper: run one gvm-cli XML command and return stdout
+        cli_base = (
+            f"gvm-cli --gmp-username '{gvm_user}' --gmp-password '{gvm_pass}' socket"
+        )
+
+        # Write a small Python helper to /tmp to avoid shell-quoting nightmares
+        helper_script = f"""
+import subprocess, sys, re, time
+import xml.etree.ElementTree as ET
+
+def gvm(xml_str):
+    r = subprocess.run(
+        ['gvm-cli', '--gmp-username', '{gvm_user}', '--gmp-password', '{gvm_pass}',
+         'socket', '--xml', xml_str],
+        capture_output=True, text=True, timeout=60
+    )
+    return r.stdout.strip()
+
+target_ip = '{target}'
+ts = str(int(time.time()))
+
+# 1 — Create target (use "All IANA assigned TCP and UDP" port list)
+r = gvm(f'<create_target>'
+        f'<name>argus-{{target_ip}}-{{ts}}</name>'
+        f'<hosts>{{target_ip}}</hosts>'
+        f'<port_list id="730ef368-57e2-11e1-a90f-406186ea4fc5"/>'
+        f'</create_target>')
+print("CREATE_TARGET:", r[:300])
+tid = re.search(r'id="([0-9a-f-]{{36}})"', r)
+if not tid:
+    print("ERROR: could not create target"); sys.exit(1)
+tid = tid.group(1)
+
+# 2 — Create task with "Full and fast" scan config
+r = gvm(f'<create_task>'
+        f'<name>argus-{{target_ip}}-{{ts}}</name>'
+        f'<config id="daba56c8-73ec-11df-a475-002264764cea"/>'
+        f'<target id="{{tid}}"/>'
+        f'</create_task>')
+print("CREATE_TASK:", r[:300])
+task_id = re.search(r'id="([0-9a-f-]{{36}})"', r)
+if not task_id:
+    print("ERROR: could not create task"); sys.exit(1)
+task_id = task_id.group(1)
+
+# 3 — Start task
+gvm(f'<start_task task_id="{{task_id}}"/>')
+print(f"TASK_STARTED: {{task_id}}")
+
+# 4 — Poll until Done (max 25 min)
+for i in range(150):
+    time.sleep(10)
+    r2 = gvm(f'<get_tasks task_id="{{task_id}}"/>')
+    try:
+        root = ET.fromstring(r2)
+        status   = root.findtext('.//status')   or ''
+        progress = root.findtext('.//progress') or '?'
+    except Exception:
+        status, progress = '', '?'
+    print(f"OPENVAS_PROGRESS: {{status}} ({{progress}}%)")
+    if status in ('Done', 'Stopped', 'Interrupted'):
+        break
+
+# 5 — Get results
+r3 = gvm(f'<get_results task_id="{{task_id}}" filter="rows=200 min_qod=30"/>')
+print("RESULTS_START")
+print(r3)
+print("RESULTS_END")
+
+# 6 — Cleanup
+gvm(f'<delete_task task_id="{{task_id}}" ultimate="0"/>')
+gvm(f'<delete_target target_id="{{tid}}" ultimate="0"/>')
+print("CLEANUP_DONE")
+"""
+        script_path = f"/tmp/argus_openvas_{target.replace('.','_')}.py"
+
+        # Write helper script
+        await self.run_tool(
+            "bash", f"-c 'cat > {script_path} << \\'PYEOF\\'\\n{helper_script}\\nPYEOF'",
+            target=self._target, phase=AttackPhase.VULN_ID, timeout=10
+        )
+        # Better: use python3 -c with the script content written via tee
+        write_out = await self.run_tool(
+            "bash",
+            f"-c 'python3 - << \\'PYEOF\\'\\n{helper_script}\\nPYEOF'",
+            target=self._target, phase=AttackPhase.VULN_ID, timeout=1560   # 26 min
+        )
+        raw = write_out.get("stdout", "")
+        result["raw_output"] += "\n" + raw
+
+        # Extract results XML block
+        rs = raw.find("RESULTS_START")
+        re_end = raw.find("RESULTS_END")
+        if rs != -1 and re_end != -1:
+            results_xml = raw[rs + len("RESULTS_START"):re_end].strip()
+            await self._parse_openvas_results(results_xml, target, result)
+
+    async def _parse_openvas_results(self, xml_output: str, target: str, result: dict):
+        """Parse GVM get_results XML and store as VulnAgent findings."""
+        import xml.etree.ElementTree as ET
+        xml_start = xml_output.find("<get_results_response")
+        if xml_start == -1:
+            xml_start = xml_output.find("<result ")
+        if xml_start == -1:
+            return
+        try:
+            # Wrap bare <result> elements in a root tag if needed
+            xml_block = xml_output[xml_start:]
+            if not xml_block.startswith("<get_results_response"):
+                xml_block = f"<results>{xml_block}</results>"
+            root = ET.fromstring(xml_block)
+        except ET.ParseError:
+            return
+
+        threat_map = {
+            "Critical": ("critical", FindingSeverity.CRITICAL),
+            "High":     ("critical", FindingSeverity.CRITICAL),
+            "Medium":   ("high",     FindingSeverity.HIGH),
+            "Low":      ("medium",   FindingSeverity.MEDIUM),
+            "Log":      ("info",     FindingSeverity.INFO),
+        }
+
+        for res in root.findall(".//result"):
+            name      = (res.findtext("name")        or "").strip()
+            desc      = (res.findtext("description") or "").strip()
+            threat    = (res.findtext("threat")      or "Log").strip()
+            host_el   = res.find("host")
+            port_el   = res.find("port")
+            nvt_el    = res.find("nvt")
+            host_ip   = (host_el.text if host_el is not None else target or "").strip()
+            port_raw  = (port_el.text  if port_el  is not None else "").strip()
+
+            if not name or threat == "Log":
+                continue
+
+            # Extract port number
+            port_val = None
+            pm2 = re.search(r"(\d+)", port_raw)
+            if pm2:
+                port_val = int(pm2.group(1))
+
+            # Extract CVEs from nvt refs
+            cve_list = []
+            if nvt_el is not None:
+                for ref in nvt_el.findall(".//ref"):
+                    if ref.get("type", "").lower() == "cve" and ref.get("id"):
+                        cve_list.append(ref.get("id"))
+
+            sev_str, _ = threat_map.get(threat, ("medium", FindingSeverity.MEDIUM))
+            await self._store_vuln(
+                result,
+                f"OVS-{re.sub(r'[^A-Z0-9]', '', name.upper())[:20]}",
+                f"[OpenVAS] {name}",
+                (desc or name)[:2000],
+                host_ip or target, port_val, "openvas",
+                sev_str, desc[:500], "openvas",
+                cves=cve_list,
+            )
+
+    # ── OWASP ZAP ────────────────────────────────────────────────────────
+
+    async def _zap_scan(self, target: str, http_ports: list, result: dict):
+        """OWASP ZAP active scan — starts daemon if needed, spiders + active-scans each HTTP port."""
+        await self.emit_reasoning(
+            step="zap",
+            reasoning="OWASP ZAP finds XSS, SQLi, path traversal, CSRF, misconfigurations via active scanning",
+            decision=f"Start ZAP daemon → spider → active scan → collect alerts on {len(http_ports)} port(s)",
+            next_action=f"ZAP active scan against {target}"
+        )
+        zap_port = 8091   # non-standard to avoid conflict with running services
+        zap_api  = f"http://127.0.0.1:{zap_port}"
+
+        # Check if ZAP daemon already up on our port
+        alive_check = await self.run_tool(
+            "bash",
+            f"-c 'curl -sf --max-time 3 \"{zap_api}/JSON/core/view/version/\" 2>/dev/null | "
+            f"grep -c version || echo 0'",
+            target=self._target, phase=AttackPhase.VULN_ID, timeout=10
+        )
+        zap_already_up = alive_check.get("stdout", "").strip().startswith("1")
+
+        if not zap_already_up:
+            # Start ZAP in headless daemon mode, wait for API readiness
+            await self.run_tool(
+                "bash",
+                f"-c 'nohup zaproxy -daemon -host 127.0.0.1 -port {zap_port} "
+                f"-config api.disablekey=true "
+                f"-config api.addrs.addr.name=.* "
+                f"-config api.addrs.addr.regex=true "
+                f"> /tmp/zap_argus.log 2>&1 & "
+                f"echo ZAP_PID:$! ; '",
+                target=self._target, phase=AttackPhase.VULN_ID, timeout=15
+            )
+            # Poll until ZAP API responds (up to 90 seconds)
+            await self.run_tool(
+                "bash",
+                f"-c 'for i in $(seq 1 30); do "
+                f'  curl -sf --max-time 3 "{zap_api}/JSON/core/view/version/" 2>/dev/null '
+                f"  | grep -q version && echo ZAP_READY && break; "
+                f"  sleep 3; "
+                f"done'",
+                target=self._target, phase=AttackPhase.VULN_ID, timeout=100
+            )
+
+        # Scan each HTTP port
+        for port in http_ports[:3]:
+            proto    = "https" if port in _HTTPS_PORTS else "http"
+            base_url = f"{proto}://{target}:{port}"
+
+            # Spider the target
+            await self.run_tool(
+                "bash",
+                f'-c \'curl -sf "{zap_api}/JSON/spider/action/scan/'
+                f'?url={base_url}&maxChildren=20&recurse=true" 2>/dev/null; '
+                f'for i in $(seq 1 30); do '
+                f'  STATUS=$(curl -sf "{zap_api}/JSON/spider/view/status/?scanId=0" 2>/dev/null | '
+                f'    grep -oP "(?<=\\"status\\":\\s\\"?)\\d+"); '
+                f'  echo "ZAP spider: $STATUS%"; '
+                f'  [ "$STATUS" = "100" ] && break; sleep 3; '
+                f'done\'',
+                target=self._target, phase=AttackPhase.VULN_ID, timeout=120
+            )
+
+            # Active scan
+            ascan_out = await self.run_tool(
+                "bash",
+                f'-c \'SCANID=$(curl -sf "{zap_api}/JSON/ascan/action/scan/'
+                f'?url={base_url}&recurse=true&inScopeOnly=false" 2>/dev/null | '
+                f'grep -oP "(?<=\\"scan\\":\\s?\\")\\d+"); '
+                f'echo "ZAP ascan ID: $SCANID"; '
+                f'for i in $(seq 1 72); do '
+                f'  PROG=$(curl -sf "{zap_api}/JSON/ascan/view/status/?scanId=$SCANID" 2>/dev/null | '
+                f'    grep -oP "(?<=\\"status\\":\\s?\\"?)\\d+"); '
+                f'  echo "ZAP active scan: $PROG%"; '
+                f'  [ "$PROG" = "100" ] && break; sleep 10; '
+                f'done\'',
+                target=self._target, phase=AttackPhase.VULN_ID, timeout=750
+            )
+            result["raw_output"] += "\n" + ascan_out.get("stdout", "")
+
+            # Retrieve alerts JSON
+            alerts_out = await self.run_tool(
+                "bash",
+                f'-c \'curl -sf "{zap_api}/JSON/alert/view/alerts/'
+                f'?baseurl={base_url}&start=0&count=200" 2>/dev/null\'',
+                target=self._target, phase=AttackPhase.VULN_ID, timeout=30
+            )
+            await self._parse_zap_alerts(alerts_out.get("stdout", ""), target, port, result)
+
+        # Shut down ZAP if we started it
+        if not zap_already_up:
+            await self.run_tool(
+                "bash",
+                f"-c 'curl -sf \"{zap_api}/JSON/core/action/shutdown/\" 2>/dev/null; sleep 3'",
+                target=self._target, phase=AttackPhase.VULN_ID, timeout=15
+            )
+
+    async def _parse_zap_alerts(self, json_output: str, target: str, port: int, result: dict):
+        """Parse OWASP ZAP JSON alerts and store as findings."""
+        import json as _json
+        try:
+            data   = _json.loads(json_output)
+            alerts = data.get("alerts", [])
+        except Exception:
+            return
+
+        risk_map = {
+            "High":          ("critical", FindingSeverity.CRITICAL),
+            "Medium":        ("high",     FindingSeverity.HIGH),
+            "Low":           ("medium",   FindingSeverity.MEDIUM),
+            "Informational": ("info",     FindingSeverity.INFO),
+        }
+        seen_names: set = set()
+
+        for alert in alerts:
+            name      = (alert.get("name")        or "").strip()
+            desc      = (alert.get("description") or "").strip()
+            risk      = (alert.get("risk")        or "Low").strip()
+            solution  = (alert.get("solution")    or "").strip()
+            evidence  = (alert.get("evidence")    or "").strip()
+            url       = (alert.get("url")         or "").strip()
+            cwe_id    = alert.get("cweid", "")
+
+            if not name or risk == "Informational" or name in seen_names:
+                continue
+            seen_names.add(name)
+
+            cves      = re.findall(r"CVE-\d{4}-\d+", desc + evidence)
+            sev_str, _ = risk_map.get(risk, ("medium", FindingSeverity.MEDIUM))
+
+            full_desc = (
+                f"{desc}\n\n"
+                f"URL      : {url}\n"
+                f"Evidence : {evidence[:300]}\n"
+                f"CWE      : CWE-{cwe_id}\n"
+                f"Solution : {solution[:400]}"
+            )
+            await self._store_vuln(
+                result,
+                f"ZAP-{re.sub(r'[^A-Z0-9]', '', name.upper())[:20]}",
+                f"[ZAP] {name}",
+                full_desc[:2000],
+                target, port, "http",
+                sev_str, evidence[:500], "zaproxy",
+                cves=cves,
+                remediation=solution[:500],
+            )
 
     # ═══════════════════════════════════════════════════════════════
     #  HELPER: store vulnerability + finding in one call

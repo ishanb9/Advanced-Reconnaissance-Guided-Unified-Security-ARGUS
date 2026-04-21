@@ -569,7 +569,21 @@ class ReasoningLoop:
             await self._emit_reasoning(f"Recon error: {e}")
 
         ports_found = self._intel.get("open_ports", [])
-        port_nums   = {p.get("port") if isinstance(p, dict) else p for p in ports_found}
+        # Use a LIST (not a set) so downstream code that slices/indexes it works.
+        # Previously this was a set-comprehension, which caused
+        # "'set' object is not subscriptable" when any consumer did `port_nums[:N]`.
+        _seen_ports = set()
+        port_nums: list = []
+        for p in ports_found:
+            val = p.get("port") if isinstance(p, dict) else p
+            try:
+                val_i = int(str(val).split("/")[0])
+            except (ValueError, TypeError):
+                continue
+            if val_i not in _seen_ports:
+                _seen_ports.add(val_i)
+                port_nums.append(val_i)
+        port_nums.sort()
 
         parallel_tasks: list = []
         parallel_tasks.append(("OSINT", self._safe_phase(self._master._phase_osint, target=self._target)))

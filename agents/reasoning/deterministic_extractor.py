@@ -283,7 +283,7 @@ class DeterministicExtractor:
                 ))
 
         # ── CVEs ──────────────────────────────────────────────────────────────
-        for cve in set(self._CVE_RE.findall(raw_output))[:5]:
+        for cve in sorted(set(self._CVE_RE.findall(raw_output)))[:5]:
             _add(DiscoveryFinding(
                 title       = f"CVE reference detected: {cve}",
                 description = f"{cve} referenced in output — verify exploitability",
