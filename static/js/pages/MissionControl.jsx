@@ -1920,6 +1920,9 @@ function MissionControl() {
       )
     ),
 
+    // ── Meta-Agents Panel ─────────────────────────────────────────────────
+    window.MetaAgentsPanel && React.createElement(window.MetaAgentsPanel, null),
+
     // ── Confirm modal ─────────────────────────────────────────────────────
     confirmVisible && React.createElement('div', {
       style: { position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.85)',

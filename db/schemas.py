@@ -50,15 +50,17 @@ class AttackPhase(str, Enum):
 
 
 class AgentName(str, Enum):
-    MASTER   = "master"
-    RECON    = "recon"
-    VULN     = "vuln"
-    OSINT    = "osint"
-    EXPLOIT  = "exploit"
-    PRIVESC  = "privesc"
-    SHELL    = "shell"
-    PAYLOAD  = "payload"
-    IOT      = "iot"
+    MASTER          = "master"
+    RECON           = "recon"
+    VULN            = "vuln"
+    OSINT           = "osint"
+    EXPLOIT         = "exploit"
+    PRIVESC         = "privesc"
+    SHELL           = "shell"
+    PAYLOAD         = "payload"
+    IOT             = "iot"
+    MASTER_CHECKER  = "master_checker"
+    ISSUE_VALIDATOR = "issue_validator"
 
 
 class SessionMode(str, Enum):

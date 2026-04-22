@@ -2077,3 +2077,8 @@ async def get_latest_ranked_paths(session_id: str) -> Optional[Dict]:
         sort=[("iteration", DESCENDING)],
     )
     return _serialize(doc) if doc else None
+
+
+async def get_findings_by_phase(session_id: str, phase: str) -> list:
+    """Alias for get_findings(session_id, phase=phase). Used by meta-agents."""
+    return await get_findings(session_id, phase=phase, limit=500)

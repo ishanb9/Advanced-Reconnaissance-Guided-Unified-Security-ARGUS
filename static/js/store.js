@@ -168,6 +168,22 @@ const INIT = {
   // ── Engagement intelligence ──────────────────────────────────────────────────
   engagementContext:     null,       // {engagement_type, title, context_summary, objectives, ...}
   operatorQuestions:     [],         // clarifying questions waiting for operator response
+
+  // ── Meta-agent state ─────────────────────────────────────────────────────────
+  metaCheckerState: {
+    status:      'idle',   // 'idle' | 'thinking'
+    phase:       '',
+    history:     [],       // [{role:'user'|'assistant', content, thought_id, ts}]
+    corrections: [],       // Correction objects (newest first, max 200)
+    stats: { total: 0, blocking: 0, advisory: 0, phasesReviewed: 0 },
+  },
+  metaValidatorState: {
+    status:      'idle',
+    phase:       '',
+    history:     [],
+    corrections: [],
+    stats: { total: 0, blocking: 0, advisory: 0, toolsValidated: 0, phasesValidated: 0 },
+  },
 };
 
 // ─── Selectors / derived state helpers ─────────────────────
@@ -971,6 +987,49 @@ function reducer(state, action) {
 
     case 'RESET_SESSION':
       return { ...INIT, sysStatus: state.sysStatus, llmStatus: state.llmStatus, sessions: state.sessions };
+
+    // ── Meta-agent reducers ───────────────────────────────────────────────
+
+    case 'META_AGENT_STATUS': {
+      const { agent, status, phase } = action.payload;
+      const isChecker = agent && agent.includes('checker');
+      const key = isChecker ? 'metaCheckerState' : 'metaValidatorState';
+      return {
+        ...state,
+        [key]: { ...state[key], status, phase: phase || state[key].phase },
+      };
+    }
+
+    case 'META_AGENT_THINKING': {
+      const { agent, chunk, thought_id, ts } = action.payload;
+      const isChecker = agent && agent.includes('checker');
+      const key = isChecker ? 'metaCheckerState' : 'metaValidatorState';
+      const prev = state[key];
+      let history = [...prev.history];
+      const last = history[history.length - 1];
+      if (last && last.role === 'assistant' && last.thought_id === thought_id) {
+        history[history.length - 1] = { ...last, content: last.content + chunk };
+      } else {
+        history = [...history, { role: 'assistant', content: chunk, thought_id, ts: ts || new Date().toISOString() }];
+      }
+      if (history.length > 200) history = history.slice(-200);
+      return { ...state, [key]: { ...prev, history } };
+    }
+
+    case 'META_AGENT_CORRECTION': {
+      const corr = action.payload;
+      const isChecker = corr.source && corr.source.includes('checker');
+      const key = isChecker ? 'metaCheckerState' : 'metaValidatorState';
+      const prev = state[key];
+      const corrections = [corr, ...prev.corrections].slice(0, 200);
+      const stats = {
+        ...prev.stats,
+        total:    prev.stats.total    + 1,
+        blocking: prev.stats.blocking + (corr.tier === 'blocking' ? 1 : 0),
+        advisory: prev.stats.advisory + (corr.tier === 'advisory' ? 1 : 0),
+      };
+      return { ...state, [key]: { ...prev, corrections, stats } };
+    }
 
     default:
       return state;
@@ -2244,6 +2303,66 @@ function routeWsEvent(msg, dispatch, shellListeners, sessionId) {
       dispatch({ type: 'OPERATOR_QUESTIONS_SET', payload: [] });
       break;
     }
+
+    // ── Meta-agents ───────────────────────────────────────────────────────
+
+    case 'meta_agent_status':
+      dispatch({ type: 'META_AGENT_STATUS', payload: {
+        agent: data.agent, status: data.status, phase: data.phase || '',
+      }});
+      break;
+
+    case 'meta_agent_thinking':
+      dispatch({ type: 'META_AGENT_THINKING', payload: {
+        agent: data.agent, chunk: data.chunk,
+        thought_id: data.thought_id, ts: data.ts,
+      }});
+      break;
+
+    case 'meta_correction': {
+      const corrTier = data.tier || 'advisory';
+      const corrIcon = corrTier === 'blocking' ? '⛔' : '💡';
+      dispatch({ type: 'META_AGENT_CORRECTION', payload: data });
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: data.source || 'meta',
+        eventType: 'meta_correction',
+        message: `${corrIcon} ${corrTier.toUpperCase()} [${data.source}]: ${(data.description || '').slice(0, 100)} [${((data.confidence || 0) * 100).toFixed(0)}%]`,
+        data,
+      }});
+      break;
+    }
+
+    case 'meta_checker_pre_phase':
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'master_checker', eventType: 'meta_checker_pre_phase',
+        message: `🔎 Master Checker [pre-${data.phase}]: ${data.summary || ''} — ${data.blocking || 0} blocking, ${data.advisory || 0} advisory`,
+        data,
+      }});
+      break;
+
+    case 'meta_checker_post_phase':
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'master_checker', eventType: 'meta_checker_post_phase',
+        message: `✅ Master Checker [post-${data.phase}]: ${data.summary || ''} — ${data.blocking || 0} blocking, ${data.advisory || 0} advisory`,
+        data,
+      }});
+      break;
+
+    case 'meta_validator_tool':
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'issue_validator', eventType: 'meta_validator_tool',
+        message: `🔍 Issue Validator [${data.tool}]: ${data.confirmed || 0} confirmed, ${data.flagged || 0} correction(s)`,
+        data,
+      }});
+      break;
+
+    case 'meta_validator_phase':
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'issue_validator', eventType: 'meta_validator_phase',
+        message: `📋 Issue Validator [phase:${data.phase}]: ${data.summary || ''} | objectives ${data.objectives_coverage || 'N/A'}`,
+        data,
+      }});
+      break;
 
     default: break;
   }

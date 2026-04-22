@@ -56,6 +56,17 @@ from utils.scan_logger import (
     start_scan_logger, close_scan_logger, get_scan_logger,
 )
 
+# Meta-agents — plan auditor and findings validator
+try:
+    from agents.meta.master_checker_agent  import MasterCheckerAgent
+    from agents.meta.issue_validator_agent import IssueValidatorAgent
+    from agents.meta.correction            import (
+        Correction, MAX_ADVISORY_CONTEXT, MAX_REPLAN_RETRIES
+    )
+    _META_AGENTS_AVAILABLE = True
+except ImportError:
+    _META_AGENTS_AVAILABLE = False
+
 # ── RAG Knowledge Base (graceful degradation if not installed) ─────────────────
 try:
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "knowledge"))
@@ -260,6 +271,14 @@ class MasterAgent(BaseAgent):
         self._shell_agent         = None
         self._payload_agent       = None
         self._attack_graph_agent  = None   # background chain analyzer
+
+        # ── Meta-agents (plan auditor + findings validator) ────────────
+        self._meta_agents_enabled:   bool                    = True
+        self._master_checker:        Optional[Any]           = None
+        self._issue_validator:       Optional[Any]           = None
+        self._pending_corrections:   asyncio.Queue           = asyncio.Queue()
+        self._meta_advisory_context: List[str]               = []
+        self._meta_listener_task:    Optional[asyncio.Task]  = None
 
         # Session config
         self._target:             str  = ""
@@ -480,6 +499,22 @@ class MasterAgent(BaseAgent):
         self._intel["target"]     = target
         self._intel["target_type"] = target_type
         self._phases_to_run  = phases or [p.value for p in AttackPhase]
+
+        # Initialise meta-agents if available
+        if _META_AGENTS_AVAILABLE and self._meta_agents_enabled:
+            _db_conn = db.get_db()
+            self._master_checker  = MasterCheckerAgent(
+                broadcast=self.broadcast, session_id=session_id, db_conn=_db_conn
+            )
+            self._issue_validator = IssueValidatorAgent(
+                broadcast=self.broadcast, session_id=session_id, db_conn=_db_conn
+            )
+            self._master_checker._session_id  = session_id
+            self._issue_validator._session_id = session_id
+            # Start background task that keeps the listener alive
+            self._meta_listener_task = asyncio.create_task(
+                self._meta_tool_listener()
+            )
 
         # Snapshot run config for checkpoint restore
         self._master_config = {
@@ -1019,6 +1054,92 @@ class MasterAgent(BaseAgent):
         })
         return True
 
+    # ══════════════════════════════════════════════════════════════════════════
+    #  META-AGENT HELPERS
+    # ══════════════════════════════════════════════════════════════════════════
+
+    async def _handle_corrections(
+        self,
+        corrections: List,
+        phase: str,
+        *,
+        allow_replan: bool = True,
+    ) -> None:
+        """
+        Apply tiered corrections from meta-agents.
+
+        Blocking (confidence >= BLOCKING_THRESHOLD):
+          - Inject as MANDATORY CORRECTION into next planning context.
+          - Emit meta_correction WS event.
+
+        Advisory (confidence < BLOCKING_THRESHOLD):
+          - Append to _meta_advisory_context rolling buffer.
+          - Emit meta_correction WS event.
+        """
+        if not corrections:
+            return
+
+        blocking = [c for c in corrections if c.tier == "blocking"]
+        advisory = [c for c in corrections if c.tier == "advisory"]
+
+        for c in advisory:
+            note = f"[{c.source}|{c.phase}] {c.description} → {c.recommended_action}"
+            self._meta_advisory_context.append(note)
+            if _META_AGENTS_AVAILABLE and len(self._meta_advisory_context) > MAX_ADVISORY_CONTEXT:
+                self._meta_advisory_context = self._meta_advisory_context[-MAX_ADVISORY_CONTEXT:]
+            await self._emit("meta_correction", {**c.to_dict(), "tier": "advisory"})
+
+        for c in blocking:
+            await self._emit("meta_correction", {**c.to_dict(), "tier": "blocking"})
+            try:
+                await self.emit_reasoning(
+                    step      = f"meta_blocking_{phase}",
+                    reasoning = f"BLOCKING correction from {c.source}: {c.description}",
+                    decision  = c.recommended_action,
+                    next_action="Re-evaluate before proceeding",
+                )
+            except Exception:
+                pass
+
+    async def _meta_advisory_prompt_block(self) -> str:
+        """Return advisory context formatted for injection into LLM planning prompts."""
+        if not self._meta_advisory_context:
+            return ""
+        lines = "\n".join(f"  • {note}" for note in self._meta_advisory_context[-10:])
+        return f"\n=== META-AGENT ADVISORY CONTEXT ===\n{lines}\n=== END ADVISORY ===\n"
+
+    async def _meta_tool_listener(self) -> None:
+        """
+        Background task: keeps alive for the full scan duration.
+        Per-tool validation corrections are enqueued by subagent store_finding hooks
+        and drained at post-phase _handle_corrections().
+        """
+        while not self._stop_requested:
+            try:
+                await asyncio.sleep(0.5)
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                import logging as _log
+                _log.getLogger(__name__).warning("[meta_listener] error: %s", exc)
+
+    async def _drain_pending_corrections(self, phase: str) -> None:
+        """Drain all queued per-tool corrections and handle them."""
+        corrections: List = []
+        while not self._pending_corrections.empty():
+            try:
+                item = self._pending_corrections.get_nowait()
+                if isinstance(item, list):
+                    corrections.extend(item)
+                else:
+                    corrections.append(item)
+            except asyncio.QueueEmpty:
+                break
+        if corrections:
+            await self._handle_corrections(corrections, phase, allow_replan=False)
+
+    # ══════════════════════════════════════════════════════════════════════════
+
     async def _save_checkpoint(self, checkpoint_type: str = "auto") -> Optional[str]:
         """
         Serialise current MasterAgent state to session_checkpoints collection.
@@ -1278,9 +1399,11 @@ class MasterAgent(BaseAgent):
                 if url.startswith("https"):
                     coros.append(SsrfSubagent(**kw).execute(url=url))
             # Burp Suite runs once per URL (uses URL as scan target; falls back to Nikto if API unavailable)
-            for url in web_urls[:2]:
+            # Pass all remaining URLs as extra_urls so Burp's passive scanner covers the full scope
+            for idx, url in enumerate(web_urls[:2]):
+                other_urls = [u for u in web_urls if u != url]
                 burp_kw = dict(kw, target=url)
-                coros.append(BurpSubagent(**burp_kw).execute())
+                coros.append(BurpSubagent(**burp_kw).execute(extra_urls=other_urls))
             if coros:
                 self._create_task(_safe(asyncio.gather(*coros, return_exceptions=True)))
 
@@ -1830,8 +1953,31 @@ class MasterAgent(BaseAgent):
         # ── PHASE 1: RECON (always first, sequential) ─────────
         await self._apply_pending_guidance()   # drain any queued guidance before recon
         if phase_enabled("recon") and not already_done("recon"):
+            # META: pre-phase review
+            if self._master_checker and self._meta_agents_enabled:
+                _pre_c = await self._master_checker.pre_phase_review(
+                    phase="recon", instructions=[], intel_snapshot=dict(self._intel))
+                await self._handle_corrections(_pre_c, "recon", allow_replan=True)
             await self._phase_recon(target, plan)
             self._phases_completed.append("recon")
+            # META: post-phase review + issue validation
+            if self._master_checker and self._meta_agents_enabled:
+                _recon_findings = []
+                try:
+                    _recon_findings = await db.get_findings_by_phase(self._session_id, "recon") or []
+                except Exception:
+                    pass
+                _post_c = await self._master_checker.post_phase_review(
+                    phase="recon",
+                    executed_tools=list(self._intel.get("raw_outputs", {}).keys()),
+                    findings=_recon_findings, intel_delta={})
+                if self._issue_validator:
+                    _val_c = await self._issue_validator.validate_phase_findings(
+                        phase="recon", all_findings=_recon_findings,
+                        scan_objectives=self._intel.get("ctf_objectives", []))
+                    _post_c.extend(_val_c)
+                await self._drain_pending_corrections("recon")
+                await self._handle_corrections(_post_c, "recon", allow_replan=False)
         elif already_done("recon"):
             await self.emit_reasoning(
                 step="recon_skipped", reasoning="Recon already completed before pause",
@@ -1929,6 +2075,27 @@ class MasterAgent(BaseAgent):
             # Sync gate: ensure all parallel agents are truly done before continuing
             await self._wait_for_agents_idle(timeout=120.0)
 
+            # META: post-parallel phase review (vuln_id + web_testing combined)
+            if self._master_checker and self._meta_agents_enabled:
+                _para_findings = []
+                try:
+                    for _pname in [n for n, _ in parallel_coros]:
+                        _pf = await db.get_findings_by_phase(self._session_id, _pname) or []
+                        _para_findings.extend(_pf)
+                except Exception:
+                    pass
+                _post_c2 = await self._master_checker.post_phase_review(
+                    phase="intelligence_aggregation",
+                    executed_tools=[n for n, _ in parallel_coros],
+                    findings=_para_findings, intel_delta={})
+                if self._issue_validator and _para_findings:
+                    _val_c2 = await self._issue_validator.validate_phase_findings(
+                        phase="intelligence_aggregation", all_findings=_para_findings,
+                        scan_objectives=self._intel.get("ctf_objectives", []))
+                    _post_c2.extend(_val_c2)
+                await self._drain_pending_corrections("intelligence_aggregation")
+                await self._handle_corrections(_post_c2, "intelligence_aggregation", allow_replan=False)
+
         # ── AUTO-CHECKPOINT 2: after parallel intel ───────────
         await self._check_pause("parallel_intel")
 
@@ -1969,6 +2136,11 @@ class MasterAgent(BaseAgent):
         await self._apply_pending_guidance()   # drain before exploit gate
         await self._transition_state("EXPLOITATION")
         if phase_enabled("exploit") and not already_done("exploit"):
+            # META: pre-phase review
+            if self._master_checker and self._meta_agents_enabled:
+                _pre_exp = await self._master_checker.pre_phase_review(
+                    phase="exploit", instructions=[], intel_snapshot=dict(self._intel))
+                await self._handle_corrections(_pre_exp, "exploit", allow_replan=True)
             if self._auto_exploit:
                 await self._phase_exploit(target)
             else:
@@ -1984,6 +2156,22 @@ class MasterAgent(BaseAgent):
                     self._phases_completed.append("exploit")
                 else:
                     await self._emit("phase_skipped", {"phase": "exploit"})
+            # META: post-phase review
+            if self._master_checker and self._meta_agents_enabled:
+                _exp_findings = []
+                try:
+                    _exp_findings = await db.get_findings_by_phase(self._session_id, "exploit") or []
+                except Exception:
+                    pass
+                _post_exp = await self._master_checker.post_phase_review(
+                    phase="exploit", executed_tools=[], findings=_exp_findings, intel_delta={})
+                if self._issue_validator and _exp_findings:
+                    _val_exp = await self._issue_validator.validate_phase_findings(
+                        phase="exploit", all_findings=_exp_findings,
+                        scan_objectives=self._intel.get("ctf_objectives", []))
+                    _post_exp.extend(_val_exp)
+                await self._drain_pending_corrections("exploit")
+                await self._handle_corrections(_post_exp, "exploit", allow_replan=False)
         elif already_done("exploit"):
             await self.emit_reasoning(
                 step="exploit_skipped", reasoning="Exploit phase completed before pause",
@@ -1999,6 +2187,17 @@ class MasterAgent(BaseAgent):
             if phase_enabled("post_exploit") and not already_done("post_exploit"):
                 await self._phase_post_exploit(target)
                 self._phases_completed.append("post_exploit")
+                # META: post-exploit review
+                if self._master_checker and self._meta_agents_enabled:
+                    _pe_findings = []
+                    try:
+                        _pe_findings = await db.get_findings_by_phase(self._session_id, "post_exploit") or []
+                    except Exception:
+                        pass
+                    _post_pe = await self._master_checker.post_phase_review(
+                        phase="post_exploit", executed_tools=[], findings=_pe_findings, intel_delta={})
+                    await self._drain_pending_corrections("post_exploit")
+                    await self._handle_corrections(_post_pe, "post_exploit", allow_replan=False)
 
             await self._transition_state("PRIVILEGE_ESCALATION")
             if phase_enabled("privesc") and not already_done("privesc"):
@@ -2097,6 +2296,14 @@ class MasterAgent(BaseAgent):
             await _drain_task
         except asyncio.CancelledError:
             pass
+
+        # Cancel meta-agent background listener
+        if self._meta_listener_task and not self._meta_listener_task.done():
+            self._meta_listener_task.cancel()
+            try:
+                await self._meta_listener_task
+            except asyncio.CancelledError:
+                pass
 
     # ─── Agent Sync Gate ──────────────────────────────────────
 
