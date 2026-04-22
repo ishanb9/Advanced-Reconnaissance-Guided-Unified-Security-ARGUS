@@ -21,7 +21,9 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import logging
+import os
 import re
+import signal as _signal
 from typing import Any, Callable, Coroutine, Dict, List, Optional
 
 import httpx
@@ -298,11 +300,20 @@ class CIDROrchestrator:
                 cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                start_new_session=True,  # new process group → killpg kills all children
             )
             try:
                 stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=120)
             except asyncio.TimeoutError:
-                proc.kill()
+                # Kill entire process group so nmap children don't linger
+                try:
+                    os.killpg(os.getpgid(proc.pid), _signal.SIGKILL)
+                except (ProcessLookupError, OSError):
+                    pass
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
                 return []
             output = stdout.decode(errors="replace")
             ips    = re.findall(ip_pattern, output)

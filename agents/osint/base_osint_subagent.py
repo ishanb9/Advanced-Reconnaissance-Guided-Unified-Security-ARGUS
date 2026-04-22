@@ -21,7 +21,9 @@ Usage
 from __future__ import annotations
 
 import asyncio
+import os
 import re
+import signal as _signal
 from typing import Dict, List, Optional
 
 import httpx
@@ -232,11 +234,17 @@ class OsintSubagentBase:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 cwd=cwd,
+                start_new_session=True,  # new process group → killpg kills all children
             )
             try:
                 stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
                 return stdout.decode("utf-8", errors="replace")
             except asyncio.TimeoutError:
+                # Kill the process group so any children also die
+                try:
+                    os.killpg(os.getpgid(proc.pid), _signal.SIGKILL)
+                except (ProcessLookupError, OSError):
+                    pass
                 try:
                     proc.kill()
                 except Exception:

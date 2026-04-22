@@ -33,18 +33,38 @@ import asyncio
 import json
 import logging
 import os
+import signal as _signal
 import sys
 import time
 import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
-from typing import Any, AsyncGenerator, Callable, Coroutine, Optional
+from typing import Any, AsyncGenerator, Callable, Coroutine, List, Optional
 
 import httpx
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 logger = logging.getLogger(__name__)
+
+
+def _kill_proc_tree(proc) -> None:
+    """Kill a subprocess AND all its children via process-group signal.
+
+    When bash runs ``nikto ... | head -150``, killing bash alone orphans nikto.
+    Using killpg() sends SIGKILL to the entire process group (bash + nikto + head)
+    so no child survives.  Falls back to proc.kill() on any OS error.
+    """
+    try:
+        pgid = os.getpgid(proc.pid)
+        os.killpg(pgid, _signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+    try:
+        proc.kill()
+    except Exception:
+        pass
+
 
 # Per-session scan logger proxies — safe no-op if no active session logger.
 try:
@@ -282,33 +302,43 @@ class BaseSubagent(ABC):
         self._tool_run_start: float = 0.0
         self._tool_deadline_sec: float = 600.0   # default 10 minutes
         self._current_tool_name: str = ""
-        self._current_proc: Optional[Any] = None   # asyncio.subprocess.Process
-        self._kill_current_tool_flag: bool = False  # one-shot: kill this tool only
+        self._current_proc: Optional[Any] = None       # asyncio.subprocess.Process
+        self._kill_current_tool_flag: bool = False      # one-shot: kill this tool only
+        self._running_procs: List[Any] = []             # ALL active procs (concurrent gather)
         # Register in global registry keyed by SUBAGENT_NAME
         _SUBAGENT_REGISTRY[self.SUBAGENT_NAME] = self
 
     def request_stop(self) -> None:
         """Signal this subagent to stop after the current tool line."""
         self._stop_requested = True
-        # If a local subprocess is running, kill it immediately
-        if self._current_proc is not None:
-            try:
-                self._current_proc.kill()
-            except Exception:
-                pass
+        # Kill ALL tracked running processes (handles concurrent gather)
+        procs_to_kill = list(self._running_procs)
+        if self._current_proc is not None and self._current_proc not in procs_to_kill:
+            procs_to_kill.append(self._current_proc)
+        for proc in procs_to_kill:
+            _kill_proc_tree(proc)
 
     def kill_current_tool(self) -> None:
-        """Kill only the currently running tool without stopping the subagent.
+        """Kill the currently running tool(s) without stopping the subagent.
+
+        Kills ALL processes tracked in _running_procs so that concurrent
+        asyncio.gather scans (e.g. nikto + gobuster + dalfox running together)
+        are all terminated, not just the last _current_proc.
+
+        Each process is killed via killpg() so that child processes spawned by
+        bash (e.g. nikto invoked as ``bash -c "nikto ..."``) also receive
+        SIGKILL and cannot orphan.
 
         The one-shot flag is cleared at the start of the next collect_tool()
         call so the subagent continues with remaining tasks normally.
         """
-        if self._current_proc is not None:
-            try:
-                self._current_proc.kill()
-            except Exception:
-                pass
         self._kill_current_tool_flag = True
+        # Kill every tracked process (handles concurrent gather)
+        procs_to_kill = list(self._running_procs)
+        if self._current_proc is not None and self._current_proc not in procs_to_kill:
+            procs_to_kill.append(self._current_proc)
+        for proc in procs_to_kill:
+            _kill_proc_tree(proc)
 
     def extend_tool(self, extra_sec: float) -> None:
         """Extend the running tool's deadline by *extra_sec* seconds."""
@@ -352,8 +382,12 @@ class BaseSubagent(ABC):
                     "elapsed_sec":  round(elapsed),
                     "deadline_sec": round(self._tool_deadline_sec),
                 })
-                # Wait 30 s before the next warning (gives the operator time to respond)
-                await asyncio.sleep(30.0)
+                # Wait 30 s before the next warning, but check flags every second
+                # so a cancel clears the watchdog promptly rather than after 30 s.
+                for _ in range(30):
+                    if self._stop_requested or self._kill_current_tool_flag:
+                        return
+                    await asyncio.sleep(1.0)
 
         except asyncio.CancelledError:
             pass
@@ -513,8 +547,12 @@ class BaseSubagent(ABC):
                 stdout=_asyncio.subprocess.PIPE,
                 stderr=_asyncio.subprocess.PIPE,
                 limit=1024 * 1024,
+                # New process group so killpg() kills bash AND all its children
+                # (e.g. nikto spawned inside bash -c "nikto ... | head -N").
+                start_new_session=True,
             )
             self._current_proc = proc
+            self._running_procs.append(proc)  # track for concurrent gather kill
 
             async def _drain(stream, prefix=""):
                 while True:
@@ -528,37 +566,42 @@ class BaseSubagent(ABC):
                         await self._emit_tool_line(tool_name, f"{prefix}{decoded}")
                         yield f"{prefix}{decoded}"
 
-            async for ln in _drain(proc.stdout):
-                if self._stop_requested or self._kill_current_tool_flag:
-                    break
-                yield ln
-            if not self._stop_requested and not self._kill_current_tool_flag:
-                async for ln in _drain(proc.stderr, "[STDERR] "):
+            try:
+                async for ln in _drain(proc.stdout):
+                    if self._stop_requested or self._kill_current_tool_flag:
+                        break
                     yield ln
+                if not self._stop_requested and not self._kill_current_tool_flag:
+                    async for ln in _drain(proc.stderr, "[STDERR] "):
+                        yield ln
 
-            if self._stop_requested or self._kill_current_tool_flag:
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
-                cancelled_line = f"[CANCELLED] Tool '{tool_name}' stopped by operator"
-                await self._emit_tool_line(tool_name, cancelled_line)
-                yield cancelled_line
+                if self._stop_requested or self._kill_current_tool_flag:
+                    # Kill entire process group — ensures nikto/head/etc. die too
+                    _kill_proc_tree(proc)
+                    cancelled_line = f"[CANCELLED] Tool '{tool_name}' stopped by operator"
+                    await self._emit_tool_line(tool_name, cancelled_line)
+                    yield cancelled_line
+                    await self._emit("subagent_tool_exit", {
+                        "tool": tool_name, "exit_code": -2, "success": False, "cancelled": True,
+                    })
+                    return
+
+                await proc.wait()
+                exit_code = proc.returncode or 0
+                exit_line = f"[EXIT {exit_code}]"
+                await self._emit_tool_line(tool_name, exit_line)
+                yield exit_line
                 await self._emit("subagent_tool_exit", {
-                    "tool": tool_name, "exit_code": -2, "success": False, "cancelled": True,
+                    "tool": tool_name, "exit_code": exit_code, "success": exit_code == 0,
                 })
-                self._current_proc = None
-                return
-
-            await proc.wait()
-            self._current_proc = None
-            exit_code = proc.returncode or 0
-            exit_line = f"[EXIT {exit_code}]"
-            await self._emit_tool_line(tool_name, exit_line)
-            yield exit_line
-            await self._emit("subagent_tool_exit", {
-                "tool": tool_name, "exit_code": exit_code, "success": exit_code == 0,
-            })
+            finally:
+                # Always deregister from tracker and clear current pointer
+                try:
+                    self._running_procs.remove(proc)
+                except ValueError:
+                    pass
+                if self._current_proc is proc:
+                    self._current_proc = None
 
         async def _run_mcp_gen():
             """Yield output lines from the MCP SSE endpoint.

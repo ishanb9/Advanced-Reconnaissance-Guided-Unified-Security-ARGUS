@@ -30,7 +30,9 @@ Adding new sources
 """
 
 import asyncio
+import os
 import re
+import signal as _signal
 from typing import Optional, Dict, List
 
 import httpx
@@ -409,9 +411,21 @@ class OsintAgent(BaseAgent):
                 "searchsploit", query,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
+                start_new_session=True,  # new process group → killpg kills all children
             )
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=20)
-            for line in stdout.decode("utf-8", errors="replace").splitlines():
+            raw_stdout = b""
+            try:
+                raw_stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=20)
+            except asyncio.TimeoutError:
+                try:
+                    os.killpg(os.getpgid(proc.pid), _signal.SIGKILL)
+                except (ProcessLookupError, OSError):
+                    pass
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+            for line in raw_stdout.decode("utf-8", errors="replace").splitlines():
                 if "|" in line and not line.startswith("-") and "Exploit Title" not in line:
                     parts = line.split("|")
                     if len(parts) >= 2:

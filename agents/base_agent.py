@@ -16,6 +16,7 @@ import asyncio
 import json
 import os
 import re
+import signal as _signal
 import subprocess
 import sys
 import time
@@ -30,6 +31,25 @@ from db.schemas import (
     FindingSeverity, WebSocketMessage
 )
 import db.mongo_client as db
+
+def _kill_proc_tree(proc) -> None:
+    """Kill a subprocess AND all its children via process-group signal.
+
+    Mirrors base_subagent._kill_proc_tree — kept local to avoid circular import.
+    Using killpg() ensures that child processes spawned by bash (e.g. nikto,
+    sqlmap, any pipeline) receive SIGKILL and cannot survive as orphans.
+    Falls back to proc.kill() on any OS error.
+    """
+    try:
+        pgid = os.getpgid(proc.pid)
+        os.killpg(pgid, _signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+    try:
+        proc.kill()
+    except Exception:
+        pass
+
 
 # Per-session scan logger proxies — safe no-op if no active session logger.
 try:
@@ -357,12 +377,9 @@ class BaseAgent(ABC):
 
     def request_stop(self):
         self._stop_requested = True
-        # Kill ALL active subprocesses (parallel-safe)
+        # Kill ALL active subprocesses via process-group kill (parallel-safe)
         for proc in list(self._active_procs):
-            try:
-                proc.kill()
-            except Exception:
-                pass
+            _kill_proc_tree(proc)
         # Cancel ALL active MCP streaming tasks
         for task in list(self._active_tool_tasks):
             if not task.done():
@@ -374,15 +391,14 @@ class BaseAgent(ABC):
         Parallel-safe: when execute_tasks() runs 7 tools via asyncio.gather,
         this kills every active subprocess and cancels every MCP streaming
         task so readline/aiter_lines unblock immediately and gather returns.
+        Uses killpg() so child processes (e.g. nikto spawned by bash) are
+        killed along with the parent shell rather than orphaned.
         The one-shot flag is cleared at the start of the next run_tool() call.
         """
         self._kill_current_tool_flag = True
-        # Kill ALL local subprocesses (parallel tools each track their proc)
+        # Kill ALL local subprocesses via process-group kill
         for proc in list(self._active_procs):
-            try:
-                proc.kill()
-            except Exception:
-                pass
+            _kill_proc_tree(proc)
         # Cancel ALL MCP streaming tasks
         for task in list(self._active_tool_tasks):
             if not task.done():
@@ -423,7 +439,12 @@ class BaseAgent(ABC):
                     "elapsed_sec":  round(elapsed),
                     "deadline_sec": round(self._tool_deadline_sec),
                 })
-                await asyncio.sleep(30.0)
+                # Wait 30 s before next warning, checking flags every second
+                # so a cancel clears the watchdog promptly rather than after 30 s.
+                for _ in range(30):
+                    if self._stop_requested or self._kill_current_tool_flag:
+                        return
+                    await asyncio.sleep(1.0)
 
         except asyncio.CancelledError:
             pass
@@ -961,6 +982,9 @@ Return JSON:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 limit=1024 * 1024,  # 1 MB read buffer
+                # New process group so killpg() kills bash AND all its children
+                # (e.g. nikto, sqlmap, any pipeline element spawned inside bash).
+                start_new_session=True,
             )
             self._active_procs.add(proc)
             try:
@@ -1000,12 +1024,8 @@ Return JSON:
                 # Process was killed by kill_current_tool() → flag is set
                 if self._kill_current_tool_flag:
                     await _emit_line(f"[CANCELLED] Tool '{tool_name}' stopped by operator", "stderr")
-                    # Make sure process is dead (it may still be running if drain was cancelled
-                    # before readline() naturally returned EOF)
-                    try:
-                        proc.kill()
-                    except Exception:
-                        pass
+                    # Kill process group to ensure all children die (not just bash)
+                    _kill_proc_tree(proc)
                     return -2
                 await proc.wait()
                 return proc.returncode or 0
