@@ -61,6 +61,7 @@ class AgentName(str, Enum):
     IOT             = "iot"
     MASTER_CHECKER  = "master_checker"
     ISSUE_VALIDATOR = "issue_validator"
+    EXPERT          = "expert"
 
 
 class SessionMode(str, Enum):

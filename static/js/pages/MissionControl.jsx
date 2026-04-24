@@ -1920,6 +1920,9 @@ function MissionControl() {
       )
     ),
 
+    // ── Red-Team Expert Panel (top-level overseer) ───────────────────────
+    window.ExpertPanel && React.createElement(window.ExpertPanel, null),
+
     // ── Meta-Agents Panel ─────────────────────────────────────────────────
     window.MetaAgentsPanel && React.createElement(window.MetaAgentsPanel, null),
 

@@ -57,15 +57,19 @@ from utils.scan_logger import (
 )
 
 # Meta-agents — plan auditor and findings validator
+_META_AGENTS_IMPORT_ERROR: str = ""
 try:
     from agents.meta.master_checker_agent  import MasterCheckerAgent
     from agents.meta.issue_validator_agent import IssueValidatorAgent
+    from agents.meta.expert_agent          import RedTeamExpertAgent
     from agents.meta.correction            import (
         Correction, MAX_ADVISORY_CONTEXT, MAX_REPLAN_RETRIES
     )
     _META_AGENTS_AVAILABLE = True
-except ImportError:
-    _META_AGENTS_AVAILABLE = False
+except Exception as _meta_import_exc:
+    # Catch ImportError, ModuleNotFoundError, AttributeError, etc.
+    _META_AGENTS_AVAILABLE    = False
+    _META_AGENTS_IMPORT_ERROR = str(_meta_import_exc)
 
 # ── RAG Knowledge Base (graceful degradation if not installed) ─────────────────
 try:
@@ -272,10 +276,11 @@ class MasterAgent(BaseAgent):
         self._payload_agent       = None
         self._attack_graph_agent  = None   # background chain analyzer
 
-        # ── Meta-agents (plan auditor + findings validator) ────────────
+        # ── Meta-agents (plan auditor + findings validator + expert) ───
         self._meta_agents_enabled:   bool                    = True
         self._master_checker:        Optional[Any]           = None
         self._issue_validator:       Optional[Any]           = None
+        self._expert:                Optional[Any]           = None
         self._pending_corrections:   asyncio.Queue           = asyncio.Queue()
         self._meta_advisory_context: List[str]               = []
         self._meta_listener_task:    Optional[asyncio.Task]  = None
@@ -501,20 +506,58 @@ class MasterAgent(BaseAgent):
         self._phases_to_run  = phases or [p.value for p in AttackPhase]
 
         # Initialise meta-agents if available
+        if not _META_AGENTS_AVAILABLE:
+            import logging as _mlog
+            _mlog.getLogger(__name__).warning(
+                "[meta-agents] Disabled — import failed: %s", _META_AGENTS_IMPORT_ERROR
+            )
+            await self._emit("meta_agents_status", {
+                "available": False,
+                "reason":    _META_AGENTS_IMPORT_ERROR or "import failed",
+            })
+
         if _META_AGENTS_AVAILABLE and self._meta_agents_enabled:
-            _db_conn = db.get_db()
-            self._master_checker  = MasterCheckerAgent(
-                broadcast=self.broadcast, session_id=session_id, db_conn=_db_conn
-            )
-            self._issue_validator = IssueValidatorAgent(
-                broadcast=self.broadcast, session_id=session_id, db_conn=_db_conn
-            )
-            self._master_checker._session_id  = session_id
-            self._issue_validator._session_id = session_id
-            # Start background task that keeps the listener alive
-            self._meta_listener_task = asyncio.create_task(
-                self._meta_tool_listener()
-            )
+            try:
+                _db_conn = db.get_db()
+                self._master_checker  = MasterCheckerAgent(
+                    broadcast=self.broadcast, session_id=session_id, db_conn=_db_conn
+                )
+                self._issue_validator = IssueValidatorAgent(
+                    broadcast=self.broadcast, session_id=session_id, db_conn=_db_conn
+                )
+                self._expert = RedTeamExpertAgent(
+                    broadcast=self.broadcast, session_id=session_id, db_conn=_db_conn
+                )
+                self._master_checker._session_id  = session_id
+                self._issue_validator._session_id = session_id
+                self._expert._session_id          = session_id
+                # Expert needs a back-reference so it can push directives into the
+                # master's guidance queue (inject_guidance).
+                try:
+                    self._expert.bind_master(self)
+                except Exception:
+                    pass
+                # Start background task that keeps the listener alive
+                self._meta_listener_task = asyncio.create_task(
+                    self._meta_tool_listener()
+                )
+                await self._emit("meta_agents_status", {
+                    "available": True,
+                    "reason":    "initialized",
+                    "expert":    True,
+                })
+            except Exception as _meta_init_exc:
+                import logging as _mlog
+                _mlog.getLogger(__name__).error(
+                    "[meta-agents] Init failed: %s", _meta_init_exc, exc_info=True
+                )
+                self._master_checker  = None
+                self._issue_validator = None
+                self._expert          = None
+                await self._emit("meta_agents_status", {
+                    "available": False,
+                    "reason":    f"init error: {_meta_init_exc}",
+                })
 
         # Snapshot run config for checkpoint restore
         self._master_config = {
@@ -605,6 +648,14 @@ class MasterAgent(BaseAgent):
         # LLM-guided planning kicks in as soon as Ollama becomes available.
         await self.set_status(AgentStatus.RUNNING, f"Initialising pentest on {target}")
         llm_ok = await self.check_llm_available()
+        # Share LLM availability with meta-agents so they skip their own cold-check
+        # and avoid a redundant /api/tags request at the start of every phase.
+        if self._master_checker:
+            self._master_checker._llm_available  = self._llm_available
+        if self._issue_validator:
+            self._issue_validator._llm_available = self._llm_available
+        if self._expert:
+            self._expert._llm_available          = self._llm_available
         if not llm_ok:
             await self._emit("llm_status", {
                 "available": False,

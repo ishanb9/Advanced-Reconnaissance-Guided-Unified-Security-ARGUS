@@ -184,6 +184,30 @@ const INIT = {
     corrections: [],
     stats: { total: 0, blocking: 0, advisory: 0, toolsValidated: 0, phasesValidated: 0 },
   },
+
+  // ── Red-Team Expert (senior tactician / oversight) ──────────────────────────
+  expertState: {
+    status:        'idle',    // 'idle' | 'thinking' | 'directing'
+    phase:         '',
+    mode:          '',        // 'pre' | 'post'
+    history:       [],        // LLM conversation chunks (same shape as meta agents)
+    directives:    [],        // Directive objects (newest first, capped 200)
+    feedback:      [],        // Peer-review entries targeting MC / IV
+    corrections:   [],        // Correction objects with source="expert"
+    objectives: {
+      mission_phase: '',
+      progress_pct:  0,
+      objectives:    [],      // [{name, status, evidence}, ...]
+    },
+    stats: {
+      total:           0,     // total corrections (mirrors meta agents)
+      blocking:        0,
+      advisory:        0,
+      directivesCount: 0,
+      feedbackCount:   0,
+      phasesReviewed:  0,
+    },
+  },
 };
 
 // ─── Selectors / derived state helpers ─────────────────────
@@ -992,7 +1016,8 @@ function reducer(state, action) {
 
     case 'META_AGENT_STATUS': {
       const { agent, status, phase } = action.payload;
-      const isChecker = agent && agent.includes('checker');
+      const a = (agent || '').toLowerCase();
+      const isChecker = a.includes('checker');
       const key = isChecker ? 'metaCheckerState' : 'metaValidatorState';
       return {
         ...state,
@@ -1002,7 +1027,8 @@ function reducer(state, action) {
 
     case 'META_AGENT_THINKING': {
       const { agent, chunk, thought_id, ts } = action.payload;
-      const isChecker = agent && agent.includes('checker');
+      const a = (agent || '').toLowerCase();
+      const isChecker = a.includes('checker');
       const key = isChecker ? 'metaCheckerState' : 'metaValidatorState';
       const prev = state[key];
       let history = [...prev.history];
@@ -1029,6 +1055,127 @@ function reducer(state, action) {
         advisory: prev.stats.advisory + (corr.tier === 'advisory' ? 1 : 0),
       };
       return { ...state, [key]: { ...prev, corrections, stats } };
+    }
+
+    case 'META_CHECKER_PHASE_DONE': {
+      const prev = state.metaCheckerState;
+      return {
+        ...state,
+        metaCheckerState: {
+          ...prev,
+          stats: { ...prev.stats, phasesReviewed: (prev.stats.phasesReviewed || 0) + 1 },
+        },
+      };
+    }
+
+    case 'META_VALIDATOR_TOOL_DONE': {
+      const prev = state.metaValidatorState;
+      return {
+        ...state,
+        metaValidatorState: {
+          ...prev,
+          stats: { ...prev.stats, toolsValidated: (prev.stats.toolsValidated || 0) + 1 },
+        },
+      };
+    }
+
+    case 'META_VALIDATOR_PHASE_DONE': {
+      const prev = state.metaValidatorState;
+      return {
+        ...state,
+        metaValidatorState: {
+          ...prev,
+          stats: { ...prev.stats, phasesValidated: (prev.stats.phasesValidated || 0) + 1 },
+        },
+      };
+    }
+
+    // ── Red-Team Expert reducers ────────────────────────────────────────
+    case 'EXPERT_STATUS': {
+      const { status, phase, mode } = action.payload;
+      const prev = state.expertState;
+      // Count a phase as "reviewed" when we go idle from thinking and there
+      // was a mode marker — guard against double-count by requiring mode.
+      const nextStats = { ...prev.stats };
+      if (status === 'idle' && (mode === 'pre' || mode === 'post')) {
+        nextStats.phasesReviewed = (prev.stats.phasesReviewed || 0) + 1;
+      }
+      return {
+        ...state,
+        expertState: {
+          ...prev,
+          status,
+          phase: phase || prev.phase,
+          mode:  mode  || prev.mode,
+          stats: nextStats,
+        },
+      };
+    }
+
+    case 'EXPERT_THINKING': {
+      const { chunk, thought_id, ts } = action.payload;
+      const prev = state.expertState;
+      let history = [...prev.history];
+      const last = history[history.length - 1];
+      if (last && last.role === 'assistant' && last.thought_id === thought_id) {
+        history[history.length - 1] = { ...last, content: last.content + chunk };
+      } else {
+        history = [...history, { role: 'assistant', content: chunk, thought_id, ts: ts || new Date().toISOString() }];
+      }
+      if (history.length > 200) history = history.slice(-200);
+      return { ...state, expertState: { ...prev, history } };
+    }
+
+    case 'EXPERT_DIRECTIVE': {
+      const d = action.payload;
+      const prev = state.expertState;
+      const directives = [d, ...prev.directives].slice(0, 200);
+      const stats = {
+        ...prev.stats,
+        directivesCount: (prev.stats.directivesCount || 0) + 1,
+      };
+      return { ...state, expertState: { ...prev, directives, stats, status: 'directing' } };
+    }
+
+    case 'EXPERT_FEEDBACK': {
+      const f = action.payload;
+      const prev = state.expertState;
+      const feedback = [f, ...prev.feedback].slice(0, 200);
+      const stats = {
+        ...prev.stats,
+        feedbackCount: (prev.stats.feedbackCount || 0) + 1,
+      };
+      return { ...state, expertState: { ...prev, feedback, stats } };
+    }
+
+    case 'EXPERT_OBJECTIVE_UPDATE': {
+      const { mission_phase, progress_pct, objectives } = action.payload;
+      const prev = state.expertState;
+      return {
+        ...state,
+        expertState: {
+          ...prev,
+          objectives: {
+            mission_phase: mission_phase || prev.objectives.mission_phase,
+            progress_pct:  typeof progress_pct === 'number' ? progress_pct : prev.objectives.progress_pct,
+            objectives:    Array.isArray(objectives) ? objectives : prev.objectives.objectives,
+          },
+        },
+      };
+    }
+
+    case 'EXPERT_CORRECTION': {
+      // Mirrors META_AGENT_CORRECTION but for source="expert".
+      const corr = action.payload;
+      const prev = state.expertState;
+      const corrections = [corr, ...prev.corrections].slice(0, 200);
+      const stats = {
+        ...prev.stats,
+        total:    prev.stats.total    + 1,
+        blocking: prev.stats.blocking + (corr.tier === 'blocking' ? 1 : 0),
+        advisory: prev.stats.advisory + (corr.tier === 'advisory' ? 1 : 0),
+      };
+      return { ...state, expertState: { ...prev, corrections, stats } };
     }
 
     default:
@@ -2307,22 +2454,42 @@ function routeWsEvent(msg, dispatch, shellListeners, sessionId) {
     // ── Meta-agents ───────────────────────────────────────────────────────
 
     case 'meta_agent_status':
-      dispatch({ type: 'META_AGENT_STATUS', payload: {
-        agent: data.agent, status: data.status, phase: data.phase || '',
-      }});
+      // Expert inherits think_with_history() → its status events arrive on
+      // this channel with agent="expert". Redirect them to the Expert state.
+      if ((data.agent || '').toLowerCase() === 'expert') {
+        dispatch({ type: 'EXPERT_STATUS', payload: {
+          status: data.status, phase: data.phase || '', mode: data.mode || '',
+        }});
+      } else {
+        dispatch({ type: 'META_AGENT_STATUS', payload: {
+          agent: data.agent, status: data.status, phase: data.phase || '',
+        }});
+      }
       break;
 
     case 'meta_agent_thinking':
-      dispatch({ type: 'META_AGENT_THINKING', payload: {
-        agent: data.agent, chunk: data.chunk,
-        thought_id: data.thought_id, ts: data.ts,
-      }});
+      // Same redirect for the token stream.
+      if ((data.agent || '').toLowerCase() === 'expert') {
+        dispatch({ type: 'EXPERT_THINKING', payload: {
+          chunk: data.chunk, thought_id: data.thought_id, ts: data.ts,
+        }});
+      } else {
+        dispatch({ type: 'META_AGENT_THINKING', payload: {
+          agent: data.agent, chunk: data.chunk,
+          thought_id: data.thought_id, ts: data.ts,
+        }});
+      }
       break;
 
     case 'meta_correction': {
       const corrTier = data.tier || 'advisory';
       const corrIcon = corrTier === 'blocking' ? '⛔' : '💡';
-      dispatch({ type: 'META_AGENT_CORRECTION', payload: data });
+      // Route expert-sourced corrections to the Expert state, others to MC/IV.
+      if ((data.source || '').toLowerCase() === 'expert') {
+        dispatch({ type: 'EXPERT_CORRECTION', payload: data });
+      } else {
+        dispatch({ type: 'META_AGENT_CORRECTION', payload: data });
+      }
       dispatch({ type: 'FEED_ENTRY', payload: {
         ts, agent: data.source || 'meta',
         eventType: 'meta_correction',
@@ -2340,15 +2507,18 @@ function routeWsEvent(msg, dispatch, shellListeners, sessionId) {
       }});
       break;
 
-    case 'meta_checker_post_phase':
+    case 'meta_checker_post_phase': {
+      dispatch({ type: 'META_CHECKER_PHASE_DONE' });
       dispatch({ type: 'FEED_ENTRY', payload: {
         ts, agent: 'master_checker', eventType: 'meta_checker_post_phase',
         message: `✅ Master Checker [post-${data.phase}]: ${data.summary || ''} — ${data.blocking || 0} blocking, ${data.advisory || 0} advisory`,
         data,
       }});
       break;
+    }
 
     case 'meta_validator_tool':
+      dispatch({ type: 'META_VALIDATOR_TOOL_DONE' });
       dispatch({ type: 'FEED_ENTRY', payload: {
         ts, agent: 'issue_validator', eventType: 'meta_validator_tool',
         message: `🔍 Issue Validator [${data.tool}]: ${data.confirmed || 0} confirmed, ${data.flagged || 0} correction(s)`,
@@ -2357,12 +2527,80 @@ function routeWsEvent(msg, dispatch, shellListeners, sessionId) {
       break;
 
     case 'meta_validator_phase':
+      dispatch({ type: 'META_VALIDATOR_PHASE_DONE' });
       dispatch({ type: 'FEED_ENTRY', payload: {
         ts, agent: 'issue_validator', eventType: 'meta_validator_phase',
         message: `📋 Issue Validator [phase:${data.phase}]: ${data.summary || ''} | objectives ${data.objectives_coverage || 'N/A'}`,
         data,
       }});
       break;
+
+    case 'meta_agents_status':
+      if (data.available) {
+        dispatch({ type: 'FEED_ENTRY', payload: {
+          ts, agent: 'meta', eventType: 'meta_agents_status',
+          message: `🛡 Meta-Agents online — Checker + Validator active`,
+          data,
+        }});
+      } else {
+        dispatch({ type: 'FEED_ENTRY', payload: {
+          ts, agent: 'meta', eventType: 'meta_agents_status',
+          message: `⚠ Meta-Agents unavailable: ${data.reason || 'unknown'}`,
+          data,
+        }});
+      }
+      break;
+
+    // ── Red-Team Expert (meta-agent; peer overseer) ───────────────────────
+    case 'expert_status':
+      dispatch({ type: 'EXPERT_STATUS', payload: {
+        status: data.status, phase: data.phase || '', mode: data.mode || '',
+      }});
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'expert', eventType: 'expert_status',
+        message: `🎯 Red-Team Expert → ${data.status}${data.phase ? ` @ ${data.phase}` : ''}${data.mode ? ` (${data.mode})` : ''}`,
+        data,
+      }});
+      break;
+
+    case 'expert_thinking':
+      dispatch({ type: 'EXPERT_THINKING', payload: {
+        chunk: data.chunk, thought_id: data.thought_id, ts: data.ts,
+      }});
+      break;
+
+    case 'expert_directive': {
+      dispatch({ type: 'EXPERT_DIRECTIVE', payload: data });
+      const dPri = (data.priority || 'medium').toUpperCase();
+      const dIcon = dPri === 'CRITICAL' ? '🔥' : dPri === 'HIGH' ? '⚡' : dPri === 'LOW' ? '💭' : '📌';
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'expert', eventType: 'expert_directive',
+        message: `${dIcon} Expert directive [${dPri}] ${data.action_type || 'note'} → ${data.target_phase || data.phase || '?'}: ${(data.title || '').slice(0, 90)}`,
+        data,
+      }});
+      break;
+    }
+
+    case 'expert_feedback': {
+      dispatch({ type: 'EXPERT_FEEDBACK', payload: data });
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'expert', eventType: 'expert_feedback',
+        message: `🧭 Expert feedback → ${data.target_agent || '?'}: ${(data.message || data.note || '').slice(0, 100)}`,
+        data,
+      }});
+      break;
+    }
+
+    case 'expert_objective_update': {
+      dispatch({ type: 'EXPERT_OBJECTIVE_UPDATE', payload: data });
+      const pct = typeof data.progress_pct === 'number' ? ` (${Math.round(data.progress_pct)}%)` : '';
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'expert', eventType: 'expert_objective_update',
+        message: `🎯 Mission phase: ${data.mission_phase || '?'}${pct}`,
+        data,
+      }});
+      break;
+    }
 
     default: break;
   }
@@ -2395,6 +2633,16 @@ function extractFeedMessage(type, agent, data) {
     case 'graph_edge':            return `${data?.source} → ${data?.target}`;
     case 'report_ready':          return `Report ready`;
     case 'guidance_applied':      return `${data?.message}`;
+    case 'meta_agents_status':    return data?.available ? `🛡 Meta-Agents online` : `⚠ Meta-Agents unavailable: ${data?.reason||''}`;
+    case 'meta_checker_pre_phase': return `🔎 Checker [pre-${data?.phase}]: ${data?.correction_count||0} correction(s)`;
+    case 'meta_checker_post_phase': return `✅ Checker [post-${data?.phase}]: ${data?.correction_count||0} correction(s)`;
+    case 'meta_validator_tool':   return `🔍 Validator [${data?.tool}]: ${data?.flagged||0} issue(s)`;
+    case 'meta_validator_phase':  return `📋 Validator [${data?.phase}]: ${data?.correction_count||0} correction(s)`;
+    case 'meta_correction':       return `${data?.tier === 'blocking' ? '⛔' : '💡'} [${data?.source}] ${(data?.description||'').slice(0,80)}`;
+    case 'expert_status':         return `🎯 Red-Team Expert → ${data?.status}${data?.phase ? ` @ ${data.phase}` : ''}`;
+    case 'expert_directive':      return `${(data?.priority||'med').toUpperCase()} ${data?.action_type||'note'} → ${data?.target_phase||'?'}: ${(data?.title||'').slice(0,80)}`;
+    case 'expert_feedback':       return `🧭 Expert → ${data?.target_agent||'?'}: ${(data?.message||data?.note||'').slice(0,80)}`;
+    case 'expert_objective_update': return `🎯 Mission: ${data?.mission_phase||'?'}${typeof data?.progress_pct==='number'?` (${Math.round(data.progress_pct)}%)`:''}`;
     // v3 events
     case 'network_scan_complete': return `Network scan done: ${(data?.open_ports||[]).length} ports`;
     case 'shell_obtained':        return `Shell on ${data?.rhost}:${data?.rport}`;

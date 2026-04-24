@@ -563,10 +563,8 @@ class ReasoningLoop:
             f"Full recon + service fingerprinting on {self._target}", "recon"
         )
 
-        try:
-            await self._master._phase_recon(target=self._target, plan={})
-        except Exception as e:
-            await self._emit_reasoning(f"Recon error: {e}")
+        # Route through _safe_phase so meta-agent pre/post hooks fire.
+        await self._safe_phase(self._master._phase_recon, target=self._target, plan={})
 
         ports_found = self._intel.get("open_ports", [])
         # Use a LIST (not a set) so downstream code that slices/indexes it works.
@@ -619,21 +617,15 @@ class ReasoningLoop:
                 "bootstrap_exploit", "💥 Exploitation", "active",
                 f"Attempting exploitation on {len(port_nums)} open ports", "exploit"
             )
-            try:
-                await self._master._phase_exploit(target=self._target)
-                await self._emit_plan_step(
-                    "bootstrap_exploit", "💥 Exploitation", "done",
-                    f"{len(self._intel.get('shells',[]))} shells | "
-                    f"{len(self._intel.get('credentials',[]))} creds",
-                    "exploit",
-                    found=bool(self._intel.get("shells") or self._intel.get("credentials")),
-                )
-            except Exception as e:
-                await self._emit_reasoning(f"Exploit phase error: {e}")
-                await self._emit_plan_step(
-                    "bootstrap_exploit", "💥 Exploitation", "failed",
-                    f"error: {e}", "exploit", found=False
-                )
+            # Route through _safe_phase so meta-agent pre/post hooks fire.
+            await self._safe_phase(self._master._phase_exploit, target=self._target)
+            await self._emit_plan_step(
+                "bootstrap_exploit", "💥 Exploitation", "done",
+                f"{len(self._intel.get('shells',[]))} shells | "
+                f"{len(self._intel.get('credentials',[]))} creds",
+                "exploit",
+                found=bool(self._intel.get("shells") or self._intel.get("credentials")),
+            )
 
     async def _bootstrap_file_analysis(self) -> None:
         """Bootstrap for forensics / malware_analysis — run file analysis tools."""
@@ -678,10 +670,7 @@ class ReasoningLoop:
         await self._emit_reasoning("Starting compliance assessment bootstrap")
         await self._emit_plan_step("bootstrap_recon", "📋 Compliance Bootstrap", "active",
                                    f"Service discovery on {self._target}", "recon")
-        try:
-            await self._master._phase_recon(target=self._target, plan={})
-        except Exception as e:
-            await self._emit_reasoning(f"Compliance recon error: {e}")
+        await self._safe_phase(self._master._phase_recon, target=self._target, plan={})
         await self._emit_plan_step("bootstrap_recon", "📋 Compliance Bootstrap", "done",
                                    "Service baseline collected", "recon", found=True)
 
@@ -1380,14 +1369,135 @@ class ReasoningLoop:
     # ------------------------------------------------------------------
 
     async def _safe_phase(self, phase_fn, **kwargs):
-        """Call a MasterAgent phase safely, returning {} on error."""
+        """Call a MasterAgent phase safely, returning {} on error.
+
+        Wraps the call with meta-agent pre/post hooks so MasterChecker and
+        IssueValidator are exercised during the reasoning-loop path (which
+        bypasses the legacy phase-by-phase flow where those hooks live).
+        """
+        name = getattr(phase_fn, "__name__", "phase")
+        # Derive phase slug from method name: "_phase_recon" → "recon"
+        phase_slug = name.replace("_phase_", "").strip("_") or "reasoning"
+
+        mc  = getattr(self._master, "_master_checker", None)
+        iv  = getattr(self._master, "_issue_validator", None)
+        ex  = getattr(self._master, "_expert",          None)
+        mc_enabled = getattr(self._master, "_meta_agents_enabled", False) and mc is not None
+        ex_enabled = getattr(self._master, "_meta_agents_enabled", False) and ex is not None
+
+        # Collect pre-phase peer corrections so the Expert can grade them.
+        pre_peer_corrections = []
+
+        # ── EXPERT: pre-phase directive (runs FIRST, sets mission context) ─
+        if ex_enabled:
+            try:
+                await ex.pre_phase_directive(
+                    phase          = phase_slug,
+                    intel_snapshot = dict(self._intel),
+                )
+            except Exception as e:
+                await self._emit_reasoning(f"[expert] pre_phase_directive({phase_slug}) error: {e}")
+
+        # ── META: pre-phase review (Master Checker) ───────────────
+        if mc_enabled:
+            try:
+                _pre_c = await mc.pre_phase_review(
+                    phase          = phase_slug,
+                    instructions   = [],
+                    intel_snapshot = dict(self._intel),
+                )
+                pre_peer_corrections = _pre_c or []
+                if _pre_c and hasattr(self._master, "_handle_corrections"):
+                    try:
+                        await self._master._handle_corrections(_pre_c, phase_slug, allow_replan=False)
+                    except Exception:
+                        pass
+            except Exception as e:
+                await self._emit_reasoning(f"[meta] pre_phase_review({phase_slug}) error: {e}")
+
+        # ── Actual phase ──────────────────────────────────────────
         try:
             result = await phase_fn(**kwargs)
-            return result or {}
+            result = result or {}
         except Exception as e:
-            name = getattr(phase_fn, "__name__", "phase")
             await self._emit_reasoning(f"{name} error: {e}")
-            return {}
+            result = {}
+
+        # ── META: post-phase review + validator ───────────────────
+        if mc_enabled:
+            try:
+                phase_findings = []
+                try:
+                    from db import mongo_client as _db
+                    phase_findings = await _db.get_findings_by_phase(
+                        self._master._session_id, phase_slug
+                    ) or []
+                except Exception:
+                    pass
+
+                _post_c = await mc.post_phase_review(
+                    phase          = phase_slug,
+                    executed_tools = list(self._intel.get("raw_outputs", {}).keys()),
+                    findings       = phase_findings,
+                    intel_delta    = {},
+                )
+                if iv:
+                    try:
+                        _val_c = await iv.validate_phase_findings(
+                            phase           = phase_slug,
+                            all_findings    = phase_findings,
+                            scan_objectives = self._intel.get("ctf_objectives", []),
+                        )
+                        _post_c = (_post_c or []) + (_val_c or [])
+                    except Exception as e:
+                        await self._emit_reasoning(f"[meta] validate_phase_findings({phase_slug}) error: {e}")
+
+                if _post_c and hasattr(self._master, "_handle_corrections"):
+                    try:
+                        await self._master._handle_corrections(_post_c, phase_slug, allow_replan=False)
+                    except Exception:
+                        pass
+            except Exception as e:
+                await self._emit_reasoning(f"[meta] post_phase_review({phase_slug}) error: {e}")
+
+        # ── EXPERT: post-phase directive + peer-review MC/IV ──────
+        if ex_enabled:
+            try:
+                # Pull this phase's findings (already fetched above if mc_enabled,
+                # otherwise fetch fresh).
+                phase_findings_ex = []
+                try:
+                    from db import mongo_client as _db2
+                    phase_findings_ex = await _db2.get_findings_by_phase(
+                        self._master._session_id, phase_slug
+                    ) or []
+                except Exception:
+                    pass
+
+                # Combine all peer corrections this phase produced (pre + post)
+                peer_all = list(pre_peer_corrections)
+                try:
+                    peer_all.extend(_post_c or [])
+                except Exception:
+                    pass
+
+                expert_corrs = await ex.post_phase_directive(
+                    phase            = phase_slug,
+                    intel_snapshot   = dict(self._intel),
+                    findings         = phase_findings_ex,
+                    peer_corrections = peer_all,
+                )
+                # Expert's own peer-review corrections flow through _handle_corrections
+                # as advisory guidance too (never blocking by default).
+                if expert_corrs and hasattr(self._master, "_handle_corrections"):
+                    try:
+                        await self._master._handle_corrections(expert_corrs, phase_slug, allow_replan=False)
+                    except Exception:
+                        pass
+            except Exception as e:
+                await self._emit_reasoning(f"[expert] post_phase_directive({phase_slug}) error: {e}")
+
+        return result
 
     async def _run_ad_enum(self) -> dict:
         """Run Active Directory enumeration via BloodHound."""

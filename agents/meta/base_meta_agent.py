@@ -59,6 +59,18 @@ class BaseMetaAgent(BaseAgent):
         self._thought_counter: int         = 0
         self._current_phase:   str         = ""
 
+    # ── Name helper ────────────────────────────────────────────────────────
+    @property
+    def _agent_name_str(self) -> str:
+        """Return the lowercase string value of the agent name (e.g. 'master_checker').
+
+        Using ``self._agent_name_str`` on a regular ``Enum`` yields ``'AgentName.MASTER_CHECKER'``,
+        which breaks frontend routing that inspects the agent identifier.
+        This helper always returns the underlying ``.value`` when available.
+        """
+        n = self.name
+        return getattr(n, "value", None) or str(n)
+
     # ── Abstract interface ─────────────────────────────────────────────────
 
     @abstractmethod
@@ -97,7 +109,7 @@ class BaseMetaAgent(BaseAgent):
         if not self._llm_available:
             await self.check_llm_available()
             if not self._llm_available:
-                logger.warning("[%s] LLM unavailable — skipping evaluation", str(self.name))
+                logger.warning("[%s] LLM unavailable — skipping evaluation", self._agent_name_str)
                 return ""
 
         # Append user turn to history before calling LLM
@@ -109,10 +121,10 @@ class BaseMetaAgent(BaseAgent):
         ]
 
         self._thought_counter += 1
-        thought_id = f"{str(self.name)}_{self._thought_counter}"
+        thought_id = f"{self._agent_name_str}_{self._thought_counter}"
 
         await self._emit("meta_agent_status", {
-            "agent":  str(self.name),
+            "agent":  self._agent_name_str,
             "status": "thinking",
             "phase":  self._current_phase,
         })
@@ -141,7 +153,7 @@ class BaseMetaAgent(BaseAgent):
                             if tok:
                                 tokens.append(tok)
                                 await self._emit("meta_agent_thinking", {
-                                    "agent":      str(self.name),
+                                    "agent":      self._agent_name_str,
                                     "phase":      self._current_phase,
                                     "chunk":      tok,
                                     "thought_id": thought_id,
@@ -152,10 +164,16 @@ class BaseMetaAgent(BaseAgent):
                             pass
 
         except Exception as exc:
-            logger.warning("[%s] LLM call failed: %s", str(self.name), exc)
+            logger.warning("[%s] LLM call failed: %s", self._agent_name_str, exc)
             # Remove the dangling user turn so history stays consistent
             if self._history and self._history[-1]["role"] == "user":
                 self._history.pop()
+            # Always return to idle so the frontend status dot doesn't get stuck
+            await self._emit("meta_agent_status", {
+                "agent":  self._agent_name_str,
+                "status": "idle",
+                "phase":  self._current_phase,
+            })
             return ""
 
         content = "".join(tokens)
@@ -169,7 +187,7 @@ class BaseMetaAgent(BaseAgent):
             self._history = self._history[-max_msgs:]
 
         await self._emit("meta_agent_status", {
-            "agent":  str(self.name),
+            "agent":  self._agent_name_str,
             "status": "idle",
             "phase":  self._current_phase,
         })
@@ -184,7 +202,7 @@ class BaseMetaAgent(BaseAgent):
             if self._db is not None:
                 await self._db["meta_corrections"].insert_one(correction.to_dict())
         except Exception as exc:
-            logger.warning("[%s] DB persist failed for correction: %s", str(self.name), exc)
+            logger.warning("[%s] DB persist failed for correction: %s", self._agent_name_str, exc)
 
         await self._emit("meta_correction", correction.to_dict())
 
