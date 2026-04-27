@@ -69,6 +69,14 @@ function TargetConfig() {
     max_threads:        5,
     max_parallel_hosts: 5,
     phases:             ALL_PHASES.map(p => p.key),
+    // ── Mission Brief (Improvement #1) ─────────────────────────────────
+    mb_objective:        'Establish foothold, capture flags, and demonstrate impact.',
+    mb_win_conditions:   'shell_obtained, user_flag_captured, root_flag_captured',
+    mb_scope_in:         '',
+    mb_scope_out:        '',
+    mb_time_budget_min:  240,
+    mb_noise_budget:     70,
+    mb_blast_radius:     'active',
   });
 
   // Auto-detect mode from target input
@@ -91,7 +99,25 @@ function TargetConfig() {
     if (!form.target_ip.trim()) { setError('Target IP is required'); return; }
     setError(''); setLoading(true);
     try {
-      const res = await window.API.sessions.create(form);
+      // Assemble the formal mission brief from the dedicated form fields
+      const splitList = s => (s || '')
+        .split(/[,\n]/)
+        .map(x => x.trim())
+        .filter(Boolean);
+      const mission_brief = {
+        objective:        form.mb_objective || '',
+        win_conditions:   splitList(form.mb_win_conditions),
+        scope_in:         splitList(form.mb_scope_in),
+        scope_out:        splitList(form.mb_scope_out),
+        time_budget_min:  Number(form.mb_time_budget_min) || 0,
+        noise_budget:     Math.max(0, Math.min(100, Number(form.mb_noise_budget) || 0)),
+        blast_radius:     form.mb_blast_radius || 'active',
+        notes:            form.notes || null,
+      };
+      const payload = { ...form, mission_brief };
+      // Strip the local-only mb_* fields so the backend schema is clean
+      Object.keys(payload).forEach(k => { if (k.startsWith('mb_')) delete payload[k]; });
+      const res = await window.API.sessions.create(payload);
       const session = res.session;
       dispatch({ type: 'SET_SESSION', payload: session });
       connectWS(session.id);
@@ -360,6 +386,104 @@ function TargetConfig() {
           onChange: e => set('target_hostname', e.target.value),
           style: inp
         })
+      ),
+    ),
+
+    // ── Mission Brief (Improvement #1) ───────────────────────────────────
+    React.createElement('div', {
+      style: {
+        ...card,
+        borderColor: 'rgba(232,67,90,0.35)',
+        background: 'rgba(232,67,90,0.04)',
+      }
+    },
+      React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 } },
+        React.createElement('span', { style: { fontSize: 14 } }, '🎖'),
+        React.createElement('span', { style: { fontSize: 12, fontWeight: 700, color: '#E8435A', letterSpacing: 0.5 } },
+          'MISSION BRIEF'),
+        React.createElement('span', {
+          style: {
+            fontSize: 9, padding: '1px 6px', borderRadius: 3, marginLeft: 'auto',
+            color: '#E8435A', background: 'rgba(232,67,90,0.10)',
+            border: '1px solid rgba(232,67,90,0.35)', fontFamily: 'var(--font-mono)',
+          }
+        }, 'GOAL-DRIVEN')
+      ),
+      React.createElement('div', { style: { fontSize: 10, color: 'var(--text-muted)', marginBottom: 12, lineHeight: 1.5 } },
+        'Defines what success looks like. Injected into every Expert prompt and planning call so the whole engagement stays aligned with the goal.'),
+
+      // Objective
+      React.createElement('div', { style: row },
+        React.createElement('div', { style: label }, 'Objective'),
+        React.createElement('input', {
+          type: 'text', value: form.mb_objective,
+          placeholder: 'e.g. Capture root.txt and demonstrate domain admin',
+          onChange: e => set('mb_objective', e.target.value),
+          style: inp,
+        })
+      ),
+      // Win conditions
+      React.createElement('div', { style: row },
+        React.createElement('div', { style: label }, 'Win conditions  (comma or newline separated)'),
+        React.createElement('textarea', {
+          value: form.mb_win_conditions, rows: 2,
+          placeholder: 'shell_obtained, user_flag_captured, root_flag_captured',
+          onChange: e => set('mb_win_conditions', e.target.value),
+          style: { ...inp, resize: 'vertical', lineHeight: 1.5 }
+        })
+      ),
+      // Scope in / out
+      React.createElement('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, marginBottom: 12 } },
+        React.createElement('div', null,
+          React.createElement('div', { style: label }, 'Scope IN'),
+          React.createElement('textarea', {
+            value: form.mb_scope_in, rows: 2,
+            placeholder: '10.10.10.0/24\nexample.htb',
+            onChange: e => set('mb_scope_in', e.target.value),
+            style: { ...inp, resize: 'vertical', lineHeight: 1.5 }
+          })
+        ),
+        React.createElement('div', null,
+          React.createElement('div', { style: label }, 'Scope OUT'),
+          React.createElement('textarea', {
+            value: form.mb_scope_out, rows: 2,
+            placeholder: 'prod.example.com',
+            onChange: e => set('mb_scope_out', e.target.value),
+            style: { ...inp, resize: 'vertical', lineHeight: 1.5 }
+          })
+        )
+      ),
+      // Budgets row
+      React.createElement('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12 } },
+        React.createElement('div', null,
+          React.createElement('div', { style: label }, 'Time budget (min)'),
+          React.createElement('input', {
+            type: 'number', min: 0, value: form.mb_time_budget_min,
+            onChange: e => set('mb_time_budget_min', Number(e.target.value) || 0),
+            style: inp,
+          })
+        ),
+        React.createElement('div', null,
+          React.createElement('div', { style: label }, `Noise budget (${form.mb_noise_budget}/100)`),
+          React.createElement('input', {
+            type: 'range', min: 0, max: 100, step: 5,
+            value: form.mb_noise_budget,
+            onChange: e => set('mb_noise_budget', Number(e.target.value)),
+            style: { ...inp, padding: 0, height: 28, accentColor: '#E8435A' },
+          })
+        ),
+        React.createElement('div', null,
+          React.createElement('div', { style: label }, 'Blast radius'),
+          React.createElement('select', {
+            value: form.mb_blast_radius,
+            onChange: e => set('mb_blast_radius', e.target.value),
+            style: { ...inp, cursor: 'pointer' },
+          },
+            React.createElement('option', { value: 'passive' },     'passive — OSINT only'),
+            React.createElement('option', { value: 'active' },      'active — scans + exploits'),
+            React.createElement('option', { value: 'destructive' }, 'destructive — DoS / data-altering'),
+          )
+        )
       ),
     ),
 

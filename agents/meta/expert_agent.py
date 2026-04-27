@@ -235,8 +235,35 @@ class RedTeamExpertAgent(BaseMetaAgent):
             "progress_pct":  0,
             "objectives":    [],
         }
+        # Mission brief (Improvement #1) — set by MasterAgent right after init
+        self._mission_brief: Optional[Any] = None
+
+    # ── Mission brief plumbing (Improvement #1) ────────────────────────────
+    def set_mission_brief(self, brief: Any) -> None:
+        """Store the formal mission brief for prompt injection."""
+        self._mission_brief = brief
+
+    def _mission_brief_block(self) -> str:
+        """Return the brief formatted for prompt injection, or empty string."""
+        mb = self._mission_brief
+        if mb is None:
+            return ""
+        try:
+            if hasattr(mb, "to_prompt_block"):
+                return mb.to_prompt_block()
+            if isinstance(mb, dict):
+                from db.schemas import MissionBrief as _MB
+                return _MB(**mb).to_prompt_block()
+        except Exception as exc:                               # noqa: BLE001
+            logger.warning("[expert] Could not render mission brief: %s", exc)
+        return ""
 
     def _build_system_prompt(self) -> str:
+        # Prepend the mission brief so it travels in *every* turn of the
+        # persistent conversation thread maintained by BaseMetaAgent.
+        block = self._mission_brief_block()
+        if block:
+            return f"{block}\n\n{_EXPERT_SYSTEM_PROMPT}"
         return _EXPERT_SYSTEM_PROMPT
 
     # ── RAG helper ─────────────────────────────────────────────────────────

@@ -328,6 +328,13 @@ async def create_session(data: SessionCreate) -> Dict:
         # Archiving
         "archived":           False,
         "archived_at":        None,
+        # Mission brief (Improvement #1) — persisted as plain dict
+        "mission_brief":      (
+            data.mission_brief.dict()
+            if getattr(data, "mission_brief", None) is not None
+            and hasattr(data.mission_brief, "dict")
+            else getattr(data, "mission_brief", None)
+        ),
     }
     await db.sessions.insert_one(doc)
     return _serialize(doc)

@@ -55,6 +55,17 @@ class WebAgent(BaseAgent):
         super().__init__(AgentName.OSINT, broadcast)   # reuse OSINT enum slot
         self.name  = "web"
         self.phase = AttackPhase.VULN_ID
+        # BaseAgent registered this instance under ``str(AgentName.OSINT)`` in
+        # its super().__init__. After the rename above, the "web" identity is
+        # what the watchdog emits to the frontend ("subagent": "web"), so the
+        # frontend's stop/extend button sends back "web". Re-register under
+        # that key as well so the direct lookup in agent_server resolves
+        # without needing the fallback-by-name scan.
+        try:
+            from agents.base_agent import _AGENT_REGISTRY as _AR
+            _AR[self.name] = self
+        except Exception:
+            pass
 
     async def run(
         self,

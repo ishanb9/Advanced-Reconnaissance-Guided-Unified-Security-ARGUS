@@ -121,6 +121,56 @@ class BaseDocument(BaseModel):
 
 
 # ═══════════════════════════════════════════════════════════
+#  MISSION BRIEF (Improvement #1 — formal mission object)
+#  First-class object on every scan that defines WHAT success
+#  looks like, the legal scope, the time/noise budgets, and the
+#  permitted blast radius. Surfaced in every planning prompt and
+#  to the Expert agent so the whole system stays goal-driven.
+# ═══════════════════════════════════════════════════════════
+
+class BlastRadius(str, Enum):
+    PASSIVE     = "passive"      # OSINT only — no packets to target
+    ACTIVE      = "active"       # scans + exploits OK, no destructive ops
+    DESTRUCTIVE = "destructive"  # DoS / data-altering ops permitted
+
+
+class MissionBrief(BaseModel):
+    """Formal mission definition attached to every session.
+
+    All fields default so legacy scans (created before this object existed)
+    still validate. The defaults represent a generic active-pentest goal.
+    """
+    objective:        str       = "Establish foothold, capture flags, and demonstrate impact."
+    win_conditions:   List[str] = Field(default_factory=lambda: [
+        "shell_obtained",          # any interactive shell on target
+        "user_flag_captured",      # /home/<user>/user.txt or equivalent
+        "root_flag_captured",      # /root/root.txt or SYSTEM-level proof
+    ])
+    scope_in:         List[str] = []   # IPs/CIDRs/domains explicitly in-scope
+    scope_out:        List[str] = []   # explicitly excluded
+    time_budget_min:  int       = 240  # soft cap; 0 = unlimited
+    noise_budget:     int       = 70   # 0 = silent, 100 = unrestricted
+    blast_radius:     str       = BlastRadius.ACTIVE.value
+    notes:            Optional[str] = None  # free-form operator context
+
+    def to_prompt_block(self) -> str:
+        """Compact, prompt-injectable rendering of the brief."""
+        lines = [
+            "=== MISSION BRIEF ===",
+            f"Objective       : {self.objective}",
+            f"Win conditions  : {', '.join(self.win_conditions) or '(unspecified)'}",
+            f"Scope IN        : {', '.join(self.scope_in)  or '(target only)'}",
+            f"Scope OUT       : {', '.join(self.scope_out) or '(none)'}",
+            f"Time budget     : {self.time_budget_min} min" if self.time_budget_min else "Time budget     : unlimited",
+            f"Noise budget    : {self.noise_budget}/100",
+            f"Blast radius    : {self.blast_radius}",
+        ]
+        if self.notes:
+            lines.append(f"Operator notes  : {self.notes}")
+        return "\n".join(lines)
+
+
+# ═══════════════════════════════════════════════════════════
 #  COLLECTION: sessions
 # ═══════════════════════════════════════════════════════════
 
@@ -136,6 +186,7 @@ class SessionCreate(BaseModel):
     max_parallel_hosts: int  = 5
     phases:             List[str] = []
     auto_exploit:       bool = False
+    mission_brief:      Optional[MissionBrief] = None
 
 
 class Session(SessionCreate):
@@ -160,6 +211,8 @@ class Session(SessionCreate):
     # Archiving
     archived:           bool = False
     archived_at:        Optional[datetime] = None
+    # Mission brief (Improvement #1) — overrides default for legacy sessions
+    mission_brief:      Optional[MissionBrief] = None
 
 
 # ═══════════════════════════════════════════════════════════
@@ -432,6 +485,7 @@ class StartPentestRequest(BaseModel):
     web_phase_timeout:  int  = 600    # Seconds before web phase emits time-extension popup (0 = no limit)
     max_parallel_hosts: int  = 5
     use_reasoning_loop: bool = False  # Enable hypothesis-driven reasoning engine
+    mission_brief:      Optional[MissionBrief] = None  # Improvement #1 — formal mission
 
 
 # ═══════════════════════════════════════════════════════════

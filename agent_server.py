@@ -54,7 +54,7 @@ from report.generator          import ReportGenerator
 # ══════════════════════════════════════════════════════════════
 
 MCP_URL    = "http://localhost:3000"
-OLLAMA_URL = os.environ.get("OLLAMA_URL",   "http://192.168.0.100:11434")
+OLLAMA_URL = os.environ.get("OLLAMA_URL",   "http://192.168.0.101:11434")
 MODEL_NAME = os.environ.get("OLLAMA_MODEL", "deepseek-v3.1:671b-cloud")
 MONGO_URI  = os.environ.get("MONGO_URI",    "mongodb://localhost:27017")
 
@@ -166,6 +166,54 @@ def _detect_session_mode(target_ip: str) -> SessionMode:
     if "," in target_ip:
         return SessionMode.MULTI
     return SessionMode.SINGLE
+
+
+def _resolve_agent_or_subagent(identifier: str):
+    """Resolve a `tool_extend` / `tool_stop` target identifier to a live agent.
+
+    The frontend sends back whatever string the backend put in the
+    ``subagent`` field of ``tool_timeout_warning``.  That string may be:
+      1. A ``SUBAGENT_NAME`` (e.g. ``web_vuln_scan``)            — BaseSubagent registry
+      2. A ``BaseAgent`` registry key — usually ``str(AgentName.XXX)``
+         which equals ``"AgentName.RECON"`` for a plain ``Enum`` subclass
+      3. A free-form ``self.name`` that was reassigned by the subclass
+         after ``super().__init__`` (e.g. ``WebAgent.self.name = "web"``)
+
+    Without this helper, case 3 falls through both registries because the
+    agent is registered under its original enum string but emits events
+    under its renamed string — meaning ``kill_current_tool()`` never
+    fires, and the watchdog keeps popping the timeout dialog every 30 s.
+    """
+    if not identifier:
+        return None
+    # Import here to avoid circular imports at module load time.
+    from agents.base_subagent import get_subagent, _SUBAGENT_REGISTRY
+    from agents.base_agent    import get_agent,    _AGENT_REGISTRY
+
+    # 1. Direct lookup in both registries.
+    sa = get_subagent(identifier) or get_agent(identifier)
+    if sa:
+        return sa
+
+    # 2. Case-insensitive fallback across BOTH registries, matching:
+    #    - the registry key
+    #    - the instance's ``name`` attribute (handles reassignment)
+    #    - the instance's ``SUBAGENT_NAME`` / ``AGENT_NAME`` class attributes
+    want = identifier.strip().lower()
+    candidates = list(_SUBAGENT_REGISTRY.items()) + list(_AGENT_REGISTRY.items())
+    for key, inst in candidates:
+        if str(key).lower() == want:
+            return inst
+        inst_name = getattr(inst, "name", None)
+        if inst_name is not None:
+            nm = getattr(inst_name, "value", None) or str(inst_name)
+            if nm.lower() == want:
+                return inst
+        for attr in ("SUBAGENT_NAME", "AGENT_NAME"):
+            v = getattr(inst, attr, None)
+            if v and str(v).lower() == want:
+                return inst
+    return None
 
 
 # ══════════════════════════════════════════════════════════════
@@ -792,7 +840,7 @@ Be concise but actionable. Use actual tool names and techniques. Format clearly 
 
     try:
         import httpx as _httpx
-        llm_url = os.environ.get("OLLAMA_URL", "http://192.168.0.100:11434")
+        llm_url = os.environ.get("OLLAMA_URL", "http://192.168.0.101:11434")
         model = os.environ.get("OLLAMA_MODEL", "deepseek-v3.1:671b-cloud")
         resp = await _httpx.AsyncClient(timeout=60.0).post(
             f"{llm_url}/api/generate",
@@ -1432,6 +1480,71 @@ async def status():
     }
 
 
+@app.get("/api/llm/check")
+async def llm_check():
+    """
+    Detailed LLM diagnostic endpoint.
+    Returns:
+      - ollama_reachable: whether the Ollama server responds at all
+      - available_models: list of model names pulled on this Ollama server
+      - configured_model: MODEL_NAME currently configured
+      - model_available:  whether configured_model appears in the pulled list
+      - model_test:       result of a quick generation call ("ok" / error string)
+      - ollama_url:       the URL being targeted
+    """
+    diag = {
+        "ollama_url":        OLLAMA_URL,
+        "configured_model":  MODEL_NAME,
+        "ollama_reachable":  False,
+        "available_models":  [],
+        "model_available":   False,
+        "model_test":        "not run",
+    }
+
+    # ── 1. Reachability + model list ─────────────────────────────────────
+    try:
+        async with httpx.AsyncClient(timeout=5) as c:
+            r = await c.get(f"{OLLAMA_URL}/api/tags")
+            if r.status_code == 200:
+                diag["ollama_reachable"] = True
+                body = r.json()
+                models = [m.get("name", "") for m in body.get("models", [])]
+                diag["available_models"] = models
+                # Match by exact name or by stripping tag suffixes for a fuzzy check
+                diag["model_available"] = (
+                    MODEL_NAME in models or
+                    any(MODEL_NAME.split(":")[0] in m for m in models)
+                )
+            else:
+                diag["ollama_reachable_error"] = f"HTTP {r.status_code}"
+    except Exception as e:
+        diag["ollama_reachable_error"] = str(e)
+
+    # ── 2. Quick generation smoke test ───────────────────────────────────
+    if diag["ollama_reachable"]:
+        try:
+            async with httpx.AsyncClient(timeout=30) as c:
+                r = await c.post(
+                    f"{OLLAMA_URL}/api/chat",
+                    json={
+                        "model":    MODEL_NAME,
+                        "messages": [{"role": "user", "content": "Reply with the single word: ready"}],
+                        "stream":   False,
+                    }
+                )
+                if r.status_code == 200:
+                    diag["model_test"] = "ok"
+                    diag["model_test_response"] = r.json().get("message", {}).get("content", "")
+                elif r.status_code == 404:
+                    diag["model_test"] = f"model not found — pull it first: ollama pull {MODEL_NAME}"
+                else:
+                    diag["model_test"] = f"HTTP {r.status_code}: {r.text[:200]}"
+        except Exception as e:
+            diag["model_test"] = f"error: {e}"
+
+    return diag
+
+
 # ══════════════════════════════════════════════════════════════
 #  SETTINGS — NEO4J / INTEGRATIONS
 # ══════════════════════════════════════════════════════════════
@@ -1858,7 +1971,7 @@ async def websocket_endpoint(ws: WebSocket, session_id: str):
                     from agents.base_agent import get_agent
                     subagent_name = msg.get("subagent", "")
                     extra_sec     = float(msg.get("extra_sec", 600))
-                    sa = get_subagent(subagent_name) or get_agent(subagent_name)
+                    sa = _resolve_agent_or_subagent(subagent_name)
                     if sa:
                         sa.extend_tool(extra_sec)
                     await ws.send_text(json.dumps({
@@ -1873,16 +1986,21 @@ async def websocket_endpoint(ws: WebSocket, session_id: str):
                     from agents.base_subagent import get_subagent
                     from agents.base_agent import get_agent
                     subagent_name = msg.get("subagent", "")
-                    sa = get_subagent(subagent_name) or get_agent(subagent_name)
+                    sa = _resolve_agent_or_subagent(subagent_name)
                     if sa:
                         if hasattr(sa, "kill_current_tool"):
                             sa.kill_current_tool()
                         else:
                             sa.request_stop()   # fallback for older agents
+                    else:
+                        print(f"[WS] tool_stop: no agent/subagent matched '{subagent_name}'")
                     await ws.send_text(json.dumps({
                         "type": "tool_stopped",
                         "data": {"subagent": subagent_name,
-                                 "message": f"Tool '{subagent_name}' cancelled — scan continues"}
+                                 "resolved":  bool(sa),
+                                 "message": (f"Tool '{subagent_name}' cancelled — scan continues"
+                                             if sa else
+                                             f"Stop request for '{subagent_name}' — no matching agent found")}
                     }))
 
             except asyncio.TimeoutError:

@@ -383,6 +383,11 @@ class MasterAgent(BaseAgent):
         self._notes: str = ""
         self._scope: str = ""
 
+        # Mission brief (Improvement #1) — formal goal definition.  Holds the
+        # validated MissionBrief Pydantic model; defaults are filled in by the
+        # API layer before run() is called so this is never None mid-scan.
+        self._mission_brief: Optional[Any] = None
+
         # User guidance queue — injected mid-run from frontend
         self._guidance_queue: asyncio.Queue = asyncio.Queue()
 
@@ -492,6 +497,7 @@ class MasterAgent(BaseAgent):
         scope:              str  = "",
         checkpoint_id:      Optional[str] = None,   # resume from checkpoint
         use_reasoning_loop: bool = False,            # enable hypothesis-driven engine
+        mission_brief:      Optional[Any] = None,    # Improvement #1 — formal mission
         **kwargs
     ) -> Dict:
         self._use_reasoning_loop = _REASONING_AVAILABLE  # Always use reasoning if available
@@ -504,6 +510,40 @@ class MasterAgent(BaseAgent):
         self._intel["target"]     = target
         self._intel["target_type"] = target_type
         self._phases_to_run  = phases or [p.value for p in AttackPhase]
+
+        # ── Mission brief (Improvement #1) — coerce to MissionBrief model ───
+        try:
+            from db.schemas import MissionBrief as _MB
+            if mission_brief is None:
+                self._mission_brief = _MB()
+            elif isinstance(mission_brief, _MB):
+                self._mission_brief = mission_brief
+            elif isinstance(mission_brief, dict):
+                self._mission_brief = _MB(**mission_brief)
+            else:
+                self._mission_brief = _MB()
+        except Exception as _mb_exc:                                # noqa: BLE001
+            import logging as _ml
+            _ml.getLogger(__name__).warning(
+                "[mission_brief] could not parse — using defaults: %s", _mb_exc
+            )
+            from db.schemas import MissionBrief as _MB
+            self._mission_brief = _MB()
+
+        # Surface mission brief in shared intel so subagents and prompts pick it up
+        try:
+            self._intel["mission_brief"] = self._mission_brief.dict()
+        except Exception:
+            self._intel["mission_brief"] = {}
+
+        # Broadcast so the UI can show the brief as a permanent banner
+        try:
+            await self._emit("mission_brief", {
+                "scan_id":       session_id,
+                "mission_brief": self._intel["mission_brief"],
+            })
+        except Exception:
+            pass
 
         # Initialise meta-agents if available
         if not _META_AGENTS_AVAILABLE:
@@ -535,6 +575,13 @@ class MasterAgent(BaseAgent):
                 # master's guidance queue (inject_guidance).
                 try:
                     self._expert.bind_master(self)
+                except Exception:
+                    pass
+                # Hand the formal mission brief to the Expert so every prompt
+                # is grounded in the same goal/scope/budget definition.
+                try:
+                    if hasattr(self._expert, "set_mission_brief") and self._mission_brief is not None:
+                        self._expert.set_mission_brief(self._mission_brief)
                 except Exception:
                     pass
                 # Start background task that keeps the listener alive

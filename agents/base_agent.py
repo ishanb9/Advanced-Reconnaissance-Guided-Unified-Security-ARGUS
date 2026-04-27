@@ -33,18 +33,37 @@ from db.schemas import (
 import db.mongo_client as db
 
 def _kill_proc_tree(proc) -> None:
-    """Kill a subprocess AND all its children via process-group signal.
+    """Kill a subprocess AND all its children.
 
-    Mirrors base_subagent._kill_proc_tree — kept local to avoid circular import.
-    Using killpg() ensures that child processes spawned by bash (e.g. nikto,
-    sqlmap, any pipeline) receive SIGKILL and cannot survive as orphans.
-    Falls back to proc.kill() on any OS error.
+    Cross-platform:
+    - POSIX: killpg() → SIGKILL to the entire process group so bash + nikto
+      + any pipeline children all die.
+    - Windows: taskkill /T /F to recursively kill the process tree, since
+      os.getpgid / os.killpg / SIGKILL do not exist there.
+
+    Always falls back to proc.kill() at the end so the asyncio Process object
+    transitions to a terminated state and drain readers unblock.
     """
-    try:
-        pgid = os.getpgid(proc.pid)
-        os.killpg(pgid, _signal.SIGKILL)
-    except (ProcessLookupError, PermissionError, OSError):
-        pass
+    # ── POSIX: process-group kill ──────────────────────────────
+    if hasattr(os, "getpgid") and hasattr(os, "killpg") and hasattr(_signal, "SIGKILL"):
+        try:
+            pgid = os.getpgid(proc.pid)
+            os.killpg(pgid, _signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+    # ── Windows: recursive taskkill ────────────────────────────
+    elif sys.platform == "win32":
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except Exception:
+            pass
+    # ── Always: final kill on the asyncio Process so drain unblocks ─
     try:
         proc.kill()
     except Exception:
@@ -147,7 +166,7 @@ def _kb_procedures(query: str, top_k: int = 3) -> str:
 
 # ─── Configuration ────────────────────────────────────────────
 MCP_URL    = "http://localhost:3000"
-OLLAMA_URL = "http://192.168.0.100:11434"   # ← Ollama host
+OLLAMA_URL = "http://192.168.0.101:11434"   # ← Ollama host
 MODEL_NAME = "deepseek-v3.1:671b-cloud"   # ← Ollama model name
 
 LLM_CHECK_TIMEOUT  = 10   # Seconds to wait for Ollama health check
@@ -315,7 +334,7 @@ class BaseAgent(ABC):
 
     async def check_llm_available(self) -> bool:
         """
-        Test if Ollama LLM is reachable and responding.
+        Test if Ollama is reachable AND the configured model exists.
         Result is cached for the session. Emits clear status to frontend.
         MASTER AGENT must call this before any planning.
         If this returns False, testing should NOT proceed.
@@ -324,6 +343,40 @@ class BaseAgent(ABC):
             async with httpx.AsyncClient(timeout=LLM_CHECK_TIMEOUT) as client:
                 resp = await client.get(f"{OLLAMA_URL}/api/tags")
                 if resp.status_code == 200:
+                    # Also verify the specific model is present so we get a
+                    # clear "model not found" error rather than a cryptic
+                    # HTTPStatusError on every think() call.
+                    try:
+                        body = resp.json()
+                        available = [m.get("name", "") for m in body.get("models", [])]
+                        model_base = MODEL_NAME.split(":")[0]
+                        model_found = (
+                            MODEL_NAME in available or
+                            any(m == MODEL_NAME or m.split(":")[0] == model_base
+                                for m in available)
+                        )
+                    except Exception:
+                        model_found = True   # can't parse — assume ok, fail later if wrong
+
+                    if not model_found:
+                        self._llm_available = False
+                        avail_str = ", ".join(available[:10]) or "(none pulled)"
+                        msg = (
+                            f"Model '{MODEL_NAME}' not found on Ollama at {OLLAMA_URL}. "
+                            f"Available: {avail_str}. "
+                            f"Run: ollama pull {MODEL_NAME}"
+                        )
+                        await self._emit("llm_status", {
+                            "available":       False,
+                            "url":             OLLAMA_URL,
+                            "model":           MODEL_NAME,
+                            "available_models": available,
+                            "message":         msg,
+                            "error":           "model_not_found",
+                        })
+                        await self.set_status(AgentStatus.ERROR, msg)
+                        return False
+
                     self._llm_available = True
                     await self._emit("llm_status", {
                         "available": True,
@@ -332,7 +385,7 @@ class BaseAgent(ABC):
                         "message":   f"LLM online — {MODEL_NAME} at {OLLAMA_URL}"
                     })
                     return True
-        except Exception as e:
+        except Exception:
             pass
 
         self._llm_available = False
@@ -342,7 +395,7 @@ class BaseAgent(ABC):
             "url":       OLLAMA_URL,
             "model":     MODEL_NAME,
             "message":   msg,
-            "error":     "Connection refused or timeout"
+            "error":     "connection_refused",
         })
         await self.set_status(AgentStatus.ERROR, msg)
         return False
@@ -1332,6 +1385,33 @@ Return JSON:
                     continue
                 # Exhausted retries — return "" so think_json → _safe_llm_result → {}
                 # and each phase method falls through to its hardcoded fallback task list.
+                return ""
+
+            except httpx.HTTPStatusError as exc:
+                # Ollama returned a non-2xx response (most commonly 404 when the
+                # model name is wrong / not pulled).  Retrying won't help — bail
+                # immediately with a human-readable message.
+                status_code = exc.response.status_code
+                if status_code == 404:
+                    self._llm_available = False   # block further calls until re-checked
+                    msg = (
+                        f"Model '{MODEL_NAME}' not found on Ollama (HTTP 404). "
+                        f"Run: ollama pull {MODEL_NAME}"
+                    )
+                else:
+                    msg = (
+                        f"Ollama returned HTTP {status_code} for model '{MODEL_NAME}'. "
+                        f"Response: {exc.response.text[:200]}"
+                    )
+                import logging as _llm_log
+                _llm_log.getLogger(__name__).error("think() HTTP error: %s", msg)
+                await self._emit("llm_status", {
+                    "available": False,
+                    "url":       OLLAMA_URL,
+                    "model":     MODEL_NAME,
+                    "message":   msg,
+                    "error":     f"http_{status_code}",
+                })
                 return ""
 
             except Exception as exc:

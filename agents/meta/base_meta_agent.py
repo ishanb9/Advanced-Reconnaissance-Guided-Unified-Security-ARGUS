@@ -163,6 +163,36 @@ class BaseMetaAgent(BaseAgent):
                         except (json.JSONDecodeError, KeyError):
                             pass
 
+        except httpx.HTTPStatusError as exc:
+            status_code = exc.response.status_code
+            if status_code == 404:
+                msg = (
+                    f"Model '{MODEL_NAME}' not found on Ollama (HTTP 404). "
+                    f"Run: ollama pull {MODEL_NAME}"
+                )
+            else:
+                msg = (
+                    f"Ollama HTTP {status_code} for model '{MODEL_NAME}': "
+                    f"{exc.response.text[:200]}"
+                )
+            logger.error("[%s] LLM HTTP error: %s", self._agent_name_str, msg)
+            # Remove the dangling user turn so history stays consistent
+            if self._history and self._history[-1]["role"] == "user":
+                self._history.pop()
+            await self._emit("llm_status", {
+                "available": False,
+                "url":       OLLAMA_URL,
+                "model":     MODEL_NAME,
+                "message":   msg,
+                "error":     f"http_{status_code}",
+            })
+            await self._emit("meta_agent_status", {
+                "agent":  self._agent_name_str,
+                "status": "idle",
+                "phase":  self._current_phase,
+            })
+            return ""
+
         except Exception as exc:
             logger.warning("[%s] LLM call failed: %s", self._agent_name_str, exc)
             # Remove the dangling user turn so history stays consistent

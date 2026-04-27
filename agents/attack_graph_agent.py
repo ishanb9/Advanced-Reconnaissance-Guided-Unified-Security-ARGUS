@@ -45,7 +45,7 @@ import db.mongo_client as _db
 logger = logging.getLogger(__name__)
 
 # ── Config ────────────────────────────────────────────────────────────────────
-OLLAMA_URL   = "http://192.168.0.100:11434"
+OLLAMA_URL   = "http://192.168.0.101:11434"
 MODEL_NAME   = "deepseek-v3.1:671b-cloud"
 LLM_TIMEOUT  = 180     # seconds
 POLL_INTERVAL = 35     # seconds between polls
