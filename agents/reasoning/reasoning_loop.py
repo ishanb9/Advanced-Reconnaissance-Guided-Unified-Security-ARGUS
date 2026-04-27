@@ -1497,6 +1497,18 @@ class ReasoningLoop:
             except Exception as e:
                 await self._emit_reasoning(f"[expert] post_phase_directive({phase_slug}) error: {e}")
 
+        # ── Win-condition tracker (Improvement #2) ────────────────
+        try:
+            if hasattr(self._master, "evaluate_win_conditions"):
+                snap = await self._master.evaluate_win_conditions(phase=phase_slug)
+                if snap and snap.get("newly_achieved"):
+                    await self._emit_reasoning(
+                        f"[win] {phase_slug}: newly achieved → {', '.join(snap['newly_achieved'])} "
+                        f"({snap['achieved_count']}/{snap['total']})"
+                    )
+        except Exception as e:
+            await self._emit_reasoning(f"[win] evaluate_win_conditions({phase_slug}) error: {e}")
+
         return result
 
     async def _run_ad_enum(self) -> dict:

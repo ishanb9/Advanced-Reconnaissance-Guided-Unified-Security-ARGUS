@@ -208,6 +208,20 @@ const INIT = {
       phasesReviewed:  0,
     },
   },
+
+  // ── Mission Brief (Improvement #1) ─────────────────────────────────────────
+  missionBrief: null,        // {objective, win_conditions, scope_in/out, ...}
+
+  // ── Win-condition tracker (Improvement #2) ─────────────────────────────────
+  winConditions: {
+    conditions:     [],      // [{name, achieved, achieved_at, evidence, ...}]
+    achieved_count: 0,
+    total:          0,
+    progress_pct:   0,
+    all_achieved:   false,
+    last_phase:     '',
+    last_update_ts: 0,
+  },
 };
 
 // ─── Selectors / derived state helpers ─────────────────────
@@ -1176,6 +1190,27 @@ function reducer(state, action) {
         advisory: prev.stats.advisory + (corr.tier === 'advisory' ? 1 : 0),
       };
       return { ...state, expertState: { ...prev, corrections, stats } };
+    }
+
+    // ── Mission Brief (Improvement #1) ───────────────────────────────────
+    case 'MISSION_BRIEF':
+      return { ...state, missionBrief: action.payload || null };
+
+    // ── Win-condition tracker (Improvement #2) ───────────────────────────
+    case 'WIN_CONDITIONS': {
+      const p = action.payload || {};
+      return {
+        ...state,
+        winConditions: {
+          conditions:     p.conditions     || [],
+          achieved_count: p.achieved_count || 0,
+          total:          p.total          || 0,
+          progress_pct:   p.progress_pct   || 0,
+          all_achieved:   !!p.all_achieved,
+          last_phase:     p.phase || state.winConditions.last_phase,
+          last_update_ts: p.ts   || Date.now() / 1000,
+        },
+      };
     }
 
     default:
@@ -2597,6 +2632,40 @@ function routeWsEvent(msg, dispatch, shellListeners, sessionId) {
       dispatch({ type: 'FEED_ENTRY', payload: {
         ts, agent: 'expert', eventType: 'expert_objective_update',
         message: `🎯 Mission phase: ${data.mission_phase || '?'}${pct}`,
+        data,
+      }});
+      break;
+    }
+
+    // ── Mission Brief (Improvement #1) ───────────────────────────────────
+    case 'mission_brief': {
+      dispatch({ type: 'MISSION_BRIEF', payload: data.mission_brief || data });
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'master', eventType: 'mission_brief',
+        message: `🎖 Mission brief loaded — ${(data.mission_brief?.objective || '').slice(0, 80)}`,
+        data,
+      }});
+      break;
+    }
+
+    // ── Win-condition tracker (Improvement #2) ───────────────────────────
+    case 'win_condition_update': {
+      dispatch({ type: 'WIN_CONDITIONS', payload: data });
+      if ((data.newly_achieved || []).length > 0) {
+        dispatch({ type: 'FEED_ENTRY', payload: {
+          ts, agent: 'master', eventType: 'win_condition_update',
+          message: `🏆 Win condition${data.newly_achieved.length > 1 ? 's' : ''} achieved: ${data.newly_achieved.join(', ')} (${data.achieved_count}/${data.total})`,
+          data,
+        }});
+      }
+      break;
+    }
+
+    case 'mission_complete': {
+      dispatch({ type: 'WIN_CONDITIONS', payload: { ...data, all_achieved: true } });
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'master', eventType: 'mission_complete',
+        message: `🏁 MISSION COMPLETE — all ${data.total || '?'} win conditions achieved`,
         data,
       }});
       break;

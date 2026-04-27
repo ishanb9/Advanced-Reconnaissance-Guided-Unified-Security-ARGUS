@@ -23,7 +23,7 @@ import json
 import os
 import re
 import sys
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Any
 from datetime import datetime
 
 # Phase 4 — bounded instruction cache (replaces unbounded plain dict)
@@ -388,6 +388,12 @@ class MasterAgent(BaseAgent):
         # API layer before run() is called so this is never None mid-scan.
         self._mission_brief: Optional[Any] = None
 
+        # Win-condition tracker (Improvement #2) — evaluates the brief's
+        # win_conditions list against intel after every phase boundary.
+        self._win_tracker: Optional[Any] = None
+        self._win_snapshot: Dict[str, Any] = {}
+        self._mission_complete_announced: bool = False
+
         # User guidance queue — injected mid-run from frontend
         self._guidance_queue: asyncio.Queue = asyncio.Queue()
 
@@ -480,6 +486,61 @@ class MasterAgent(BaseAgent):
             })
         return result
 
+    # ─── Win-condition tracking (Improvement #2) ──────────────────────────
+
+    async def evaluate_win_conditions(self, phase: str = "") -> Dict[str, Any]:
+        """Re-evaluate the mission's win conditions against current intel.
+
+        Updates ``self._win_snapshot`` and ``self._intel['win_conditions']``,
+        broadcasts a ``win_condition_update`` WS event, and emits a one-shot
+        ``mission_complete`` event the first time every condition is achieved.
+        Safe to call repeatedly — the tracker latches achieved conditions True.
+        """
+        if self._win_tracker is None:
+            return {}
+        try:
+            snap = self._win_tracker.evaluate(self._intel)
+        except Exception as exc:                                # noqa: BLE001
+            import logging as _ml
+            _ml.getLogger(__name__).warning("[win_conditions] evaluate failed: %s", exc)
+            return {}
+
+        self._win_snapshot = snap
+        self._intel["win_conditions"] = snap
+
+        try:
+            await self._emit("win_condition_update", {
+                "scan_id": self._session_id,
+                "phase":   phase or str(self.phase or ""),
+                **snap,
+            })
+        except Exception:
+            pass
+
+        # One-shot mission_complete announcement
+        if snap.get("all_achieved") and not self._mission_complete_announced:
+            self._mission_complete_announced = True
+            try:
+                await self._emit("mission_complete", {
+                    "scan_id":      self._session_id,
+                    "phase":        phase or str(self.phase or ""),
+                    "achieved":     snap["achieved_count"],
+                    "total":        snap["total"],
+                    "conditions":   snap["conditions"],
+                })
+            except Exception:
+                pass
+
+        # Hand the latest snapshot to the Expert so the next directive prompt
+        # is grounded in the current win-condition state.
+        try:
+            if self._expert is not None and hasattr(self._expert, "set_win_snapshot"):
+                self._expert.set_win_snapshot(snap)
+        except Exception:
+            pass
+
+        return snap
+
     # ─── Main Entry Point ─────────────────────────────────────
 
     async def run(
@@ -544,6 +605,27 @@ class MasterAgent(BaseAgent):
             })
         except Exception:
             pass
+
+        # ── Win-condition tracker (Improvement #2) ──────────────────────────
+        try:
+            from agents.mission.win_conditions import WinConditionTracker
+            wc_list = list(getattr(self._mission_brief, "win_conditions", []) or [])
+            self._win_tracker = WinConditionTracker(wc_list)
+            # Initial evaluation so the UI gets a baseline snapshot
+            self._win_snapshot = self._win_tracker.evaluate(self._intel)
+            self._intel["win_conditions"] = self._win_snapshot
+            await self._emit("win_condition_update", {
+                "scan_id":  session_id,
+                "phase":    "init",
+                **self._win_snapshot,
+            })
+        except Exception as _wc_exc:                                # noqa: BLE001
+            import logging as _ml
+            _ml.getLogger(__name__).warning(
+                "[win_conditions] init failed: %s", _wc_exc
+            )
+            self._win_tracker  = None
+            self._win_snapshot = {}
 
         # Initialise meta-agents if available
         if not _META_AGENTS_AVAILABLE:

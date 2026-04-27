@@ -237,6 +237,8 @@ class RedTeamExpertAgent(BaseMetaAgent):
         }
         # Mission brief (Improvement #1) — set by MasterAgent right after init
         self._mission_brief: Optional[Any] = None
+        # Win-condition snapshot (Improvement #2) — refreshed each phase
+        self._win_snapshot: Dict[str, Any] = {}
 
     # ── Mission brief plumbing (Improvement #1) ────────────────────────────
     def set_mission_brief(self, brief: Any) -> None:
@@ -258,13 +260,42 @@ class RedTeamExpertAgent(BaseMetaAgent):
             logger.warning("[expert] Could not render mission brief: %s", exc)
         return ""
 
+    # ── Win-condition plumbing (Improvement #2) ────────────────────────────
+    def set_win_snapshot(self, snap: Dict[str, Any]) -> None:
+        """Receive the latest win-condition snapshot from MasterAgent."""
+        self._win_snapshot = snap or {}
+
+    def _win_snapshot_block(self) -> str:
+        snap = self._win_snapshot
+        if not snap or not snap.get("conditions"):
+            return ""
+        lines = [
+            "=== WIN-CONDITION STATE ===",
+            f"Progress: {snap.get('achieved_count', 0)}/{snap.get('total', 0)}"
+            f" ({snap.get('progress_pct', 0)}%)",
+        ]
+        for c in snap["conditions"]:
+            mark = "[X]" if c.get("achieved") else "[ ]"
+            line = f"  {mark} {c.get('name', '')}"
+            if c.get("achieved") and c.get("evidence"):
+                line += f"  — {c['evidence']}"
+            lines.append(line)
+        if snap.get("all_achieved"):
+            lines.append(">>> ALL WIN CONDITIONS ACHIEVED — recommend HALT/exfil/report. <<<")
+        return "\n".join(lines)
+
     def _build_system_prompt(self) -> str:
-        # Prepend the mission brief so it travels in *every* turn of the
-        # persistent conversation thread maintained by BaseMetaAgent.
-        block = self._mission_brief_block()
-        if block:
-            return f"{block}\n\n{_EXPERT_SYSTEM_PROMPT}"
-        return _EXPERT_SYSTEM_PROMPT
+        # Prepend the mission brief and current win-condition state so they
+        # travel in *every* turn of the persistent conversation thread.
+        parts: List[str] = []
+        mb = self._mission_brief_block()
+        if mb:
+            parts.append(mb)
+        ws = self._win_snapshot_block()
+        if ws:
+            parts.append(ws)
+        parts.append(_EXPERT_SYSTEM_PROMPT)
+        return "\n\n".join(parts)
 
     # ── RAG helper ─────────────────────────────────────────────────────────
     def _rag_query(self, query: str, phase: Optional[str] = None) -> str:
