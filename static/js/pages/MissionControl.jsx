@@ -1923,6 +1923,9 @@ function MissionControl() {
     // ── Mission Brief + Win-Condition Banner (Improvements #1, #2) ───────
     window.MissionBriefBanner && React.createElement(window.MissionBriefBanner, null),
 
+    // ── Value-of-Information action ranking (Improvement #3) ────────────
+    window.VoIRankingPanel && React.createElement(window.VoIRankingPanel, null),
+
     // ── Red-Team Expert Panel (top-level overseer) ───────────────────────
     window.ExpertPanel && React.createElement(window.ExpertPanel, null),
 

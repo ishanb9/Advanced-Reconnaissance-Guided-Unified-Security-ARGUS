@@ -136,12 +136,17 @@ class DecisionEngine:
         emit_fn:                Callable[..., Any],
         session_id:             str,
         auto_execute_threshold: float = 0.70,
+        voi_rank_fn:            Optional[Callable[[List[Dict[str, Any]]], List[Dict[str, Any]]]] = None,
     ) -> None:
         self._think_json  = think_json_fn
         self._emit        = emit_fn
         self._session_id  = session_id
         self._threshold   = auto_execute_threshold
         self._action_score: int = 0
+        # Optional Value-of-Information ranker injected by MasterAgent.
+        # Signature: rank_actions(list[dict]) -> list[dict] sorted by VoI desc,
+        # each dict augmented with voi_score / voi_factors / voi_reasons / voi_dropped.
+        self._voi_rank_fn = voi_rank_fn
 
     # ------------------------------------------------------------------
     # Public API
@@ -176,27 +181,25 @@ class DecisionEngine:
         """
         target = intel.get("target", "")
 
+        # ── Phase 1: gather every viable (hypothesis, action) candidate ─────
+        candidates: List[Dict[str, Any]] = []
         for hypothesis in hypotheses:
             if hypothesis.invalidated:
                 continue
             if not hypothesis.recommended_next_actions:
                 continue
 
-            # Pick the first recommended action that hasn't been exhausted
             for action_str in hypothesis.recommended_next_actions:
-                # Skip blank / malformed action strings from LLM output
                 if not action_str or not action_str.strip():
                     continue
 
                 tool, args, target_service = self._parse_action_str(
                     action_str, target
                 )
-
-                # Skip the sentinel "unknown" tool — unparseable LLM output
                 if tool == "unknown":
                     continue
 
-                # Skip if this exact tool+service combination already failed
+                # Hard skip: known-failed pair
                 if negative_memory.has_failed_before(tool, target_service):
                     count = negative_memory.attempt_count(tool, target_service)
                     await self._emit_reasoning(
@@ -204,7 +207,7 @@ class DecisionEngine:
                     )
                     continue
 
-                # Detect redundant scan (same tool run 3+ times on same target)
+                # Hard skip: scan already exhausted
                 tool_key = f"{tool}:{target_service}"
                 if used_tools.get(tool_key, 0) >= 3:
                     await self._emit_reasoning(
@@ -213,27 +216,84 @@ class DecisionEngine:
                     )
                     continue
 
-                # Build pre-execution plan
-                plan = await self.build_pre_execution_plan(hypothesis, intel)
+                candidates.append({
+                    "tool":           tool,
+                    "args":           args,
+                    "target_service": target_service,
+                    "action_str":     action_str,
+                    "phase":          intel.get("current_phase", ""),
+                    "confidence":     hypothesis.confidence,
+                    "_hypothesis":    hypothesis,
+                })
 
-                action = JustifiedAction(
-                    action_id            = str(uuid.uuid4()),
-                    tool                 = tool,
-                    args                 = args,
-                    target_service       = target_service,
-                    reason               = self._build_reason(hypothesis),
-                    expected_outcome     = hypothesis.recommended_next_actions[0],
-                    success_criteria     = self._build_success_criteria(hypothesis),
-                    hypothesis_id        = hypothesis.hypothesis_id,
-                    confidence           = hypothesis.confidence,
-                    requires_confirmation = hypothesis.confidence < self._threshold,
-                    plan                 = plan,
-                )
+        if not candidates:
+            return None
 
-                await self._emit_action(action)
-                return action
+        # ── Phase 2: Value-of-Information re-ranking ────────────────────────
+        ranked = candidates
+        if self._voi_rank_fn is not None:
+            try:
+                # Strip the hypothesis ref before scoring (not JSON-friendly),
+                # then re-attach by index after.
+                scoring_input = [
+                    {k: v for k, v in c.items() if k != "_hypothesis"}
+                    for c in candidates
+                ]
+                scored = self._voi_rank_fn(scoring_input)
+                # Re-attach hypothesis by matching action_str + tool + target_service
+                lookup = {
+                    (c["tool"], c["target_service"], c["action_str"]): c["_hypothesis"]
+                    for c in candidates
+                }
+                ranked = []
+                for s in scored:
+                    key = (s.get("tool"), s.get("target_service"), s.get("action_str"))
+                    s["_hypothesis"] = lookup.get(key)
+                    ranked.append(s)
+                # Drop hard-rejected actions
+                ranked = [r for r in ranked if not r.get("voi_dropped")]
+                # Emit a transparency event with the top of the ranking
+                await self._emit_voi_ranking(ranked[:5])
+            except Exception as exc:
+                await self._emit_reasoning(f"VoI ranking failed: {exc}")
+                ranked = candidates
 
-        return None
+        if not ranked:
+            return None
+
+        chosen = ranked[0]
+        hypothesis = chosen.get("_hypothesis")
+        if hypothesis is None:
+            return None
+
+        # Build pre-execution plan for the winner
+        plan = await self.build_pre_execution_plan(hypothesis, intel)
+
+        voi_score   = chosen.get("voi_score")
+        voi_reasons = chosen.get("voi_reasons") or []
+
+        reason = self._build_reason(hypothesis)
+        if voi_score is not None:
+            reason = f"[VoI={voi_score}] " + reason
+            if voi_reasons:
+                reason += "  ::  " + "; ".join(voi_reasons[:3])
+
+        action = JustifiedAction(
+            action_id            = str(uuid.uuid4()),
+            tool                 = chosen["tool"],
+            args                 = chosen["args"],
+            target_service       = chosen["target_service"],
+            reason               = reason,
+            expected_outcome     = chosen.get("action_str", ""),
+            success_criteria     = self._build_success_criteria(hypothesis),
+            hypothesis_id        = hypothesis.hypothesis_id,
+            confidence           = hypothesis.confidence,
+            requires_confirmation = hypothesis.confidence < self._threshold,
+            plan                 = plan,
+        )
+
+        await self._emit_action(action)
+        return action
 
     async def build_pre_execution_plan(
         self,
@@ -448,6 +508,34 @@ class DecisionEngine:
                     "agent":      "master",
                     "data":       {"message": message, "component": "decision_engine"},
                 })
+        except Exception:
+            pass
+
+    async def _emit_voi_ranking(self, ranked: List[Dict[str, Any]]) -> None:
+        """Emit the top-N VoI-ranked candidates so the operator can see *why*
+        a particular action was chosen and what runners-up were considered."""
+        try:
+            if not callable(self._emit):
+                return
+            payload = []
+            for r in ranked:
+                payload.append({
+                    "tool":           r.get("tool"),
+                    "args":           r.get("args"),
+                    "target_service": r.get("target_service"),
+                    "action_str":     r.get("action_str"),
+                    "voi_score":      r.get("voi_score"),
+                    "voi_factors":    r.get("voi_factors") or {},
+                    "voi_reasons":    r.get("voi_reasons") or [],
+                    "voi_dropped":    bool(r.get("voi_dropped", False)),
+                    "confidence":     r.get("confidence"),
+                })
+            await self._emit({
+                "type":       "voi_ranking",
+                "session_id": self._session_id,
+                "agent":      "master",
+                "data":       {"top": payload, "count": len(payload)},
+            })
         except Exception:
             pass
 

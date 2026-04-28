@@ -222,6 +222,12 @@ const INIT = {
     last_phase:     '',
     last_update_ts: 0,
   },
+
+  // ── Value-of-Information ranking (Improvement #3) ──────────────────────────
+  voiRanking: {
+    top:            [],          // [{tool, args, target_service, voi_score, voi_factors, voi_reasons, voi_dropped, confidence}]
+    last_update_ts: 0,
+  },
 };
 
 // ─── Selectors / derived state helpers ─────────────────────
@@ -1209,6 +1215,18 @@ function reducer(state, action) {
           all_achieved:   !!p.all_achieved,
           last_phase:     p.phase || state.winConditions.last_phase,
           last_update_ts: p.ts   || Date.now() / 1000,
+        },
+      };
+    }
+
+    // ── Value-of-Information ranking (Improvement #3) ────────────────────
+    case 'VOI_RANKING': {
+      const p = action.payload || {};
+      return {
+        ...state,
+        voiRanking: {
+          top:            Array.isArray(p.top) ? p.top : [],
+          last_update_ts: Date.now() / 1000,
         },
       };
     }
@@ -2655,6 +2673,20 @@ function routeWsEvent(msg, dispatch, shellListeners, sessionId) {
         dispatch({ type: 'FEED_ENTRY', payload: {
           ts, agent: 'master', eventType: 'win_condition_update',
           message: `🏆 Win condition${data.newly_achieved.length > 1 ? 's' : ''} achieved: ${data.newly_achieved.join(', ')} (${data.achieved_count}/${data.total})`,
+          data,
+        }});
+      }
+      break;
+    }
+
+    // ── Value-of-Information ranking (Improvement #3) ───────────────────
+    case 'voi_ranking': {
+      dispatch({ type: 'VOI_RANKING', payload: data });
+      const top = (data?.top || [])[0];
+      if (top) {
+        dispatch({ type: 'FEED_ENTRY', payload: {
+          ts, agent: 'master', eventType: 'voi_ranking',
+          message: `🎯 VoI: ${top.tool} on ${top.target_service||'?'} (score=${top.voi_score})`,
           data,
         }});
       }

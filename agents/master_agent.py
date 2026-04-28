@@ -541,6 +541,77 @@ class MasterAgent(BaseAgent):
 
         return snap
 
+    # ─── Value-of-Information action scoring (Improvement #3) ─────────────
+
+    def _voi_failed_pairs(self) -> Dict[str, int]:
+        """Build a {tool:service -> failed_count} map from NegativeMemory."""
+        out: Dict[str, int] = {}
+        nm = getattr(self, "_negative_memory", None)
+        if nm is None:
+            return out
+        try:
+            # NegativeMemory exposes ._index as {(tool, service) -> count}
+            idx = getattr(nm, "_index", None) or {}
+            for key, count in idx.items():
+                if isinstance(key, tuple) and len(key) == 2:
+                    tool, svc = key
+                    out[f"{(tool or '').lower()}:{svc or ''}".rstrip(":")] = int(count)
+        except Exception:
+            pass
+        return out
+
+    def score_action(self, action: Dict[str, Any]) -> Dict[str, Any]:
+        """Score one candidate action using Value-of-Information.
+
+        Returns the VoIBreakdown as a dict.  See agents.mission.voi_scorer.
+        """
+        try:
+            from agents.mission.voi_scorer import score_action as _score
+        except Exception:
+            return {"score": 0, "factors": {}, "reasons": [], "dropped": False}
+        brief_dict: Dict[str, Any] = {}
+        if self._mission_brief is not None:
+            try:
+                brief_dict = self._mission_brief.model_dump()  # type: ignore[attr-defined]
+            except Exception:
+                try:
+                    brief_dict = self._mission_brief.dict()    # type: ignore[attr-defined]
+                except Exception:
+                    brief_dict = {}
+        b = _score(
+            action        = action,
+            intel         = self._intel,
+            win_snapshot  = self._win_snapshot or {},
+            used_tools    = dict(self._used_tools),
+            failed_pairs  = self._voi_failed_pairs(),
+            mission_brief = brief_dict,
+        )
+        return b.to_dict()
+
+    def rank_actions(self, actions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Rank candidate actions by Value-of-Information."""
+        try:
+            from agents.mission.voi_scorer import rank_actions as _rank
+        except Exception:
+            return list(actions or [])
+        brief_dict: Dict[str, Any] = {}
+        if self._mission_brief is not None:
+            try:
+                brief_dict = self._mission_brief.model_dump()  # type: ignore[attr-defined]
+            except Exception:
+                try:
+                    brief_dict = self._mission_brief.dict()    # type: ignore[attr-defined]
+                except Exception:
+                    brief_dict = {}
+        return _rank(
+            actions       = actions or [],
+            intel         = self._intel,
+            win_snapshot  = self._win_snapshot or {},
+            used_tools    = dict(self._used_tools),
+            failed_pairs  = self._voi_failed_pairs(),
+            mission_brief = brief_dict,
+        )
+
     # ─── Main Entry Point ─────────────────────────────────────
 
     async def run(
@@ -1702,12 +1773,15 @@ class MasterAgent(BaseAgent):
         if stored_paths:
             self._attack_planner.restore_from_dicts(stored_paths)
 
-        # DecisionEngine — uses master's think_json and broadcast
+        # DecisionEngine — uses master's think_json and broadcast.
+        # Pass the master's VoI ranker so candidate actions are scored by
+        # expected information-value before one is chosen (Improvement #3).
         self._decision_engine = DecisionEngine(
             think_json_fn          = self.think_json,
             emit_fn                = self._broadcast_raw,
             session_id             = session_id,
             auto_execute_threshold = 0.70,
+            voi_rank_fn            = self.rank_actions,
         )
         # Restore score from checkpoint
         self._decision_engine.set_score(self._intel.get("action_score", 0))
