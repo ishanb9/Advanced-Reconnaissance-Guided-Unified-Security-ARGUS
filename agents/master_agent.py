@@ -255,6 +255,42 @@ def _merge_string_lists(a: list, b: list) -> list:
     return _dedup_strings((a or []) + (b or []))
 
 
+# ── Improvement #5 — opportunistic-pivot trigger events ──────────────────
+# Event types that, when emitted, cause MasterAgent.notify_pivot_event to
+# fire and let the reasoning loop dispatch any newly-applicable phases
+# without waiting for the next iteration boundary.
+_PIVOT_TRIGGER_EVENTS = frozenset({
+    "credential_found",
+    "shell_obtained",
+    "flag_found",
+    "privesc_success",
+})
+
+
+def _pivot_signature(event_type: str, payload: Any) -> str:
+    """Stable signature for pivot deduplication.
+
+    Same credential / shell / flag emitted twice should pivot only once.
+    Falls back to a JSON-ish hash when the payload shape is unknown.
+    """
+    try:
+        if not isinstance(payload, dict):
+            return f"{event_type}:{repr(payload)[:120]}"
+        if event_type == "credential_found":
+            return f"cred:{payload.get('user','?')}@{payload.get('host','?')}:{payload.get('service','?')}"
+        if event_type == "shell_obtained":
+            return f"shell:{payload.get('rhost','?')}:{payload.get('rport','?')}:{payload.get('shell_id','?')}"
+        if event_type == "flag_found":
+            return f"flag:{payload.get('flag_type','?')}:{(payload.get('value','') or '')[:40]}"
+        if event_type == "privesc_success":
+            return f"privesc:{payload.get('shell_id','?')}:{payload.get('new_user','?')}"
+        # Generic fallback — use a small subset of keys
+        keys = sorted(k for k in payload.keys() if k != "ts")[:4]
+        return f"{event_type}:" + ",".join(f"{k}={str(payload.get(k))[:30]}" for k in keys)
+    except Exception:
+        return f"{event_type}:?"
+
+
 class MasterAgent(BaseAgent):
     """
     LLM-driven orchestrator. Only agent that thinks.
@@ -393,6 +429,14 @@ class MasterAgent(BaseAgent):
         self._win_tracker: Optional[Any] = None
         self._win_snapshot: Dict[str, Any] = {}
         self._mission_complete_announced: bool = False
+
+        # Opportunistic-pivot bookkeeping (Improvement #5).
+        # Lock prevents concurrent _consider_pivots calls from racing on the
+        # _phases_dispatched map; signature set tracks which discrete events
+        # we've already pivoted on so a flood of duplicate emissions does
+        # not re-trigger.
+        self._pivot_lock: Optional[asyncio.Lock] = None
+        self._pivot_seen: set = set()
 
         # User guidance queue — injected mid-run from frontend
         self._guidance_queue: asyncio.Queue = asyncio.Queue()
@@ -2079,6 +2123,12 @@ class MasterAgent(BaseAgent):
         """
         Emit a raw event dict to the WebSocket broadcast system.
         Used by reasoning components which build their own event dicts.
+
+        Improvement #5 — also funnels high-value events
+        (``credential_found``, ``shell_obtained``, ``flag_found``,
+        ``privesc_success``) into ``notify_pivot_event`` so the reasoning
+        loop can pivot mid-iteration without waiting for the next
+        decision boundary.
         """
         try:
             event_type = event.get("type", "reasoning_event")
@@ -2086,6 +2136,47 @@ class MasterAgent(BaseAgent):
             await self._emit(event_type, data)
         except Exception:
             pass
+
+        # Opportunistic-pivot tap (Improvement #5).
+        if event_type in _PIVOT_TRIGGER_EVENTS:
+            try:
+                await self.notify_pivot_event(event_type, data)
+            except Exception:
+                pass
+
+    async def notify_pivot_event(self, event_type: str, payload: Any) -> None:
+        """Public hook called when a high-value engagement event fires.
+
+        Subagents and the reasoning loop both call this when a credential is
+        captured, a shell drops, a flag is read, or privesc succeeds.  The
+        master forwards the event to the active ``ReasoningLoop`` (if any)
+        which calls ``_consider_pivots()`` immediately under a lock — this
+        unblocks lateral movement / privesc / post-exploit phases the moment
+        the triggering evidence is in intel, instead of waiting for the
+        action loop to come back around.
+
+        Idempotency: each (event_type, signature) tuple is processed at most
+        once per session.  ``signature`` is derived from the payload so that
+        duplicate emissions of the same credential do not re-fire pivots.
+        """
+        sig = _pivot_signature(event_type, payload)
+        key = (event_type, sig)
+        if key in self._pivot_seen:
+            return
+        self._pivot_seen.add(key)
+
+        loop_inst = getattr(self, "_reasoning_loop_inst", None)
+        if loop_inst is None or not hasattr(loop_inst, "on_pivot_event"):
+            return
+
+        # Lazy-init the lock in case __init__ ran in a non-async context.
+        if self._pivot_lock is None:
+            self._pivot_lock = asyncio.Lock()
+        async with self._pivot_lock:
+            try:
+                await loop_inst.on_pivot_event(event_type, payload)
+            except Exception:
+                pass
 
     async def _db_update_hypothesis(
         self,

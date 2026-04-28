@@ -2698,6 +2698,17 @@ function routeWsEvent(msg, dispatch, shellListeners, sessionId) {
       break;
     }
 
+    // ── Opportunistic event-driven pivots (Improvement #5) ──────────────
+    case 'opportunistic_pivot': {
+      const phases = (data?.phases || []).join(', ') || '(no new phases)';
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'master', eventType: 'opportunistic_pivot',
+        message: `⚡ ${data?.trigger || 'event'} → opportunistic pivot @ iter ${data?.iteration}: ${phases}`,
+        data,
+      }});
+      break;
+    }
+
     // ── Value-of-Information ranking (Improvement #3) ───────────────────
     case 'voi_ranking': {
       dispatch({ type: 'VOI_RANKING', payload: data });

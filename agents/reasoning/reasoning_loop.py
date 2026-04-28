@@ -373,7 +373,12 @@ class ReasoningLoop:
             )
 
             # ── EXECUTE ──────────────────────────────────────────────────
-            was_shell = bool(self._intel.get("shell_access"))
+            # Capture pre-execute pivot snapshot so post-execute we can diff
+            # and synthesise credential_found / shell_obtained / flag_found
+            # events for anything new — these route through master and
+            # trigger _consider_pivots opportunistically (Improvement #5).
+            pivot_pre = self._intel_snapshot_for_pivots()
+            was_shell = pivot_pre["shell_access"]
             result    = await self._execute(action)
             result["_was_shell_before"] = was_shell  # used by score_action_result
 
@@ -466,13 +471,21 @@ class ReasoningLoop:
             # ── UPDATE STATE ──────────────────────────────────────────────
             await self._update(action, result, validated, active_hyp)
 
-            # ── UNIFIED CROSS-PHASE PIVOTS (Improvement #4) ───────────────
-            # Now that intel has been updated, audit cross-phase triggers:
-            # any phase whose state-driven precondition is newly satisfied
-            # gets dispatched in parallel.  Idempotent — phases already
-            # executed are skipped.  This replaces the rigid bootstrap →
-            # exploit → post-exploit chain with a state-driven decision
-            # loop that fires pivots the instant evidence warrants them.
+            # ── UNIFIED CROSS-PHASE PIVOTS (Improvements #4 + #5) ─────────
+            # Step 1 (#5): synthesise discrete events for any high-value
+            # delta vs. the pre-execute snapshot.  These flow through
+            # master._broadcast_raw → master.notify_pivot_event → ReasoningLoop.
+            # on_pivot_event, which immediately calls _consider_pivots under
+            # a lock.  So credentials / shells / flags trigger pivots as soon
+            # as they appear in intel.
+            try:
+                await self._emit_pivot_deltas(pivot_pre)
+            except Exception as exc:
+                await self._emit_reasoning(f"[pivots] delta-emit error: {exc}")
+
+            # Step 2 (#4): even when no discrete pivot event fired, audit
+            # cross-phase triggers once per iteration so newly-satisfied
+            # state (e.g. new vulns, ports) still dispatches phases.
             try:
                 fired = await self._consider_pivots()
                 if fired:
@@ -1584,6 +1597,125 @@ class ReasoningLoop:
             await self._emit_reasoning(f"[win] evaluate_win_conditions({phase_slug}) error: {e}")
 
         return result
+
+    # ------------------------------------------------------------------
+    # Improvement #5 — Opportunistic event-driven pivots
+    # ------------------------------------------------------------------
+
+    def _intel_snapshot_for_pivots(self) -> Dict[str, Any]:
+        """Capture a small snapshot of intel keys we diff for pivot emission."""
+        intel = self._intel
+        return {
+            "shell_access": bool(intel.get("shell_access")),
+            "user_flag":    intel.get("user_flag") or "",
+            "root_flag":    intel.get("root_flag") or "",
+            "creds_count":  len(intel.get("credentials") or []),
+            "shells_count": len(intel.get("shells") or []),
+        }
+
+    async def _emit_pivot_deltas(self, prev: Dict[str, Any]) -> List[str]:
+        """Emit synthesized pivot-trigger events for any high-value deltas.
+
+        Each emission is routed via ``self._emit`` → ``master._broadcast_raw``
+        which in turn calls ``master.notify_pivot_event`` — so the master is
+        always the single funnel for pivot decisions.
+
+        Returns the list of event types emitted (informational).
+        """
+        emitted: List[str] = []
+        cur = self._intel_snapshot_for_pivots()
+
+        # ── Shell newly gained ────────────────────────────────────────────
+        if cur["shell_access"] and not prev.get("shell_access"):
+            shell_data = {}
+            shells = self._intel.get("shells") or []
+            if shells:
+                last = shells[-1] if isinstance(shells[-1], dict) else {}
+                shell_data = {
+                    "shell_id": last.get("shell_id") or last.get("id") or f"shell_{cur['shells_count']}",
+                    "rhost":    last.get("rhost") or last.get("host") or self._target,
+                    "rport":    last.get("rport") or last.get("port"),
+                    "user":     last.get("user"),
+                }
+            else:
+                shell_data = {"shell_id": "shell_0", "rhost": self._target}
+            await self._emit({
+                "type":       "shell_obtained",
+                "session_id": self._session_id,
+                "agent":      "master",
+                "data":       shell_data,
+            })
+            emitted.append("shell_obtained")
+
+        # ── Flags newly captured ──────────────────────────────────────────
+        for kind in ("user_flag", "root_flag"):
+            if cur[kind] and cur[kind] != prev.get(kind):
+                await self._emit({
+                    "type":       "flag_found",
+                    "session_id": self._session_id,
+                    "agent":      "master",
+                    "data": {
+                        "flag_type": "root" if kind == "root_flag" else "user",
+                        "value":     str(cur[kind])[:80],
+                        "location":  self._target,
+                    },
+                })
+                emitted.append("flag_found")
+
+        # ── New credentials harvested ─────────────────────────────────────
+        if cur["creds_count"] > prev.get("creds_count", 0):
+            new_creds = (self._intel.get("credentials") or [])[prev.get("creds_count", 0):]
+            for cred in new_creds:
+                if not isinstance(cred, dict):
+                    continue
+                await self._emit({
+                    "type":       "credential_found",
+                    "session_id": self._session_id,
+                    "agent":      "master",
+                    "data": {
+                        "user":    cred.get("user") or cred.get("username") or "?",
+                        "host":    cred.get("host") or self._target,
+                        "service": cred.get("service") or cred.get("port") or "?",
+                        "secret":  (cred.get("pass") or cred.get("password") or cred.get("hash") or "")[:40],
+                    },
+                })
+                emitted.append("credential_found")
+
+        return emitted
+
+    async def on_pivot_event(self, event_type: str, payload: Any) -> None:
+        """Called by ``MasterAgent.notify_pivot_event`` when a high-value
+        engagement event fires.  Re-runs the cross-phase audit immediately
+        so any newly-applicable phase dispatches now, without waiting for
+        the next iteration boundary.
+
+        The master holds a lock around this call so concurrent triggers do
+        not race on ``_phases_dispatched``.
+        """
+        try:
+            short = str(payload)[:80] if not isinstance(payload, dict) else (
+                f"user={payload.get('user','?')}@{payload.get('host','?')}" if event_type == "credential_found"
+                else f"shell={payload.get('rhost','?')}:{payload.get('rport','?')}" if event_type == "shell_obtained"
+                else f"flag={payload.get('flag_type','?')}" if event_type == "flag_found"
+                else str(payload)[:80]
+            )
+            await self._emit_reasoning(
+                f"[opportunistic] {event_type} → re-evaluating pivots ({short})"
+            )
+            fired = await self._consider_pivots()
+            await self._emit({
+                "type":       "opportunistic_pivot",
+                "session_id": self._session_id,
+                "agent":      "master",
+                "data": {
+                    "trigger":   event_type,
+                    "iteration": self._iteration,
+                    "phases":    fired,
+                    "summary":   short,
+                },
+            })
+        except Exception as exc:
+            await self._emit_reasoning(f"[opportunistic] on_pivot_event error: {exc}")
 
     # ------------------------------------------------------------------
     # Improvement #4 — Unified decision loop: cross-phase pivots
