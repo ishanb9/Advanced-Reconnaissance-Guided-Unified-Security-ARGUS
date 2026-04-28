@@ -2679,6 +2679,25 @@ function routeWsEvent(msg, dispatch, shellListeners, sessionId) {
       break;
     }
 
+    // ── Unified decision loop (Improvement #4) ──────────────────────────
+    case 'phase_unit_dispatched': {
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'master', eventType: 'phase_unit_dispatched',
+        message: `🧩 Phase unit fired: ${data?.phase} (iter ${data?.iteration})${data?.forced ? ' [forced]' : ''}`,
+        data,
+      }});
+      break;
+    }
+    case 'pivots_fired': {
+      const phases = (data?.phases || []).join(', ');
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'master', eventType: 'pivots_fired',
+        message: `🔀 Cross-phase pivots fired @ iter ${data?.iteration}: ${phases}`,
+        data,
+      }});
+      break;
+    }
+
     // ── Value-of-Information ranking (Improvement #3) ───────────────────
     case 'voi_ranking': {
       dispatch({ type: 'VOI_RANKING', payload: data });

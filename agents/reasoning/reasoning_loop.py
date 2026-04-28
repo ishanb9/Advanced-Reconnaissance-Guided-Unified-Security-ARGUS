@@ -92,6 +92,14 @@ class ReasoningLoop:
         # Tracks last validated hypothesis node for graph edge chaining
         self._last_validated_node_id: Optional[str]  = None
 
+        # ── Improvement #4 — unified decision loop ────────────────────────
+        # Tracks which phase units have already been dispatched so the
+        # cross-phase audit (_consider_pivots) is idempotent.  Keys are the
+        # phase slug strings ("recon", "vuln_id", "web_testing", "exploit",
+        # "privesc", "lateral_movement", etc.).  Values are the iteration
+        # number when dispatch happened.
+        self._phases_dispatched: Dict[str, int] = {}
+
         # ── Question Engine (3-layer extraction + discovery pass) ─────────
         self._question_engine = QuestionEngine(
             master_agent = master_agent,
@@ -458,6 +466,23 @@ class ReasoningLoop:
             # ── UPDATE STATE ──────────────────────────────────────────────
             await self._update(action, result, validated, active_hyp)
 
+            # ── UNIFIED CROSS-PHASE PIVOTS (Improvement #4) ───────────────
+            # Now that intel has been updated, audit cross-phase triggers:
+            # any phase whose state-driven precondition is newly satisfied
+            # gets dispatched in parallel.  Idempotent — phases already
+            # executed are skipped.  This replaces the rigid bootstrap →
+            # exploit → post-exploit chain with a state-driven decision
+            # loop that fires pivots the instant evidence warrants them.
+            try:
+                fired = await self._consider_pivots()
+                if fired:
+                    await self._emit_loop_event("pivots_fired", {
+                        "iteration": iteration,
+                        "phases":    fired,
+                    })
+            except Exception as exc:
+                await self._emit_reasoning(f"[pivots] error: {exc}")
+
             # ── QUESTION ENGINE: answer extraction + discovery pass ────────
             # Layer 1 (deterministic) + Layer 2 (LLM) + Layer 3 (tool) against
             # this tool's output. Works for both CTF objectives and ad-hoc questions.
@@ -472,13 +497,14 @@ class ReasoningLoop:
             )
 
             # ── AUTO POST-EXPLOITATION ────────────────────────────────────
-            # If shell access was just gained this iteration, immediately
-            # chain post-exploit + privesc (mirrors how a real attacker works)
+            # Shell-gained event still emits a clear operator message, but the
+            # actual post-exploit + privesc + lateral dispatches now flow
+            # through the unified _consider_pivots() above (idempotent), so
+            # this no longer duplicates work nor enforces a hardcoded order.
             if not result.get("_was_shell_before") and self._intel.get("shell_access"):
                 await self._emit_reasoning(
-                    "🎯 Shell access gained — automatically chaining post-exploitation"
+                    "🎯 Shell access gained — pivots will fire post-exploit / privesc / lateral"
                 )
-                await self._auto_post_exploit()
 
             # ── CHECKPOINT ───────────────────────────────────────────────
             if iteration % self.CHECKPOINT_EVERY == 0:
@@ -564,7 +590,9 @@ class ReasoningLoop:
         )
 
         # Route through _safe_phase so meta-agent pre/post hooks fire.
-        await self._safe_phase(self._master._phase_recon, target=self._target, plan={})
+        await self._safe_phase(self._master._phase_recon,
+                               phase_slug="recon",
+                               target=self._target, plan={})
 
         ports_found = self._intel.get("open_ports", [])
         # Use a LIST (not a set) so downstream code that slices/indexes it works.
@@ -584,12 +612,18 @@ class ReasoningLoop:
         port_nums.sort()
 
         parallel_tasks: list = []
-        parallel_tasks.append(("OSINT", self._safe_phase(self._master._phase_osint, target=self._target)))
+        parallel_tasks.append(("OSINT", self._safe_phase(self._master._phase_osint,
+                                                          phase_slug="osint",
+                                                          target=self._target)))
         if port_nums:
-            parallel_tasks.append(("Vuln ID", self._safe_phase(self._master._phase_vuln_id, target=self._target)))
+            parallel_tasks.append(("Vuln ID", self._safe_phase(self._master._phase_vuln_id,
+                                                                phase_slug="vuln_id",
+                                                                target=self._target)))
         web_ports = [p for p in port_nums if p in {80, 443, 8080, 8443, 8000, 8888, 3000, 5000, 9090, 9443}]
         if web_ports:
-            parallel_tasks.append(("Web", self._safe_phase(self._master._phase_web_testing, target=self._target, web_ports=web_ports)))
+            parallel_tasks.append(("Web", self._safe_phase(self._master._phase_web_testing,
+                                                            phase_slug="web_testing",
+                                                            target=self._target, web_ports=web_ports)))
 
         if parallel_tasks:
             await self._emit_plan_step("bootstrap_deep", "🔬 Deep Fingerprinting", "active",
@@ -618,7 +652,9 @@ class ReasoningLoop:
                 f"Attempting exploitation on {len(port_nums)} open ports", "exploit"
             )
             # Route through _safe_phase so meta-agent pre/post hooks fire.
-            await self._safe_phase(self._master._phase_exploit, target=self._target)
+            await self._safe_phase(self._master._phase_exploit,
+                                   phase_slug="exploit",
+                                   target=self._target)
             await self._emit_plan_step(
                 "bootstrap_exploit", "💥 Exploitation", "done",
                 f"{len(self._intel.get('shells',[]))} shells | "
@@ -670,7 +706,9 @@ class ReasoningLoop:
         await self._emit_reasoning("Starting compliance assessment bootstrap")
         await self._emit_plan_step("bootstrap_recon", "📋 Compliance Bootstrap", "active",
                                    f"Service discovery on {self._target}", "recon")
-        await self._safe_phase(self._master._phase_recon, target=self._target, plan={})
+        await self._safe_phase(self._master._phase_recon,
+                               phase_slug="recon",
+                               target=self._target, plan={})
         await self._emit_plan_step("bootstrap_recon", "📋 Compliance Bootstrap", "done",
                                    "Service baseline collected", "recon", found=True)
 
@@ -1368,16 +1406,52 @@ class ReasoningLoop:
     # Specialist condition helpers
     # ------------------------------------------------------------------
 
-    async def _safe_phase(self, phase_fn, **kwargs):
+    async def _safe_phase(self, phase_fn, *, phase_slug: Optional[str] = None,
+                          force: bool = False, **kwargs):
         """Call a MasterAgent phase safely, returning {} on error.
 
         Wraps the call with meta-agent pre/post hooks so MasterChecker and
         IssueValidator are exercised during the reasoning-loop path (which
         bypasses the legacy phase-by-phase flow where those hooks live).
+
+        Improvement #4 — unified decision loop:
+          * ``phase_slug`` may be passed explicitly to decouple meta-hooks
+            from the ``_phase_*`` naming convention.  When omitted, the slug
+            is derived from the function name as before (back-compat).
+          * ``force=False`` skips the call when this phase slug was already
+            dispatched in a previous iteration, returning ``{}``.  Pass
+            ``force=True`` for the bootstrap phase or for explicit
+            re-runs that need to override the idempotency guard.
         """
         name = getattr(phase_fn, "__name__", "phase")
         # Derive phase slug from method name: "_phase_recon" → "recon"
-        phase_slug = name.replace("_phase_", "").strip("_") or "reasoning"
+        if not phase_slug:
+            phase_slug = name.replace("_phase_", "").strip("_") or "reasoning"
+
+        # Idempotency: skip if already dispatched (unless force=True).
+        if not force and phase_slug in self._phases_dispatched:
+            await self._emit_reasoning(
+                f"[loop] {phase_slug} already dispatched at iter "
+                f"{self._phases_dispatched[phase_slug]} — skipping"
+            )
+            return {}
+        # Mark as dispatched up-front so concurrent calls do not race.
+        self._phases_dispatched[phase_slug] = self._iteration
+
+        # Broadcast that a unit-of-work is starting (operator transparency).
+        try:
+            await self._emit({
+                "type":       "phase_unit_dispatched",
+                "session_id": self._session_id,
+                "agent":      "master",
+                "data":       {
+                    "phase":     phase_slug,
+                    "iteration": self._iteration,
+                    "forced":    bool(force),
+                },
+            })
+        except Exception:
+            pass
 
         mc  = getattr(self._master, "_master_checker", None)
         iv  = getattr(self._master, "_issue_validator", None)
@@ -1510,6 +1584,138 @@ class ReasoningLoop:
             await self._emit_reasoning(f"[win] evaluate_win_conditions({phase_slug}) error: {e}")
 
         return result
+
+    # ------------------------------------------------------------------
+    # Improvement #4 — Unified decision loop: cross-phase pivots
+    # ------------------------------------------------------------------
+
+    async def _consider_pivots(self) -> List[str]:
+        """Per-iteration cross-phase audit.
+
+        Runs after every action update.  For each phase whose state-driven
+        trigger is currently satisfied, dispatch it via ``_safe_phase`` —
+        which is idempotent, so phases already executed are silently
+        skipped.  This unifies what used to be the rigid bootstrap →
+        exploit → post-exploit chain into a single state-driven decision
+        loop where pivots fire as soon as evidence warrants them.
+
+        Returns the list of phase slugs that actually fired this call
+        (empty when nothing new is warranted).
+        """
+        intel       = self._intel
+        eng_ctx     = intel.get("engagement_context") or {}
+        is_passive  = eng_ctx.get("engagement_type", "pentest") in (
+            "forensics", "network_analysis", "malware_analysis", "compliance"
+        )
+        tools_excl  = {t.lower().split()[0] for t in (eng_ctx.get("tools_excluded") or [])}
+
+        # Each candidate is (phase_slug, condition_bool, dispatch_coro_factory).
+        # Conditions read from intel only — never side-effecting.
+        candidates: List[tuple] = []
+
+        if not is_passive:
+            # Vulnerability scan — once ports are known, before we exploit.
+            candidates.append((
+                "vuln_id",
+                bool(intel.get("open_ports")) and "nikto" not in tools_excl,
+                lambda: self._safe_phase(self._master._phase_vuln_id,
+                                         phase_slug="vuln_id",
+                                         target=self._target),
+            ))
+            # Web testing — any web port discovered.
+            web_ports = sorted({
+                int(str(p.get("port") if isinstance(p, dict) else p).split("/")[0])
+                for p in intel.get("open_ports", [])
+                if (isinstance(p, dict) and str(p.get("port", "")).split("/")[0].isdigit())
+                   or (not isinstance(p, dict) and str(p).split("/")[0].isdigit())
+            } & {80, 443, 8080, 8443, 8000, 8888, 3000, 5000, 9090, 9443})
+            candidates.append((
+                "web_testing",
+                bool(web_ports) and "gobuster" not in tools_excl,
+                lambda wp=web_ports: self._safe_phase(
+                    self._master._phase_web_testing,
+                    phase_slug="web_testing",
+                    target=self._target, web_ports=wp,
+                ),
+            ))
+            # AD enumeration.
+            candidates.append((
+                "ad_enum",
+                self._should_run_ad() and "bloodhound-python" not in tools_excl,
+                lambda: self._run_ad_enum(),
+            ))
+            # Cloud metadata.
+            candidates.append((
+                "cloud",
+                self._should_run_cloud(),
+                lambda: self._safe_phase(self._master._phase_cloud,
+                                         phase_slug="cloud",
+                                         target=self._target),
+            ))
+            # Exploit — any port + any vuln evidence.
+            has_exploit_evidence = bool(intel.get("open_ports")) and (
+                bool(intel.get("vulnerabilities")) or bool(intel.get("technologies"))
+            )
+            candidates.append((
+                "exploit",
+                has_exploit_evidence and not intel.get("shell_access"),
+                lambda: self._safe_phase(self._master._phase_exploit,
+                                         phase_slug="exploit",
+                                         target=self._target),
+            ))
+            # Lateral movement — credentials harvested or AD detected.
+            candidates.append((
+                "lateral_movement",
+                self._should_run_lateral(),
+                lambda: self._safe_phase(self._master._phase_lateral_movement,
+                                         phase_slug="lateral_movement",
+                                         target=self._target),
+            ))
+
+        # Container escape — driven purely by detection, applies to passive too.
+        if intel.get("container_info", {}).get("type"):
+            candidates.append((
+                "container",
+                True,
+                lambda: self._safe_phase(self._master._phase_container,
+                                         phase_slug="container",
+                                         target=self._target),
+            ))
+
+        # Privilege escalation — fires the moment a shell appears.
+        if intel.get("shell_access") and not intel.get("root_flag"):
+            candidates.append((
+                "privesc",
+                True,
+                lambda: self._safe_phase(self._master._phase_privesc,
+                                         phase_slug="privesc",
+                                         target=self._target),
+            ))
+            # Post-exploit enumeration (creds, tokens, files).
+            candidates.append((
+                "post_exploit",
+                True,
+                lambda: self._safe_phase(self._master._phase_post_exploit,
+                                         phase_slug="post_exploit",
+                                         target=self._target),
+            ))
+
+        # Filter to phases not yet dispatched whose triggers are satisfied.
+        to_fire = [
+            (slug, factory) for slug, ok, factory in candidates
+            if ok and slug not in self._phases_dispatched
+        ]
+        if not to_fire:
+            return []
+
+        slugs = [s for s, _ in to_fire]
+        await self._emit_reasoning(
+            f"[pivots] iter {self._iteration}: dispatching {len(slugs)} phase(s) "
+            f"in parallel → {', '.join(slugs)}"
+        )
+        # Fire them in parallel — _safe_phase already swallows exceptions.
+        await asyncio.gather(*[f() for _, f in to_fire], return_exceptions=True)
+        return slugs
 
     async def _run_ad_enum(self) -> dict:
         """Run Active Directory enumeration via BloodHound."""
