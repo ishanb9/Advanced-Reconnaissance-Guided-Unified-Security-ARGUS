@@ -1013,6 +1013,11 @@ Return JSON:
         self._tool_deadline_sec = 600.0   # reset fresh for each tool call
         watchdog = asyncio.create_task(self._tool_watchdog(tool_name))
 
+        # Improvement #6 — information-entropy abandonment.
+        from agents.reasoning.entropy_sampler import EntropySampler
+        entropy = EntropySampler()
+        entropy_killed = {"v": False}   # closure-mutable flag
+
         # Tools that must run locally (not via MCP) because MCP does not expose
         # a generic shell executor.  The full_cmd is already assembled above.
         _LOCAL_TOOLS = {"bash", "sh", "zsh", "cmd", "powershell", "python", "python3", "perl", "ruby"}
@@ -1027,6 +1032,29 @@ Return JSON:
                 "line":      line,
                 "type":      ltype,
             })
+            # Improvement #6 — entropy-based abandonment
+            entropy.feed(line)
+            if not entropy_killed["v"]:
+                reason = entropy.should_abandon(
+                    time.monotonic() - self._tool_run_start
+                )
+                if reason:
+                    entropy_killed["v"] = True
+                    await self._emit("tool_abandoned_low_entropy", {
+                        "agent":        str(self.name),
+                        "tool":         tool_name,
+                        "elapsed_sec":  round(time.monotonic() - self._tool_run_start),
+                        "reason":       reason,
+                        "stats":        entropy.stats(),
+                    })
+                    logger.info(
+                        "[%s] tool '%s' abandoned: %s",
+                        self.name, tool_name, reason,
+                    )
+                    try:
+                        self.kill_current_tool()
+                    except Exception:
+                        pass
 
         async def _run_local() -> int:
             """Run full_cmd in a local subprocess and stream output."""

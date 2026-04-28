@@ -2256,6 +2256,60 @@ function routeWsEvent(msg, dispatch, shellListeners, sessionId) {
       break;
     }
 
+    // ── Episodic memory recall / record (#8) ──────────────
+    case 'episode_recalled': {
+      const ed = data || msg;
+      const eps = ed.episodes || [];
+      const heads = eps.slice(0, 3).map(e =>
+        `${e.target_type || '?'}:${(e.target || '').toString().slice(0, 24)}`
+      ).join(', ');
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'master', eventType: 'episode_recalled',
+        message: `📚 Recalled ${ed.count || eps.length} past engagement(s)${heads ? ': ' + heads : ''}`,
+        data: ed,
+      }});
+      break;
+    }
+    case 'episode_recorded': {
+      const ed = data || msg;
+      const ep = ed.episode || {};
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'master', eventType: 'episode_recorded',
+        message: `💾 Episode stored: ${ep.summary || ep.target || 'session'}`,
+        data: ed,
+      }});
+      break;
+    }
+
+    // ── Hypothesis-conditioned scan profile (#7) ──────────
+    case 'scan_profile_updated': {
+      const sp = data || msg;
+      const svcs = (sp.priority_services || []).slice(0, 4).join(', ');
+      const ports = (sp.priority_ports || []).slice(0, 6).join(',');
+      const cves = (sp.priority_cves || []).slice(0, 3).join(', ');
+      const bits = [];
+      if (svcs)  bits.push(`svcs=${svcs}`);
+      if (ports) bits.push(`ports=${ports}`);
+      if (cves)  bits.push(`CVEs=${cves}`);
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'master', eventType: 'scan_profile_updated',
+        message: `🎯 Scan profile @ iter ${sp.iteration ?? '?'}: ${bits.join(' | ') || '(empty)'}`,
+        data: sp,
+      }});
+      break;
+    }
+
+    // ── Tool abandoned for low information entropy (#6) ───
+    case 'tool_abandoned_low_entropy': {
+      const saD = data || msg;
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: saD.agent || saD.subagent || 'agent', eventType: 'tool_abandoned_low_entropy',
+        message: `🛑 Abandoned ${saD.tool || 'tool'} after ${saD.elapsed_sec || 0}s — ${saD.reason || 'low entropy'}`,
+        data: saD,
+      }});
+      break;
+    }
+
     // ── Awaiting confirmation (exploit gate or web gate) ──
     case 'awaiting_confirmation': {
       const phase = data?.phase || '';

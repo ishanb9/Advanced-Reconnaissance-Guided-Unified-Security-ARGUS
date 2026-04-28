@@ -49,17 +49,39 @@ logger = logging.getLogger(__name__)
 
 
 def _kill_proc_tree(proc) -> None:
-    """Kill a subprocess AND all its children via process-group signal.
+    """Kill a subprocess AND all its children.
 
-    When bash runs ``nikto ... | head -150``, killing bash alone orphans nikto.
-    Using killpg() sends SIGKILL to the entire process group (bash + nikto + head)
-    so no child survives.  Falls back to proc.kill() on any OS error.
+    Cross-platform:
+    - POSIX: killpg() → SIGKILL to the entire process group (bash + nikto +
+      head + any pipeline elements).
+    - Windows: taskkill /T /F to recursively kill the process tree, since
+      os.getpgid / os.killpg / SIGKILL do not exist on Windows and would
+      raise AttributeError before the fallback proc.kill() can run.
+
+    Always falls back to proc.kill() at the end so the asyncio Process
+    transitions to terminated state and drain readers unblock promptly.
     """
-    try:
-        pgid = os.getpgid(proc.pid)
-        os.killpg(pgid, _signal.SIGKILL)
-    except (ProcessLookupError, PermissionError, OSError):
-        pass
+    # ── POSIX: process-group kill ──────────────────────────────
+    if hasattr(os, "getpgid") and hasattr(os, "killpg") and hasattr(_signal, "SIGKILL"):
+        try:
+            pgid = os.getpgid(proc.pid)
+            os.killpg(pgid, _signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+    # ── Windows: recursive taskkill ────────────────────────────
+    elif sys.platform == "win32":
+        try:
+            import subprocess as _subprocess
+            _subprocess.run(
+                ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                stdout=_subprocess.DEVNULL,
+                stderr=_subprocess.DEVNULL,
+                timeout=5,
+                creationflags=getattr(_subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except Exception:
+            pass
+    # ── Always: final kill on the asyncio Process so drain unblocks ─
     try:
         proc.kill()
     except Exception:
@@ -767,12 +789,35 @@ class BaseSubagent(ABC):
         self._tool_run_start    = time.monotonic()
         self._tool_deadline_sec = 600.0   # reset to 10 min for each tool call
 
+        # Improvement #6 — information-entropy abandonment.  See
+        # agents/reasoning/entropy_sampler.py for the rationale and tuning.
+        from agents.reasoning.entropy_sampler import EntropySampler
+        entropy = EntropySampler()
+
         watchdog = asyncio.create_task(self._tool_watchdog(tool_name))
         lines: list[str] = []
         try:
             try:
                 async for line in self.run_tool(tool_name, target, options):
                     lines.append(line)
+                    entropy.feed(line)
+                    abandon_reason = entropy.should_abandon(
+                        time.monotonic() - self._tool_run_start
+                    )
+                    if abandon_reason:
+                        await self._emit("tool_abandoned_low_entropy", {
+                            "tool":         tool_name,
+                            "subagent":     self.SUBAGENT_NAME,
+                            "elapsed_sec":  round(time.monotonic() - self._tool_run_start),
+                            "reason":       abandon_reason,
+                            "stats":        entropy.stats(),
+                        })
+                        logger.info(
+                            "[%s] tool '%s' abandoned: %s",
+                            self.SUBAGENT_NAME, tool_name, abandon_reason,
+                        )
+                        self.kill_current_tool()
+                        break
                     if self._stop_requested:
                         break
             except (asyncio.TimeoutError, asyncio.CancelledError) as exc:

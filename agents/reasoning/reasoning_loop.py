@@ -277,6 +277,9 @@ class ReasoningLoop:
             # Persist top hypotheses to DB
             await self._persist_hypotheses()
 
+            # Improvement #7 — refresh hypothesis-conditioned scan profile
+            await self._refresh_scan_profile()
+
             # ── PRIORITIZE ───────────────────────────────────────────────
             self._ranked_paths = await self._prioritize()
             if self._ranked_paths:
@@ -1716,6 +1719,54 @@ class ReasoningLoop:
             })
         except Exception as exc:
             await self._emit_reasoning(f"[opportunistic] on_pivot_event error: {exc}")
+
+    # ------------------------------------------------------------------
+    # Improvement #7 — Hypothesis-conditioned scan profile
+    # ------------------------------------------------------------------
+
+    async def _refresh_scan_profile(self) -> None:
+        """Build a ScanProfile from current hypotheses, stash on intel, emit.
+
+        The profile is rendered into ``_intel_summary()`` (via
+        ``master_agent``) so every existing LLM phase planner that reads
+        the summary picks up the bias automatically — no per-planner
+        change required.
+        """
+        try:
+            from agents.reasoning.scan_profile import build_scan_profile
+            profile = build_scan_profile(
+                hypotheses = self._hypotheses,
+                intel      = self._intel,
+                top_n      = 5,
+                iteration  = self._iteration,
+            )
+        except Exception as exc:
+            await self._emit_reasoning(f"[scan_profile] build error: {exc}")
+            return
+
+        prev = (self._intel.get("scan_profile") or {})
+        new  = profile.to_dict()
+        self._intel["scan_profile"] = new
+
+        # Skip the WS event when the bias hasn't materially changed —
+        # avoids feed spam on iterations that don't shift hypotheses.
+        material_keys = ("priority_ports", "priority_services",
+                         "priority_cves", "priority_paths")
+        changed = any(prev.get(k) != new.get(k) for k in material_keys)
+        if not changed:
+            return
+        if profile.is_empty():
+            return
+
+        try:
+            await self._emit({
+                "type":       "scan_profile_updated",
+                "session_id": self._session_id,
+                "agent":      "master",
+                "data":       new,
+            })
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Improvement #4 — Unified decision loop: cross-phase pivots

@@ -151,6 +151,13 @@ async def _create_indexes():
     await db.long_term_memory.create_index([("tags", ASCENDING)])
     await db.long_term_memory.create_index([("created_at", DESCENDING)])
 
+    # ── engagement_episodes (Improvement #8 — episodic memory) ──────────────
+    await db.engagement_episodes.create_index([("target_type", ASCENDING), ("created_at", DESCENDING)])
+    await db.engagement_episodes.create_index([("services", ASCENDING)])
+    await db.engagement_episodes.create_index([("cves", ASCENDING)])
+    await db.engagement_episodes.create_index([("session_id", ASCENDING)], unique=True, sparse=True)
+    await db.engagement_episodes.create_index([("created_at", DESCENDING)])
+
     # ── evidence ────────────────────────────────────────────────────────────
     await db.evidence.create_index(
         [("session_id", ASCENDING), ("host", ASCENDING), ("phase", ASCENDING)]
@@ -1494,6 +1501,107 @@ async def update_memory_confidence(memory_id: str, delta: float) -> bool:
         return result.modified_count > 0
     except InvalidId:
         return False
+
+
+# ═══════════════════════════════════════════════════════════
+#  ENGAGEMENT EPISODES (Improvement #8 — episodic memory)
+# ═══════════════════════════════════════════════════════════
+
+async def record_engagement_episode(episode: Dict) -> Dict:
+    """Persist a session-level episode summary for later recall.
+
+    The episode dict is upserted by ``session_id`` so re-running
+    finalisation (e.g. resume → complete twice) doesn't create dupes.
+    """
+    db = get_db()
+    sid = episode.get("session_id")
+    doc = dict(episode)
+    doc.setdefault("created_at", datetime.utcnow())
+    doc.setdefault("recalled_count", 0)
+    if sid:
+        await db.engagement_episodes.update_one(
+            {"session_id": sid},
+            {"$set": doc},
+            upsert=True,
+        )
+        existing = await db.engagement_episodes.find_one({"session_id": sid})
+        return _serialize(existing or doc)
+    doc["_id"] = ObjectId()
+    await db.engagement_episodes.insert_one(doc)
+    return _serialize(doc)
+
+
+async def recall_similar_episodes(
+    target_type:  Optional[str] = None,
+    services:     Optional[List[str]] = None,
+    cves:         Optional[List[str]] = None,
+    *,
+    limit:        int = 5,
+    exclude_session_id: Optional[str] = None,
+) -> List[Dict]:
+    """Return recent episodes that match by target_type / shared services
+    / shared CVEs, ranked by overlap × recency.
+
+    Uses two cheap queries (target_type, then services∪cves) and merges,
+    rather than a full text-similarity search — sufficient for this scale
+    and the recall is rendered as a hint, not a filter.
+    """
+    db = get_db()
+    candidates: Dict[str, Dict] = {}
+
+    base_filter: Dict = {}
+    if exclude_session_id:
+        base_filter["session_id"] = {"$ne": exclude_session_id}
+
+    async def _add(query: Dict, score: int):
+        cursor = db.engagement_episodes.find(query)\
+            .sort([("created_at", DESCENDING)]).limit(limit * 3)
+        async for doc in cursor:
+            sid = doc.get("session_id") or str(doc.get("_id"))
+            if sid in candidates:
+                candidates[sid]["_score"] += score
+            else:
+                d = dict(doc)
+                d["_score"] = score
+                candidates[sid] = d
+
+    if target_type:
+        q = dict(base_filter, target_type=target_type)
+        await _add(q, score=2)
+    if services:
+        q = dict(base_filter, services={"$in": list(services)})
+        await _add(q, score=3)
+    if cves:
+        q = dict(base_filter, cves={"$in": list(cves)})
+        await _add(q, score=4)
+
+    if not candidates:
+        return []
+
+    ranked = sorted(
+        candidates.values(),
+        key=lambda d: (d.get("_score", 0),
+                       d.get("created_at") or datetime.min),
+        reverse=True,
+    )[:limit]
+
+    # Increment recalled_count for retrieved episodes (best-effort)
+    ids = [d["_id"] for d in ranked if "_id" in d]
+    if ids:
+        try:
+            await db.engagement_episodes.update_many(
+                {"_id": {"$in": ids}},
+                {"$inc": {"recalled_count": 1},
+                 "$set": {"last_recalled": datetime.utcnow()}},
+            )
+        except Exception:
+            pass
+
+    out = []
+    for d in ranked:
+        d.pop("_score", None)
+        out.append(_serialize(d))
+    return out
 
 
 # ═══════════════════════════════════════════════════════════

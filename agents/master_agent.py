@@ -973,6 +973,31 @@ class MasterAgent(BaseAgent):
             # Persist plan in intel so future resumes can reuse it without an LLM call
             self._intel["_master_plan"] = plan
 
+            # Improvement #8 — episodic memory recall (best-effort, never blocks)
+            try:
+                recalled = await db.recall_similar_episodes(
+                    target_type        = (plan.get("assessment_type") or target_type or "").lower() or None,
+                    services           = plan.get("priority_services") or [],
+                    cves               = list(self._intel.get("cves") or []),
+                    limit              = 5,
+                    exclude_session_id = session_id,
+                )
+            except Exception as _exc:
+                recalled = []
+            if recalled:
+                self._intel["episodic_recalls"] = recalled
+                await self._emit("episode_recalled", {
+                    "session_id": session_id,
+                    "count":      len(recalled),
+                    "episodes":   recalled,
+                })
+                await self.emit_reasoning(
+                    step       = "episodic_memory_recall",
+                    reasoning  = f"Recalled {len(recalled)} similar past engagement(s) for context",
+                    decision   = "Using as priors for scan biasing",
+                    next_action= "Continue with current planning"
+                )
+
             await self._emit("master_plan", {"plan": plan, "target": target})
             await self.emit_reasoning(
                 step       = "master_plan_created",
@@ -1115,6 +1140,29 @@ class MasterAgent(BaseAgent):
             "status":       SessionStatus.COMPLETED,
             "completed_at": datetime.utcnow()
         })
+
+        # Improvement #8 — record this engagement as an episode for future recall
+        try:
+            from agents.reasoning.episodic_memory import build_episode_payload
+            hyp_list = self._intel.get("hypotheses") or []
+            episode = build_episode_payload(
+                session_id    = session_id,
+                target        = target,
+                target_type   = (self._intel.get("target_type")
+                                 or (plan or {}).get("assessment_type") or "unknown"),
+                intel         = self._intel,
+                hypotheses    = hyp_list,
+                ranked_paths  = self._intel.get("ranked_attack_paths") or [],
+                mission_brief = getattr(self, "mission_brief", None),
+            )
+            stored = await db.record_engagement_episode(episode)
+            await self._emit("episode_recorded", {
+                "session_id": session_id,
+                "episode":    stored,
+            })
+        except Exception as _exc:
+            logger.warning("episodic memory record failed: %s", _exc)
+
         await self._emit("pentest_complete", {
             "session_id": session_id,
             "intel":      self._intel,
@@ -6282,6 +6330,43 @@ Return JSON with enumeration goals: {{
         """
         i = self._intel
         lines = ["=== CURRENT PENTEST INTELLIGENCE ==="]
+
+        # Improvement #8 — episodic memory recalls (rendered before scan profile
+        # so the LLM sees prior lessons before current bias).
+        recalls = i.get("episodic_recalls") or []
+        if recalls:
+            try:
+                from agents.reasoning.episodic_memory import render_recall_block
+                block = render_recall_block(recalls)
+                if block:
+                    lines.append(block)
+            except Exception:
+                pass
+
+        # Improvement #7 — hypothesis-conditioned scan profile (rendered FIRST
+        # so phase planners see the bias before the raw intel dump).
+        sp = i.get("scan_profile")
+        if isinstance(sp, dict) and any(sp.get(k) for k in (
+            "priority_ports", "priority_services", "priority_cves",
+            "priority_paths", "priority_hosts",
+        )):
+            lines.append("--- Scan profile (hypothesis-conditioned) ---")
+            if sp.get("top_statement"):
+                lines.append(f"  Top hypothesis : {str(sp['top_statement'])[:160]}")
+            if sp.get("priority_services"):
+                lines.append(f"  Priority svcs  : {', '.join(sp['priority_services'][:8])}")
+            if sp.get("priority_ports"):
+                lines.append(f"  Priority ports : {', '.join(str(p) for p in sp['priority_ports'][:12])}")
+            if sp.get("priority_cves"):
+                lines.append(f"  Priority CVEs  : {', '.join(sp['priority_cves'][:8])}")
+            if sp.get("priority_paths"):
+                lines.append(f"  Priority paths : {', '.join(sp['priority_paths'][:8])}")
+            if sp.get("priority_hosts"):
+                lines.append(f"  Priority hosts : {', '.join(sp['priority_hosts'][:6])}")
+            lines.append(
+                "  → Bias scans toward these targets; defer catch-all defaults."
+            )
+            lines.append("---")
 
         lines.append(f"Target      : {i.get('target','?')} ({i.get('target_type','unknown')})")
         lines.append(f"OS          : {i.get('os_guess','unknown')}")
