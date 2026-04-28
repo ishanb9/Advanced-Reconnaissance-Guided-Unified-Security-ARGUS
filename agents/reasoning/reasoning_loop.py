@@ -280,6 +280,9 @@ class ReasoningLoop:
             # Improvement #7 — refresh hypothesis-conditioned scan profile
             await self._refresh_scan_profile()
 
+            # Improvement #9 — procedural RAG: attach technique chains to top hyps
+            await self._refresh_technique_chains()
+
             # ── PRIORITIZE ───────────────────────────────────────────────
             self._ranked_paths = await self._prioritize()
             if self._ranked_paths:
@@ -1719,6 +1722,79 @@ class ReasoningLoop:
             })
         except Exception as exc:
             await self._emit_reasoning(f"[opportunistic] on_pivot_event error: {exc}")
+
+    # ------------------------------------------------------------------
+    # Improvement #9 — Procedural RAG: technique-chain selection
+    # ------------------------------------------------------------------
+
+    async def _refresh_technique_chains(self) -> None:
+        """For the top-K hypotheses, look up matching technique chains and
+        stash them on intel.  The chains are rendered into ``_intel_summary``
+        so every existing LLM phase planner picks up the procedural prior.
+        """
+        try:
+            from agents.reasoning.technique_chains import (
+                select_chains_for_hypothesis,
+            )
+        except Exception as exc:
+            await self._emit_reasoning(f"[procedural_rag] import error: {exc}")
+            return
+
+        if not self._hypotheses:
+            return
+
+        top = sorted(
+            self._hypotheses,
+            key=lambda h: float(getattr(h, "confidence", 0.0) or 0.0),
+            reverse=True,
+        )[:3]
+
+        attached: List[Dict[str, Any]] = []
+        seen_ids: set = set()
+        for h in top:
+            if getattr(h, "invalidated", False):
+                continue
+            try:
+                chains = select_chains_for_hypothesis(h, self._intel, top_n=2)
+            except Exception:
+                chains = []
+            for ch in chains:
+                if ch.chain_id in seen_ids:
+                    continue
+                seen_ids.add(ch.chain_id)
+                attached.append({
+                    "hypothesis_id":  getattr(h, "hypothesis_id", ""),
+                    "hypothesis":     getattr(h, "statement", "")[:160],
+                    "chain":          ch.to_dict(),
+                })
+
+        prev_ids = {a["chain"]["chain_id"]
+                    for a in (self._intel.get("technique_chains") or [])
+                    if isinstance(a, dict) and isinstance(a.get("chain"), dict)}
+        new_ids = {a["chain"]["chain_id"] for a in attached}
+
+        self._intel["technique_chains"] = attached
+
+        if attached and new_ids != prev_ids:
+            try:
+                await self._emit({
+                    "type":       "technique_chain_selected",
+                    "session_id": self._session_id,
+                    "agent":      "master",
+                    "data": {
+                        "iteration": self._iteration,
+                        "count":     len(attached),
+                        "chains":    [{
+                            "chain_id":   a["chain"]["chain_id"],
+                            "name":       a["chain"]["name"],
+                            "phase":      a["chain"]["phase"],
+                            "mitre":      a["chain"]["mitre"],
+                            "hypothesis": a["hypothesis"],
+                        } for a in attached],
+                    },
+                })
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     # Improvement #7 — Hypothesis-conditioned scan profile

@@ -6331,6 +6331,43 @@ Return JSON with enumeration goals: {{
         i = self._intel
         lines = ["=== CURRENT PENTEST INTELLIGENCE ==="]
 
+        # Improvement #9 — procedural technique chains (rendered before recalls
+        # so the LLM sees the structured procedure first).
+        chain_attachments = i.get("technique_chains") or []
+        if chain_attachments:
+            try:
+                from agents.reasoning.technique_chains import (
+                    TechniqueChain, TechniqueStep, render_chains_for_prompt,
+                )
+                chain_objs: list = []
+                for att in chain_attachments:
+                    if not isinstance(att, dict):
+                        continue
+                    raw = att.get("chain") or {}
+                    if not isinstance(raw, dict):
+                        continue
+                    try:
+                        steps = [TechniqueStep(**s) for s in raw.get("steps", [])
+                                 if isinstance(s, dict)]
+                        chain_objs.append(TechniqueChain(
+                            chain_id    = raw.get("chain_id", ""),
+                            name        = raw.get("name", ""),
+                            description = raw.get("description", ""),
+                            phase       = raw.get("phase", ""),
+                            applies_when= raw.get("applies_when") or {},
+                            steps       = steps,
+                            mitre       = list(raw.get("mitre") or []),
+                            source      = raw.get("source", "builtin"),
+                            confidence  = float(raw.get("confidence", 0.85)),
+                        ))
+                    except Exception:
+                        continue
+                block = render_chains_for_prompt(chain_objs)
+                if block:
+                    lines.append(block)
+            except Exception:
+                pass
+
         # Improvement #8 — episodic memory recalls (rendered before scan profile
         # so the LLM sees prior lessons before current bias).
         recalls = i.get("episodic_recalls") or []

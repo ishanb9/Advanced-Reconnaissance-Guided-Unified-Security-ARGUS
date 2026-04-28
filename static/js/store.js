@@ -2256,6 +2256,18 @@ function routeWsEvent(msg, dispatch, shellListeners, sessionId) {
       break;
     }
 
+    // ── Procedural RAG: technique chain selected (#9) ─────
+    case 'technique_chain_selected': {
+      const td = data || msg;
+      const names = (td.chains || []).slice(0, 3).map(c => c.name).join(' | ') || '(none)';
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'master', eventType: 'technique_chain_selected',
+        message: `🧩 Procedural chains @ iter ${td.iteration ?? '?'}: ${names}`,
+        data: td,
+      }});
+      break;
+    }
+
     // ── Episodic memory recall / record (#8) ──────────────
     case 'episode_recalled': {
       const ed = data || msg;
