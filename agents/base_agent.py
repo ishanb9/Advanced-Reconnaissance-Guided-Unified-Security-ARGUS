@@ -1312,6 +1312,14 @@ Return JSON:
             f"Be specific, technical, and use OSCP/OSWE methodology."
         )
 
+        # ── Scope-guard preamble (Improvement #16) ──────────────────────
+        # Prepended to every system prompt so the LLM hard-refuses any
+        # plan against out-of-scope assets.  When _scope_guard is empty
+        # we still prepend a generic refusal directive.
+        scope_guard_text = getattr(self, "_scope_guard", "") or ""
+        if scope_guard_text and "=== SCOPE GUARD" not in system:
+            system = f"{scope_guard_text}\n{system}"
+
         messages = [
             {"role": "system", "content": system},
             {"role": "user",   "content": prompt}

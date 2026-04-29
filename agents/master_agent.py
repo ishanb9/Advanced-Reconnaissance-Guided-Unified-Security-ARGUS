@@ -896,6 +896,35 @@ class MasterAgent(BaseAgent):
         except Exception:
             pass
 
+        # Improvement #16 — assemble the scope-guard prefix from
+        # engagement context + operator notes/scope and bind it to self
+        # so every BaseAgent.think() call auto-prepends it.  Also stash
+        # the structured guard on intel for the _intel_summary renderer.
+        try:
+            from agents.reasoning.scope_guard import (
+                build_scope_guard, build_scope_prefix,
+            )
+            _guard = build_scope_guard(
+                target              = target,
+                engagement_context  = self._intel.get("engagement_context") or {},
+                notes               = self._notes,
+                scope               = self._scope,
+            )
+            self._scope_guard_obj = _guard
+            self._scope_guard     = build_scope_prefix(_guard)
+            self._intel["scope_guard"] = _guard.to_dict()
+            try:
+                await self._broadcast_raw({
+                    "type":       "scope_guard_updated",
+                    "session_id": session_id,
+                    "agent":      "master",
+                    "data":       _guard.to_dict(),
+                })
+            except Exception:
+                pass
+        except Exception as _se:
+            self._scope_guard = ""
+
         # Improvement #13 — auto-derive dry-run mode from engagement type
         # + operator hints.  CTF/lab/training boxes flip it off; prod /
         # red-team / live engagements force it on.
@@ -6391,6 +6420,13 @@ Return JSON with enumeration goals: {{
         """
         i = self._intel
         lines = ["=== CURRENT PENTEST INTELLIGENCE ==="]
+
+        # Improvement #16 — scope-guard block at the very top so any
+        # planner that uses the intel summary as its system context
+        # gets the same hard scope rules as direct think() callers.
+        guard_text = getattr(self, "_scope_guard", "") or ""
+        if guard_text:
+            lines.append(guard_text.rstrip())
 
         # Improvement #13 — dry-run mode banner so the LLM knows
         # destructive actions will be gated for operator preview.

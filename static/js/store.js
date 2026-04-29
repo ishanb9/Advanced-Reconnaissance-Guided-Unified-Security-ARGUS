@@ -2328,6 +2328,22 @@ function routeWsEvent(msg, dispatch, shellListeners, sessionId) {
       break;
     }
 
+    // ── Scope guard built (#16) ───────────────────────────
+    case 'scope_guard_updated': {
+      const sg = data || msg;
+      const hostsN = (sg.allowed_hosts || []).length;
+      const cidrsN = (sg.allowed_cidrs || []).length;
+      const domsN  = (sg.allowed_domains || []).length;
+      const oosN   = (sg.out_of_scope || []).length;
+      const rulesN = (sg.rules_of_engagement || []).length;
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'master', eventType: 'scope_guard_updated',
+        message: `🛡 Scope guard: ${hostsN} host(s), ${cidrsN} CIDR(s), ${domsN} domain(s), ${oosN} OOS, ${rulesN} RoE rule(s)`,
+        data: sg,
+      }});
+      break;
+    }
+
     // ── Self-critique gate (#15) ──────────────────────────
     case 'self_critique': {
       const sc = data || msg;
