@@ -2328,6 +2328,32 @@ function routeWsEvent(msg, dispatch, shellListeners, sessionId) {
       break;
     }
 
+    // ── Dry-run preview (#13) ─────────────────────────────
+    case 'dry_run_preview': {
+      const dr = data || msg;
+      const v = dr.verdict || {};
+      const tier = v.tier || 'risky';
+      const icon = tier === 'destructive' ? '🛑' : '🧪';
+      const reason = (v.reasons || [])[0] || 'flagged';
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'master', eventType: 'dry_run_preview',
+        message: `${icon} Dry-run [${tier}] ${dr.tool || '?'} — ${reason}`,
+        data: dr,
+      }});
+      break;
+    }
+
+    // ── Dry-run mode toggled (#13) ────────────────────────
+    case 'dry_run_mode_changed': {
+      const dm = data || msg;
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'master', eventType: 'dry_run_mode_changed',
+        message: `🧪 Dry-run mode: ${dm.enabled ? 'ON' : 'OFF'} (${dm.reason || dm.source || 'manual'})`,
+        data: dm,
+      }});
+      break;
+    }
+
     // ── Defensive posture fingerprinted (#12) ─────────────
     case 'defensive_posture_updated': {
       const dp = data || msg;

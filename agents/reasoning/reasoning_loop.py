@@ -384,6 +384,58 @@ class ReasoningLoop:
                 "exploit", probability=action.confidence,
             )
 
+            # ── DRY-RUN GATE (Improvement #13) ───────────────────────────
+            # Soft gate: when master.dry_run_mode is enabled and the action
+            # is classified destructive (or risky on stealth engagements),
+            # emit a preview event and skip execution this iteration.  The
+            # operator confirms via the existing requires_confirmation
+            # path or toggles dry_run_mode off in the UI.
+            if getattr(self._master, "dry_run_mode", False) and not action.requires_confirmation:
+                try:
+                    from agents.reasoning.dry_run import (
+                        classify_action, build_preview,
+                    )
+                    verdict = classify_action(action)
+                    nb_for_tier = getattr(self._master, "noise_budget", None)
+                    is_stealth = bool(nb_for_tier and getattr(nb_for_tier, "mode", "") == "stealth")
+                    gate = (verdict.tier == "destructive") or (is_stealth and verdict.tier == "risky")
+                    if gate:
+                        preview = build_preview(
+                            action,
+                            session_id = self._session_id,
+                            iteration  = self._iteration,
+                        )
+                        await self._emit({
+                            "type":       "dry_run_preview",
+                            "session_id": self._session_id,
+                            "agent":      "master",
+                            "data":       preview,
+                        })
+                        await self._neg_memory.record_failure(
+                            tool           = action.tool,
+                            args           = action.args,
+                            target_service = action.target_service,
+                            failure_reason = (
+                                f"dry_run_gated tier={verdict.tier} "
+                                f"reasons={'; '.join(verdict.reasons)[:120]}"
+                            ),
+                            hypothesis_id  = action.hypothesis_id,
+                            host           = self._target,
+                        )
+                        await self._emit_plan_step(
+                            action.action_id,
+                            f"🧪 {action.tool} (dry-run preview)",
+                            "failed",
+                            f"[{verdict.tier}] {(verdict.reasons[0] if verdict.reasons else '')[:120]}",
+                            "exploit",
+                            mitre_id    = active_hyp_mitre,
+                            probability = action.confidence,
+                            found       = False,
+                        )
+                        continue
+                except Exception as exc:
+                    await self._emit_reasoning(f"[dry_run] gate error: {exc}")
+
             # ── NOISE BUDGET GATE (Improvement #11) ──────────────────────
             # Soft gate: if the action's estimated noise cost would push the
             # session over budget, skip & record a negative-memory entry so

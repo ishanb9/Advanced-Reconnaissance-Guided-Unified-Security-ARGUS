@@ -467,6 +467,11 @@ class MasterAgent(BaseAgent):
         except Exception:
             self.noise_budget = None
 
+        # Improvement #13 — dry-run mode for destructive ops.  Defaults to
+        # ON (fail-safe); auto-derived in run() once engagement type and
+        # operator notes are known so CTF/lab boxes flip it OFF.
+        self.dry_run_mode: bool = True
+
         # Background tasks — fire-and-forget asyncio.Task objects.
         # Tracked here so _wait_for_agents_idle can properly drain them before
         # report generation begins.
@@ -885,6 +890,33 @@ class MasterAgent(BaseAgent):
                     "session_id": session_id,
                     "agent":      "master",
                     "data":       self.noise_budget.to_dict(),
+                })
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+        # Improvement #13 — auto-derive dry-run mode from engagement type
+        # + operator hints.  CTF/lab/training boxes flip it off; prod /
+        # red-team / live engagements force it on.
+        try:
+            from agents.reasoning.dry_run import default_mode_for_engagement
+            self.dry_run_mode = default_mode_for_engagement(
+                engagement_type = target_type,
+                target_type     = target_type,
+                notes           = self._notes,
+                scope           = self._scope,
+            )
+            try:
+                await self._broadcast_raw({
+                    "type":       "dry_run_mode_changed",
+                    "session_id": session_id,
+                    "agent":      "master",
+                    "data": {
+                        "enabled": self.dry_run_mode,
+                        "source":  "auto",
+                        "reason":  f"engagement={target_type}",
+                    },
                 })
             except Exception:
                 pass
@@ -6359,6 +6391,16 @@ Return JSON with enumeration goals: {{
         """
         i = self._intel
         lines = ["=== CURRENT PENTEST INTELLIGENCE ==="]
+
+        # Improvement #13 — dry-run mode banner so the LLM knows
+        # destructive actions will be gated for operator preview.
+        if getattr(self, "dry_run_mode", False):
+            lines.append(
+                "=== DRY-RUN MODE: ON === Destructive ops (rm -rf, DROP TABLE, "
+                "msf exploit modules, sqlmap --dump-all, hydra, responder) are "
+                "previewed for operator review before execution.  Prefer "
+                "non-destructive enumeration first."
+            )
 
         # Improvement #11 — noise budget banner (rendered up front so the LLM
         # respects the stealth constraint before picking tools below).
