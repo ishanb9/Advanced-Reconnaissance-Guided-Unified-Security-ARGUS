@@ -995,12 +995,21 @@ class ReasoningLoop:
         """
         Ask the LLM: does this result confirm or refute the hypothesis?
         Falls back to heuristic validation on LLM failure.
+
+        Improvement #14 — after the LLM/heuristic returns 'validated',
+        the Issue Validator is run as a hard gate.  Even an enthusiastic
+        'yes' from the LLM is overruled when the raw stdout contains no
+        concrete evidence pattern for the hypothesis class.  Findings
+        that fail the gate stay at 'suspected'.
         """
         if not hypothesis:
             return False
 
-        stdout    = (result.get("stdout") or result.get("output") or "")[:1000]
-        exit_code = result.get("exit_code", -1)
+        stdout_full = (result.get("stdout") or result.get("output") or "")
+        stdout      = stdout_full[:1000]
+        exit_code   = result.get("exit_code", -1)
+
+        soft_validated = False  # the pre-gate verdict
 
         # Quick heuristic: obvious failure signals
         error_signals = [
@@ -1009,39 +1018,75 @@ class ReasoningLoop:
             "module not found", "exploit failed",
         ]
         stdout_lower = stdout.lower()
-        for sig in error_signals:
-            if sig in stdout_lower:
-                return False
+        failed_hard = any(sig in stdout_lower for sig in error_signals)
 
-        # Quick heuristic: obvious success signals
-        success_signals = ["shell", "uid=", "whoami", "flag{", "root@", "meterpreter"]
-        for sig in success_signals:
-            if sig in stdout_lower:
-                return True
+        if failed_hard:
+            soft_validated = False
+        else:
+            # Quick heuristic: obvious success signals
+            success_signals = ["shell", "uid=", "whoami", "flag{", "root@", "meterpreter"]
+            if any(sig in stdout_lower for sig in success_signals):
+                soft_validated = True
+            elif len(stdout) < 20:
+                soft_validated = (exit_code == 0)
+            else:
+                system = (
+                    "You are a penetration tester reviewing a tool's output. "
+                    "Determine if the output confirms the hypothesis. "
+                    "Respond with ONLY 'yes' or 'no'."
+                )
+                prompt = (
+                    f"Hypothesis: {hypothesis.statement}\n"
+                    f"Tool: {action.tool}\n"
+                    f"Exit code: {exit_code}\n"
+                    f"Output:\n{stdout[:500]}\n\n"
+                    "Does this output confirm the hypothesis? (yes/no)"
+                )
+                try:
+                    response = await self._master.think(prompt, system)
+                    response = (response or "").strip().lower()
+                    soft_validated = response.startswith("yes")
+                except Exception:
+                    soft_validated = (exit_code == 0)
 
-        # LLM validation for ambiguous cases
-        if len(stdout) < 20:
-            return exit_code == 0
-
-        system = (
-            "You are a penetration tester reviewing a tool's output. "
-            "Determine if the output confirms the hypothesis. "
-            "Respond with ONLY 'yes' or 'no'."
-        )
-        prompt = (
-            f"Hypothesis: {hypothesis.statement}\n"
-            f"Tool: {action.tool}\n"
-            f"Exit code: {exit_code}\n"
-            f"Output:\n{stdout[:500]}\n\n"
-            "Does this output confirm the hypothesis? (yes/no)"
-        )
-
+        # ── HARD GATE (Improvement #14) ───────────────────────────────
         try:
-            response = await self._master.think(prompt, system)
-            response = (response or "").strip().lower()
-            return response.startswith("yes")
-        except Exception:
-            return exit_code == 0
+            from agents.reasoning.issue_validator import validate_grounding
+            iv = validate_grounding(
+                statement = hypothesis.statement or "",
+                mitre     = hypothesis.mitre_technique or "",
+                tool      = action.tool or "",
+                stdout    = stdout_full,
+                exit_code = exit_code,
+            )
+            grounded = iv.grounded
+            await self._emit({
+                "type":       "finding_validation",
+                "session_id": self._session_id,
+                "agent":      "master",
+                "data": {
+                    "hypothesis_id": hypothesis.hypothesis_id,
+                    "statement":     (hypothesis.statement or "")[:160],
+                    "tool":          action.tool,
+                    "soft_validated": soft_validated,
+                    "grounded":       grounded,
+                    "validation":     iv.to_dict(),
+                },
+            })
+            if soft_validated and not grounded:
+                # Override: refuse to confirm without grounding evidence.
+                await self._emit_reasoning(
+                    f"[issue_validator] downgraded {hypothesis.hypothesis_id} "
+                    f"({iv.issue_class}) — {iv.reason}"
+                )
+                return False
+            # If soft says no but grounding finds strong evidence, leave
+            # the soft verdict in place (the heuristic / LLM saw a real
+            # failure signal we trust over our pattern set).
+            return soft_validated
+        except Exception as exc:
+            await self._emit_reasoning(f"[issue_validator] gate error: {exc}")
+            return soft_validated
 
     async def _update(
         self,

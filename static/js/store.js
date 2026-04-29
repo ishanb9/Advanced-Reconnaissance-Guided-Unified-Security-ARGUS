@@ -2328,6 +2328,24 @@ function routeWsEvent(msg, dispatch, shellListeners, sessionId) {
       break;
     }
 
+    // ── Issue Validator hard gate (#14) ───────────────────
+    case 'finding_validation': {
+      const fv = data || msg;
+      const v = fv.validation || {};
+      const gated = fv.soft_validated && !fv.grounded;
+      const icon = gated ? '⛔' : (fv.grounded ? '✅' : '◌');
+      const cls = v.issue_class || '?';
+      const tail = gated
+        ? `gated — no evidence for ${cls} (${(v.missing_signals || []).slice(0,2).join(', ')})`
+        : (fv.grounded ? `grounded ${cls} score=${v.score ?? '?'}` : `unconfirmed ${cls}`);
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'master', eventType: 'finding_validation',
+        message: `${icon} Validator: ${(fv.statement || '').slice(0,90)} — ${tail}`,
+        data: fv,
+      }});
+      break;
+    }
+
     // ── Dry-run preview (#13) ─────────────────────────────
     case 'dry_run_preview': {
       const dr = data || msg;
