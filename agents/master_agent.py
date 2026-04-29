@@ -6428,6 +6428,18 @@ Return JSON with enumeration goals: {{
         if guard_text:
             lines.append(guard_text.rstrip())
 
+        # Improvement #18 — live goal-progress timeline (right after scope
+        # guard so phase planners see "what we have left to win" up front).
+        gtl = getattr(self, "goal_timeline", None)
+        if gtl is not None and gtl.goals:
+            try:
+                from agents.reasoning.goal_timeline import render_timeline_for_prompt
+                block = render_timeline_for_prompt(gtl)
+                if block:
+                    lines.append(block)
+            except Exception:
+                pass
+
         # Improvement #13 — dry-run mode banner so the LLM knows
         # destructive actions will be gated for operator preview.
         if getattr(self, "dry_run_mode", False):

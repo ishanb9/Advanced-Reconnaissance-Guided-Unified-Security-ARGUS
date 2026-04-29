@@ -305,6 +305,9 @@ class ReasoningLoop:
             # Improvement #12 — defensive posture fingerprinting (passive)
             await self._refresh_defensive_posture()
 
+            # Improvement #18 — live goal-progress timeline
+            await self._refresh_goal_timeline()
+
             # ── PRIORITIZE ───────────────────────────────────────────────
             self._ranked_paths = await self._prioritize()
             if self._ranked_paths:
@@ -2333,6 +2336,91 @@ class ReasoningLoop:
             })
         except Exception:
             pass
+
+    # ------------------------------------------------------------------
+    # Improvement #18 — Live goal-progress timeline
+    # ------------------------------------------------------------------
+
+    async def _refresh_goal_timeline(self) -> None:
+        """Reconcile the win-condition snapshot into a live timeline.
+
+        Surfaces structured per-goal state transitions, milestones, and
+        a velocity-based ETA on remaining iterations.  Emits
+        ``goal_timeline_updated`` when any goal state or progress
+        materially changes.  Renders a banner via
+        ``MasterAgent._intel_summary`` so phase planners see overall
+        progress at the top of every prompt.
+        """
+        try:
+            from agents.reasoning.goal_timeline import (
+                GoalTimeline, render_timeline_for_prompt,
+            )
+        except Exception as exc:
+            await self._emit_reasoning(f"[goal_timeline] import error: {exc}")
+            return
+
+        # Refresh underlying win-conditions snapshot.
+        try:
+            evaluator = getattr(self._master, "evaluate_win_conditions", None)
+            if callable(evaluator):
+                await evaluator()  # updates self._intel["win_conditions"]
+        except Exception as exc:
+            await self._emit_reasoning(f"[goal_timeline] evaluate failed: {exc}")
+
+        snapshot = self._intel.get("win_conditions") or {}
+        if not snapshot.get("conditions"):
+            return  # no mission brief / no win conditions configured
+
+        tl = getattr(self._master, "goal_timeline", None)
+        if tl is None:
+            tl = GoalTimeline()
+            try:
+                self._master.goal_timeline = tl
+            except Exception:
+                pass
+
+        prior_sig = tl.signature()
+        changed, milestones = tl.update(
+            win_snapshot = snapshot,
+            intel        = self._intel,
+            iteration    = self._iteration,
+        )
+        new_sig = tl.signature()
+
+        payload = tl.to_dict(iteration=self._iteration)
+        self._intel["goal_timeline"] = payload
+
+        if not changed and prior_sig == new_sig:
+            return
+
+        try:
+            await self._emit({
+                "type":       "goal_timeline_updated",
+                "session_id": self._session_id,
+                "agent":      "master",
+                "data": {
+                    **payload,
+                    "new_milestones": [m.to_dict() for m in milestones],
+                },
+            })
+        except Exception:
+            pass
+
+        # Record one trace step per state transition (Improvement #17).
+        for m in milestones:
+            try:
+                if m.kind == "transition" and m.from_state and m.to_state:
+                    await self._record_trace_step(
+                        kind     = "observation",
+                        summary  = (
+                            f"goal '{m.note[:60] if m.note else ''}' "
+                            f"{m.from_state} → {m.to_state}"
+                        ),
+                        refs     = {"goal_transition": f"{m.from_state}->{m.to_state}"},
+                        payload  = m.to_dict(),
+                    )
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------
     # Improvement #4 — Unified decision loop: cross-phase pivots

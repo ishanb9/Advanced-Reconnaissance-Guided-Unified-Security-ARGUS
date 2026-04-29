@@ -71,6 +71,7 @@ const INIT = {
   reasoningLog:    [],
   reasoningTrace:    [],   // #17 — full append-only trace for "Why?" panel
   reasoningTraceById:{},   // #17 — step_id → step lookup for chain walks
+  goalTimeline:      null, // #18 — live goal-progress timeline payload
   toolOutputs:     {},
   findingsSummary: { critical: 0, high: 0, medium: 0, low: 0, info: 0, total: 0 },
   flags:           [],
@@ -370,6 +371,10 @@ function reducer(state, action) {
       const entries = [action.payload, ...state.reasoningLog].slice(0, 200);
       return { ...state, reasoningLog: entries };
     }
+
+    // ── Live goal-progress timeline (#18) ────────────────
+    case 'GOAL_TIMELINE_REPLACE':
+      return { ...state, goalTimeline: action.payload };
 
     // ── Reasoning trace ("Why?" panel) (#17) ─────────────
     case 'TRACE_APPEND': {
@@ -2336,6 +2341,31 @@ function routeWsEvent(msg, dispatch, shellListeners, sessionId) {
         ts, agent: 'master', eventType: 'scan_profile_updated',
         message: `🎯 Scan profile @ iter ${sp.iteration ?? '?'}: ${bits.join(' | ') || '(empty)'}`,
         data: sp,
+      }});
+      break;
+    }
+
+    // ── Live goal-progress timeline (#18) ─────────────────
+    case 'goal_timeline_updated': {
+      const gt = data || msg;
+      const sm = gt.summary || {};
+      const newMs = gt.new_milestones || [];
+      // Persist full timeline payload for any UI panel.
+      dispatch({ type: 'GOAL_TIMELINE_REPLACE', payload: gt });
+      const eta = sm.eta_iterations
+        ? `  · ETA ≈ ${sm.eta_iterations} iters`
+        : '';
+      const transitions = newMs
+        .filter(m => m.kind === 'transition' && m.from_state && m.to_state)
+        .map(m => `${m.from_state}→${m.to_state}`)
+        .slice(0, 2)
+        .join(', ');
+      const tail = transitions ? `  (${transitions})` : '';
+      const flag = gt.all_met ? '  🏁 ALL MET' : '';
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'master', eventType: 'goal_timeline_updated',
+        message: `🎯 Goals: ${sm.met ?? 0}/${sm.total ?? 0}${eta}${tail}${flag}`,
+        data: gt,
       }});
       break;
     }
