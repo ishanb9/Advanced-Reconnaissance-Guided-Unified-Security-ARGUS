@@ -69,6 +69,8 @@ const INIT = {
   phasesCompleted: [],
   feedEntries:     [],
   reasoningLog:    [],
+  reasoningTrace:    [],   // #17 — full append-only trace for "Why?" panel
+  reasoningTraceById:{},   // #17 — step_id → step lookup for chain walks
   toolOutputs:     {},
   findingsSummary: { critical: 0, high: 0, medium: 0, low: 0, info: 0, total: 0 },
   flags:           [],
@@ -367,6 +369,16 @@ function reducer(state, action) {
     case 'REASONING_ENTRY': {
       const entries = [action.payload, ...state.reasoningLog].slice(0, 200);
       return { ...state, reasoningLog: entries };
+    }
+
+    // ── Reasoning trace ("Why?" panel) (#17) ─────────────
+    case 'TRACE_APPEND': {
+      const trace = state.reasoningTrace || [];
+      const next = [...trace, action.payload].slice(-1024);
+      // Build by-id index for O(1) chain walks.
+      const byId = state.reasoningTraceById || {};
+      const newById = { ...byId, [action.payload.step_id]: action.payload };
+      return { ...state, reasoningTrace: next, reasoningTraceById: newById };
     }
 
     // ── Reasoning Engine ────────────────────────────────────
@@ -2325,6 +2337,26 @@ function routeWsEvent(msg, dispatch, shellListeners, sessionId) {
         message: `🎯 Scan profile @ iter ${sp.iteration ?? '?'}: ${bits.join(' | ') || '(empty)'}`,
         data: sp,
       }});
+      break;
+    }
+
+    // ── Reasoning trace step ("Why?" panel) (#17) ─────────
+    case 'reasoning_trace_step': {
+      const st = data || msg;
+      const kindIcon = {
+        observation: '👁',  hypothesis: '💡',  rank: '📊',
+        select:      '🎯',  gate:       '🚦',  execute: '⚡',
+        validate:    '🔍',  finding:    '📌',  pivot:   '↪',
+      }[st.kind] || '·';
+      dispatch({ type: 'TRACE_APPEND', payload: st });
+      // Suppress noisy kinds from the main feed; show high-signal only.
+      if (['finding','gate','validate','pivot'].includes(st.kind)) {
+        dispatch({ type: 'FEED_ENTRY', payload: {
+          ts, agent: 'master', eventType: 'reasoning_trace_step',
+          message: `${kindIcon} ${st.kind}: ${(st.summary || '').slice(0,140)}`,
+          data: st,
+        }});
+      }
       break;
     }
 

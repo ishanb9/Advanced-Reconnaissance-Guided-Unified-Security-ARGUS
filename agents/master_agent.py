@@ -6449,6 +6449,26 @@ Return JSON with enumeration goals: {{
             except Exception:
                 pass
 
+        # Improvement #17 — last reasoning chain (so the next planner can
+        # self-reference the prior decision pathway).  Walks the most
+        # recent validate or finding step back to its root.
+        trace = getattr(self, "reasoning_trace", None)
+        if trace is not None and len(trace) > 0:
+            try:
+                from agents.reasoning.reasoning_trace import render_chain_for_prompt
+                # Prefer the most recent finding's chain; fall back to
+                # the most recent validate step; else the most recent step.
+                recent = trace.recent(40)
+                anchor = next((s for s in reversed(recent) if s.kind == "finding"), None) \
+                       or next((s for s in reversed(recent) if s.kind == "validate"), None) \
+                       or (recent[-1] if recent else None)
+                chain = trace.chain_for(anchor.step_id) if anchor else []
+                block = render_chain_for_prompt(chain)
+                if block:
+                    lines.append(block)
+            except Exception:
+                pass
+
         # Improvement #15 — last self-critique verdict (so the next phase
         # planner sees what was just blocked / held and why).
         crit = i.get("last_self_critique")

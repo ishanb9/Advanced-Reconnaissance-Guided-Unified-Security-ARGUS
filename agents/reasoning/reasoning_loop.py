@@ -92,6 +92,22 @@ class ReasoningLoop:
         # Tracks last validated hypothesis node for graph edge chaining
         self._last_validated_node_id: Optional[str]  = None
 
+        # ── Improvement #17 — reasoning trace ("Why?" panel) ──────────
+        try:
+            from agents.reasoning.reasoning_trace import ReasoningTrace
+            self._reasoning_trace = ReasoningTrace(session_id=session_id)
+            # Surface to master so other components and the API layer can
+            # query the chain by ref.
+            try:
+                master_agent.reasoning_trace = self._reasoning_trace  # type: ignore[attr-defined]
+            except Exception:
+                pass
+        except Exception:
+            self._reasoning_trace = None
+        # Per-iteration step ids for parent-pointer chaining.
+        self._last_select_step_id:   Optional[str] = None
+        self._last_validate_step_id: Optional[str] = None
+
         # ── Improvement #4 — unified decision loop ────────────────────────
         # Tracks which phase units have already been dispatched so the
         # cross-phase audit (_consider_pivots) is idempotent.  Keys are the
@@ -324,6 +340,32 @@ class ReasoningLoop:
                 negative_memory = self._neg_memory,
             )
 
+            # Improvement #17 — record selection trace step parented on
+            # the hypothesis it derives from.
+            if action is not None:
+                _hyp_step = None
+                trace = getattr(self, "_reasoning_trace", None)
+                if trace is not None:
+                    _hyp_step = trace.latest_step_for("hypothesis_id", action.hypothesis_id or "")
+                self._last_select_step_id = await self._record_trace_step(
+                    kind      = "select",
+                    summary   = (
+                        f"selected {action.tool} → {action.target_service or '?'} "
+                        f"(conf={action.confidence:.2f})"
+                    ),
+                    parent_id = (_hyp_step.step_id if _hyp_step else None),
+                    refs      = {
+                        "action_id":     action.action_id or "",
+                        "hypothesis_id": action.hypothesis_id or "",
+                        "tool":          action.tool or "",
+                    },
+                    payload   = {
+                        "args":    (action.args or "")[:200],
+                        "reason":  (action.reason or "")[:200],
+                        "expected_outcome": (action.expected_outcome or "")[:200],
+                    },
+                )
+
             if action is None:
                 await self._emit_reasoning(
                     "No actionable hypothesis found — exhausting more evidence paths"
@@ -471,6 +513,14 @@ class ReasoningLoop:
                         },
                     })
                     if crit.recommendation == "abort":
+                        await self._record_trace_step(
+                            kind     = "gate",
+                            summary  = f"self-critique ABORT: {crit.reason[:120]}",
+                            parent_id= self._last_select_step_id,
+                            refs     = {"action_id": action.action_id or "",
+                                        "gate":      "self_critique"},
+                            payload  = crit.to_dict(),
+                        )
                         await self._emit_reasoning(
                             f"[self_critique] aborting {action.tool} — {crit.reason}"
                         )
@@ -572,6 +622,25 @@ class ReasoningLoop:
             was_shell = pivot_pre["shell_access"]
             result    = await self._execute(action)
 
+            # Improvement #17 — record execute step
+            _exec_step_id = await self._record_trace_step(
+                kind      = "execute",
+                summary   = (
+                    f"ran {action.tool} (exit={result.get('exit_code', '?')}, "
+                    f"stdout={len((result.get('stdout') or ''))}b)"
+                ),
+                parent_id = self._last_select_step_id,
+                refs      = {
+                    "action_id":     action.action_id or "",
+                    "hypothesis_id": action.hypothesis_id or "",
+                    "tool":          action.tool or "",
+                },
+                payload   = {
+                    "exit_code": result.get("exit_code"),
+                    "stdout_preview": (result.get("stdout") or "")[:200],
+                },
+            )
+
             # ── NOISE BUDGET CONSUME (Improvement #11) ───────────────────
             if nb is not None:
                 try:
@@ -597,6 +666,21 @@ class ReasoningLoop:
                 None
             )
             validated  = await self._validate(action, result, active_hyp)
+
+            # Improvement #17 — record validate step
+            self._last_validate_step_id = await self._record_trace_step(
+                kind      = "validate",
+                summary   = (
+                    f"{'CONFIRMED' if validated else 'unconfirmed'} "
+                    f"{(active_hyp.statement if active_hyp else action.tool)[:120]}"
+                ),
+                parent_id = _exec_step_id,
+                refs      = {
+                    "action_id":     action.action_id or "",
+                    "hypothesis_id": action.hypothesis_id or "",
+                },
+                payload   = {"validated": bool(validated)},
+            )
 
             # ── EMIT RESULTS TO ALL DASHBOARDS ───────────────────────────
             stdout_preview = (result.get("stdout") or "")[:200]
@@ -2532,6 +2616,34 @@ class ReasoningLoop:
 
     async def _persist_hypotheses(self) -> None:
         """Store top hypotheses to MongoDB."""
+        # Improvement #17 — record one trace step per top hypothesis so
+        # later select/execute/validate steps can be parented back to it.
+        trace = getattr(self, "_reasoning_trace", None)
+        if trace is not None:
+            for h in self._hypotheses[:5]:
+                # Only record if we don't already have a step for this hyp_id
+                # (avoid spam — hypotheses persist for many iterations).
+                if trace.latest_step_for("hypothesis_id", h.hypothesis_id):
+                    continue
+                try:
+                    await self._record_trace_step(
+                        kind    = "hypothesis",
+                        summary = (
+                            f"H[{(h.mitre_technique or '?')}] "
+                            f"{(h.statement or '')[:140]} (conf={h.confidence:.2f})"
+                        ),
+                        refs    = {
+                            "hypothesis_id": h.hypothesis_id or "",
+                            "mitre":         h.mitre_technique or "",
+                        },
+                        payload = {
+                            "evidence_supporting": list(h.evidence_supporting or [])[:5],
+                            "attack_phase":        h.attack_phase or "",
+                        },
+                    )
+                except Exception:
+                    pass
+
         try:
             import db.mongo_client as dbm
             for h in self._hypotheses[:5]:
@@ -2586,6 +2698,40 @@ class ReasoningLoop:
                 })
         except Exception:
             pass
+
+    async def _record_trace_step(
+        self,
+        *, kind: str,
+        summary: str,
+        parent_id: Optional[str] = None,
+        refs: Optional[Dict[str, str]] = None,
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> Optional[str]:
+        """Improvement #17 — append a reasoning trace step and broadcast it."""
+        trace = getattr(self, "_reasoning_trace", None)
+        if trace is None:
+            return None
+        try:
+            step = trace.record(
+                kind      = kind,
+                summary   = summary,
+                parent_id = parent_id,
+                refs      = refs,
+                payload   = payload,
+                iteration = self._iteration,
+            )
+        except Exception:
+            return None
+        try:
+            await self._emit({
+                "type":       "reasoning_trace_step",
+                "session_id": self._session_id,
+                "agent":      "master",
+                "data":       step.to_dict(),
+            })
+        except Exception:
+            pass
+        return step.step_id
 
     async def _emit_reasoning(self, message: str) -> None:
         try:
@@ -2679,6 +2825,24 @@ class ReasoningLoop:
         mitre:       str = "",
     ) -> None:
         """Emit a finding event — populates FindingsBoard."""
+        finding_id = str(uuid.uuid4())
+        # Improvement #17 — finding step parented on the most recent
+        # validate step (if any) so the chain is complete from
+        # observation → finding.
+        try:
+            await self._record_trace_step(
+                kind      = "finding",
+                summary   = f"FINDING [{severity}] {title[:140]}",
+                parent_id = self._last_validate_step_id,
+                refs      = {
+                    "finding_id": finding_id,
+                    "mitre":      mitre or "",
+                    "tool":       tool or "",
+                },
+                payload   = {"phase": phase, "severity": severity},
+            )
+        except Exception:
+            pass
         try:
             await self._emit({
                 "type":       "finding",
@@ -2686,7 +2850,7 @@ class ReasoningLoop:
                 "agent":      "master",
                 "data": {
                     "finding": {
-                        "id":          str(uuid.uuid4()),
+                        "id":          finding_id,
                         "title":       title[:200],
                         "severity":    severity,
                         "description": description[:500],
