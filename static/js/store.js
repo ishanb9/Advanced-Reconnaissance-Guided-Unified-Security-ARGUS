@@ -2328,6 +2328,25 @@ function routeWsEvent(msg, dispatch, shellListeners, sessionId) {
       break;
     }
 
+    // ── Defensive posture fingerprinted (#12) ─────────────
+    case 'defensive_posture_updated': {
+      const dp = data || msg;
+      const prods = dp.products || {};
+      const bits = [];
+      ['edr','siem','ids','waf','av','honey'].forEach(cat => {
+        if ((prods[cat] || []).length) {
+          bits.push(`${cat.toUpperCase()}: ${(prods[cat] || []).slice(0,2).join(', ')}`);
+        }
+      });
+      const stealthFlag = dp.stealth_recommended ? '  [STEALTH RECOMMENDED]' : '';
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'master', eventType: 'defensive_posture_updated',
+        message: `🛡 Defenders: ${bits.join(' | ') || '(none)'}${stealthFlag}`,
+        data: dp,
+      }});
+      break;
+    }
+
     // ── Noise budget updated (#11) ────────────────────────
     case 'noise_budget_updated': {
       const nb = data || msg;

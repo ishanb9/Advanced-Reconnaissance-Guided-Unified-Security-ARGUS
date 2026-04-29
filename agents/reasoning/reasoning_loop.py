@@ -286,6 +286,9 @@ class ReasoningLoop:
             # Improvement #10 — Neo4j-driven attack-path inference
             await self._refresh_inferred_paths()
 
+            # Improvement #12 — defensive posture fingerprinting (passive)
+            await self._refresh_defensive_posture()
+
             # ── PRIORITIZE ───────────────────────────────────────────────
             self._ranked_paths = await self._prioritize()
             if self._ranked_paths:
@@ -1981,6 +1984,89 @@ class ReasoningLoop:
         try:
             await self._emit({
                 "type":       "scan_profile_updated",
+                "session_id": self._session_id,
+                "agent":      "master",
+                "data":       new,
+            })
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
+    # Improvement #12 — Defensive posture fingerprinting
+    # ------------------------------------------------------------------
+
+    async def _refresh_defensive_posture(self) -> None:
+        """Mine intel passively for EDR/WAF/SIEM/IDS fingerprints.
+
+        On material change emits ``defensive_posture_updated``.  When a
+        high-weight EDR or SIEM is freshly identified and the noise budget
+        (#11) is still in default mode, the budget is auto-downshifted to
+        stealth so subsequent action selection prefers quiet tradecraft.
+        """
+        try:
+            from agents.reasoning.defensive_posture import (
+                fingerprint_posture,
+            )
+        except Exception as exc:
+            await self._emit_reasoning(f"[defensive_posture] import error: {exc}")
+            return
+
+        prior_mode = "default"
+        nb = getattr(self._master, "noise_budget", None)
+        if nb is not None:
+            prior_mode = getattr(nb, "mode", "default") or "default"
+
+        try:
+            posture = fingerprint_posture(
+                self._intel,
+                iteration  = self._iteration,
+                prior_mode = prior_mode,
+            )
+        except Exception as exc:
+            await self._emit_reasoning(f"[defensive_posture] fingerprint error: {exc}")
+            return
+
+        prev = self._intel.get("defensive_posture") or {}
+        new  = posture.to_dict()
+        prev_sig = tuple(sorted(
+            (cat, tuple(sorted(set(prods))))
+            for cat, prods in (prev.get("products") or {}).items()
+        ))
+        new_sig = posture.signature()
+        self._intel["defensive_posture"] = new
+
+        if prev_sig == new_sig:
+            return
+
+        # Auto-downshift noise budget when EDR/SIEM appears.
+        if posture.stealth_recommended and nb is not None and prior_mode == "default":
+            try:
+                from agents.reasoning.noise_budget import (
+                    NoiseBudget, STEALTH_BUDGET,
+                )
+                old_total     = nb.total
+                old_remaining = nb.remaining
+                # Cap remaining at the new total so we don't grant credits.
+                nb.total     = STEALTH_BUDGET
+                nb.remaining = min(old_remaining, STEALTH_BUDGET)
+                nb.mode      = "stealth"
+                await self._emit({
+                    "type":       "noise_budget_updated",
+                    "session_id": self._session_id,
+                    "agent":      "master",
+                    "data": {
+                        **nb.to_dict(),
+                        "auto_downshift": True,
+                        "previous_total": old_total,
+                        "trigger":        "defensive_posture",
+                    },
+                })
+            except Exception as exc:
+                await self._emit_reasoning(f"[defensive_posture] noise downshift error: {exc}")
+
+        try:
+            await self._emit({
+                "type":       "defensive_posture_updated",
                 "session_id": self._session_id,
                 "agent":      "master",
                 "data":       new,

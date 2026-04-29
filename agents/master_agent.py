@@ -6371,6 +6371,28 @@ Return JSON with enumeration goals: {{
             except Exception:
                 pass
 
+        # Improvement #12 — defensive posture (rendered alongside the noise
+        # budget so the LLM picks tradecraft AND volume to suit defenders).
+        dp = i.get("defensive_posture")
+        if isinstance(dp, dict) and (dp.get("products") or {}):
+            try:
+                from agents.reasoning.defensive_posture import (
+                    DefensivePosture, render_posture_for_prompt,
+                )
+                rebuilt = DefensivePosture(
+                    products            = dict(dp.get("products") or {}),
+                    evidence            = list(dp.get("evidence") or []),
+                    weight              = int(dp.get("weight") or 0),
+                    iteration           = int(dp.get("iteration") or 0),
+                    stealth_recommended = bool(dp.get("stealth_recommended")),
+                    summary             = str(dp.get("summary") or ""),
+                )
+                block = render_posture_for_prompt(rebuilt)
+                if block:
+                    lines.append(block)
+            except Exception:
+                pass
+
         # Improvement #10 — Neo4j-inferred attack paths (rendered FIRST so the
         # LLM sees the concrete end-to-end route before priors / chains).
         inferred = i.get("inferred_paths") or []
