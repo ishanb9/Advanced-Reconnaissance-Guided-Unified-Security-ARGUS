@@ -6413,6 +6413,18 @@ Return JSON with enumeration goals: {{
             except Exception:
                 pass
 
+        # Improvement #15 — last self-critique verdict (so the next phase
+        # planner sees what was just blocked / held and why).
+        crit = i.get("last_self_critique")
+        if isinstance(crit, dict) and crit.get("recommendation"):
+            try:
+                from agents.reasoning.self_critique import render_critique_for_prompt
+                block = render_critique_for_prompt(crit)
+                if block:
+                    lines.append(block)
+            except Exception:
+                pass
+
         # Improvement #12 — defensive posture (rendered alongside the noise
         # budget so the LLM picks tradecraft AND volume to suit defenders).
         dp = i.get("defensive_posture")

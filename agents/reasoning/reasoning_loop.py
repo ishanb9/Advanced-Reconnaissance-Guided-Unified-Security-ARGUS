@@ -436,6 +436,85 @@ class ReasoningLoop:
                 except Exception as exc:
                     await self._emit_reasoning(f"[dry_run] gate error: {exc}")
 
+            # ── SELF-CRITIQUE GATE (Improvement #15) ─────────────────────
+            # Pre-mortem on risky/destructive actions: structured checks
+            # for preconditions, negative-memory repeats, sub-threshold
+            # confidence, scope membership, and defender compatibility.
+            try:
+                from agents.reasoning.dry_run import classify_action as _cls
+                from agents.reasoning.self_critique import critique_action
+                _verdict = _cls(action)
+                if _verdict.tier in ("risky", "destructive") and not action.requires_confirmation:
+                    eng_ctx = self._intel.get("engagement_context") or {}
+                    scope_hosts = eng_ctx.get("scope_hosts") or eng_ctx.get("targets") or []
+                    crit = critique_action(
+                        action,
+                        hypothesis  = next((h for h in self._hypotheses
+                                            if h.hypothesis_id == action.hypothesis_id), None),
+                        intel       = self._intel,
+                        tier        = _verdict.tier,
+                        neg_memory  = self._neg_memory,
+                        posture     = self._intel.get("defensive_posture"),
+                        scope_hosts = scope_hosts,
+                        target      = self._target,
+                    )
+                    self._intel["last_self_critique"] = crit.to_dict()
+                    await self._emit({
+                        "type":       "self_critique",
+                        "session_id": self._session_id,
+                        "agent":      "master",
+                        "data": {
+                            "tool":          action.tool,
+                            "tier":          _verdict.tier,
+                            "hypothesis_id": action.hypothesis_id,
+                            "critique":      crit.to_dict(),
+                        },
+                    })
+                    if crit.recommendation == "abort":
+                        await self._emit_reasoning(
+                            f"[self_critique] aborting {action.tool} — {crit.reason}"
+                        )
+                        await self._neg_memory.record_failure(
+                            tool           = action.tool,
+                            args           = action.args,
+                            target_service = action.target_service,
+                            failure_reason = f"self_critique_abort: {crit.reason[:140]}",
+                            hypothesis_id  = action.hypothesis_id,
+                            host           = self._target,
+                        )
+                        await self._emit_plan_step(
+                            action.action_id,
+                            f"🛑 {action.tool} (self-critique abort)",
+                            "failed",
+                            crit.reason[:120],
+                            "exploit",
+                            mitre_id    = active_hyp_mitre,
+                            probability = action.confidence,
+                            found       = False,
+                        )
+                        continue
+                    if crit.recommendation == "hold":
+                        # Promote to a confirmation-required action so the
+                        # operator can review before it fires next iter.
+                        action.requires_confirmation = True
+                        await self._emit_reasoning(
+                            f"[self_critique] holding {action.tool} for review — {crit.reason}"
+                        )
+                        await self._emit_confirmation_request(action)
+                        confirmed = await self._wait_for_confirmation(action, timeout=60)
+                        if not confirmed:
+                            await self._neg_memory.record_failure(
+                                tool           = action.tool,
+                                args           = action.args,
+                                target_service = action.target_service,
+                                failure_reason = f"self_critique_hold_unconfirmed: {crit.reason[:120]}",
+                                hypothesis_id  = action.hypothesis_id,
+                                host           = self._target,
+                            )
+                            continue
+            except Exception as exc:
+                await self._emit_reasoning(f"[self_critique] gate error: {exc}")
+
             # ── NOISE BUDGET GATE (Improvement #11) ──────────────────────
             # Soft gate: if the action's estimated noise cost would push the
             # session over budget, skip & record a negative-memory entry so

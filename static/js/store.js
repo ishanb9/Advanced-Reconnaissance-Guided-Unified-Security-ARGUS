@@ -2328,6 +2328,25 @@ function routeWsEvent(msg, dispatch, shellListeners, sessionId) {
       break;
     }
 
+    // ── Self-critique gate (#15) ──────────────────────────
+    case 'self_critique': {
+      const sc = data || msg;
+      const c = sc.critique || {};
+      const rec = c.recommendation || 'proceed';
+      const icon = rec === 'abort' ? '🛑' : rec === 'hold' ? '⚠' : '✓';
+      const detail = rec === 'abort'
+        ? (c.blockers || []).slice(0,1).join('; ')
+        : rec === 'hold'
+          ? (c.concerns || []).slice(0,1).join('; ')
+          : 'no concerns';
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'master', eventType: 'self_critique',
+        message: `${icon} Pre-mortem [${sc.tier || '?'}] ${sc.tool || '?'} → ${rec} — ${detail}`,
+        data: sc,
+      }});
+      break;
+    }
+
     // ── Issue Validator hard gate (#14) ───────────────────
     case 'finding_validation': {
       const fv = data || msg;
