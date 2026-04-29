@@ -6331,6 +6331,18 @@ Return JSON with enumeration goals: {{
         i = self._intel
         lines = ["=== CURRENT PENTEST INTELLIGENCE ==="]
 
+        # Improvement #10 — Neo4j-inferred attack paths (rendered FIRST so the
+        # LLM sees the concrete end-to-end route before priors / chains).
+        inferred = i.get("inferred_paths") or []
+        if inferred:
+            try:
+                from agents.reasoning.path_inference import render_paths_for_prompt
+                block = render_paths_for_prompt(inferred)
+                if block:
+                    lines.append(block)
+            except Exception:
+                pass
+
         # Improvement #9 — procedural technique chains (rendered before recalls
         # so the LLM sees the structured procedure first).
         chain_attachments = i.get("technique_chains") or []

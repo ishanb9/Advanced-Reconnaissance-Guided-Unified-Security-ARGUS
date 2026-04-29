@@ -283,6 +283,9 @@ class ReasoningLoop:
             # Improvement #9 — procedural RAG: attach technique chains to top hyps
             await self._refresh_technique_chains()
 
+            # Improvement #10 — Neo4j-driven attack-path inference
+            await self._refresh_inferred_paths()
+
             # ── PRIORITIZE ───────────────────────────────────────────────
             self._ranked_paths = await self._prioritize()
             if self._ranked_paths:
@@ -1722,6 +1725,82 @@ class ReasoningLoop:
             })
         except Exception as exc:
             await self._emit_reasoning(f"[opportunistic] on_pivot_event error: {exc}")
+
+    # ------------------------------------------------------------------
+    # Improvement #10 — Neo4j-driven attack-path inference
+    # ------------------------------------------------------------------
+
+    async def _refresh_inferred_paths(self) -> None:
+        """Query Neo4j for the current session subgraph and compute the
+        cheapest weighted paths from foothold(s) to goal(s).  Emit on
+        material change; render in ``_intel_summary`` for all planners.
+        """
+        try:
+            from db import neo4j_client
+            from agents.reasoning.path_inference import (
+                derive_goal_node_ids, derive_foothold_node_ids,
+                dijkstra_paths, summarise_paths,
+            )
+        except Exception as exc:
+            await self._emit_reasoning(f"[path_inference] import error: {exc}")
+            return
+
+        try:
+            sub = await neo4j_client.fetch_subgraph_for_inference(self._session_id)
+        except Exception as exc:
+            # Neo4j unavailable / empty graph → silent skip
+            await self._emit_reasoning(f"[path_inference] neo4j fetch skipped: {exc}")
+            return
+
+        nodes = sub.get("nodes") or []
+        edges = sub.get("edges") or []
+        if not nodes:
+            return
+
+        sources = derive_foothold_node_ids(nodes, intel=self._intel)
+        sinks   = derive_goal_node_ids(nodes,    intel=self._intel)
+        if not sources or not sinks:
+            # Nothing to infer yet — graph still being built
+            return
+
+        try:
+            raw_paths = dijkstra_paths(nodes, edges, sources, sinks, max_paths=5)
+            paths = summarise_paths(raw_paths, nodes)
+        except Exception as exc:
+            await self._emit_reasoning(f"[path_inference] dijkstra error: {exc}")
+            return
+
+        prev = self._intel.get("inferred_paths") or []
+        self._intel["inferred_paths"] = paths
+
+        # Emit only when the cheapest path or top-3 set changed
+        def _signature(ps):
+            return tuple((p.get("dst"), tuple(p.get("nodes", [])),
+                          round(p.get("cost", 0.0), 2)) for p in ps[:3])
+        if not paths or _signature(paths) == _signature(prev):
+            return
+
+        try:
+            await self._emit({
+                "type":       "inferred_paths_updated",
+                "session_id": self._session_id,
+                "agent":      "master",
+                "data": {
+                    "iteration": self._iteration,
+                    "count":     len(paths),
+                    "top": [{
+                        "src":        p["src"],
+                        "dst":        p["dst"],
+                        "cost":       p["cost"],
+                        "confidence": p["confidence"],
+                        "length":     len(p["nodes"]) - 1,
+                        "labels":     [n.get("label") or n.get("node_id")
+                                       for n in p.get("nodes_decorated", [])],
+                    } for p in paths[:3]],
+                },
+            })
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Improvement #9 — Procedural RAG: technique-chain selection

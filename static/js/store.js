@@ -2256,6 +2256,23 @@ function routeWsEvent(msg, dispatch, shellListeners, sessionId) {
       break;
     }
 
+    // ── Neo4j-inferred attack paths (#10) ─────────────────
+    case 'inferred_paths_updated': {
+      const pd = data || msg;
+      const top = (pd.top || [])[0];
+      let msg2 = `🛣 No reachable goal yet`;
+      if (top) {
+        const route = (top.labels || []).slice(0, 5).join(' → ');
+        msg2 = `🛣 Cheapest path: cost=${(top.cost ?? 0).toFixed(2)} conf=${(top.confidence ?? 0).toFixed(2)} | ${route}`;
+      }
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'master', eventType: 'inferred_paths_updated',
+        message: msg2,
+        data: pd,
+      }});
+      break;
+    }
+
     // ── Procedural RAG: technique chain selected (#9) ─────
     case 'technique_chain_selected': {
       const td = data || msg;

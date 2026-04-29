@@ -214,6 +214,48 @@ async def get_attack_paths(
     ]
 
 
+async def fetch_subgraph_for_inference(session_id: str) -> Dict[str, List]:
+    """Fetch a lean view of the session subgraph for Python-side path
+    inference (Improvement #10).  Returns nodes/edges with the minimum
+    fields needed by the Dijkstra in ``agents.reasoning.path_inference``.
+
+    Edge ``cost`` defaults to 1.0 if not set on the relationship.  Edge
+    ``confidence`` defaults to 0.5 (used when computing reliability).
+    """
+    nodes_raw = await _run(
+        "MATCH (n {session_id: $sid}) "
+        "RETURN n.node_id AS node_id, labels(n)[0] AS node_type, "
+        "       coalesce(n.label,'') AS label, "
+        "       properties(n) AS props",
+        {"sid": session_id},
+    )
+    edges_raw = await _run(
+        "MATCH (a {session_id: $sid})-[r]->(b {session_id: $sid}) "
+        "RETURN a.node_id AS src, b.node_id AS tgt, type(r) AS rel_type, "
+        "       coalesce(r.cost, 1.0) AS cost, "
+        "       coalesce(r.confidence, 0.5) AS confidence, "
+        "       properties(r) AS props",
+        {"sid": session_id},
+    )
+    nodes = [
+        {"node_id":  r["node_id"],
+         "node_type": r["node_type"],
+         "label":     r["label"],
+         "props":     r.get("props") or {}}
+        for r in nodes_raw if r.get("node_id")
+    ]
+    edges = [
+        {"src":        r["src"],
+         "tgt":        r["tgt"],
+         "rel_type":   r["rel_type"],
+         "cost":       float(r.get("cost") or 1.0),
+         "confidence": float(r.get("confidence") or 0.5),
+         "props":      r.get("props") or {}}
+        for r in edges_raw if r.get("src") and r.get("tgt")
+    ]
+    return {"nodes": nodes, "edges": edges}
+
+
 async def delete_session_graph(session_id: str):
     """Remove all nodes and relationships for a session (called on session delete)."""
     await _run(
