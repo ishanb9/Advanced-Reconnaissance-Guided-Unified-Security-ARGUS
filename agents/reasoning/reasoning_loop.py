@@ -381,6 +381,54 @@ class ReasoningLoop:
                 "exploit", probability=action.confidence,
             )
 
+            # ── NOISE BUDGET GATE (Improvement #11) ──────────────────────
+            # Soft gate: if the action's estimated noise cost would push the
+            # session over budget, skip & record a negative-memory entry so
+            # the next decision picks a quieter alternative.  Confirmed
+            # high-confidence actions (operator-confirmed) skip this gate.
+            nb = getattr(self._master, "noise_budget", None)
+            if nb is not None and not action.requires_confirmation:
+                try:
+                    if nb.would_exceed(action):
+                        cost = nb.cost_of(action)
+                        await self._emit({
+                            "type":       "noise_budget_blocked",
+                            "session_id": self._session_id,
+                            "agent":      "master",
+                            "data": {
+                                "tool":      action.tool,
+                                "args":      action.args,
+                                "cost":      cost,
+                                "remaining": nb.remaining,
+                                "status":    nb.status(),
+                                "reason":    "would exceed noise budget",
+                            },
+                        })
+                        await self._neg_memory.record_failure(
+                            tool           = action.tool,
+                            args           = action.args,
+                            target_service = action.target_service,
+                            failure_reason = (
+                                f"noise_budget_exceeded "
+                                f"(cost={cost} remaining={nb.remaining})"
+                            ),
+                            hypothesis_id  = action.hypothesis_id,
+                            host           = self._target,
+                        )
+                        await self._emit_plan_step(
+                            action.action_id,
+                            f"🛑 {action.tool} (noise gated)",
+                            "failed",
+                            f"Skipped — noise cost {cost} > remaining {nb.remaining}",
+                            "exploit",
+                            mitre_id    = active_hyp_mitre,
+                            probability = action.confidence,
+                            found       = False,
+                        )
+                        continue
+                except Exception:
+                    pass
+
             # ── EXECUTE ──────────────────────────────────────────────────
             # Capture pre-execute pivot snapshot so post-execute we can diff
             # and synthesise credential_found / shell_obtained / flag_found
@@ -389,6 +437,23 @@ class ReasoningLoop:
             pivot_pre = self._intel_snapshot_for_pivots()
             was_shell = pivot_pre["shell_access"]
             result    = await self._execute(action)
+
+            # ── NOISE BUDGET CONSUME (Improvement #11) ───────────────────
+            if nb is not None:
+                try:
+                    taken = nb.consume(action, note=action.target_service or "")
+                    await self._emit({
+                        "type":       "noise_budget_updated",
+                        "session_id": self._session_id,
+                        "agent":      "master",
+                        "data": {
+                            **nb.to_dict(),
+                            "last_tool": action.tool,
+                            "last_cost": taken,
+                        },
+                    })
+                except Exception:
+                    pass
             result["_was_shell_before"] = was_shell  # used by score_action_result
 
             # ── VALIDATE ─────────────────────────────────────────────────

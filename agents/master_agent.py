@@ -457,6 +457,16 @@ class MasterAgent(BaseAgent):
         self._attack_planner:      Optional[AttackPlanner] = None      # type: ignore[name-defined]
         self._negative_memory:     Optional[NegativeMemory] = None     # type: ignore[name-defined]
 
+        # Improvement #11 — per-session noise budget.  Defaults to a moderate
+        # authorised-pentest profile; reset/replaced in run() once operator
+        # notes & scope are available so "stealth"/"red team"/"loud" hints
+        # can re-tune the budget.
+        try:
+            from agents.reasoning.noise_budget import NoiseBudget as _NB, DEFAULT_BUDGET
+            self.noise_budget: Optional[Any] = _NB(DEFAULT_BUDGET, mode="default")
+        except Exception:
+            self.noise_budget = None
+
         # Background tasks — fire-and-forget asyncio.Task objects.
         # Tracked here so _wait_for_agents_idle can properly drain them before
         # report generation begins.
@@ -861,6 +871,25 @@ class MasterAgent(BaseAgent):
                 "note": f"[SCOPE/FOCUS] {self._scope}",
                 "ts":   datetime.utcnow().isoformat()
             })
+
+        # Improvement #11 — retune noise budget from operator hints.
+        try:
+            from agents.reasoning.noise_budget import (
+                budget_from_mode, parse_mode_from_text,
+            )
+            mode = parse_mode_from_text(f"{self._notes} {self._scope}")
+            self.noise_budget = budget_from_mode(mode, session_id=session_id)
+            try:
+                await self._broadcast_raw({
+                    "type":       "noise_budget_updated",
+                    "session_id": session_id,
+                    "agent":      "master",
+                    "data":       self.noise_budget.to_dict(),
+                })
+            except Exception:
+                pass
+        except Exception:
+            pass
 
         # ── Per-session file logger — captures every tool call, LLM call,
         # phase transition, finding and error into logs/<timestamp>_<sid>/
@@ -6330,6 +6359,17 @@ Return JSON with enumeration goals: {{
         """
         i = self._intel
         lines = ["=== CURRENT PENTEST INTELLIGENCE ==="]
+
+        # Improvement #11 — noise budget banner (rendered up front so the LLM
+        # respects the stealth constraint before picking tools below).
+        nb = getattr(self, "noise_budget", None)
+        if nb is not None:
+            try:
+                block = nb.render_for_prompt()
+                if block:
+                    lines.append(block)
+            except Exception:
+                pass
 
         # Improvement #10 — Neo4j-inferred attack paths (rendered FIRST so the
         # LLM sees the concrete end-to-end route before priors / chains).

@@ -2328,6 +2328,33 @@ function routeWsEvent(msg, dispatch, shellListeners, sessionId) {
       break;
     }
 
+    // ── Noise budget updated (#11) ────────────────────────
+    case 'noise_budget_updated': {
+      const nb = data || msg;
+      const used = nb.used ?? '?';
+      const total = nb.total ?? '?';
+      const tool = nb.last_tool ? ` ${nb.last_tool}(+${nb.last_cost ?? 0})` : '';
+      const status = nb.status || 'ok';
+      const icon = status === 'exceeded' ? '🛑' : status === 'warning' ? '⚠' : '🔇';
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'master', eventType: 'noise_budget_updated',
+        message: `${icon} Noise ${used}/${total} (${nb.mode || 'default'}, ${status})${tool}`,
+        data: nb,
+      }});
+      break;
+    }
+
+    // ── Noise budget blocked an action (#11) ──────────────
+    case 'noise_budget_blocked': {
+      const nb = data || msg;
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'master', eventType: 'noise_budget_blocked',
+        message: `🛑 Noise gate blocked ${nb.tool || 'tool'} — cost ${nb.cost ?? '?'} > remaining ${nb.remaining ?? '?'}`,
+        data: nb,
+      }});
+      break;
+    }
+
     // ── Tool abandoned for low information entropy (#6) ───
     case 'tool_abandoned_low_entropy': {
       const saD = data || msg;
