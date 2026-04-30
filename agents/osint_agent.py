@@ -265,21 +265,45 @@ class OsintAgent(BaseAgent):
         return results
 
     async def _search_nvd(self, keyword: str, session_id: str) -> List[Dict]:
+        # Bug-fix (post-mortem of v2 crash 2026-04-19): the OSINT planner
+        # was forwarding command-fragment "queries" like
+        # "-d 10.129.33.11 -b all" or "net:10.129.33.11/24" to NVD, which
+        # always 404s.  Reject obvious junk before firing — anything that
+        # isn't a plausible service+version keyword is dropped silently.
+        kw = (keyword or "").strip()
+        if not kw or len(kw) < 3 or len(kw) > 80:
+            return []
+        if any(c in kw for c in ("/", ":", "\n")):
+            return []
+        if kw.startswith(("-", "--", ".")) or kw[0].isdigit():
+            return []
+
         url     = "https://services.nvd.nist.gov/rest/json/cves/2.0"
-        headers = {"apiKey": NVD_API_KEY} if NVD_API_KEY else {}
-        params  = {"keywordSearch": keyword, "resultsPerPage": 5, "startIndex": 0}
+        headers = {
+            "User-Agent": "ARGUS-pentest/1.0",      # NVD 404s on missing UA
+            "Accept":     "application/json",
+        }
+        if NVD_API_KEY:
+            headers["apiKey"] = NVD_API_KEY
+        params  = {"keywordSearch": kw, "resultsPerPage": 5, "startIndex": 0}
 
         try:
             async with httpx.AsyncClient(
                 timeout=TIMEOUTS.get("default", 20)
             ) as client:
                 resp = await client.get(url, params=params, headers=headers)
+            # 404/403 on the unauthenticated path == rate-limited / bad key —
+            # not a server-side outage.  Skip silently so the feed isn't
+            # spammed with osint_warning lines that the planner then treats
+            # as evidence.
+            if resp.status_code in (403, 404):
+                return []
             if resp.status_code != 200:
                 return []
             data = resp.json()
         except Exception as exc:
             await self._emit("osint_warning", {
-                "message": f"NVD error for '{keyword}': {exc}"
+                "message": f"NVD error for '{kw[:40]}': {exc}"
             })
             return []
 

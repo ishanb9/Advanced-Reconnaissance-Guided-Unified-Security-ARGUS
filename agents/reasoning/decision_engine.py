@@ -181,12 +181,50 @@ class DecisionEngine:
         """
         target = intel.get("target", "")
 
+        # ── Phase 0 (Recommendation E): Foothold primers force-promoted ────
+        # If an open service has a registered cheap-unauth primer chain
+        # (FTP anon, telnet default-creds, SNMP public, SMB null-session,
+        # DB default-creds, redis unauth) that has NOT yet been tried this
+        # session, fire its first read-only step ahead of any LLM-proposed
+        # action.  This is what turns "did we even try the door?" from a
+        # planner-luck question into a deterministic guarantee.
+        primer = self._next_unused_foothold_primer(
+            intel           = intel,
+            target          = target,
+            used_tools      = used_tools,
+            negative_memory = negative_memory,
+        )
+        if primer is not None:
+            await self._emit_reasoning(
+                f"[primer] auto-firing cheap-foothold probe: "
+                f"{primer.tool} → {primer.target_service} (chain={primer.plan.path[0] if primer.plan and primer.plan.path else '?'})"
+            )
+            return primer
+
         # ── Phase 1: gather every viable (hypothesis, action) candidate ─────
+        # Recommendation G — index validated hypotheses by id so dependent
+        # steps in the current iteration can check whether their parent
+        # has already landed.
+        validated_ids: set = {
+            h.hypothesis_id for h in hypotheses
+            if getattr(h, "validated", False)
+        }
+
         candidates: List[Dict[str, Any]] = []
         for hypothesis in hypotheses:
             if hypothesis.invalidated:
                 continue
             if not hypothesis.recommended_next_actions:
+                continue
+
+            # Defer dependent steps until their parent is validated.  Steps
+            # without a parent (the common case, idx=1) fall through.
+            parent_id = getattr(hypothesis, "parent_hypothesis_id", None)
+            if parent_id and parent_id not in validated_ids:
+                await self._emit_reasoning(
+                    f"Deferring step {getattr(hypothesis, 'step_index', '?')} "
+                    f"({hypothesis.statement[:60]}…) — parent not yet validated"
+                )
                 continue
 
             for action_str in hypothesis.recommended_next_actions:
@@ -199,11 +237,15 @@ class DecisionEngine:
                 if tool == "unknown":
                     continue
 
-                # Hard skip: known-failed pair
-                if negative_memory.has_failed_before(tool, target_service):
-                    count = negative_memory.attempt_count(tool, target_service)
+                # Hard skip: this exact (tool, service, args_signature) failed
+                # before — Recommendation D's fine-grained ban.  A previous
+                # sqlmap on /login.php?user= failing no longer blocks sqlmap
+                # on /admin/api/users.php?id=.
+                if negative_memory.has_failed_before(tool, target_service, args=args):
+                    count = negative_memory.attempt_count(tool, target_service, args=args)
                     await self._emit_reasoning(
-                        f"Skipping {tool} on {target_service} — failed {count}x previously"
+                        f"Skipping {tool} on {target_service} (this variant) — "
+                        f"failed {count}x previously"
                     )
                     continue
 
@@ -482,6 +524,130 @@ class DecisionEngine:
             "bloodhound-python": f"ldap:389",
         }
         return tool_service.get(tool, f"{tool}:{target}")
+
+    # ── Recommendation E: foothold-primer auto-promotion ──────────────────
+
+    # Map of (port → (chain_id, tool, args_template)) — the read-only first
+    # step of each cheap-foothold primer chain.  These run before any
+    # LLM-proposed action whenever their port is open and they haven't
+    # yet fired this session.  Args use a bare {target} placeholder.
+    _FOOTHOLD_PRIMERS: List[Dict[str, Any]] = [
+        # FTP anonymous probe
+        {"chain": "ftp_anonymous_login", "ports": ["21"],
+         "tool": "nmap", "args": "--script ftp-anon -p21 {target}",
+         "service_label": "ftp:21",
+         "rationale": "vsftpd/proftpd routinely ship with anon-read enabled"},
+        # Telnet — passive nmap probe (no brute on first iteration)
+        {"chain": "telnet_default_creds", "ports": ["23"],
+         "tool": "nmap", "args": "-sV -p23 --script banner {target}",
+         "service_label": "telnet:23",
+         "rationale": "telnet banner often leaks default-creds product family"},
+        # SNMP public walk
+        {"chain": "snmp_public_v2c_walk", "ports": ["161"],
+         "tool": "snmpwalk", "args": "-v 2c -c public {target}",
+         "service_label": "snmp:161",
+         "rationale": "default community 'public' leaks users + processes"},
+        # SMB null-session enum
+        {"chain": "smb_anonymous_enum", "ports": ["139", "445"],
+         "tool": "smbclient", "args": "-L //{target}/ -N",
+         "service_label": "smb:445",
+         "rationale": "null-session shares + user enum still works on many boxes"},
+        # MySQL empty-password root
+        {"chain": "db_default_creds_quick", "ports": ["3306"],
+         "tool": "mysql", "args": "-h {target} -u root -e 'SHOW DATABASES;'",
+         "service_label": "mysql:3306",
+         "rationale": "lab boxes often leave root/'' enabled"},
+        # Postgres default
+        {"chain": "db_default_creds_quick", "ports": ["5432"],
+         "tool": "psql", "args": "-h {target} -U postgres -c '\\l' -W postgres",
+         "service_label": "postgresql:5432",
+         "rationale": "default postgres/postgres credentials"},
+        # MongoDB unauth
+        {"chain": "db_default_creds_quick", "ports": ["27017"],
+         "tool": "mongosh", "args": "--host {target} --eval 'db.adminCommand({listDatabases:1})'",
+         "service_label": "mongodb:27017",
+         "rationale": "unauthenticated Mongo on default port"},
+        # Redis unauth
+        {"chain": "redis_unauth_to_shell", "ports": ["6379"],
+         "tool": "redis-cli", "args": "-h {target} ping",
+         "service_label": "redis:6379",
+         "rationale": "unauthenticated Redis ping → write-key foothold"},
+    ]
+
+    def _next_unused_foothold_primer(
+        self,
+        *, intel:           dict,
+        target:             str,
+        used_tools:         Dict[str, int],
+        negative_memory:    NegativeMemory,
+    ) -> Optional[JustifiedAction]:
+        """Return a primer action if any open service has a primer that
+        has not yet fired and was not already banned.  None otherwise.
+
+        The intent is "always knock on the obvious doors before invoking
+        the heavyweight planner".  Once every applicable primer has run
+        once, this returns None forever (per session) and the normal
+        LLM-driven planner takes over.
+        """
+        # Open ports — accept ints or strings or {port:..} dicts.
+        open_ports: set = set()
+        for p in (intel.get("open_ports") or []):
+            if isinstance(p, dict):
+                pp = p.get("port")
+                if pp is not None:
+                    open_ports.add(str(pp))
+            else:
+                open_ports.add(str(p).split("/")[0])
+
+        if not open_ports:
+            return None
+
+        # Track which primers have already fired this session via a
+        # state key on intel (reset on session-start).
+        fired = intel.setdefault("_foothold_primers_fired", set())
+        if isinstance(fired, list):
+            fired = set(fired)
+            intel["_foothold_primers_fired"] = fired
+
+        for primer in self._FOOTHOLD_PRIMERS:
+            if not (set(primer["ports"]) & open_ports):
+                continue
+            primer_key = primer["chain"] + ":" + primer["service_label"]
+            if primer_key in fired:
+                continue
+            tool = primer["tool"]
+            svc  = primer["service_label"]
+            # Respect negative memory — if this exact probe failed already,
+            # skip it (saves a round-trip on a confirmed-dead service).
+            try:
+                args_filled = primer["args"].format(target=target)
+            except Exception:
+                args_filled = primer["args"]
+            if negative_memory.has_failed_before(tool, svc, args=args_filled):
+                # Mark fired so we don't re-evaluate it next iteration.
+                fired.add(primer_key)
+                continue
+
+            # Mark fired pre-emptively so a slow listener / repeated
+            # select_action call doesn't re-issue the same primer.
+            fired.add(primer_key)
+
+            return JustifiedAction(
+                action_id            = f"primer-{primer['chain']}-{primer['service_label']}",
+                tool                 = tool,
+                args                 = args_filled,
+                target_service       = svc,
+                reason               = (
+                    f"[Primer/{primer['chain']}] cheap-unauth probe before LLM "
+                    f"planner — {primer['rationale']}"
+                ),
+                expected_outcome     = "Primer banner / version / share list / unauth confirmation",
+                success_criteria     = "Tool exits 0 with non-error output indicating service responds",
+                hypothesis_id        = "primer",
+                confidence           = 0.85,
+                requires_confirmation= False,
+            )
+        return None
 
     def _build_reason(self, hypothesis: Hypothesis) -> str:
         """Format a justification string from a hypothesis."""

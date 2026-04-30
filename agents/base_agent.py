@@ -1114,13 +1114,28 @@ Return JSON:
                 self._active_procs.discard(proc)
 
         async def _run_via_mcp() -> int:
-            """Run tool via MCP SSE endpoint and stream output. Returns exit_code."""
-            # Use the same REST format and endpoint as base_subagent.py
-            mcp_endpoint = f"{MCP_URL}/tools/call"
+            """Run tool via MCP SSE endpoint and stream output. Returns exit_code.
+
+            Bug-fix (post-mortem of v2 crash 2026-04-19): the orchestrator was
+            posting to ``/tools/call`` with a flat ``{tool,arguments}`` body,
+            which the live MCP server rejects with HTTP 400.  The actual
+            protocol — confirmed by the working ``base_subagent`` calls in
+            the same scan — is JSON-RPC over POST ``/`` with method
+            ``tools/call`` and ``params={name, arguments}``.  Event types in
+            the SSE stream carry their payload in a ``data`` field (not
+            ``output``/``line``/``message``); error events with "Unknown
+            tool" mean the registry doesn't have it, so callers should fall
+            back to local execution by raising HTTPStatusError-equivalent.
+            """
+            mcp_endpoint = f"{MCP_URL}/"
             payload = {
-                "tool":      tool_name,
-                "arguments": {"target": target or "", "options": args},
+                "method": "tools/call",
+                "params": {
+                    "name":      tool_name,
+                    "arguments": {"target": target or "", "options": args},
+                },
             }
+            not_in_registry = False
             async with httpx.AsyncClient(timeout=httpx.Timeout(timeout)) as client:
                 async with client.stream(
                     "POST", mcp_endpoint, json=payload,
@@ -1133,24 +1148,47 @@ Return JSON:
                         if not raw:
                             continue
                         content = raw[5:].strip() if raw.startswith("data:") else raw.strip()
+                        if not content:
+                            continue
                         try:
                             event = json.loads(content)
                             etype = event.get("type", "")
-                            chunk = (event.get("output") or event.get("line") or
-                                     event.get("data")   or event.get("message") or "")
-                            if etype in ("stdout", "output", ""):
+                            # Subagent dialect uses "data"; legacy fallbacks
+                            # accepted for forward compatibility.
+                            chunk = (event.get("data")    or event.get("message") or
+                                     event.get("output")  or event.get("line")    or "")
+                            if etype == "stdout" or etype == "":
                                 if chunk:
                                     await _emit_line(chunk, "stdout")
                             elif etype == "stderr":
                                 if chunk:
-                                    await _emit_line(chunk, "stderr")
+                                    await _emit_line(f"[STDERR] {chunk}", "stderr")
                             elif etype == "exit":
                                 return int(event.get("code", 0))
                             elif etype == "error":
-                                await _emit_line(f"[MCP ERROR] {chunk}", "stderr")
+                                msg = event.get("message") or event.get("data") or ""
+                                if msg and "Unknown tool" in msg:
+                                    not_in_registry = True
+                                await _emit_line(f"[MCP ERROR] {msg or chunk}", "stderr")
+                            elif etype == "info":
+                                if chunk:
+                                    await _emit_line(f"[INFO] {chunk}", "stdout")
+                            else:
+                                # Unknown event type — surface the payload as stdout.
+                                if chunk:
+                                    await _emit_line(chunk, "stdout")
                         except (json.JSONDecodeError, ValueError):
                             if content:
                                 await _emit_line(content, "stdout")
+            # Tool not in MCP registry — signal caller via a synthetic
+            # 404-ish HTTPStatusError so the existing fallback branch
+            # (line 1180-ish) runs the tool locally.
+            if not_in_registry:
+                raise httpx.HTTPStatusError(
+                    f"MCP registry missing tool '{tool_name}'",
+                    request  = None,    # type: ignore[arg-type]
+                    response = httpx.Response(404),
+                )
             return 0
 
         try:

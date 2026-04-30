@@ -472,6 +472,11 @@ class MasterAgent(BaseAgent):
         # operator notes are known so CTF/lab boxes flip it OFF.
         self.dry_run_mode: bool = True
 
+        # Recommendation C — listener manager (lazy-init in run() so
+        # self._auto_detect_lhost can resolve interfaces at the right
+        # moment; tests / units that build a bare master see None).
+        self.listener_manager: Optional[Any] = None
+
         # Background tasks — fire-and-forget asyncio.Task objects.
         # Tracked here so _wait_for_agents_idle can properly drain them before
         # report generation begins.
@@ -895,6 +900,26 @@ class MasterAgent(BaseAgent):
                 pass
         except Exception:
             pass
+
+        # Recommendation C — instantiate the listener manager once we
+        # know enough about the engagement to resolve LHOST.
+        try:
+            from agents.reasoning.listener_manager import ListenerManager
+            self.listener_manager = ListenerManager(master_agent=self)
+            try:
+                await self._broadcast_raw({
+                    "type":       "listener_manager_ready",
+                    "session_id": session_id,
+                    "agent":      "master",
+                    "data": {
+                        "lhost":   self.listener_manager.lhost,
+                        "backend": self.listener_manager._default_backend,
+                    },
+                })
+            except Exception:
+                pass
+        except Exception as _le:
+            self.listener_manager = None
 
         # Improvement #16 — assemble the scope-guard prefix from
         # engagement context + operator notes/scope and bind it to self
@@ -1723,7 +1748,7 @@ class MasterAgent(BaseAgent):
                     coros.append(WebFingerprintSubagent(**kw).execute(
                         url=f"{proto}://{target}:{port}"
                     ))
-            self._create_task(_safe(asyncio.gather(*coros, return_exceptions=True)))
+            await self._await_and_sync_subagents(coros, phase="recon", timeout=300.0)
 
         elif phase == "vuln":
             from agents.vuln.cve_lookup_subagent    import CveLookupSubagent
@@ -1754,28 +1779,38 @@ class MasterAgent(BaseAgent):
                 coros.append(SslAuditSubagent(**kw).execute())
             if ports & {"445", "139"}:
                 coros.append(SmbVulnSubagent(**kw).execute())
-            self._create_task(_safe(asyncio.gather(*coros, return_exceptions=True)))
+            await self._await_and_sync_subagents(coros, phase="vuln", timeout=240.0)
 
         elif phase == "exploit":
             from agents.exploit.exploit_orchestrator  import ExploitOrchestrator
             orch = ExploitOrchestrator(broadcast=sa_broadcast)
             orch._session_id = sid
-            self._create_task(_safe(orch.run(
-                session_id   = sid,
-                target       = target,
-                db           = _db.get_db(),
-                services     = list(self._intel.get("services", {}).values()),
-                cves         = self._intel.get("cves", []),
-                open_ports   = self._intel.get("open_ports", []),
-                web_urls     = [
-                    f"http{'s' if int(str(p)) in (443,8443) else ''}://{target}:{p}"
-                    for p, s in self._intel.get("services",{}).items()
-                    if any(x in (s.get("service","") if isinstance(s,dict) else str(s)).lower()
-                           for x in ("http","https"))
-                ][:3],
-                lhost        = kwargs.get("lhost", "LHOST"),
-                lport        = kwargs.get("lport", 4444),
-            )))
+
+            # Recommendation C — auto-detect LHOST via the listener manager
+            # (or operator override) instead of the literal-string default.
+            lm    = getattr(self, "listener_manager", None)
+            lhost = kwargs.get("lhost") or (lm.lhost if lm else None) or self._auto_detect_lhost()
+            lport = int(kwargs.get("lport") or 4444)
+
+            await self._await_and_sync_subagents(
+                [orch.run(
+                    session_id   = sid,
+                    target       = target,
+                    db           = _db.get_db(),
+                    services     = list(self._intel.get("services", {}).values()),
+                    cves         = self._intel.get("cves", []),
+                    open_ports   = self._intel.get("open_ports", []),
+                    web_urls     = [
+                        f"http{'s' if int(str(p)) in (443,8443) else ''}://{target}:{p}"
+                        for p, s in self._intel.get("services",{}).items()
+                        if any(x in (s.get("service","") if isinstance(s,dict) else str(s)).lower()
+                               for x in ("http","https"))
+                    ][:3],
+                    lhost        = lhost,
+                    lport        = lport,
+                )],
+                phase="exploit", timeout=600.0,
+            )
 
         elif phase == "privesc":
             from agents.privesc.linux_enum_subagent    import LinuxEnumSubagent
@@ -1783,9 +1818,13 @@ class MasterAgent(BaseAgent):
             kw    = dict(session_id=sid, target=target, broadcast=sa_broadcast, db=_db.get_db())
             os_guess = self._intel.get("os_guess", "").lower()
             if "windows" in os_guess:
-                self._create_task(_safe(WindowsEnumSubagent(**kw).execute()))
+                await self._await_and_sync_subagents(
+                    [WindowsEnumSubagent(**kw).execute()], phase="privesc", timeout=240.0,
+                )
             else:
-                self._create_task(_safe(LinuxEnumSubagent(**kw).execute()))
+                await self._await_and_sync_subagents(
+                    [LinuxEnumSubagent(**kw).execute()], phase="privesc", timeout=240.0,
+                )
 
         elif phase == "web":
             from agents.web.dir_fuzz_subagent                  import DirFuzzSubagent
@@ -1838,7 +1877,7 @@ class MasterAgent(BaseAgent):
                 burp_kw = dict(kw, target=url)
                 coros.append(BurpSubagent(**burp_kw).execute(extra_urls=other_urls))
             if coros:
-                self._create_task(_safe(asyncio.gather(*coros, return_exceptions=True)))
+                await self._await_and_sync_subagents(coros, phase="web", timeout=480.0)
 
         elif phase == "post":
             from agents.post.local_cred_harvest_subagent import LocalCredHarvestSubagent
@@ -1859,7 +1898,7 @@ class MasterAgent(BaseAgent):
                     PersistenceSubagent(**kw).execute(shell_id=shell_id),
                     LogEvasionSubagent(**kw).execute(shell_id=shell_id),
                 ]
-            self._create_task(_safe(asyncio.gather(*coros, return_exceptions=True)))
+            await self._await_and_sync_subagents(coros, phase="post", timeout=300.0)
 
         elif phase == "lateral":
             from agents.lateral.ad_enum_subagent      import AdEnumSubagent
@@ -1876,7 +1915,164 @@ class MasterAgent(BaseAgent):
                     ),
                     NtlmCaptureSubagent(**kw).execute(),
                 ]
-            self._create_task(_safe(asyncio.gather(*coros, return_exceptions=True)))
+            await self._await_and_sync_subagents(coros, phase="lateral", timeout=360.0)
+
+    def _auto_detect_lhost(self) -> str:
+        """Best-effort attacker-IP detection for reverse-shell payloads.
+
+        Order: explicit operator override → ListenerManager.lhost →
+        primary VPN/tap interface → first non-loopback IPv4 → "127.0.0.1".
+        Never raises; falls back to "127.0.0.1" so callers can still
+        construct a command (failure is then visible in the listener).
+        """
+        # Operator override on intel.
+        op = (self._intel.get("attacker_ip") or "").strip()
+        if op:
+            return op
+
+        try:
+            import netifaces
+            preferred = ("tun0", "tap0", "vpn0", "wg0", "eth0", "en0")
+            for iface in preferred:
+                if iface not in netifaces.interfaces():
+                    continue
+                addrs = netifaces.ifaddresses(iface).get(netifaces.AF_INET) or []
+                for a in addrs:
+                    ip = a.get("addr", "")
+                    if ip and not ip.startswith("127."):
+                        return ip
+            # Fallback: any non-loopback IPv4.
+            for iface in netifaces.interfaces():
+                addrs = netifaces.ifaddresses(iface).get(netifaces.AF_INET) or []
+                for a in addrs:
+                    ip = a.get("addr", "")
+                    if ip and not ip.startswith("127.") and not ip.startswith("169.254."):
+                        return ip
+        except Exception:
+            pass
+
+        # Last resort — at least makes the listener auditable.
+        return "127.0.0.1"
+
+    async def _await_and_sync_subagents(
+        self,
+        coros: list,
+        *, phase: str,
+        timeout: float = 240.0,
+    ) -> None:
+        """Recommendation B — await subagent coroutines and merge their
+        ``parsed_data`` (or equivalent) back into ``self._intel`` before the
+        next phase begins.
+
+        The previous fire-and-forget pattern (``self._create_task(_safe(
+        asyncio.gather(...)))``) made every subagent's findings race against
+        the next phase reading ``self._intel``.  On a fast cloud LLM the
+        next phase would routinely fire before recon subagents had even
+        finished, so the hypothesis engine looked at empty intel.
+
+        ``timeout`` is per-batch wall-clock — long enough that nmap full-port
+        scans and gobuster wordlists complete, short enough that one
+        misbehaving subagent can't stall the engagement.
+        """
+        if not coros:
+            return
+
+        # Race-aware: stop_requested aborts the wait early.
+        try:
+            results = await asyncio.wait_for(
+                asyncio.gather(*coros, return_exceptions=True),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            await self.emit_reasoning(
+                step       = f"subagent_timeout_{phase}",
+                reasoning  = f"Phase '{phase}' subagent batch hit {timeout}s timeout — partial results retained",
+                decision   = "Continuing with whatever intel was already merged",
+                next_action= "Move to next phase",
+            )
+            return
+        except Exception as exc:
+            await self.emit_reasoning(
+                step       = f"subagent_err_{phase}_batch",
+                reasoning  = f"Subagent batch error (non-fatal): {exc}",
+                decision   = "Continuing — main flow unaffected",
+                next_action= "Next phase will see whatever was merged before failure",
+            )
+            return
+
+        # Merge per-subagent results.  Each subagent typically returns either:
+        #   - an AgentResult-like with .parsed_data dict
+        #   - a plain dict (e.g. ExploitOrchestrator: {"shell_obtained": bool, ...})
+        #   - None / Exception (skip)
+        # We trust two intel-shaped key families:
+        #   structured: open_ports, services (dict), os_guess, web_paths,
+        #               technologies, users, shares, credentials,
+        #               domain, dc_ip, interesting_files, banners
+        #   list-type:  cves, vulnerabilities, exploits, web_vulns, login_pages
+        STRUCTURED = {"open_ports", "services", "os_guess", "web_paths",
+                      "technologies", "users", "shares", "credentials",
+                      "domain", "dc_ip", "interesting_files", "banners",
+                      "service_versions", "shells"}
+        LIST_KEYS  = {"cves", "vulnerabilities", "exploits", "web_vulns",
+                      "login_pages", "subdomains"}
+
+        for res in results:
+            if res is None or isinstance(res, Exception):
+                continue
+            pd = getattr(res, "parsed_data", None)
+            if pd is None and isinstance(res, dict):
+                pd = res
+            if not isinstance(pd, dict):
+                continue
+
+            for k in STRUCTURED:
+                if k not in pd or pd[k] is None:
+                    continue
+                v = pd[k]
+                if k == "services" and isinstance(v, dict):
+                    self._intel.setdefault("services", {}).update(v)
+                elif k == "open_ports" and isinstance(v, list):
+                    existing = self._intel.get("open_ports") or []
+                    self._intel["open_ports"] = list(dict.fromkeys(list(existing) + list(v)))
+                elif k in ("os_guess", "domain", "dc_ip"):
+                    if v and self._intel.get(k, "") in ("", "unknown", None):
+                        self._intel[k] = v
+                elif isinstance(v, list):
+                    existing = self._intel.get(k) or []
+                    seen = {str(e) for e in existing}
+                    for item in v:
+                        if str(item) not in seen:
+                            existing.append(item)
+                            seen.add(str(item))
+                    self._intel[k] = existing
+                elif isinstance(v, dict):
+                    self._intel.setdefault(k, {}).update(v)
+
+            for k in LIST_KEYS:
+                v = pd.get(k)
+                if not isinstance(v, list):
+                    continue
+                existing = self._intel.get(k) or []
+                seen = {str(e) for e in existing}
+                for item in v:
+                    if str(item) not in seen:
+                        existing.append(item)
+                        seen.add(str(item))
+                self._intel[k] = existing
+
+            # ExploitOrchestrator-shape: shell_obtained dict triggers
+            # register_shell so downstream phases see the foothold.
+            if pd.get("shell_obtained") and not self._intel.get("shell_access"):
+                try:
+                    await self.register_shell(
+                        source   = f"subagent:{phase}",
+                        user     = pd.get("user") or "unknown",
+                        host     = self._target,
+                        method   = pd.get("method") or phase,
+                        evidence = str(pd.get("evidence") or "")[:300],
+                    )
+                except Exception:
+                    pass
 
     async def _guidance_drain_loop(self):
         """
@@ -2281,6 +2477,129 @@ class MasterAgent(BaseAgent):
                 await self.notify_pivot_event(event_type, data)
             except Exception:
                 pass
+
+    async def register_shell(
+        self,
+        *, source:    str,
+        user:         str = "unknown",
+        host:         Optional[str] = None,
+        method:       str = "",
+        evidence:     str = "",
+        session_id:   Optional[str] = None,
+        rhost:        Optional[str] = None,
+        rport:        Optional[int] = None,
+    ) -> bool:
+        """Recommendation A — single write site for shell-access state.
+
+        Any caller (master's exploit phase, reasoning-loop, ExploitOrchestrator,
+        ListenerManager, ShellManager, manual operator capture) MUST call this
+        instead of writing ``self._intel["shell_access"]`` directly.
+
+        On the first registration this:
+
+        * flips ``intel["shell_access"] = True`` and records the user
+        * appends an ``attack_path`` step
+        * emits ``shell_obtained`` (routes through ``notify_pivot_event`` so the
+          reasoning loop can pivot mid-iteration without waiting for the next
+          decision boundary)
+        * fires ``plan_step_update`` so the dashboard shows "exploit done"
+        * stores a success-memory entry for cross-engagement learning
+
+        Subsequent calls are idempotent: they update ``current_user`` if a
+        more privileged user is reported (e.g. SYSTEM beats www-data), and
+        always append a new ``attack_path`` entry so the timeline shows
+        the lateral / privesc progression.  Returns True on first foothold,
+        False on subsequent updates.
+        """
+        host = host or self._target or ""
+        was_first = not self._intel.get("shell_access")
+
+        # Privilege ordering for upgrades.
+        priv_rank = {
+            "system": 100, "nt authority\\system": 100, "root": 100,
+            "administrator": 90, "admin": 80, "domain admin": 95,
+        }
+        prev_user = (self._intel.get("current_user") or "").lower()
+        new_user_low = (user or "").lower()
+        if was_first or priv_rank.get(new_user_low, 50) >= priv_rank.get(prev_user, 0):
+            self._intel["current_user"] = user or "unknown"
+
+        self._intel["shell_access"] = True
+        self._intel.setdefault("attack_path", []).append({
+            "phase":  "exploit" if was_first else "post_exploit",
+            "result": f"Shell as {user} on {host}{(' via ' + method) if method else ''}",
+            "source": source,
+            "ts":     datetime.utcnow().isoformat(),
+        })
+
+        # Track session list for ListenerManager + ShellManager surface.
+        if session_id or rhost:
+            self._intel.setdefault("shells", []).append({
+                "session_id": session_id or "",
+                "user":       user,
+                "host":       host,
+                "rhost":      rhost or host,
+                "rport":      rport,
+                "source":     source,
+                "method":     method,
+                "ts":         datetime.utcnow().isoformat(),
+            })
+
+        # Best-effort logging — never block the foothold registration.
+        try:
+            await self._emit("shell_obtained", {
+                "scan_id":    self._session_id,
+                "session_id": self._session_id,
+                "user":       user,
+                "host":       host,
+                "rhost":      rhost or host,
+                "rport":      rport,
+                "source":     source,
+                "method":     method,
+                "evidence":   (evidence or "")[:600],
+                "ts":         datetime.utcnow().isoformat(),
+            })
+        except Exception:
+            pass
+
+        if was_first:
+            try:
+                await self._emit("plan_step_update", {
+                    "step_id": "exploit",
+                    "status":  "done",
+                    "result":  f"Shell obtained as {user} via {source}",
+                    "detail":  (evidence or method)[:200],
+                    "found":   True,
+                    "ts":      datetime.utcnow().isoformat(),
+                })
+            except Exception:
+                pass
+
+            # Cross-engagement memory.
+            try:
+                await self._store_success_memory("shell_obtained", {
+                    "os":       self._intel.get("os_guess", "?"),
+                    "services": _fmt_svcs(self._intel.get("services", {}))[:200],
+                    "method":   method or source,
+                    "user":     user,
+                }, ["exploit", "shell", self._intel.get("os_guess", "unknown").lower()])
+            except Exception:
+                pass
+
+            # Tap pivot logic — lets reasoning loop fire post-ex / privesc
+            # phases immediately without waiting for the iteration boundary.
+            try:
+                await self.notify_pivot_event("shell_obtained", {
+                    "user":   user,
+                    "host":   host,
+                    "rhost":  rhost or host,
+                    "rport":  rport,
+                    "source": source,
+                })
+            except Exception:
+                pass
+
+        return was_first
 
     async def notify_pivot_event(self, event_type: str, payload: Any) -> None:
         """Public hook called when a high-value engagement event fires.
@@ -3751,14 +4070,95 @@ class MasterAgent(BaseAgent):
                 next_action= vi.get("command","")
             )
 
-            # Single task: Master specified exactly one tool + args
-            result = await agent.execute_tasks(
-                target,
-                [{"tool": vi["tool"], "args": vi.get("args",""),
-                  "purpose": vector.get("description",""),
-                  "timeout": vector.get("timeout",300), "can_parallel": False}],
-                f"EXPLOIT_V{i+1}", self._intel
+            # Recommendation C — if the LLM specified lhost/lport/pre_command,
+            # spin up a real listener around the exploit fire so reverse-shell
+            # payloads have somewhere to call back to.  Without this every
+            # reverse_tcp/reverse_https payload is a no-op.
+            needs_listener = bool(
+                vi.get("lhost") or vi.get("lport") or vi.get("pre_command")
+                or "reverse" in (vi.get("args") or "").lower()
+                or "lhost=" in (vi.get("args") or "").lower()
             )
+            lm = getattr(self, "listener_manager", None)
+            captured = False
+            if needs_listener and lm is not None:
+                # Inject the manager's lhost/lport into the args so the
+                # exploit's payload calls back to a port we're listening on.
+                lhost = vi.get("lhost") or lm.lhost
+                try:
+                    lport = int(vi.get("lport") or 4444)
+                except Exception:
+                    lport = 4444
+
+                # Substitute placeholders in args.
+                _args = (vi.get("args") or "")
+                for placeholder, value in (
+                    ("LHOST=PLACEHOLDER", f"LHOST={lhost}"),
+                    ("LPORT=PLACEHOLDER", f"LPORT={lport}"),
+                    ("<lhost>", lhost), ("<LHOST>", lhost),
+                    ("<lport>", str(lport)), ("<LPORT>", str(lport)),
+                ):
+                    _args = _args.replace(placeholder, value)
+
+                async def _fire(_lhost, _lport):
+                    return await agent.execute_tasks(
+                        target,
+                        [{"tool": vi["tool"], "args": _args,
+                          "purpose": vector.get("description", ""),
+                          "timeout": vector.get("timeout", 300),
+                          "can_parallel": False}],
+                        f"EXPLOIT_V{i+1}", self._intel,
+                    )
+
+                try:
+                    cap = await lm.fire_and_capture(
+                        run_exploit_coro = _fire,
+                        backend = None,         # auto: msfconsole > ncat > nc
+                        lport   = lport,
+                        timeout = float(vector.get("timeout", 60) or 60),
+                        rhost   = target,
+                    )
+                    captured = bool(cap.get("captured"))
+                    # We need a 'result' shape for the evaluator below.
+                    result = {
+                        "stdout":    cap.get("evidence", "")[:4096],
+                        "stderr":    "",
+                        "exit_code": 0 if captured else 1,
+                        "tool":      vi["tool"],
+                        "args":      _args,
+                        "listener":  {
+                            "session_id": cap.get("session_id"),
+                            "captured":   captured,
+                            "user":       cap.get("user"),
+                            "lport":      cap.get("lport"),
+                        },
+                    }
+                except Exception as _le_exc:
+                    await self.emit_reasoning(
+                        step       = f"listener_err_{i+1}",
+                        reasoning  = f"Listener error (falling back to direct fire): {_le_exc}",
+                        decision   = "Run exploit without listener capture",
+                        next_action= vi.get("command", ""),
+                    )
+                    result = await agent.execute_tasks(
+                        target,
+                        [{"tool": vi["tool"], "args": vi.get("args", ""),
+                          "purpose": vector.get("description", ""),
+                          "timeout": vector.get("timeout", 300),
+                          "can_parallel": False}],
+                        f"EXPLOIT_V{i+1}", self._intel,
+                    )
+            else:
+                # Plain exploit: no callback expected.  Single task: Master
+                # specified exactly one tool + args.
+                result = await agent.execute_tasks(
+                    target,
+                    [{"tool": vi["tool"], "args": vi.get("args", ""),
+                      "purpose": vector.get("description", ""),
+                      "timeout": vector.get("timeout", 300),
+                      "can_parallel": False}],
+                    f"EXPLOIT_V{i+1}", self._intel,
+                )
 
             # Master evaluates the result
             eval_r = self._safe_llm_result(
@@ -3798,21 +4198,16 @@ class MasterAgent(BaseAgent):
                 )
 
             if eval_r.get("shell_obtained"):
-                self._intel["shell_access"]  = True
-                self._intel["current_user"]  = eval_r.get("user") or "unknown"
-                self._intel["attack_path"].append({
-                    "phase":"exploit",
-                    "result": f"Shell as {self._intel['current_user']} via {vi.get('tool','')}",
-                    "ts": datetime.utcnow().isoformat()
-                })
-                await self._emit("plan_step_update", {
-                    "step_id": "exploit",
-                    "status":  "done",
-                    "result":  f"Shell obtained as {self._intel['current_user']} via {vi.get('tool','')}",
-                    "detail":  eval_r.get("reasoning","")[:200],
-                    "found":   True,
-                    "ts":      datetime.utcnow().isoformat()
-                })
+                # Recommendation A — route through the centralized helper so
+                # plan_step_update / pivot_event / success_memory / attack_path
+                # all stay in lockstep regardless of who registers the shell.
+                await self.register_shell(
+                    source   = "master_exploit_phase",
+                    user     = eval_r.get("user") or "unknown",
+                    host     = target,
+                    method   = vi.get("tool", ""),
+                    evidence = eval_r.get("reasoning", "")[:300],
+                )
                 if eval_r.get("user_flag"):
                     self._intel["user_flag"] = str(eval_r["user_flag"])
                     await self.store_flag("user", str(eval_r["user_flag"]), "/home/*/user.txt")

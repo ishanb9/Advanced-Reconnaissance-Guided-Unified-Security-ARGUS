@@ -49,6 +49,10 @@ class Hypothesis:
     validated:                bool      = False
     invalidated:              bool      = False
     iteration_number:         int       = 0
+    # Recommendation G — multi-step action sequencing
+    step_index:               int       = 0     # 1-based position in plan
+    depends_on_step:          Optional[int] = None
+    parent_hypothesis_id:     Optional[str] = None
     created_at:               str       = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
@@ -66,6 +70,9 @@ class Hypothesis:
             "validated":                self.validated,
             "invalidated":              self.invalidated,
             "iteration_number":         self.iteration_number,
+            "step_index":               self.step_index,
+            "depends_on_step":          self.depends_on_step,
+            "parent_hypothesis_id":     self.parent_hypothesis_id,
             "created_at":               self.created_at,
         }
 
@@ -83,6 +90,9 @@ class Hypothesis:
             validated                = bool(d.get("validated", False)),
             invalidated              = bool(d.get("invalidated", False)),
             iteration_number         = int(d.get("iteration_number", 0)),
+            step_index               = int(d.get("step_index", 0) or 0),
+            depends_on_step          = d.get("depends_on_step"),
+            parent_hypothesis_id     = d.get("parent_hypothesis_id"),
             created_at               = d.get("created_at", datetime.now(timezone.utc).isoformat()),
         )
 
@@ -424,6 +434,7 @@ class HypothesisEngine:
             '      "action": "EXACT complete shell command with real IP/URL — e.g. gobuster dir -u http://10.10.10.5 -w /usr/share/wordlists/dirb/common.txt",',
             '      "tool": "tool name only — e.g. gobuster",',
             '      "target": "specific host/URL/service — e.g. http://10.10.10.5:80",',
+            '      "mitre_technique": "ATT&CK ID covering this action — e.g. T1190, T1110.001, T1078, T1059.004 (REQUIRED — best-fit technique, sub-technique if applicable)",',
             '      "reason": "why this specific command tests the top hypothesis",',
             '      "expected_result": "what the output will look like on success",',
             '      "success_criteria": "exact string, file, or output that confirms the hypothesis"',
@@ -435,12 +446,14 @@ class HypothesisEngine:
             "}",
             "",
             "HARD RULES FOR next_actions:",
-            "- MAXIMUM 2 actions. If 1 is sufficient, use 1.",
+            "- MAXIMUM 5 actions ordered by execution sequence (Recommendation G).",
             "- The 'action' field MUST be a complete executable shell command with actual IPs/URLs substituted in.",
             "- Do NOT use placeholder text like TARGET or VICTIM — use the real IP from the target state.",
             "- Do NOT repeat any tool+target combo that appears in FAILED ATTEMPTS.",
-            "- Each action must test a different hypothesis (no redundant tool runs).",
+            "- Each action must test a different hypothesis (no redundant tool runs) UNLESS it is a follow-up step that depends on an earlier action's success.",
             "- If objectives are pending, at least one action must target answering the next objective.",
+            "- The 'mitre_technique' field is REQUIRED. Use the most specific ATT&CK ID that covers the action (e.g. T1190 for public-facing exploit, T1110.001 for password brute force, T1078.001 for default credentials, T1059.004 for unix shell, T1003 for credential dumping).",
+            "- If an action depends on a previous action succeeding (e.g. 'use captured creds to ssh in'), set 'depends_on_step' to that earlier step's index (1-based). Otherwise omit it.",
             "",
             "AVAILABLE KALI TOOLS:",
             "  Recon:    nmap, rustscan, masscan, whatweb, dnsrecon, dig, whois, curl",
@@ -801,8 +814,15 @@ class HypothesisEngine:
             # Default confidence from top hypothesis
             default_conf = max(hyp_conf.values()) if hyp_conf else 0.75
 
-            # Convert each next_action into a Hypothesis object
-            for idx, act in enumerate(next_actions[:2]):   # hard cap: 2 actions
+            # Recommendation G — accept 5-step plans with depends_on_step.
+            # Each next_action becomes one Hypothesis but the dependency
+            # graph is preserved on the Hypothesis so the DecisionEngine
+            # can defer dependent steps until their parent has been
+            # validated.  Steps with depends_on_step=N stay invalidated=
+            # False but flagged ``_pending_step_dep`` so the engine skips
+            # them this iteration (they fire next iteration once the
+            # parent shows up validated).
+            for idx, act in enumerate(next_actions[:5]):   # cap: 5 actions
                 if not isinstance(act, dict):
                     continue
 
@@ -812,6 +832,27 @@ class HypothesisEngine:
                 reason     = str(act.get("reason") or "").strip()
                 expected   = str(act.get("expected_result")  or "").strip()
                 success_c  = str(act.get("success_criteria") or "").strip()
+                # Recommendation F — MITRE technique restored to the
+                # parser path so the Issue Validator (#14) gets its
+                # strongest signal back.  Accept either field name; the
+                # validator strips sub-techniques itself.
+                mitre_id   = str(
+                    act.get("mitre_technique")
+                    or act.get("mitre")
+                    or act.get("attack_technique")
+                    or ""
+                ).strip()
+                # Recommendation G — depends_on_step is a 1-based index
+                # into next_actions; the engine defers dependent steps
+                # until their parent has been validated.
+                dep_raw    = act.get("depends_on_step", act.get("depends_on"))
+                try:
+                    dep_step = int(dep_raw) if dep_raw not in (None, "", 0) else None
+                except (TypeError, ValueError):
+                    dep_step = None
+                # Sanity: a step can only depend on a strictly earlier step.
+                if dep_step is not None and (dep_step < 1 or dep_step > idx):
+                    dep_step = None
 
                 # Require at minimum a command or a tool
                 if not action_cmd and not tool_name:
@@ -849,6 +890,15 @@ class HypothesisEngine:
                 if interpretation:
                     evidence.append(interpretation[:200])
 
+                # Map 1-based dep step → parent hypothesis_id (resolved
+                # after the loop because parents may be later in iteration
+                # order than their dependents… but the schema says a step
+                # can only depend on EARLIER steps, so by-index lookup is
+                # safe to fill at append time).
+                parent_id = None
+                if dep_step is not None and 1 <= dep_step <= len(hypotheses):
+                    parent_id = hypotheses[dep_step - 1].hypothesis_id
+
                 h = Hypothesis(
                     hypothesis_id            = str(uuid.uuid4()),
                     statement                = stmt,
@@ -857,8 +907,11 @@ class HypothesisEngine:
                     required_evidence        = [success_c] if success_c else [],
                     recommended_next_actions = [cmd],
                     attack_phase             = self._infer_attack_phase(tool_name),
-                    mitre_technique          = None,
+                    mitre_technique          = mitre_id or None,
                     iteration_number         = iteration,
+                    step_index               = idx + 1,           # 1-based
+                    depends_on_step          = dep_step,
+                    parent_hypothesis_id     = parent_id,
                 )
                 hypotheses.append(h)
 

@@ -1246,6 +1246,32 @@ class ReasoningLoop:
                     f"({iv.issue_class}) — {iv.reason}"
                 )
                 return False
+
+            # Recommendation A — when grounding identifies a shell-class win,
+            # register it through the master so post-ex / privesc / lateral
+            # phases can fire regardless of which path produced the shell.
+            if grounded and iv.issue_class == "shell_obtained":
+                try:
+                    register = getattr(self._master, "register_shell", None)
+                    if callable(register):
+                        # Try to extract a user from the matched evidence.
+                        user = "unknown"
+                        for q in iv.evidence_quotes:
+                            ql = q.lower()
+                            if "uid=0" in ql or "(root)" in ql:
+                                user = "root"; break
+                            if "system" in ql or "nt authority" in ql:
+                                user = "SYSTEM"; break
+                        await register(
+                            source   = f"reasoning_loop:{action.tool}",
+                            user     = user,
+                            host     = self._target,
+                            method   = action.tool,
+                            evidence = (iv.evidence_quotes[0] if iv.evidence_quotes else "")[:300],
+                        )
+                except Exception as _re_exc:
+                    await self._emit_reasoning(f"[register_shell] error: {_re_exc}")
+
             # If soft says no but grounding finds strong evidence, leave
             # the soft verdict in place (the heuristic / LLM saw a real
             # failure signal we trust over our pattern set).

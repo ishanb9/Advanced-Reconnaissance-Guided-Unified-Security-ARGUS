@@ -39,6 +39,7 @@ class FailedAttempt:
     hypothesis_id:  str       # which hypothesis this attempt was testing
     attempt_count:  int       = 1
     session_id:     str       = ""
+    args_signature: str       = ""    # Recommendation D — fine-grained ban key
     created_at:     str       = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
@@ -54,6 +55,7 @@ class FailedAttempt:
             "hypothesis_id":  self.hypothesis_id,
             "attempt_count":  self.attempt_count,
             "session_id":     self.session_id,
+            "args_signature": self.args_signature,
             "created_at":     self.created_at,
         }
 
@@ -69,6 +71,7 @@ class FailedAttempt:
             hypothesis_id  = d.get("hypothesis_id", ""),
             attempt_count  = d.get("attempt_count", 1),
             session_id     = d.get("session_id", ""),
+            args_signature = d.get("args_signature", ""),
             created_at     = d.get("created_at", datetime.now(timezone.utc).isoformat()),
         )
 
@@ -147,8 +150,17 @@ class NegativeMemory:
         """
         Record a failed attempt.
 
-        If the same (tool, target_service) has been tried before, increments
-        the attempt_count instead of creating a duplicate entry.
+        Recommendation D — keys now include an *args_signature* derived
+        from the args string (URL path, parameter name, wordlist token,
+        payload family, port).  Failure on
+        ``sqlmap -u http://x/login.php?user=foo`` now bans only that
+        specific (tool, service, sig) triple — leaving sqlmap free to
+        try ``--data`` POST, a different parameter, a different
+        endpoint, or a different wordlist.
+
+        The legacy ``(tool, target_service)`` key is still tracked under
+        ``self._coarse_index`` so callers that just want a "has this
+        general combo been tried at all?" check can still get it.
 
         Parameters
         ----------
@@ -159,19 +171,21 @@ class NegativeMemory:
         evidence:       Raw output snippet (truncated to 500 chars).
         hypothesis_id:  ID of the hypothesis this attempt was testing.
         host:           Target host IP/hostname.
-
-        Returns
-        -------
-        FailedAttempt
-            The created or updated attempt record.
         """
-        key = f"{tool}:{target_service}"
+        sig  = self._args_signature(tool, args)
+        key  = f"{tool}:{target_service}:{sig}"
+        coarse_key = f"{tool}:{target_service}"
         self._index[key] = self._index.get(key, 0) + 1
+        if not hasattr(self, "_coarse_index"):
+            self._coarse_index = {}
+        self._coarse_index[coarse_key] = self._coarse_index.get(coarse_key, 0) + 1
 
         # Find existing record or create new
         existing = next(
             (a for a in self._attempts
-             if a.tool == tool and a.target_service == target_service),
+             if a.tool == tool
+             and a.target_service == target_service
+             and getattr(a, "args_signature", "") == sig),
             None
         )
 
@@ -192,6 +206,10 @@ class NegativeMemory:
                 attempt_count  = 1,
                 session_id     = self._session_id,
             )
+            try:
+                attempt.args_signature = sig    # type: ignore[attr-defined]
+            except Exception:
+                pass
             self._attempts.append(attempt)
 
         # Persist asynchronously (non-blocking; failure is non-fatal)
@@ -216,19 +234,149 @@ class NegativeMemory:
     # Reading
     # ------------------------------------------------------------------
 
-    def has_failed_before(self, tool: str, target_service: str) -> bool:
+    def has_failed_before(
+        self,
+        tool:           str,
+        target_service: str,
+        args:           Optional[str] = None,
+    ) -> bool:
         """
-        Return True if this (tool, target_service) combination has failed
-        at least once this session.
+        Recommendation D — refined ban semantics.
 
-        Used by DecisionEngine as a fast pre-flight check before spending
-        tokens on a plan that is known to not work.
+        * If ``args`` is provided, returns True only when that exact
+          *(tool, target_service, args_signature)* triple has failed —
+          letting sqlmap try a different parameter / wordlist after one
+          failure on a single endpoint.
+        * If ``args`` is None, falls back to the legacy coarse-grained
+          check (any failure on the (tool, service) pair).  Callers that
+          do their own redundancy bookkeeping can use the coarse form;
+          the DecisionEngine should always pass ``args``.
+        * Even with ``args``, after ``COARSE_BAN_THRESHOLD`` total
+          failures on the (tool, service) pair we fall back to a ban,
+          so an LLM that keeps re-proposing variants of the same broken
+          attack still gets stopped eventually.
         """
-        return f"{tool}:{target_service}" in self._index
+        if args is not None:
+            sig = self._args_signature(tool, args)
+            fine_key = f"{tool}:{target_service}:{sig}"
+            if fine_key in self._index:
+                return True
+            # Soft cap on coarse failures — after N distinct args have
+            # all failed against the same (tool, service), assume the
+            # service is genuinely unreachable for that tool family.
+            if hasattr(self, "_coarse_index"):
+                if self._coarse_index.get(f"{tool}:{target_service}", 0) >= self.COARSE_BAN_THRESHOLD:
+                    return True
+            return False
+        return f"{tool}:{target_service}" in (
+            getattr(self, "_coarse_index", None) or self._index
+        )
 
-    def attempt_count(self, tool: str, target_service: str) -> int:
-        """Return how many times a specific (tool, service) has been tried."""
-        return self._index.get(f"{tool}:{target_service}", 0)
+    def attempt_count(
+        self,
+        tool:           str,
+        target_service: str,
+        args:           Optional[str] = None,
+    ) -> int:
+        """Return how many times this (tool, service[, args_signature]) has been tried."""
+        if args is not None:
+            sig = self._args_signature(tool, args)
+            return self._index.get(f"{tool}:{target_service}:{sig}", 0)
+        return (getattr(self, "_coarse_index", None) or self._index).get(
+            f"{tool}:{target_service}", 0
+        )
+
+    # Coarse failure threshold beyond which we ban the whole (tool, service)
+    # pair regardless of args_signature — prevents the LLM from cycling
+    # through pointless variants forever.
+    COARSE_BAN_THRESHOLD = 5
+
+    @staticmethod
+    def _args_signature(tool: str, args: str) -> str:
+        """Compute a stable, low-cardinality signature of ``args``.
+
+        The goal is to bucket "the same attack with cosmetic differences"
+        together while keeping "different attack on the same service"
+        distinct.  Tracked tokens, in order of priority:
+
+        * ``-u <url>`` / ``-h <host>`` path component
+        * URL query parameter NAME (``?id=…`` → ``param=id``)
+        * ``--data`` mode (POST vs GET)
+        * Wordlist filename (basename only, no path)
+        * Payload family (e.g. ``windows/x64/meterpreter`` → ``meterpreter``)
+        * Port number from ``:NNNN`` if present
+        * SQLmap level/risk; hydra/medusa thread; nmap script family
+        """
+        if not args:
+            return f"{tool}:noargs"
+
+        import re as _re
+        a = (args or "").lower()
+        bits: List[str] = []
+
+        # URL path (sqlmap -u, curl -X, gobuster -u)
+        m = _re.search(r"https?://[^/\s]+(/[^\s?#]*)", a)
+        if m:
+            path = m.group(1).strip("/").split("?")[0]
+            if path:
+                # Keep only the last 2 path segments — cosmetic ones flap.
+                segments = [s for s in path.split("/") if s][-2:]
+                if segments:
+                    bits.append("path=" + ".".join(segments))
+
+        # Query parameter NAME
+        for m in _re.finditer(r"[?&]([a-z_][a-z0-9_]*)=", a):
+            bits.append(f"param={m.group(1)}")
+            break  # one is enough
+
+        # POST vs GET
+        if "--data" in a or " -X post" in a or "post-form" in a:
+            bits.append("method=post")
+
+        # Wordlist basename
+        m = _re.search(r"(?:-w|-W|-P|-L|--wordlist[= ])\s*(\S+)", a)
+        if m:
+            wl = m.group(1).split("/")[-1].split("\\")[-1]
+            bits.append(f"wordlist={wl[:32]}")
+
+        # Payload family
+        m = _re.search(r"(?:-p|--payload\s+|set\s+payload\s+)\s*(\S+)", a)
+        if m:
+            payload = m.group(1)
+            # Reduce to last segment (e.g. windows/x64/meterpreter/reverse_tcp → reverse_tcp)
+            tail = payload.rstrip("/").rsplit("/", 1)[-1]
+            bits.append(f"payload={tail[:32]}")
+
+        # Port
+        m = _re.search(r":(\d{2,5})\b", a)
+        if m:
+            bits.append(f"port={m.group(1)}")
+
+        # SQLmap risk/level
+        for flag, name in (("--level", "level"), ("--risk", "risk")):
+            m = _re.search(rf"{flag}[= ]\s*(\d)", a)
+            if m:
+                bits.append(f"{name}={m.group(1)}")
+
+        # NSE script family
+        m = _re.search(r"--script[= ]\s*([a-z][a-z0-9-]*)", a)
+        if m:
+            bits.append(f"nse={m.group(1)}")
+
+        # MSF module
+        m = _re.search(r"\b(use|exploit)\s+(?:exploit|auxiliary|post)/([a-z0-9_/-]+)", a)
+        if m:
+            mod = m.group(2).split("/")[-1][:40]
+            bits.append(f"module={mod}")
+
+        if not bits:
+            # Fallback: hash a short prefix so different arg-strings still
+            # bucket distinctly, but cosmetic spacing differences fold.
+            import hashlib
+            digest = hashlib.md5(a[:200].encode("utf-8", "replace")).hexdigest()[:10]
+            return f"h={digest}"
+
+        return "|".join(sorted(bits))
 
     def get_all(self) -> List[FailedAttempt]:
         """Return all recorded failed attempts."""
