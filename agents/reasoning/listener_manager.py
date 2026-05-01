@@ -137,6 +137,30 @@ class ListenerManager:
             self._has_msfconsole, self._has_ncat, self._has_nc,
         )
 
+    # ── Runtime override ───────────────────────────────────────────────
+    async def set_lhost(self, lhost: str, *, reason: str = "operator override") -> None:
+        """Replace the active LHOST mid-engagement (e.g. when the
+        operator switches VPN or the auto-detect picked the wrong NIC).
+
+        Existing live listeners keep their old binding — they're tied to
+        a kernel socket that can't be relocated.  New listeners spawned
+        via :meth:`acquire` use the new value.
+        """
+        if not lhost or lhost == self.lhost:
+            return
+        old = self.lhost
+        self.lhost = str(lhost).strip()
+        logger.info("[ListenerManager] LHOST override %s → %s (%s)",
+                    old, self.lhost, reason)
+        try:
+            await self._master._emit("listener_lhost_changed", {
+                "old":    old,
+                "new":    self.lhost,
+                "reason": reason,
+            })
+        except Exception:
+            pass
+
     # ── Allocation ─────────────────────────────────────────────────────
     def _pick_port(self) -> int:
         for p in self._port_pool:

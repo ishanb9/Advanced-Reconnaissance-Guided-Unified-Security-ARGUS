@@ -10,7 +10,7 @@ WS protocol:
 """
 
 import asyncio, fcntl, os, pty, signal, struct, termios, time
-from typing import Optional, Dict, List, Callable, Awaitable
+from typing import Optional, Dict, List, Callable, Awaitable, Any
 from datetime import datetime
 import netifaces
 
@@ -156,6 +156,13 @@ class ShellAgent(BaseAgent):
         super().__init__(AgentName.SHELL, broadcast)
         self.phase = AttackPhase.POST_EXPLOIT
         self._shells: Dict[str, PtyShell] = {}
+        # Recommendation A — ShellAgent gets a back-reference to MasterAgent
+        # so manual-capture paths (create_listener, connect_ssh) can flow
+        # through register_shell and trip post-ex / privesc / lateral.
+        # MasterAgent assigns this when it instantiates / receives a
+        # ShellAgent reference (currently set in API layer); a None
+        # _master means standalone use and the registration is skipped.
+        self._master: Optional[Any] = None
 
     async def run(self, session_id: str, target: str, **kwargs) -> Dict:
         self._session_id = session_id
@@ -196,6 +203,28 @@ class ShellAgent(BaseAgent):
                 "shell_id": shell_id, "active": True,
                 "info": {"pid": pty_shell.pid, "port": lport, "lhost": lhost}
             })
+            # Recommendation A — manual listener spawn is also a foothold
+            # source.  Without this, post-ex / privesc / lateral never fire
+            # for operator-driven captures.  We register optimistically on
+            # the *listener* — the actual callback may not have arrived
+            # yet, but for an operator-driven flow the user is starting
+            # the listener because they expect a callback shortly.  The
+            # entry is replaced/upgraded by the next callback or by
+            # connect_ssh later in the chain.
+            if self._master is not None:
+                try:
+                    await self._master.register_shell(
+                        source     = "shell_agent:listener",
+                        user       = "unknown",
+                        host       = rhost or "",
+                        method     = f"reverse_shell:{shell_type}",
+                        evidence   = display_cmd,
+                        session_id = shell_id,
+                        rhost      = rhost,
+                        rport      = lport,
+                    )
+                except Exception:
+                    pass
             return {"success": True, "shell_id": shell_id, "pid": pty_shell.pid,
                     "command": display_cmd, "lhost": lhost, "lport": lport}
         return {"success": False, "error": "PTY spawn failed"}
@@ -226,6 +255,23 @@ class ShellAgent(BaseAgent):
             await self._emit("shell_status", {
                 "shell_id": shell_id, "active": True, "info": {"host": host, "user": username}
             })
+            # Recommendation A — SSH-in is a foothold the post-ex / privesc
+            # / lateral phases must see.  Skipped silently when no master
+            # back-reference is set (standalone API-only use).
+            if self._master is not None:
+                try:
+                    await self._master.register_shell(
+                        source     = "shell_agent:ssh",
+                        user       = username or "unknown",
+                        host       = host,
+                        method     = "ssh",
+                        evidence   = f"SSH session as {username}@{host}:{port}",
+                        session_id = shell_id,
+                        rhost      = host,
+                        rport      = port,
+                    )
+                except Exception:
+                    pass
             return {"success": True, "shell_id": shell_id, "pid": pty_shell.pid}
         return {"success": False, "error": "SSH spawn failed"}
 

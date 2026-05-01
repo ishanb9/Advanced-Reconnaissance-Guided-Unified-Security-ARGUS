@@ -1283,6 +1283,15 @@ class MasterAgent(BaseAgent):
             "intel":      self._intel,
             "message":    "Pentest complete — review Findings Board and generate report."
         })
+        # Recommendation C — release every still-running listener so a
+        # subsequent engagement on the same process doesn't collide on
+        # ports 4444-4474 and so msfconsole/ncat/nc handlers don't leak.
+        lm = getattr(self, "listener_manager", None)
+        if lm is not None:
+            try:
+                await lm.shutdown()
+            except Exception as _le:
+                logger.warning("listener_manager shutdown failed: %s", _le)
         # Flush and close the per-session scan log
         try:
             close_scan_logger(session_id)
@@ -2062,7 +2071,11 @@ class MasterAgent(BaseAgent):
 
             # ExploitOrchestrator-shape: shell_obtained dict triggers
             # register_shell so downstream phases see the foothold.
-            if pd.get("shell_obtained") and not self._intel.get("shell_access"):
+            # Always call register_shell when shell_obtained=True — the
+            # helper itself handles idempotence and privilege upgrades
+            # (e.g. www-data → root).  Don't gate on existing
+            # shell_access; that would prevent root-upgrade signals.
+            if pd.get("shell_obtained"):
                 try:
                     await self.register_shell(
                         source   = f"subagent:{phase}",
@@ -4082,15 +4095,25 @@ class MasterAgent(BaseAgent):
             lm = getattr(self, "listener_manager", None)
             captured = False
             if needs_listener and lm is not None:
-                # Inject the manager's lhost/lport into the args so the
-                # exploit's payload calls back to a port we're listening on.
-                lhost = vi.get("lhost") or lm.lhost
+                # Recommendation C — FORCE the manager's lhost.  The
+                # listener binds locally on lm.lhost; any payload that
+                # calls back must target the same address or no callback
+                # ever lands.  An LLM-supplied lhost that disagrees with
+                # the local interface is a guaranteed silent failure, so
+                # we override unconditionally.  Operator override flows
+                # via lm.set_lhost(), not the LLM JSON.
+                lhost = lm.lhost
+                # The manager allocates the port itself; the LLM's lport
+                # is a hint for collision avoidance but not authoritative.
                 try:
                     lport = int(vi.get("lport") or 4444)
                 except Exception:
                     lport = 4444
 
-                # Substitute placeholders in args.
+                # Substitute placeholders + force-rewrite any literal
+                # LHOST=…/LPORT=… emitted by the LLM so even an
+                # over-confident model can't break the callback path.
+                import re as _re
                 _args = (vi.get("args") or "")
                 for placeholder, value in (
                     ("LHOST=PLACEHOLDER", f"LHOST={lhost}"),
@@ -4099,6 +4122,29 @@ class MasterAgent(BaseAgent):
                     ("<lport>", str(lport)), ("<LPORT>", str(lport)),
                 ):
                     _args = _args.replace(placeholder, value)
+                # LHOST=<anything> → LHOST=<lm.lhost>
+                _args = _re.sub(
+                    r"\bLHOST\s*=\s*\S+",
+                    f"LHOST={lhost}",
+                    _args, flags=_re.IGNORECASE,
+                )
+                # LPORT=<digits> → LPORT=<our chosen lport>
+                _args = _re.sub(
+                    r"\bLPORT\s*=\s*\d+",
+                    f"LPORT={lport}",
+                    _args, flags=_re.IGNORECASE,
+                )
+                # `set LHOST X` (msfconsole RC) → `set LHOST <ours>`
+                _args = _re.sub(
+                    r"\bset\s+LHOST\s+\S+",
+                    f"set LHOST {lhost}",
+                    _args, flags=_re.IGNORECASE,
+                )
+                _args = _re.sub(
+                    r"\bset\s+LPORT\s+\d+",
+                    f"set LPORT {lport}",
+                    _args, flags=_re.IGNORECASE,
+                )
 
                 async def _fire(_lhost, _lport):
                     return await agent.execute_tasks(

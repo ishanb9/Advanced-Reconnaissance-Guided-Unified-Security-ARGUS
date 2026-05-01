@@ -42,21 +42,35 @@ from db.cache import (
     findings_cache, graph_cache, tool_outputs_cache, session_meta_cache,
     stats as cache_stats,
 )
+
+
+# ══════════════════════════════════════════════════════════════
+#  CONFIG  ← edit here; values propagate to all agents
+# ══════════════════════════════════════════════════════════════
+# Change the defaults below to reconfigure the entire platform.
+# Environment variables always take precedence over these defaults.
+
+MCP_URL    = os.environ.get("MCP_URL",      "http://localhost:3000")
+OLLAMA_URL = os.environ.get("OLLAMA_URL",   "http://192.168.0.101:11434")
+MODEL_NAME = os.environ.get("OLLAMA_MODEL", "deepseek-v3.1:671b-cloud")
+MONGO_URI  = os.environ.get("MONGO_URI",    "mongodb://localhost:27017")
+
+# Write resolved values back into os.environ so every agent module that
+# imports after this point (and any subprocess) picks them up automatically.
+# This means no agent file needs its own hardcoded default — they all read
+# os.environ.get("OLLAMA_URL") and get whatever was set here.
+os.environ["MCP_URL"]      = MCP_URL
+os.environ["OLLAMA_URL"]   = OLLAMA_URL
+os.environ["OLLAMA_MODEL"] = MODEL_NAME
+os.environ["MONGO_URI"]    = MONGO_URI
+
+
+# ── Agent imports AFTER config so os.environ is fully populated ──────────
 from agents.master_agent       import MasterAgent
 from agents.shell_agent        import ShellAgent
 from agents.payload_agent      import PayloadAgent
 from agents.cidr_orchestrator  import CIDROrchestrator
 from report.generator          import ReportGenerator
-
-
-# ══════════════════════════════════════════════════════════════
-#  CONFIG
-# ══════════════════════════════════════════════════════════════
-
-MCP_URL    = "http://localhost:3000"
-OLLAMA_URL = os.environ.get("OLLAMA_URL",   "http://192.168.0.101:11434")
-MODEL_NAME = os.environ.get("OLLAMA_MODEL", "deepseek-v3.1:671b-cloud")
-MONGO_URI  = os.environ.get("MONGO_URI",    "mongodb://localhost:27017")
 
 
 # ══════════════════════════════════════════════════════════════
@@ -266,6 +280,11 @@ async def index(request: Request):
 async def create_session(body: StartPentestRequest):
     session_mode = _detect_session_mode(body.target_ip)
 
+    # Mission brief — Improvement #1.  Use the operator's brief if supplied,
+    # otherwise fall back to schema defaults so legacy clients keep working.
+    from db.schemas import MissionBrief as _MB
+    mission_brief = body.mission_brief or _MB()
+
     session_data = SessionCreate(
         target_ip           = body.target_ip,
         target_hostname     = body.target_hostname,
@@ -276,6 +295,7 @@ async def create_session(body: StartPentestRequest):
         max_threads         = body.max_threads,
         session_mode        = session_mode,
         max_parallel_hosts  = getattr(body, "max_parallel_hosts", 5),
+        mission_brief       = mission_brief,
     )
     session    = await db.create_session(session_data)
     session_id = session["id"]
@@ -295,6 +315,7 @@ async def create_session(body: StartPentestRequest):
         notes              = getattr(body, "notes", "") or "",
         scope              = getattr(body, "scope", "")  or "",
         use_reasoning_loop = True,  # Always enabled — reasoning-driven approach
+        mission_brief      = mission_brief.dict() if hasattr(mission_brief, "dict") else mission_brief,
     )
 
     if session_mode == SessionMode.SINGLE:
@@ -323,6 +344,11 @@ async def create_session(body: StartPentestRequest):
     # Pre-create ShellAgent for this session
     shell_agent = ShellAgent(broadcast=broadcast)
     shell_agent._session_id = session_id
+    # Recommendation A — back-reference so manual listener / SSH captures
+    # flow through MasterAgent.register_shell.  Multi-host orchestrator's
+    # MasterAgent reference is resolved at first foothold (each host has
+    # its own MasterAgent inside CIDROrchestrator).
+    shell_agent._master = master if session_mode == SessionMode.SINGLE else None
     active_shell_agents[session_id] = shell_agent
 
     return {"session": session, "message": f"Pentest started on {body.target_ip}",
@@ -840,8 +866,8 @@ Be concise but actionable. Use actual tool names and techniques. Format clearly 
 
     try:
         import httpx as _httpx
-        llm_url = os.environ.get("OLLAMA_URL", "http://192.168.0.101:11434")
-        model = os.environ.get("OLLAMA_MODEL", "deepseek-v3.1:671b-cloud")
+        llm_url = OLLAMA_URL
+        model   = MODEL_NAME
         resp = await _httpx.AsyncClient(timeout=60.0).post(
             f"{llm_url}/api/generate",
             json={"model": model, "prompt": prompt, "stream": False}

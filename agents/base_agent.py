@@ -165,9 +165,9 @@ def _kb_procedures(query: str, top_k: int = 3) -> str:
 
 
 # ─── Configuration ────────────────────────────────────────────
-MCP_URL    = "http://localhost:3000"
-OLLAMA_URL = "http://192.168.0.101:11434"   # ← Ollama host
-MODEL_NAME = "deepseek-v3.1:671b-cloud"   # ← Ollama model name
+MCP_URL    = os.environ.get("MCP_URL",      "http://localhost:3000")
+OLLAMA_URL = os.environ.get("OLLAMA_URL",   "http://192.168.0.101:11434")
+MODEL_NAME = os.environ.get("OLLAMA_MODEL", "deepseek-v3.1:671b-cloud")
 
 LLM_CHECK_TIMEOUT  = 10   # Seconds to wait for Ollama health check
 LLM_THINK_TIMEOUT  = 600  # Per-chunk read timeout when streaming (tokens arrive continuously)
@@ -737,8 +737,8 @@ class BaseAgent(ABC):
             if _KG_AVAILABLE and result and isinstance(result, str) and len(result) > 50:
                 try:
                     _target = context.get("target") or getattr(self, "_target", "unknown")
-                    _llm_url   = getattr(self, "_llm_url",   "http://localhost:11434")
-                    _llm_model = getattr(self, "_llm_model", "llama3")
+                    _llm_url   = getattr(self, "_llm_url",   OLLAMA_URL)
+                    _llm_model = getattr(self, "_llm_model", MODEL_NAME)
                     asyncio.create_task(_kg_infer(
                         session_id = self._session_id,
                         tool_name  = tool_name,

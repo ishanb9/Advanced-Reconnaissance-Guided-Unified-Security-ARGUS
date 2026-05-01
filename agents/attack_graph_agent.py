@@ -31,6 +31,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import re
 import time
 import uuid
@@ -45,8 +46,8 @@ import db.mongo_client as _db
 logger = logging.getLogger(__name__)
 
 # ── Config ────────────────────────────────────────────────────────────────────
-OLLAMA_URL   = "http://192.168.0.101:11434"
-MODEL_NAME   = "deepseek-v3.1:671b-cloud"
+OLLAMA_URL   = os.environ.get("OLLAMA_URL",   "http://192.168.0.101:11434")
+MODEL_NAME   = os.environ.get("OLLAMA_MODEL", "deepseek-v3.1:671b-cloud")
 LLM_TIMEOUT  = 180     # seconds
 POLL_INTERVAL = 35     # seconds between polls
 NEW_FINDINGS_THRESHOLD = 3  # min new findings before re-analysis

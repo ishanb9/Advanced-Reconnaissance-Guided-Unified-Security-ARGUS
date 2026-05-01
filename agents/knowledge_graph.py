@@ -162,14 +162,20 @@ async def infer_and_write(
     tool_name:  str,
     target:     str,
     raw_output: str,
-    llm_url:    str  = "http://localhost:11434",
-    llm_model:  str  = "llama3",
+    llm_url:    str  = "",   # resolved at call time from OLLAMA_URL env var
+    llm_model:  str  = "",  # resolved at call time from OLLAMA_MODEL env var
 ) -> int:
     """
     Fire-and-forget coroutine.
     Extracts semantic triples from tool output via LLM and writes them to Neo4j.
     Returns the number of triples written (0 if Neo4j unavailable or no triples).
     """
+    import os as _os
+    if not llm_url:
+        llm_url = _os.environ.get("OLLAMA_URL", "http://192.168.0.101:11434")
+    if not llm_model:
+        llm_model = _os.environ.get("OLLAMA_MODEL", "deepseek-v3.1:671b-cloud")
+
     if not raw_output or len(raw_output.strip()) < 20:
         return 0
 
