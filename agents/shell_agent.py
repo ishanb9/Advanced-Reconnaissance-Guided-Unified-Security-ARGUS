@@ -203,14 +203,11 @@ class ShellAgent(BaseAgent):
                 "shell_id": shell_id, "active": True,
                 "info": {"pid": pty_shell.pid, "port": lport, "lhost": lhost}
             })
-            # Recommendation A — manual listener spawn is also a foothold
-            # source.  Without this, post-ex / privesc / lateral never fire
-            # for operator-driven captures.  We register optimistically on
-            # the *listener* — the actual callback may not have arrived
-            # yet, but for an operator-driven flow the user is starting
-            # the listener because they expect a callback shortly.  The
-            # entry is replaced/upgraded by the next callback or by
-            # connect_ssh later in the chain.
+            # Listener spawn is OPTIMISTIC — we have no callback yet, so
+            # post-ex / privesc / lateral must NOT fire on this call.  When
+            # the callback actually arrives, ListenerManager.wait_for_session
+            # calls register_shell with confirmed=True + real `uid=`/prompt
+            # evidence and that's what flips shell_access.
             if self._master is not None:
                 try:
                     await self._master.register_shell(
@@ -222,6 +219,7 @@ class ShellAgent(BaseAgent):
                         session_id = shell_id,
                         rhost      = rhost,
                         rport      = lport,
+                        confirmed  = False,
                     )
                 except Exception:
                     pass

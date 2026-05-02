@@ -93,6 +93,11 @@ async def _create_indexes():
     await db.findings.create_index([("session_id", ASCENDING), ("subagent", ASCENDING)])
     await db.findings.create_index([("cves", ASCENDING)])
     await db.findings.create_index([("finding_id", ASCENDING)], sparse=True)
+    # Dedup lookup — store_finding queries by (session_id, fingerprint)
+    # before inserting to merge duplicates instead of duplicating.
+    await db.findings.create_index(
+        [("session_id", ASCENDING), ("fingerprint", ASCENDING)]
+    )
 
     # ── tool_outputs ────────────────────────────────────────────────────────
     await db.tool_outputs.create_index(
@@ -537,6 +542,124 @@ async def add_flag_to_session(session_id: str, flag_value: str):
 #  FINDINGS
 # ═══════════════════════════════════════════════════════════
 
+# ─── Finding fingerprint / dedup helpers ────────────────────────────────────
+# Stopwords stripped before computing a finding's normalized signature.
+# Removing them prevents the same finding emitted with paraphrased titles
+# ("SMB signing enabled and required" / "Server enforces SMB signing" /
+# "SMB message signing required") from generating 3 separate documents.
+_FINDING_STOPWORDS = frozenset({
+    "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
+    "and", "or", "but", "with", "without", "via", "by", "to", "from", "of",
+    "in", "on", "for", "at", "as", "this", "that", "these", "those",
+    "found", "detected", "identified", "discovered", "observed", "appears",
+    "potential", "potentially", "possible", "possibly", "suspected",
+    "vulnerability", "vulnerable", "issue", "issues", "service", "services",
+    "server", "servers", "host", "hosts", "system", "systems",
+    "enabled", "disabled", "active", "running",
+    # Security-report filler words that vary per LLM-generated paraphrase but
+    # add no technical content.  Adding them keeps the fingerprint tight on
+    # the actual subject of the finding.
+    "required", "requires", "enforces", "enforced", "enforcement",
+    "allowed", "allows", "available", "supported", "supports",
+    "message", "messages", "level", "version", "configuration", "config",
+    "policy", "policies", "setting", "settings", "mode", "method",
+    "remote", "local", "network", "internal", "external",
+    "default", "defaults", "weak", "strong", "open", "closed", "exposed",
+})
+
+# Synonym map: canonicalize known-equivalent tokens before set-merging.
+# These collapse the most common paraphrase variants we've seen in scan
+# logs into a single signature without changing semantics.
+_FINDING_SYNONYMS = {
+    "smbv1":   "smb",
+    "smbv2":   "smb",
+    "smbv3":   "smb",
+    "smb1":    "smb",
+    "smb2":    "smb",
+    "smb3":    "smb",
+    "winrm":   "winrm",
+    "winrs":   "winrm",
+    "msrpc":   "rpc",
+    "rdp":     "rdp",
+    "mstsc":   "rdp",
+    "kerb":    "kerberos",
+    "kerberoasting": "kerberoast",
+    "asreproast":    "asrep",
+    "asreproasting": "asrep",
+    "preauth": "asrep",   # the only context we use it in for findings
+    "ntlmrelay": "ntlm",
+    "ntlmrelaying": "ntlm",
+    "auth":    "authentication",
+    "authn":   "authentication",
+    "credentials": "creds",
+    "password":    "creds",
+    "passwd":      "creds",
+    "anonymous":   "anon",
+    "guest":       "anon",
+    "null":        "anon",
+    "nullsession": "anon",
+}
+
+
+def _normalize_finding_title(title: str) -> str:
+    """Reduce a finding title to a comparable signature.
+
+    Steps: lowercase → strip punctuation → split on whitespace → drop
+    stopwords → canonicalize synonyms → take first 6 keyword tokens →
+    sort → join (deduped).
+
+    Two paraphrased titles with the same technical meaning collapse to the
+    same string here.  The cap on token count means very long titles still
+    match shorter ones with the same kernel.
+    """
+    if not title:
+        return ""
+    import re as _re
+    cleaned = _re.sub(r"[^A-Za-z0-9]+", " ", title.lower())
+    toks: List[str] = []
+    seen: set = set()
+    for t in cleaned.split():
+        if not t or t in _FINDING_STOPWORDS:
+            continue
+        # Canonicalize synonym
+        t = _FINDING_SYNONYMS.get(t, t)
+        if t in _FINDING_STOPWORDS:
+            continue
+        # Dedupe within the title (so "smb message smb signing" → smb signing)
+        if t in seen:
+            continue
+        seen.add(t)
+        toks.append(t)
+        if len(toks) >= 6:
+            break
+    if not toks:
+        return ""
+    return " ".join(sorted(toks))
+
+
+def _finding_fingerprint(
+    *, host: str, port: Optional[int], cves: Optional[List[str]],
+    title: str,
+) -> str:
+    """Return a deterministic key identifying this *kind* of finding for
+    a given target endpoint.  Used as the dedup key.
+
+    Priority: when at least one CVE is attached, the CVE id is enough —
+    same CVE on the same (host, port) is by definition the same finding.
+    Otherwise fall back to the normalized-title signature.
+    """
+    h = (host or "").strip().lower()
+    p = str(port or 0)
+    if cves:
+        # Pick lowest CVE id so two findings with different CVE ordering
+        # still produce the same fingerprint.
+        cve_key = sorted({str(c).strip().upper() for c in cves if c})[0] if any(cves) else ""
+        if cve_key:
+            return f"{h}|{p}|cve:{cve_key}"
+    sig = _normalize_finding_title(title)
+    return f"{h}|{p}|t:{sig}"
+
+
 async def store_finding(
     session_id:  str,
     agent:       AgentName,
@@ -553,8 +676,60 @@ async def store_finding(
     raw_output:  Optional[str]  = None,
     extra:       Dict           = None
 ) -> Dict:
-    """Store a new finding. Returns created document."""
+    """Store a new finding, deduplicating against already-stored findings.
+
+    Dedup is keyed on (session_id, host, port, fingerprint) where
+    fingerprint is either the lowest-id CVE on the finding or the
+    normalized-title signature.  When a duplicate is detected we:
+      * increment ``seen_count`` on the existing doc
+      * upgrade severity if the new severity is higher
+      * append any new CVE / exploit values not already listed
+      * update ``last_seen_at`` so freshness is preserved
+    Returns either the existing (updated) doc or the newly inserted doc.
+    """
     db = get_db()
+
+    fp = _finding_fingerprint(host=host, port=port, cves=cves, title=title)
+
+    # Try to find an existing finding with the same fingerprint for this
+    # session.  Index on (session_id, fingerprint) — added in setup().
+    existing = await db.findings.find_one({
+        "session_id":  session_id,
+        "fingerprint": fp,
+    })
+
+    if existing is not None:
+        # Severity upgrade — keep highest severity seen
+        _SEV_RANK = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
+        old_sev = (existing.get("severity") or "").lower() if isinstance(existing.get("severity"), str) else str(existing.get("severity") or "").lower()
+        new_sev = severity.value.lower() if hasattr(severity, "value") else str(severity).lower()
+        sev_to_set = severity if _SEV_RANK.get(new_sev, 0) > _SEV_RANK.get(old_sev, 0) else existing.get("severity")
+
+        # Merge CVEs / exploits lists
+        merged_cves = list({*(existing.get("cves") or []), *(cves or [])})
+        merged_exploits = list({*(existing.get("exploits") or []), *(exploits or [])})
+
+        update_doc = {
+            "$set": {
+                "severity":     sev_to_set,
+                "cves":         merged_cves,
+                "exploits":     merged_exploits,
+                "last_seen_at": datetime.utcnow(),
+            },
+            "$inc": {"seen_count": 1},
+        }
+        await db.findings.update_one({"_id": existing["_id"]}, update_doc)
+
+        # Reflect changes in the doc we return
+        existing.update({
+            "severity":     sev_to_set,
+            "cves":         merged_cves,
+            "exploits":     merged_exploits,
+            "last_seen_at": datetime.utcnow(),
+            "seen_count":   (existing.get("seen_count") or 1) + 1,
+        })
+        return _serialize(existing)
+
     doc = {
         "_id":         ObjectId(),
         "session_id":  session_id,
@@ -574,11 +749,14 @@ async def store_finding(
         "screenshot":  None,
         "remediation": None,
         "found_at":    datetime.utcnow(),
+        "last_seen_at": datetime.utcnow(),
         "verified":    False,
+        "fingerprint": fp,
+        "seen_count":  1,
         "extra":       extra or {}
     }
     await db.findings.insert_one(doc)
-    # Update session counter
+    # Update session counter (only on first insertion of this fingerprint)
     await increment_session_stats(session_id, findings=1)
     return _serialize(doc)
 

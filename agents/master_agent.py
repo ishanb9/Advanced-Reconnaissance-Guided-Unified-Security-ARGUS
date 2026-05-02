@@ -2501,6 +2501,7 @@ class MasterAgent(BaseAgent):
         session_id:   Optional[str] = None,
         rhost:        Optional[str] = None,
         rport:        Optional[int] = None,
+        confirmed:    bool = True,
     ) -> bool:
         """Recommendation A — single write site for shell-access state.
 
@@ -2508,7 +2509,7 @@ class MasterAgent(BaseAgent):
         ListenerManager, ShellManager, manual operator capture) MUST call this
         instead of writing ``self._intel["shell_access"]`` directly.
 
-        On the first registration this:
+        On the first **confirmed** registration this:
 
         * flips ``intel["shell_access"] = True`` and records the user
         * appends an ``attack_path`` step
@@ -2518,13 +2519,80 @@ class MasterAgent(BaseAgent):
         * fires ``plan_step_update`` so the dashboard shows "exploit done"
         * stores a success-memory entry for cross-engagement learning
 
+        ``confirmed`` semantics
+        -----------------------
+        Optimistic callers — listener spawn, ssh-process-spawn before auth
+        succeeded — pass ``confirmed=False``.  We still record the pending
+        session entry in ``intel['shells']`` so the operator UI can attach,
+        but we do **not** flip ``shell_access`` and we do **not** fire the
+        post-exploit / privesc / lateral phases.  Those phases only run
+        when at least one *real* foothold exists.
+
+        Confirmed callers (real foothold):
+          * ListenerManager.wait_for_session — saw a callback signature
+            (uid=, $/# prompt, Meterpreter session N opened)
+          * ExploitOrchestrator — subagent reported shell_obtained=True
+          * shell_agent.connect_ssh — SSH session reached interactive prompt
+          * Manual operator capture via UI
+
+        Auto-detection fallback: if ``confirmed`` is left at its default
+        (True) but the evidence contains nothing that looks like real shell
+        output (no uid=, no prompt, no session-opened banner), and the
+        source is one of the well-known optimistic sources, we downgrade
+        to confirmed=False internally.  This prevents legacy callers from
+        silently flipping the post-ex gate.
+
         Subsequent calls are idempotent: they update ``current_user`` if a
         more privileged user is reported (e.g. SYSTEM beats www-data), and
         always append a new ``attack_path`` entry so the timeline shows
-        the lateral / privesc progression.  Returns True on first foothold,
-        False on subsequent updates.
+        the lateral / privesc progression.  Returns True on first
+        confirmed foothold, False on optimistic / subsequent updates.
         """
+        import re as _re
         host = host or self._target or ""
+
+        # ── Optimistic-source auto-downgrade ──────────────────────────
+        # These sources fire BEFORE a real callback / auth-success has
+        # been observed.  Even if the caller passed confirmed=True, treat
+        # them as optimistic unless evidence proves otherwise.
+        _OPTIMISTIC_SOURCES = {
+            "shell_agent:listener",   # listener spawn — no callback yet
+            "shell_agent:ssh",        # SSH process spawn — pre-auth
+        }
+        # Subagent sources that often LLM-hallucinate `shell_obtained: True`
+        # without real evidence.  Listed here so the evidence-regex check
+        # below acts as the actual gate — real exploit captures (msfconsole
+        # `Meterpreter session N opened`, `uid=…`, prompt regex) pass; bare
+        # claims like "shell obtained via SQLi" with no prompt evidence get
+        # downgraded.
+        _OPTIMISTIC_SOURCE_PREFIXES = (
+            "subagent:",      # any phase subagent
+            "exploit_orchestrator:",
+            "web_exploit:",
+            "credential_spray:",
+        )
+        if any(source.startswith(p) for p in _OPTIMISTIC_SOURCE_PREFIXES):
+            _OPTIMISTIC_SOURCES = _OPTIMISTIC_SOURCES | {source}
+        # A "real foothold evidence" pattern is any of:
+        #   uid=N(name)   →  Linux/Unix id output
+        #   user@host:~$  →  shell prompt
+        #   PS C:\>       →  PowerShell prompt
+        #   Pwn3d!        →  CrackMapExec admin marker
+        #   Meterpreter session N opened
+        #   Command shell session N opened
+        _REAL_SHELL_RE = _re.compile(
+            r"(?:uid=\d+\(|"
+            r"[\w.-]+@[\w.-]+:[^\n]{0,30}[#$]|"
+            r"PS\s+[A-Z]:\\|"
+            r"Pwn3d!|"
+            r"Meterpreter session\s+\d+\s+opened|"
+            r"Command shell session\s+\d+\s+opened)",
+            _re.I,
+        )
+        if confirmed and source in _OPTIMISTIC_SOURCES:
+            if not _REAL_SHELL_RE.search(evidence or ""):
+                confirmed = False
+
         was_first = not self._intel.get("shell_access")
 
         # Privilege ordering for upgrades.
@@ -2534,8 +2602,34 @@ class MasterAgent(BaseAgent):
         }
         prev_user = (self._intel.get("current_user") or "").lower()
         new_user_low = (user or "").lower()
-        if was_first or priv_rank.get(new_user_low, 50) >= priv_rank.get(prev_user, 0):
+        # Don't overwrite a real user with "unknown" from an optimistic call.
+        if confirmed and (was_first or priv_rank.get(new_user_low, 50) >= priv_rank.get(prev_user, 0)):
             self._intel["current_user"] = user or "unknown"
+
+        # Record optimistic / pending session in shells[] regardless, so the
+        # UI shell-attach surface can list them; only the gate flag is gated.
+        if not confirmed:
+            self._intel.setdefault("shells", []).append({
+                "session_id": session_id or "",
+                "user":       user or "unknown",
+                "host":       host,
+                "method":     method,
+                "rhost":      rhost,
+                "rport":      rport,
+                "ts":         datetime.utcnow().isoformat(),
+                "pending":    True,
+                "source":     source,
+            })
+            try:
+                import logging as _log
+                _log.getLogger(__name__).info(
+                    "[register_shell] OPTIMISTIC (no-flip) source=%s user=%s host=%s — "
+                    "post-ex/privesc will not fire on this call",
+                    source, user, host,
+                )
+            except Exception:
+                pass
+            return False  # not a confirmed foothold
 
         self._intel["shell_access"] = True
         self._intel.setdefault("attack_path", []).append({
