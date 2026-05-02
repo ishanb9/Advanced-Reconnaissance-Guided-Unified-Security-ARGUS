@@ -92,6 +92,8 @@ class WebSocketManager:
         "credential_found", "tunnel_established", "persistence_planted",
         "burp_scan_complete", "chain_exploit_success", "privesc_success",
         "shell_obtained", "network_scan_complete", "phase_start", "phase_complete",
+        # Attack graph / chain analysis events
+        "chain_analysis", "chain_analysis_status", "graph_refresh",
     }
     BUFFER_SIZE = 200  # max buffered events per session
 

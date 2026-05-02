@@ -388,7 +388,18 @@ class MasterAgent(BaseAgent):
             "failed_attempts":     {},    # {"tool:service": count}
             "ranked_attack_paths": [],    # list[dict] — RankedAttackPath objects
             "reasoning_journal":   [],    # list[str] — situation assessments
+            # ── Loot / exfil state (#7) ──────────────────────────
+            "loot":                {        # populated by ExfilPipeline
+                "ssh_keys":      [],
+                "nt_hashes":     [],
+                "kerberos_tgts": [],
+                "kerberos_tgss": [],
+                "secrets":       [],
+            },
         }
+        # ExfilPipeline instance — initialised lazily in run() once
+        # the session_id is known.
+        self._exfil_pipeline = None
 
         # ── Pentest State Machine ────────────────────────────
         # INIT → RECON → INTELLIGENCE_AGGREGATION → VULNERABILITY_ANALYSIS
@@ -900,6 +911,68 @@ class MasterAgent(BaseAgent):
                 pass
         except Exception:
             pass
+
+        # Recommendation #7 — exfiltration pipeline.  Per-session loot
+        # collector that DoI-classifies tool/shell output, stages it
+        # to disk, manifests it, and surfaces findings.  Wire it before
+        # listener_manager so any callbacks captured can immediately
+        # feed loot through it.
+        try:
+            from agents.reasoning.exfil_pipeline import ExfilPipeline
+            async def _exfil_emit_finding(*, title, description, severity, host, extra):
+                # Adapter — translate ExfilPipeline's emit signature into
+                # the platform's standard finding pipeline.
+                try:
+                    await db.store_finding(
+                        session_id  = session_id,
+                        agent       = AgentName.MASTER,
+                        phase       = self._intel.get("state", AttackPhase.POST_EXPLOIT),
+                        severity    = FindingSeverity(severity.lower()) if isinstance(severity, str) else severity,
+                        title       = title,
+                        description = description,
+                        host        = host or self._target,
+                        port        = None,
+                        service     = None,
+                        cves        = [],
+                        exploits    = [],
+                        tool_used   = "exfil_pipeline",
+                        raw_output  = None,
+                        extra       = extra or {},
+                    )
+                except Exception:
+                    pass
+            self._exfil_pipeline = ExfilPipeline(
+                session_id   = session_id,
+                target       = target,
+                emit_finding = _exfil_emit_finding,
+            )
+            try:
+                await self._broadcast_raw({
+                    "type":       "exfil_pipeline_ready",
+                    "session_id": session_id,
+                    "agent":      "master",
+                    "data": {
+                        "loot_dir": self._exfil_pipeline.manifest_summary().get("loot_dir"),
+                    },
+                })
+            except Exception:
+                pass
+        except Exception as _exfil_err:
+            import logging as _l
+            _l.getLogger(__name__).warning(
+                "ExfilPipeline failed to initialise: %s", _exfil_err)
+            self._exfil_pipeline = None
+
+        # Quick-Fix-3 — Tool-availability report.  Probe MCP for every
+        # tool the primer chains depend on; surface missing ones up-front
+        # so the operator immediately sees gaps and can apt-install /
+        # disable the affected primers rather than debug from logs.
+        try:
+            await self._probe_primer_tool_availability(session_id)
+        except Exception as _probe_err:
+            import logging as _l
+            _l.getLogger(__name__).warning(
+                "tool-availability probe failed: %s", _probe_err)
 
         # Recommendation C — instantiate the listener manager once we
         # know enough about the engagement to resolve LHOST.
@@ -2277,6 +2350,277 @@ class MasterAgent(BaseAgent):
             return "privesc"
         return "generic"
 
+    # Tools every primer chain depends on.  When one of these is missing
+    # from the operator's Kali, the corresponding chain step silently
+    # skips itself — _probe_primer_tool_availability surfaces the gap
+    # at session start so the operator knows up-front.
+    _PRIMER_TOOL_DEPS: Dict[str, List[str]] = {
+        "credentialed-AD":     ["crackmapexec", "evil-winrm", "impacket-GetUserSPNs",
+                                 "impacket-GetNPUsers", "impacket-secretsdump",
+                                 "ldapsearch", "bloodhound-python", "xfreerdp"],
+        "credentialed-DB":     ["mysql", "psql", "impacket-mssqlclient",
+                                 "mongosh", "redis-cli"],
+        "credentialed-SSH":    ["sshpass", "ssh"],
+        "credentialed-Web":    ["curl", "swaks"],
+        "no-creds-AD":         ["ldapsearch", "impacket-lookupsid", "enum4linux-ng",
+                                 "crackmapexec", "kerbrute", "coercer", "responder"],
+        "default-creds":       ["hydra", "crackmapexec", "redis-cli", "mongosh",
+                                 "snmpwalk"],
+        "web-exploit":         ["whatweb", "nuclei", "feroxbuster", "wpscan",
+                                 "droopescan", "joomscan", "arjun", "sqlmap",
+                                 "tplmap", "ffuf", "dalfox", "davtest"],
+        "post-foothold":       ["curl", "wget"],   # plus shell_exec (no MCP probe)
+        "lateral":             ["nmap", "crackmapexec", "impacket-getST",
+                                 "impacket-secretsdump"],
+    }
+
+    async def _probe_primer_tool_availability(self, session_id: str) -> None:
+        """Probe MCP for every tool referenced by the primer chains.
+        Emit a `primer_tool_availability` event with per-chain coverage
+        stats so the dashboard can surface gaps and the operator can
+        take corrective action (apt install / disable chain) up-front.
+        """
+        import httpx, os as _os
+        mcp_url = _os.environ.get("MCP_URL", "http://localhost:3000")
+
+        # Flatten and dedupe the dep set so we issue one probe per tool
+        all_tools = sorted({t for deps in self._PRIMER_TOOL_DEPS.values() for t in deps})
+
+        availability: Dict[str, bool] = {}
+        try:
+            async with httpx.AsyncClient(timeout=2.0) as client:
+                for tool_name in all_tools:
+                    try:
+                        resp = await client.post(mcp_url + "/", json={
+                            "method": "tools/check",
+                            "params": {"name": tool_name},
+                        })
+                        if resp.status_code == 200:
+                            body = resp.json() or {}
+                            availability[tool_name] = bool(body.get("available")
+                                                           or body.get("ok")
+                                                           or body.get("result", {}).get("available"))
+                        else:
+                            availability[tool_name] = False
+                    except Exception:
+                        availability[tool_name] = False
+        except Exception:
+            # MCP not reachable — fall back to "unknown" rather than block startup
+            availability = {t: None for t in all_tools}
+
+        # Per-chain coverage
+        chain_coverage: Dict[str, Dict[str, Any]] = {}
+        for chain_name, deps in self._PRIMER_TOOL_DEPS.items():
+            present = [t for t in deps if availability.get(t) is True]
+            missing = [t for t in deps if availability.get(t) is False]
+            chain_coverage[chain_name] = {
+                "deps":     deps,
+                "present":  present,
+                "missing":  missing,
+                "coverage": (len(present) / len(deps)) if deps else 1.0,
+            }
+
+        missing_overall = sorted({m for c in chain_coverage.values() for m in c["missing"]})
+        install_hints = {
+            t: f"apt install -y {t}"
+            for t in missing_overall
+            # Best-effort hints — pip / nodejs / go-installed tools won't apt-install.
+            # Operator still gets the tool name and can install via the right path.
+        }
+
+        try:
+            await self._broadcast_raw({
+                "type":       "primer_tool_availability",
+                "session_id": session_id,
+                "agent":      "master",
+                "data": {
+                    "tools_total":     len(all_tools),
+                    "tools_present":   sum(1 for v in availability.values() if v is True),
+                    "tools_missing":   missing_overall,
+                    "install_hints":   install_hints,
+                    "chain_coverage":  chain_coverage,
+                },
+            })
+        except Exception:
+            pass
+
+        # Also emit a one-line console summary for log-tailing operators
+        try:
+            import logging as _l
+            log = _l.getLogger(__name__)
+            for chain_name, info in chain_coverage.items():
+                if info["missing"]:
+                    log.warning(
+                        "[primer-deps] %-18s coverage=%d/%d  MISSING: %s",
+                        chain_name,
+                        len(info["present"]), len(info["deps"]),
+                        ", ".join(info["missing"]),
+                    )
+                else:
+                    log.info(
+                        "[primer-deps] %-18s coverage=%d/%d  (all present)",
+                        chain_name, len(info["present"]), len(info["deps"]),
+                    )
+        except Exception:
+            pass
+
+        # Stash on intel so the LLM planner can see what's available
+        self._intel["primer_tool_availability"] = chain_coverage
+
+    async def _dispatch_active_shell_command(
+        self,
+        *, command: str,
+        purpose:    str = "",
+        timeout:    int = 60,
+    ) -> dict:
+        """Run ``command`` inside the most-recent confirmed shell session
+        and capture its output.
+
+        Used by the post-foothold + lateral primers, which emit synthetic
+        ``shell_exec`` actions instead of MCP-dispatched tool calls.
+        Returns the standard dispatch shape so callers don't need to
+        special-case it: ``{stdout, stderr, exit_code, tool, args}``.
+
+        Output capture works by:
+          * resolving the most recent non-pending shell from intel['shells']
+          * registering a temporary listener on the ShellAgent's broadcast
+            so we can buffer chunks of output during the window
+          * pushing the command + a unique sentinel string to the PTY
+          * collecting output until the sentinel echoes back (or until
+            ``timeout`` elapses)
+
+        When no shell session exists, returns an explanatory failure
+        result rather than spawning a fresh subprocess.
+        """
+        import asyncio as _asyncio
+        import time as _time
+        import uuid as _uuid
+
+        # Find the active shell to dispatch through
+        shells = self._intel.get("shells") or []
+        active = [s for s in shells if isinstance(s, dict) and not s.get("pending")]
+        if not active:
+            return {
+                "stdout":    "",
+                "stderr":    "no active shell session — primer should not have fired",
+                "exit_code": -2,
+                "output_id": "",
+                "tool":      "shell_exec",
+                "args":      command,
+            }
+        shell_record = active[-1]
+        shell_id     = shell_record.get("session_id") or shell_record.get("shell_id") or ""
+
+        shell_agent = getattr(self, "_shell_agent", None)
+        if shell_agent is None:
+            try:
+                from agents.shell_agent import ShellAgent
+                shell_agent = ShellAgent(broadcast=self.broadcast)
+                shell_agent._session_id = self._session_id
+                shell_agent._master = self
+                self._shell_agent = shell_agent
+            except Exception as exc:
+                return {
+                    "stdout":    "",
+                    "stderr":    f"shell agent unavailable: {exc}",
+                    "exit_code": -3,
+                    "tool":      "shell_exec",
+                    "args":      command,
+                }
+
+        # Sentinel + buffer setup
+        sentinel = f"__ARGUS_DONE_{_uuid.uuid4().hex[:12]}__"
+        chunks: list = []
+
+        # Tap the ShellAgent's per-shell PTY output for our session.
+        # ShellAgent broadcasts shell_output messages; we hook the
+        # shell_agent._on_pty_output to also feed our buffer.
+        original_on_output = getattr(shell_agent, "_on_pty_output", None)
+
+        async def _tap(_shell_id, _data):
+            if _shell_id == shell_id:
+                chunks.append(_data)
+            try:
+                if callable(original_on_output):
+                    await original_on_output(_shell_id, _data)
+            except Exception:
+                pass
+
+        # Find the actual PtyShell record so we can override the callback
+        pty = (shell_agent._shells or {}).get(shell_id) if hasattr(shell_agent, "_shells") else None
+        if pty is None:
+            return {
+                "stdout":    "",
+                "stderr":    f"shell session {shell_id} not registered in ShellAgent — primer fired before shell wire-up completed",
+                "exit_code": -4,
+                "tool":      "shell_exec",
+                "args":      command,
+            }
+        original_callback = pty.on_output
+        pty.on_output = _tap
+
+        # Build the wrapped command — append `; echo SENTINEL`.  We use a
+        # newline so even multi-stage shells get the right boundary.
+        wrapped = (command or "").rstrip()
+        # Avoid breaking PowerShell pipelines — use `; ` for cmd/PS and
+        # `\n` for bash; both shells accept the bash form harmlessly.
+        wrapped = wrapped + f"\necho {sentinel}\n"
+
+        try:
+            # Send the command into the PTY
+            await shell_agent.handle_input(shell_id, wrapped)
+
+            # Wait for sentinel or timeout
+            deadline = _time.monotonic() + max(5, int(timeout or 60))
+            while _time.monotonic() < deadline:
+                blob = "".join(chunks)
+                if sentinel in blob:
+                    # Strip the wrapper artefacts: the echo'd command and
+                    # everything from the sentinel onward.
+                    idx = blob.find(sentinel)
+                    captured = blob[:idx]
+                    # Best-effort: strip the leading echo of the command itself
+                    cmd_first_line = (command or "").splitlines()[0] if command else ""
+                    if cmd_first_line and captured.lstrip().startswith(cmd_first_line):
+                        captured = captured.lstrip()[len(cmd_first_line):]
+                    captured_clean = captured.strip()
+                    # Feed captured output to the exfil pipeline for DoI
+                    # classification — this is how post-foothold loot
+                    # ends up in intel['loot'] for the lateral primer.
+                    try:
+                        self.ingest_loot(
+                            captured_clean,
+                            source = f"shell:{shell_id}",
+                            tool   = "shell_exec",
+                            host   = shell_record.get("host"),
+                        )
+                    except Exception:
+                        pass
+                    return {
+                        "stdout":    captured_clean,
+                        "stderr":    "",
+                        "exit_code": 0,
+                        "tool":      "shell_exec",
+                        "args":      command,
+                        "shell_id":  shell_id,
+                    }
+                await _asyncio.sleep(0.5)
+
+            # Timeout — return whatever we got so the loop can still learn from it
+            return {
+                "stdout":    "".join(chunks),
+                "stderr":    f"shell_exec timeout after {timeout}s (no sentinel)",
+                "exit_code": 124,
+                "tool":      "shell_exec",
+                "args":      command,
+                "shell_id":  shell_id,
+            }
+        finally:
+            try:
+                pty.on_output = original_callback
+            except Exception:
+                pass
+
     async def _dispatch_to_agent(
         self,
         tool:    str,
@@ -2293,6 +2637,15 @@ class MasterAgent(BaseAgent):
 
         Returns a dict with: stdout, stderr, exit_code, output_id.
         """
+        # When a primer emits the synthetic "shell_exec" tool name, that
+        # means "run this command inside an existing PTY session on the
+        # target" — NOT "spawn it on the operator host via MCP".  Route
+        # through the active shell session instead.
+        if tool == "shell_exec":
+            return await self._dispatch_active_shell_command(
+                command = args, purpose = purpose, timeout = timeout,
+            )
+
         agent_type = self._classify_tool_to_phase(tool)
         task = {
             "tool":         tool,
@@ -2490,6 +2843,60 @@ class MasterAgent(BaseAgent):
                 await self.notify_pivot_event(event_type, data)
             except Exception:
                 pass
+
+    def _merge_raw_outputs(self, raw_outputs: Dict[str, str]) -> None:
+        """Merge new raw_outputs into intel AND feed each new blob to
+        the exfil pipeline so DoI patterns get a chance to match.
+
+        Replaces the bare ``self._intel['raw_outputs'].update(...)``
+        pattern across the 7 phase-merge sites — same merge semantics,
+        plus loot ingestion.
+        """
+        if not raw_outputs or not isinstance(raw_outputs, dict):
+            return
+        store = self._intel.setdefault("raw_outputs", {})
+        for tool_name, blob in raw_outputs.items():
+            # Same merge semantic as before — overwrite per tool key
+            store[tool_name] = blob
+            # Only ingest non-trivial strings
+            if blob and isinstance(blob, str) and len(blob) > 20:
+                try:
+                    self.ingest_loot(blob, source=f"tool:{tool_name}", tool=str(tool_name))
+                except Exception:
+                    pass
+
+    def ingest_loot(self, output: str, *, source: str = "", tool: str = "",
+                    host: Optional[str] = None) -> int:
+        """Recommendation #7 — public entry point for loot ingestion.
+
+        Any tool / shell-exec output that might contain harvestable
+        data is fed in here.  ExfilPipeline classifies, stages, and
+        manifests; we then refresh ``self._intel['loot']`` so the
+        lateral primer's gate-checks see the new loot in the next
+        decision-engine iteration.
+
+        Returns the number of LootEntry rows produced (0 when the
+        pipeline isn't ready or the output had no DoI matches).
+        """
+        if self._exfil_pipeline is None:
+            return 0
+        try:
+            entries = self._exfil_pipeline.ingest(
+                output, source=source, tool=tool,
+                host=host or self._target,
+            )
+            if entries:
+                # Refresh the consolidated loot view that the lateral
+                # primer's preconditions check.  Keep both the rich
+                # entry list (for the report) and the bucketed lateral
+                # shape current.
+                self._intel["loot"] = self._exfil_pipeline.export_aggregate_loot()
+            return len(entries)
+        except Exception as exc:
+            import logging as _l
+            _l.getLogger(__name__).warning(
+                "[ingest_loot] failed: %s", exc)
+            return 0
 
     async def register_shell(
         self,
@@ -3367,7 +3774,7 @@ class MasterAgent(BaseAgent):
         self._intel["service_versions"].update(result.get("service_versions",{}))
         for u in result.get("users",[]):
             if u not in self._intel["users"]: self._intel["users"].append(u)
-        self._intel["raw_outputs"].update(result.get("raw_outputs",{}))
+        self._merge_raw_outputs(result.get("raw_outputs",{}))
 
         # ── Auto-detect IoT target from discovered ports ───────
         from agents.iot.iot_agent import is_iot_target
@@ -3449,7 +3856,7 @@ class MasterAgent(BaseAgent):
                 for v in enum_r.get(k,[]):
                     if v not in self._intel[k]: self._intel[k].append(v)
             self._intel["service_versions"].update(enum_r.get("service_versions",{}))
-            self._intel["raw_outputs"].update(enum_r.get("raw_outputs",{}))
+            self._merge_raw_outputs(enum_r.get("raw_outputs",{}))
             # merge enum_r into result for interpretation
             # Uses _dedup_strings for string lists, direct extend for other lists
             _STRING_KEYS = {"open_ports","cves","web_paths","users","shares",
@@ -3546,7 +3953,7 @@ class MasterAgent(BaseAgent):
 
         if result.get("cves"):
             self._intel["cves"] = _merge_string_lists(self._intel["cves"], result.get("cves",[]))
-        self._intel["raw_outputs"].update(result.get("raw_outputs",{}))
+        self._merge_raw_outputs(result.get("raw_outputs",{}))
 
         # ── Fire vuln subagents in background ──────────────────
         await self._run_phase_subagents("vuln", target)
@@ -4106,7 +4513,7 @@ class MasterAgent(BaseAgent):
         if result.get("cves"):
             self._intel["cves"] = _merge_string_lists(self._intel["cves"], result.get("cves",[]))
         self._intel["exploit_modules"] += result.get("exploit_modules",[])
-        self._intel["raw_outputs"].update(result.get("raw_outputs",{}))
+        self._merge_raw_outputs(result.get("raw_outputs",{}))
         self._intel["attack_path"].append({
             "phase":"osint",
             "result": f"Modules: {len(self._intel['exploit_modules'])} | CVEs: {len(self._intel['cves'])}",
@@ -4442,7 +4849,7 @@ class MasterAgent(BaseAgent):
             if u not in self._intel["users"]: self._intel["users"].append(u)
         for f in result.get("interesting_files",[]):
             if f not in self._intel["interesting_files"]: self._intel["interesting_files"].append(f)
-        self._intel["raw_outputs"].update(result.get("raw_outputs",{}))
+        self._merge_raw_outputs(result.get("raw_outputs",{}))
         self._intel["attack_path"].append({
             "phase":"post_exploit",
             "result": f"Creds: {len(result.get('credentials',[]))} | Files: {len(result.get('interesting_files',[]))}",
@@ -4494,7 +4901,7 @@ class MasterAgent(BaseAgent):
         ]
 
         result = await agent.execute_tasks(target, tasks, "PRIVESC", self._intel)
-        self._intel["raw_outputs"].update(result.get("raw_outputs",{}))
+        self._merge_raw_outputs(result.get("raw_outputs",{}))
 
         # ── Master evaluates and may run a second round ───────
         privesc_eval = self._safe_llm_result(await self._llm_evaluate_privesc(target, result))
@@ -4538,7 +4945,7 @@ Return JSON:
                     next_action= followup_tasks[0].get("purpose","")
                 )
                 result2 = await agent.execute_tasks(target, followup_tasks, "PRIVESC_EXPLOIT", self._intel)
-                self._intel["raw_outputs"].update(result2.get("raw_outputs",{}))
+                self._merge_raw_outputs(result2.get("raw_outputs",{}))
 
                 privesc_eval2 = self._safe_llm_result(await self._llm_evaluate_privesc(target, result2))
                 await self.emit_reasoning(
