@@ -637,6 +637,51 @@ def _normalize_finding_title(title: str) -> str:
     return " ".join(sorted(toks))
 
 
+# B10 — fix UTF-8 mojibake (cp1252-misdecoded UTF-8) in finding titles /
+# descriptions before they're persisted.  The most common pattern in
+# scan logs is the em-dash:  UTF-8 bytes  0xE2 0x80 0x94  decoded as
+# Latin-1 / cp1252  →  "â€"" / "â€”".  When this lands in
+# MongoDB it propagates everywhere downstream (events.jsonl, frontend
+# render, report).  We undo the double-encoding at the ingest boundary.
+_MOJIBAKE_FIXES = {
+    "â€”": "—",   # em dash
+    "â€“": "–",   # en dash
+    "â€™": "'",   # right single quote
+    "â€˜": "'",   # left single quote
+    "â€œ": "\"",  # left double quote
+    "â€": "\"",  # right double quote
+    "â€¦": "…",   # ellipsis
+    "â€¢": "•",   # bullet
+    "Â ":       " ",   # nbsp
+}
+
+def _fix_text_mojibake(s: Any) -> Any:
+    """Best-effort mojibake repair.  Returns ``s`` unchanged when it's not
+    a string OR contains no known mojibake pattern.  Tries the structural
+    re-encode first (UTF-8 bytes mistakenly decoded as cp1252) and falls
+    back to the static substitution table for partial damage cases.
+    """
+    if not isinstance(s, str) or not s:
+        return s
+    # Quick exit when no telltale bytes are present
+    if "â" not in s and "Â" not in s and "ï»¿" not in s:
+        return s
+    # 1. Structural re-encode — round-trip through latin-1 → utf-8
+    try:
+        candidate = s.encode("latin-1").decode("utf-8")
+        # Reject if the round-trip introduced replacement chars
+        if "�" not in candidate:
+            return candidate
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        pass
+    # 2. Targeted substitutions for partial damage
+    fixed = s
+    for bad, good in _MOJIBAKE_FIXES.items():
+        if bad in fixed:
+            fixed = fixed.replace(bad, good)
+    return fixed
+
+
 def _finding_fingerprint(
     *, host: str, port: Optional[int], cves: Optional[List[str]],
     title: str,
@@ -688,6 +733,12 @@ async def store_finding(
     Returns either the existing (updated) doc or the newly inserted doc.
     """
     db = get_db()
+
+    # B10 — sanitize mojibake before fingerprinting / storing.  Doing it
+    # here means every persistence path (master, subagents, exfil pipeline)
+    # gets the fix automatically.
+    title       = _fix_text_mojibake(title)
+    description = _fix_text_mojibake(description)
 
     fp = _finding_fingerprint(host=host, port=port, cves=cves, title=title)
 

@@ -23,7 +23,7 @@ import json
 import os
 import re
 import sys
-from typing import Optional, Dict, List, Any
+from typing import Optional, Dict, List, Any, Tuple
 from datetime import datetime
 
 # Phase 4 — bounded instruction cache (replaces unbounded plain dict)
@@ -2386,7 +2386,14 @@ class MasterAgent(BaseAgent):
         # Flatten and dedupe the dep set so we issue one probe per tool
         all_tools = sorted({t for deps in self._PRIMER_TOOL_DEPS.values() for t in deps})
 
+        # B4 — record per-tool probe outcome so missing/probe-failed tools
+        # can be told apart in scan.log.  Without this, a probe error
+        # (timeout, MCP 5xx, JSON parse fail) is indistinguishable from
+        # "tool not on PATH".
         availability: Dict[str, bool] = {}
+        probe_errors: Dict[str, str]  = {}
+        import logging as _l
+        _log = _l.getLogger(__name__)
         try:
             async with httpx.AsyncClient(timeout=2.0) as client:
                 for tool_name in all_tools:
@@ -2396,17 +2403,52 @@ class MasterAgent(BaseAgent):
                             "params": {"name": tool_name},
                         })
                         if resp.status_code == 200:
-                            body = resp.json() or {}
-                            availability[tool_name] = bool(body.get("available")
-                                                           or body.get("ok")
-                                                           or body.get("result", {}).get("available"))
+                            try:
+                                body = resp.json() or {}
+                            except Exception as je:
+                                probe_errors[tool_name] = f"json_parse: {je!s:.80}"
+                                availability[tool_name] = False
+                                _log.debug(
+                                    "[primer-deps] PROBE_FAIL tool=%s reason=json_parse",
+                                    tool_name,
+                                )
+                                continue
+                            present = bool(
+                                body.get("available")
+                                or body.get("ok")
+                                or body.get("result", {}).get("available")
+                            )
+                            availability[tool_name] = present
+                            if not present:
+                                # Record why MCP says not-available
+                                reason = (
+                                    body.get("reason")
+                                    or body.get("result", {}).get("reason")
+                                    or "not_in_registry_or_PATH"
+                                )
+                                probe_errors[tool_name] = str(reason)[:120]
                         else:
                             availability[tool_name] = False
-                    except Exception:
+                            probe_errors[tool_name] = f"http_{resp.status_code}"
+                            _log.warning(
+                                "[primer-deps] PROBE_FAIL tool=%s http=%d",
+                                tool_name, resp.status_code,
+                            )
+                    except Exception as exc:
                         availability[tool_name] = False
-        except Exception:
-            # MCP not reachable — fall back to "unknown" rather than block startup
+                        probe_errors[tool_name] = f"{type(exc).__name__}: {exc!s:.80}"
+                        _log.warning(
+                            "[primer-deps] PROBE_ERR tool=%s err=%s",
+                            tool_name, type(exc).__name__,
+                        )
+        except Exception as exc:
+            # MCP unreachable — mark all tools "unknown" rather than block startup
+            _log.error(
+                "[primer-deps] MCP unreachable at %s (%s) — entire probe pass skipped",
+                mcp_url, exc,
+            )
             availability = {t: None for t in all_tools}
+            probe_errors = {t: f"mcp_unreachable:{type(exc).__name__}" for t in all_tools}
 
         # Per-chain coverage
         chain_coverage: Dict[str, Dict[str, Any]] = {}
@@ -2439,6 +2481,7 @@ class MasterAgent(BaseAgent):
                     "tools_missing":   missing_overall,
                     "install_hints":   install_hints,
                     "chain_coverage":  chain_coverage,
+                    "probe_errors":    probe_errors,   # B4 — per-tool failure detail
                 },
             })
         except Exception:
@@ -2798,6 +2841,119 @@ class MasterAgent(BaseAgent):
             "foothold":  False,
         }
 
+    def _normalize_action_args(self, tool: str, args: str) -> Tuple[str, str]:
+        """B8 + B12 — Pre-dispatch action arg rewriter.
+
+        The LLM frequently emits commands with placeholder values
+        (`-d domain.local`) or missing prerequisites (bare `ssh user@host`
+        with no password / BatchMode flag, which then hangs and times out).
+        This helper performs targeted, conservative rewrites BEFORE the
+        action reaches MCP so the dispatched command actually has a chance
+        to succeed.
+
+        Conservative on purpose: rewrites only happen when intel actually
+        carries the right data.  When intel doesn't have the data, the args
+        are returned unchanged.
+        """
+        import re as _re
+        tool_l = (tool or "").lower()
+        a = (args or "").strip()
+
+        # ── B8: SSH bare-form rewrite ────────────────────────────────
+        # Bare `ssh user@host` (no -i key, no sshpass wrapper) hangs
+        # forever waiting for password prompt.  Rewrite using the first
+        # credential in intel['credentials'] when its user matches.
+        if tool_l == "ssh":
+            # Match either bare `user@host` or `-p N user@host` etc.
+            user_at = _re.search(r"(\b[A-Za-z_][\w.-]*)@([A-Za-z0-9._-]+)", a)
+            if user_at:
+                u_proposed = user_at.group(1)
+                h_proposed = user_at.group(2)
+                # Find a matching credential
+                creds = self._intel.get("credentials") or []
+                pwd = None
+                for c in creds:
+                    if not isinstance(c, dict):
+                        continue
+                    if (c.get("user") or "").lower() == u_proposed.lower():
+                        pwd = c.get("password") or c.get("pass")
+                        if pwd:
+                            break
+                # Also try operator_notes scan via decision_engine extractor
+                if not pwd:
+                    try:
+                        from agents.reasoning.decision_engine import DecisionEngine
+                        creds_extracted = DecisionEngine._extract_credentials(self._intel)
+                        if creds_extracted and (creds_extracted.get("user") or "").lower() == u_proposed.lower():
+                            pwd = creds_extracted.get("pass")
+                    except Exception:
+                        pass
+
+                if pwd:
+                    # Build a non-interactive SSH command
+                    safe_pwd = pwd.replace("'", "'\"'\"'")  # escape single quotes
+                    new_args = (
+                        f"-p '{safe_pwd}' ssh -o StrictHostKeyChecking=no "
+                        f"-o BatchMode=no -o ConnectTimeout=10 "
+                        f"-o PreferredAuthentications=password -o PubkeyAuthentication=no "
+                        f"{u_proposed}@{h_proposed} 'id; whoami; hostname; uname -a 2>/dev/null'"
+                    )
+                    import logging as _l
+                    _l.getLogger(__name__).info(
+                        "[normalize] B8 ssh→sshpass rewrite for %s@%s (creds available)",
+                        u_proposed, h_proposed,
+                    )
+                    return "sshpass", new_args
+                # No creds found — at least add BatchMode so it fails fast
+                # instead of hanging on the password prompt.
+                if "BatchMode" not in a and "-i " not in a:
+                    new_args = "-o BatchMode=yes -o ConnectTimeout=10 " + a
+                    import logging as _l
+                    _l.getLogger(__name__).info(
+                        "[normalize] B8 ssh +BatchMode (no creds found for %s)", u_proposed
+                    )
+                    return tool, new_args
+
+        # ── B12: bloodhound-python placeholder rewrite ───────────────
+        # The LLM frequently emits `-d domain.local` instead of using the
+        # actual discovered domain.  Replace with intel-resolved value.
+        if tool_l in ("bloodhound-python", "bloodhound", "bloodhound-ce-python"):
+            real_domain = (
+                (self._intel.get("domain") or "").strip()
+                or (self._intel.get("ad", {}).get("dns_domain") or "").strip()
+                if isinstance(self._intel.get("ad"), dict)
+                else ""
+            )
+            if real_domain:
+                placeholder_pattern = _re.compile(
+                    r"-d\s+(?:domain\.local|example\.com|target\.local|"
+                    r"corp\.local|local|placeholder|TARGET_DOMAIN|<domain>|DOMAIN)",
+                    _re.I,
+                )
+                if placeholder_pattern.search(a):
+                    new_args = placeholder_pattern.sub(f"-d {real_domain}", a)
+                    import logging as _l
+                    _l.getLogger(__name__).info(
+                        "[normalize] B12 bloodhound -d <placeholder> → -d %s",
+                        real_domain,
+                    )
+                    return tool, new_args
+                # Also catch the case where -d is present but the value is
+                # the LITERAL string "domain" with no dot — also a placeholder.
+                bare_d = _re.search(r"-d\s+(\S+)", a)
+                if bare_d and "." not in bare_d.group(1) and bare_d.group(1).lower() in (
+                    "domain", "target", "host", "ad", "active-directory"
+                ):
+                    new_args = a.replace(bare_d.group(0), f"-d {real_domain}", 1)
+                    import logging as _l
+                    _l.getLogger(__name__).info(
+                        "[normalize] B12 bloodhound -d %s → -d %s",
+                        bare_d.group(1), real_domain,
+                    )
+                    return tool, new_args
+
+        return tool, args
+
     async def _dispatch_to_agent(
         self,
         tool:    str,
@@ -2834,6 +2990,16 @@ class MasterAgent(BaseAgent):
             return await self._dispatch_evil_winrm(
                 args = args, purpose = purpose, timeout = timeout,
             )
+
+        # B8 / B12 — Pre-dispatch normalization.  When the LLM proposes a
+        # tool with placeholder / unsafe args, rewrite the args using known
+        # intel BEFORE the action reaches MCP.  Two fixes:
+        #   B8:  bare `ssh user@host` (no creds) → sshpass + password
+        #         from intel['credentials'] + BatchMode=yes so it doesn't
+        #         hang waiting for an interactive prompt.
+        #   B12: bloodhound-python `-d domain.local` placeholder → real
+        #         domain from intel['domain'] / intel['ad']['dns_domain'].
+        tool, args = self._normalize_action_args(tool, args)
 
         agent_type = self._classify_tool_to_phase(tool)
         task = {
@@ -6173,9 +6339,17 @@ Return JSON:
             from agents.base_agent import MCP_URL
         except Exception:
             MCP_URL = "http://localhost:3000"
+        # B2 — MCP server only accepts POST `/` with JSON-RPC `{method: "tools/list"}`.
+        # The previous GET `/tools/list` returned HTTP 405 Method Not Allowed
+        # on every session start, leaving _tool_catalog empty so the LLM
+        # planner had no idea which tools were actually available and emitted
+        # references to tools that aren't installed.
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
-                r = await client.get(f"{MCP_URL}/tools/list")
+                r = await client.post(f"{MCP_URL}/", json={
+                    "method": "tools/list",
+                    "params": {},
+                })
                 data = r.json() if r.status_code == 200 else {}
         except Exception as exc:
             await self.emit_reasoning(
@@ -6186,7 +6360,10 @@ Return JSON:
             )
             return
 
-        # MCP /tools/list returns {"tools": [{name, bin, category, description}, ...]}
+        # MCP /tools/list returns {"tools": [...]} — possibly nested under
+        # "result" depending on JSON-RPC response shape.  Handle both forms.
+        if isinstance(data, dict) and "result" in data and isinstance(data["result"], dict):
+            data = data["result"]
         raw = data.get("tools") or data if isinstance(data, (list, dict)) else []
         if isinstance(raw, dict):
             raw = raw.get("tools", [])

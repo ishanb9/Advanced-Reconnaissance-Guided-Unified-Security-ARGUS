@@ -968,9 +968,16 @@ class ServiceBannerSubagent(BaseSubagent):
                 ))
             return
 
-        # ── Generic — INFO finding if banner non-trivial ──────────────────
+        # B9 — Generic banner data is no longer stored as a finding.  These
+        # INFO entries previously made up ~74% of the findings list, which
+        # buried the actual actionable findings (LDAP anon bind, kerberoast
+        # available, etc.) in noise.  The banner data still flows into
+        # intel['banners'] / intel['service_versions'] for the planner via
+        # the parsed_data merge at the recon phase.  Operators wanting the
+        # banners back in findings can set ARGUS_INCLUDE_BANNER_FINDINGS=1.
+        import os as _os
         banner_text = banner.get("banner", "")
-        if banner_text and len(banner_text) > 8:
+        if banner_text and len(banner_text) > 8 and _os.environ.get("ARGUS_INCLUDE_BANNER_FINDINGS"):
             await self.store_finding(Finding(
                 title=f"Port {port} Banner ({banner.get('service', 'unknown')})",
                 description=(

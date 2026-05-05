@@ -2298,7 +2298,15 @@ class DecisionEngine:
         return "Hypothesis validated — action produced expected output"
 
     async def _emit_reasoning(self, message: str) -> None:
-        """Emit a reasoning trace event to the frontend."""
+        """Emit a reasoning trace event to the frontend AND persist it to
+        the per-session ``events.jsonl`` via ``scan_logger.log_reasoning``.
+
+        B3 — without the persistence step, primer dispatch decisions
+        ([cred-primer], [nocreds-ad], [web-primer] etc.) are visible only
+        on the live WebSocket — they never make it into the scan log
+        directory, so post-mortem analysis is blind to *why* the engine
+        chose any given action.
+        """
         try:
             if callable(self._emit):
                 await self._emit({
@@ -2308,6 +2316,28 @@ class DecisionEngine:
                     "data":       {"message": message, "component": "decision_engine"},
                 })
         except Exception:
+            pass
+
+        # B3 — also persist to events.jsonl so post-mortem tooling sees it
+        try:
+            from utils.scan_logger import log_reasoning as _log_reasoning
+            # Extract a short component label from the [tag] prefix when
+            # the message starts with one (e.g. "[cred-primer] ...").
+            step_label = "decision"
+            if message.startswith("["):
+                end = message.find("]")
+                if 1 < end < 40:
+                    step_label = message[1:end]
+            _log_reasoning(
+                self._session_id,
+                step       = step_label,
+                reasoning  = "",
+                decision   = message[:600],
+                next_action= "",
+            )
+        except Exception:
+            # Logger may not be initialised in unit-test contexts — never
+            # let a logging failure kill an action selection.
             pass
 
     async def _emit_voi_ranking(self, ranked: List[Dict[str, Any]]) -> None:
