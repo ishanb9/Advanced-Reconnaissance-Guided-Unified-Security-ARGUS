@@ -173,6 +173,25 @@ LLM_CHECK_TIMEOUT  = 10   # Seconds to wait for Ollama health check
 LLM_THINK_TIMEOUT  = 600  # Per-chunk read timeout when streaming (tokens arrive continuously)
 _LLM_MAX_RETRIES   = 2    # Retry attempts before giving up on a single think() call
 
+# B1 — circuit breaker for Ollama HTTP 500 storms.
+# When Ollama is hammered or the model is overloaded it returns intermittent
+# 500s.  Without backoff the platform retries in tight loops, wasting time
+# and producing 0-tool-call sessions.  We track consecutive 5xx responses
+# at module scope (shared across all BaseAgent instances) so the breaker
+# is global to the engagement.
+class _LLMCircuitState:
+    consecutive_5xx:  int   = 0       # current run of 5xx responses
+    open_until_ts:    float = 0.0     # epoch seconds — refuse calls before this
+    last_500_at:      float = 0.0     # for stats / dashboards
+
+# Tunables — relatively conservative defaults that keep the platform alive
+# during transient Ollama hiccups without thrashing the server.
+_LLM_5XX_BACKOFF_BASE     = 5.0       # base sleep after the first 5xx
+_LLM_5XX_BACKOFF_FACTOR   = 2.0       # exponential multiplier per retry
+_LLM_5XX_BACKOFF_MAX      = 60.0      # cap on per-attempt sleep
+_LLM_CIRCUIT_TRIP_AT      = 6         # consecutive 5xx → open the breaker
+_LLM_CIRCUIT_OPEN_FOR     = 90.0      # seconds the breaker stays open
+
 # ─── Type aliases ────────────────────────────────────────────
 BroadcastFn = Callable[[WebSocketMessage], Awaitable[None]]
 
@@ -1308,6 +1327,31 @@ Return JSON:
         • Other errors  → raise RuntimeError with context
         """
         # ── Availability gate ───────────────────────────────────
+        # B1 — Circuit breaker pre-check.  When Ollama has been returning
+        # 5xx storms, refuse to attempt new LLM calls until the cooldown
+        # expires.  This prevents the platform from burning entire scan
+        # windows hammering a dead model and lets the deterministic
+        # primer chains drive progress in the meantime.
+        import time as _t
+        if _LLMCircuitState.open_until_ts and _t.time() < _LLMCircuitState.open_until_ts:
+            remaining = _LLMCircuitState.open_until_ts - _t.time()
+            await self._emit("llm_slow", {
+                "agent":   str(self.name),
+                "message": (
+                    f"Ollama circuit breaker OPEN ({remaining:.0f}s until retry, "
+                    f"after {_LLMCircuitState.consecutive_5xx} consecutive 5xx). "
+                    f"Step using deterministic defaults."
+                ),
+                "circuit_open": True,
+                "remaining_sec": int(remaining),
+            })
+            return ""
+        # Breaker has expired — give Ollama another chance, but reset counter
+        # so a single new failure doesn't immediately re-trip.
+        if _LLMCircuitState.open_until_ts and _t.time() >= _LLMCircuitState.open_until_ts:
+            _LLMCircuitState.open_until_ts   = 0.0
+            _LLMCircuitState.consecutive_5xx = 0
+
         if not self._llm_available:   # covers both None and False
             await self.check_llm_available()
             if not self._llm_available:
@@ -1399,6 +1443,8 @@ Return JSON:
 
                 content = "".join(tokens)
                 self._llm_available = True   # confirmed responsive
+                # B1 — successful response → clear the circuit-breaker counter
+                _LLMCircuitState.consecutive_5xx = 0
 
                 _phase = str(self.phase) if hasattr(self, "phase") and self.phase else ""
                 await self._emit("llm_response", {
@@ -1462,25 +1508,101 @@ Return JSON:
                 return ""
 
             except httpx.HTTPStatusError as exc:
-                # Ollama returned a non-2xx response (most commonly 404 when the
-                # model name is wrong / not pulled).  Retrying won't help — bail
-                # immediately with a human-readable message.
+                # Ollama returned a non-2xx response.  Differentiate:
+                #   404      → model not pulled — bail, retrying won't fix it
+                #   4xx      → request error — bail, retrying won't fix it
+                #   5xx      → server-side hiccup — RETRY with exponential
+                #              backoff; trip the circuit breaker after N
+                #              consecutive failures (B1 fix).
                 status_code = exc.response.status_code
+                import logging as _llm_log
+                import time as _t
+
                 if status_code == 404:
-                    self._llm_available = False   # block further calls until re-checked
+                    self._llm_available = False
                     msg = (
                         f"Model '{MODEL_NAME}' not found on Ollama (HTTP 404). "
                         f"Run: ollama pull {MODEL_NAME}"
                     )
-                else:
+                    _llm_log.getLogger(__name__).error("think() HTTP error: %s", msg)
+                    await self._emit("llm_status", {
+                        "available": False, "url": OLLAMA_URL, "model": MODEL_NAME,
+                        "message":   msg, "error": "http_404",
+                    })
+                    return ""
+
+                if 400 <= status_code < 500:
+                    # Client error (bad request body, oversized prompt) —
+                    # one-shot, no retry.
                     msg = (
-                        f"Ollama returned HTTP {status_code} for model '{MODEL_NAME}'. "
-                        f"Response: {exc.response.text[:200]}"
+                        f"Ollama returned HTTP {status_code} (client error) "
+                        f"for model '{MODEL_NAME}'. Response: {exc.response.text[:200]}"
                     )
-                import logging as _llm_log
+                    _llm_log.getLogger(__name__).error("think() HTTP error: %s", msg)
+                    await self._emit("llm_status", {
+                        "available": False, "url": OLLAMA_URL, "model": MODEL_NAME,
+                        "message":   msg, "error": f"http_{status_code}",
+                    })
+                    return ""
+
+                # === 5xx path — server-side, retryable ===
+                _LLMCircuitState.consecutive_5xx += 1
+                _LLMCircuitState.last_500_at      = _t.time()
+
+                # Trip the breaker once we've seen too many in a row
+                if _LLMCircuitState.consecutive_5xx >= _LLM_CIRCUIT_TRIP_AT:
+                    _LLMCircuitState.open_until_ts = _t.time() + _LLM_CIRCUIT_OPEN_FOR
+                    _llm_log.getLogger(__name__).error(
+                        "think() Ollama circuit breaker OPEN — %d consecutive 5xx, "
+                        "rejecting LLM calls for %.0fs (until %s)",
+                        _LLMCircuitState.consecutive_5xx,
+                        _LLM_CIRCUIT_OPEN_FOR,
+                        datetime.fromtimestamp(_LLMCircuitState.open_until_ts).isoformat(),
+                    )
+                    await self._emit("llm_status", {
+                        "available": False, "url": OLLAMA_URL, "model": MODEL_NAME,
+                        "message": (
+                            f"Ollama returning HTTP 5xx repeatedly — "
+                            f"circuit breaker open for {_LLM_CIRCUIT_OPEN_FOR:.0f}s. "
+                            f"Reasoning loop will use deterministic primers + cached defaults."
+                        ),
+                        "error": f"circuit_open_5xx_{_LLMCircuitState.consecutive_5xx}",
+                    })
+                    self._llm_available = False
+                    return ""
+
+                # Per-attempt exponential backoff
+                if attempt < _LLM_MAX_RETRIES:
+                    sleep_s = min(
+                        _LLM_5XX_BACKOFF_MAX,
+                        _LLM_5XX_BACKOFF_BASE * (_LLM_5XX_BACKOFF_FACTOR ** (attempt - 1)),
+                    )
+                    _llm_log.getLogger(__name__).warning(
+                        "think() Ollama HTTP %d (consecutive_5xx=%d) — backing off %.1fs (attempt %d/%d)",
+                        status_code, _LLMCircuitState.consecutive_5xx,
+                        sleep_s, attempt, _LLM_MAX_RETRIES,
+                    )
+                    await self._emit("llm_slow", {
+                        "agent":    str(self.name),
+                        "attempt":  attempt,
+                        "of":       _LLM_MAX_RETRIES,
+                        "http":     status_code,
+                        "consecutive_5xx": _LLMCircuitState.consecutive_5xx,
+                        "message":  f"Ollama HTTP {status_code} — retrying in {sleep_s:.1f}s",
+                    })
+                    await asyncio.sleep(sleep_s)
+                    continue
+
+                # Exhausted retries on this call — return "" so caller falls
+                # back to defaults.  Breaker may still trip later.
+                msg = (
+                    f"Ollama returned HTTP {status_code} for model '{MODEL_NAME}' "
+                    f"(consecutive_5xx={_LLMCircuitState.consecutive_5xx}). "
+                    f"Response: {exc.response.text[:200]}"
+                )
                 _llm_log.getLogger(__name__).error("think() HTTP error: %s", msg)
                 await self._emit("llm_status", {
-                    "available": False,
+                    "available": True,  # could still recover — don't kill platform
                     "url":       OLLAMA_URL,
                     "model":     MODEL_NAME,
                     "message":   msg,

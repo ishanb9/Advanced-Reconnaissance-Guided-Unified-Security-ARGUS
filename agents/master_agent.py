@@ -2621,6 +2621,183 @@ class MasterAgent(BaseAgent):
             except Exception:
                 pass
 
+    async def _dispatch_evil_winrm(
+        self,
+        *, args:   str,
+        purpose:   str = "",
+        timeout:   int = 60,
+    ) -> dict:
+        """B11 — Spawn evil-winrm as a PTY-backed shell session and capture
+        the prompt as a confirmed foothold.
+
+        evil-winrm is fundamentally interactive — when MCP runs it as a
+        regular tool the process hangs at the ``*Evil-WinRM* PS C:\\>``
+        prompt waiting for input, hits the read timeout, and gets killed.
+        Result: the credentialed-AD primer's "instant shell" step
+        produced no shell, no foothold, no register_shell call.
+
+        Here we route the spawn through ShellAgent.create_listener-style
+        PTY infrastructure: the prompt streams back through the PTY,
+        we wait for the recognisable banner, then call register_shell
+        with confirmed=True so post-exploitation actually fires.
+
+        ``args`` should be the standard evil-winrm flags (e.g.
+        ``-i 10.0.0.1 -u user -p 'pass'``).
+        """
+        import asyncio as _asyncio
+        import re as _re
+        import time as _time
+        import uuid as _uuid
+
+        shell_id = f"ewinrm-{_uuid.uuid4().hex[:8]}"
+
+        # Lazily build / reuse a ShellAgent
+        shell_agent = getattr(self, "_shell_agent", None)
+        if shell_agent is None:
+            try:
+                from agents.shell_agent import ShellAgent, PtyShell
+            except Exception as exc:
+                return {
+                    "stdout":    "",
+                    "stderr":    f"shell_agent import failed: {exc}",
+                    "exit_code": -3,
+                    "tool":      "evil-winrm",
+                    "args":      args,
+                }
+            shell_agent = ShellAgent(broadcast=self.broadcast)
+            shell_agent._session_id = self._session_id
+            shell_agent._master = self
+            self._shell_agent = shell_agent
+        else:
+            try:
+                from agents.shell_agent import PtyShell
+            except Exception:
+                from agents.shell_agent import PtyShell  # type: ignore
+
+        # Parse out target / user from args so we can populate intel
+        # and pass them to register_shell when the prompt lands.
+        m_target = _re.search(r"-i\s+(\S+)", args or "")
+        m_user   = _re.search(r"-u\s+(\S+)", args or "")
+        rhost    = m_target.group(1) if m_target else (self._target or "")
+        ruser    = m_user.group(1)   if m_user   else "unknown"
+        # Strip surrounding quotes the LLM sometimes adds
+        ruser = ruser.strip("'\"")
+
+        # Build argv — split args on whitespace honouring single-quoted strings
+        argv: list = ["evil-winrm"]
+        # tokenise — re.findall with shlex-equivalent pattern
+        for tok in _re.findall(r"'[^']*'|\"[^\"]*\"|\S+", args or ""):
+            argv.append(tok.strip("'\""))
+
+        # Buffer chunks coming out of the PTY so we can detect the prompt
+        chunks: list = []
+
+        async def _on_output(_shell_id, _data):
+            chunks.append(_data)
+            # Mirror to broadcast through the agent's normal hook
+            try:
+                if shell_agent and hasattr(shell_agent, "_on_pty_output"):
+                    await shell_agent._on_pty_output(_shell_id, _data)
+            except Exception:
+                pass
+
+        pty = PtyShell(shell_id, _on_output)
+        spawned = await pty.spawn(argv)
+        if not spawned:
+            return {
+                "stdout":    "".join(chunks),
+                "stderr":    "evil-winrm PTY spawn failed (binary missing or argv invalid)",
+                "exit_code": 127,
+                "tool":      "evil-winrm",
+                "args":      args,
+            }
+        # Track the session in ShellAgent so subsequent shell_exec calls
+        # find it via intel['shells']
+        try:
+            shell_agent._shells[shell_id] = pty
+        except Exception:
+            pass
+
+        # Wait for the evil-winrm welcome prompt — patterns the tool emits
+        # when authentication has succeeded and the PS prompt is up.
+        prompt_re = _re.compile(
+            r"(?:\*Evil-WinRM\*\s*PS|"
+            r"PS\s+[A-Z]:\\[^\n]*>|"
+            r"Info: Establishing connection to remote endpoint)",
+            _re.I,
+        )
+        deadline = _time.monotonic() + max(15, int(timeout))
+        success = False
+        auth_failed = False
+        while _time.monotonic() < deadline:
+            blob = "".join(chunks)
+            if prompt_re.search(blob):
+                success = True
+                break
+            # Common failure patterns — bail early so we don't burn the timeout
+            if _re.search(r"(?:WinRMAuthorizationError|"
+                          r"Error: An error of type.*has occurred|"
+                          r"Could not connect|"
+                          r"Access is denied|"
+                          r"401\s+Unauthorized)", blob, _re.I):
+                auth_failed = True
+                break
+            await _asyncio.sleep(0.5)
+
+        full_output = "".join(chunks)
+
+        if success:
+            # B11 — Real foothold!  Register with confirmed=True and an
+            # evidence string that contains the prompt regex so the
+            # auto-downgrade in register_shell keeps it confirmed.
+            try:
+                await self.register_shell(
+                    source     = "evil-winrm:primer",
+                    user       = ruser,
+                    host       = rhost,
+                    method     = "evil-winrm",
+                    evidence   = full_output[-1500:],
+                    session_id = shell_id,
+                    rhost      = rhost,
+                    rport      = 5985,
+                    confirmed  = True,
+                )
+            except Exception as exc:
+                import logging as _l
+                _l.getLogger(__name__).warning(
+                    "evil-winrm register_shell failed: %s", exc
+                )
+            return {
+                "stdout":    full_output,
+                "stderr":    "",
+                "exit_code": 0,
+                "tool":      "evil-winrm",
+                "args":      args,
+                "shell_id":  shell_id,
+                "foothold":  True,
+            }
+
+        # Auth failed or timed out — kill the spawned process and report
+        try:
+            pty.terminate()
+        except Exception:
+            pass
+        try:
+            shell_agent._shells.pop(shell_id, None)
+        except Exception:
+            pass
+
+        return {
+            "stdout":    full_output,
+            "stderr":    "evil-winrm authentication failed" if auth_failed else
+                         f"evil-winrm prompt did not appear within {timeout}s",
+            "exit_code": 1 if auth_failed else 124,
+            "tool":      "evil-winrm",
+            "args":      args,
+            "shell_id":  shell_id,
+            "foothold":  False,
+        }
+
     async def _dispatch_to_agent(
         self,
         tool:    str,
@@ -2644,6 +2821,18 @@ class MasterAgent(BaseAgent):
         if tool == "shell_exec":
             return await self._dispatch_active_shell_command(
                 command = args, purpose = purpose, timeout = timeout,
+            )
+
+        # B11 — evil-winrm is interactive PTY-only.  Spawning it via MCP
+        # produces a process that hangs at the prompt and times out, so
+        # the credentialed-AD primer chain's #4 step never registered
+        # a foothold even when the credentials were valid.  Route it
+        # through ShellAgent.create_listener-style PTY spawn so the
+        # `*Evil-WinRM* PS C:\>` prompt is captured, the session lives
+        # for follow-up commands, and register_shell trips properly.
+        if tool in ("evil-winrm", "evilwinrm"):
+            return await self._dispatch_evil_winrm(
+                args = args, purpose = purpose, timeout = timeout,
             )
 
         agent_type = self._classify_tool_to_phase(tool)

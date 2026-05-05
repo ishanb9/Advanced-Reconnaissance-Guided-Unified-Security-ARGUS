@@ -1349,6 +1349,28 @@ class ReasoningLoop:
             fa[key] = fa.get(key, 0) + 1
             self._intel["failed_attempts"] = fa
 
+        # B5 — Record SUCCESSFUL-BUT-UNINFORMATIVE outputs in negative_memory
+        # too.  Without this, a curl `-w '%{http_code}' -o /dev/null` against
+        # /admin returns "404\n" (short, exit-0) which the heuristic
+        # validator marks `validated=True`, so the failure-record branch
+        # above never fires.  Result: the LLM re-proposes the same URL
+        # every iteration.  Tracking these as low-signal failures keyed on
+        # (tool, args_signature) makes the dedup pre-flight check work.
+        else:
+            low_signal_reason = self._classify_low_signal_result(action, result)
+            if low_signal_reason:
+                stdout = (result.get("stdout") or result.get("output") or "")[:500]
+                await self._neg_memory.record_failure(
+                    tool           = action.tool,
+                    args           = action.args,
+                    target_service = action.target_service,
+                    failure_reason = f"low_signal:{low_signal_reason}",
+                    evidence       = stdout,
+                    hypothesis_id  = action.hypothesis_id,
+                    host           = self._target,
+                )
+                self._intel["negative_memory"] = self._neg_memory.to_dict_list()
+
         # Capture score BEFORE update so delta calculation is accurate
         prev_score = self._intel.get("action_score", 0)
 
@@ -2671,6 +2693,81 @@ class ReasoningLoop:
             if isinstance(sh, dict) and sh.get("elevated"):
                 return True
         return False
+
+    def _classify_low_signal_result(
+        self,
+        action: JustifiedAction,
+        result: dict,
+    ) -> Optional[str]:
+        """B5 — return a short label when ``result`` is technically a
+        success (exit_code==0) but produced no actionable evidence, so
+        re-proposing the same args wastes iterations.
+
+        Returns None when the result IS informative.  Returns a short
+        category string (``http_4xx``, ``http_5xx``, ``empty_body``,
+        ``zero_results``) when it isn't.
+        """
+        exit_code = result.get("exit_code")
+        if exit_code not in (0, None):
+            return None  # already a real failure → handled by main branch
+
+        stdout = (result.get("stdout") or result.get("output") or "")
+        stripped = stdout.strip()
+        tool = (action.tool or "").lower()
+        args = (action.args or "")
+
+        # ── curl with -w '%{http_code}' or -I HEAD probe ─────────────
+        # Args using the http_code template print just the status code +
+        # newline.  Three-digit-only output like "404" / "403" / "500"
+        # is the canonical low-signal pattern.
+        if tool in ("curl", "wget", "httpx", "httprobe"):
+            # Pure status code response (3 digits possibly preceded by tags)
+            import re as _re
+            m = _re.search(r"(?<!\d)(\d{3})(?!\d)", stripped[:32])
+            if m and len(stripped) < 80:
+                code = int(m.group(1))
+                if 400 <= code < 500:
+                    return f"http_{code}"
+                if 500 <= code < 600:
+                    return f"http_{code}"
+                if code in (200, 204, 301, 302) and len(stripped) <= 6:
+                    # Probed and got OK but body discarded — fine, but
+                    # not actionable enough to justify a re-probe.
+                    return None  # let LLM re-purpose the URL with a body fetch
+            # Empty body from -o /dev/null with no -w printed → useless
+            if not stripped:
+                return "empty_body"
+
+        # ── gobuster / ffuf / feroxbuster — no findings ──────────────
+        if tool in ("gobuster", "ffuf", "feroxbuster", "dirb", "wfuzz"):
+            # Empty findings line is the no-result banner — these tools
+            # exit 0 even when nothing was found.
+            if any(sig in stdout.lower() for sig in (
+                "0 results", "0 matches", "no targets",
+                "no urls found", "0 patterns",
+            )):
+                return "zero_results"
+
+        # ── nuclei / wpscan / nikto with no findings ────────────────
+        if tool in ("nuclei", "wpscan", "nikto", "wapiti"):
+            if "0 hosts found" in stdout.lower() or "no vulnerabilities" in stdout.lower():
+                return "zero_results"
+
+        # ── Universal: completely empty output is always low-signal ──
+        if not stripped:
+            return "empty_output"
+
+        # ── Universal: very short non-error output that doesn't carry
+        # any of the strong success signals the validator looks for.
+        if len(stripped) < 20:
+            success_markers = (
+                "uid=", "root@", "flag{", "shell", "meterpreter",
+                "pwned", "win!", "compromised", "logged in",
+            )
+            if not any(m in stripped.lower() for m in success_markers):
+                return "trivial_output"
+
+        return None
 
     def _extract_failure_reason(self, result: dict) -> str:
         """Extract a brief failure reason from a tool result dict."""

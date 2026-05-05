@@ -24,6 +24,7 @@ Scoring
 
 from __future__ import annotations
 
+import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -343,7 +344,10 @@ class DecisionEngine:
                 tool, args, target_service = self._parse_action_str(
                     action_str, target
                 )
-                if tool == "unknown":
+                # B6 — empty tool name means parser rejected the string as
+                # pseudo-code / prose / illegal characters.  Drop silently;
+                # _parse_action_str already logged the rejection.
+                if tool in ("", "unknown"):
                     continue
 
                 # Hard skip: this exact (tool, service, args_signature) failed
@@ -569,6 +573,25 @@ class DecisionEngine:
     # Helpers
     # ------------------------------------------------------------------
 
+    # B6 — Words the LLM uses in pseudo-code / conditional planning that
+    # must NEVER be dispatched as tool names.  Without this guard the
+    # MCP server gets requests like tool="if" args="web ports are found,
+    # run gobuster..." and returns "Unknown tool: if".
+    _PSEUDO_CODE_TOOLS = frozenset({
+        "if", "elif", "else", "then", "fi", "endif", "when", "while",
+        "for", "foreach", "do", "done", "until", "loop",
+        "try", "catch", "finally", "with",
+        "case", "switch", "default", "break", "continue", "return",
+        "and", "or", "not", "but", "however",
+        "first", "next", "after", "before", "finally",
+        "step", "phase", "task", "action",
+        "use", "run", "execute", "invoke", "call",
+        "consider", "check", "verify", "test", "review",
+        "todo", "fixme", "note", "tbd",
+        "the", "a", "an", "i", "we",
+        "unknown", "none", "null", "n/a",
+    })
+
     def _parse_action_str(
         self,
         action_str: str,
@@ -579,11 +602,43 @@ class DecisionEngine:
         (tool, args, target_service).
 
         Falls back gracefully when the string is not a recognisable command.
+        Rejects pseudo-code conditional / planning prose (e.g. "if web
+        ports are found, run gobuster...") by returning tool="" so the
+        caller can drop the action instead of dispatching gibberish.
         """
         action_str = action_str.strip()
+
+        # Strip code fences / shell prompts the LLM sometimes wraps args with
+        for prefix in ("```bash", "```sh", "```", "$ ", "# ", "> "):
+            if action_str.startswith(prefix):
+                action_str = action_str[len(prefix):].lstrip()
+        if action_str.endswith("```"):
+            action_str = action_str[:-3].rstrip()
+
         parts      = action_str.split(None, 1)  # split on first whitespace
-        tool       = parts[0].lower() if parts else "unknown"
+        tool_raw   = parts[0] if parts else ""
+        tool       = tool_raw.lower()
         args       = parts[1] if len(parts) > 1 else ""
+
+        # B6 — Pseudo-code rejection.  When the LLM emits text like
+        # "if web ports are found, run gobuster...", the first word is
+        # "if" — which the MCP server doesn't recognise.  Reject any
+        # first-word that's a known prose / conditional keyword OR that
+        # contains characters no real tool name would have (commas,
+        # quotes, parentheses).
+        BAD_TOOL_CHARS = ",\"'`()[]{}<>:;!?"
+        if (
+            not tool
+            or tool in self._PSEUDO_CODE_TOOLS
+            or any(ch in tool_raw for ch in BAD_TOOL_CHARS)
+            or not re.match(r"^[A-Za-z][A-Za-z0-9._+/-]*$", tool_raw)
+        ):
+            import logging as _l
+            _l.getLogger(__name__).warning(
+                "[parse_action] rejecting pseudo-code action: %r",
+                action_str[:120],
+            )
+            return "", "", ""
 
         # Derive a target_service identifier from the args or tool name
         target_service = self._infer_target_service(tool, args, target)
