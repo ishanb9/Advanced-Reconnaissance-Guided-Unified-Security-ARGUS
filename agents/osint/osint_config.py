@@ -11,7 +11,7 @@ Option A — Environment variables (recommended for production):
     ...
 
 Option B — Edit the defaults directly in this file (dev/lab use):
-    Incorporate the required keys in the placeholder variable and change the second argument of os.environ.get("KEY", "YOUR_KEY_HERE")
+    Change the second argument of os.environ.get("KEY", "YOUR_KEY_HERE")
 
 API KEY SOURCES
 ---------------
@@ -69,18 +69,16 @@ BUILTWITH_API_KEY = os.environ.get("BUILTWITH_API_KEY", "")
 if BUILTWITH_API_KEY == _BUILTWITH_PLACEHOLDER:
     BUILTWITH_API_KEY = ""
 
-# Google Custom Search — used for Google Dorking automation
+# Google Custom Search — used by Google Dorks subagent + WebIntelAgent
 # GOOGLE_API_KEY: create at https://console.developers.google.com (free: 100 queries/day)
 # GOOGLE_CX: create a Custom Search Engine at https://cse.google.com → set to search entire web
-# Bundled placeholders confirmed dead (403) on 2026-04-19 — treat as unset.
-_GOOGLE_API_PLACEHOLDER = ""
-_GOOGLE_CX_PLACEHOLDER  = ""
+#
+# Operator-provided keys (re-validated 2026-05-05).  Env var takes precedence
+# when set, otherwise these defaults are used.  Both consumers degrade
+# gracefully to DuckDuckGo HTML / SearXNG when the keys are empty or the
+# Google project hasn't enabled the Custom Search JSON API.
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "")
-GOOGLE_CX      = os.environ.get("GOOGLE_CX", "")
-if GOOGLE_API_KEY == _GOOGLE_API_PLACEHOLDER:
-    GOOGLE_API_KEY = ""
-if GOOGLE_CX == _GOOGLE_CX_PLACEHOLDER:
-    GOOGLE_CX = ""
+GOOGLE_CX      = os.environ.get("GOOGLE_CX",      "")
 
 # Censys — internet-wide scan database (ports, certs, services)
 # Free tier: 250 queries/month. Get at https://search.censys.io/account/api

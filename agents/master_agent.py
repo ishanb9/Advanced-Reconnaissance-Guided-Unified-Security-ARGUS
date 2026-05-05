@@ -4883,6 +4883,74 @@ class MasterAgent(BaseAgent):
             "ts":      datetime.utcnow().isoformat()
         })
 
+        # ── Proactive Web Intelligence ─────────────────────────────────
+        # OSINT phase already pulled CVE/module intel via searchsploit and
+        # the OSINT subagents.  As a final step, ask the WebIntelAgent to
+        # search authoritative pentest sources (HackTricks, exploit-db,
+        # AttackerKB) for exploitation techniques specific to the
+        # discovered service+version / CVE / framework signatures and
+        # stash any extractable hints on intel['web_intel_hints'] so the
+        # exploit phase planner sees them in the prompt context.
+        try:
+            from agents.reasoning.web_intel_agent import WebIntelAgent
+            wia = getattr(self, "_web_intel_agent", None)
+            if wia is None:
+                wia = WebIntelAgent(
+                    master_agent = self,
+                    session_id   = self._session_id,
+                    target       = target,
+                    broadcast    = self._broadcast_raw,
+                )
+                self._web_intel_agent = wia
+            # Force-invoke regardless of stuck-state — proactive harvest
+            queries = wia.build_queries(self._intel)
+            if queries:
+                await self.emit_reasoning(
+                    step       = "web_intel_proactive",
+                    reasoning  = f"Querying authoritative pentest sources for {len(queries)} signatures",
+                    decision   = "Web intel proactive harvest at OSINT phase tail",
+                    next_action= "Hint set will be available to exploit phase planner",
+                )
+                hints_total = 0
+                for q in queries[: WebIntelAgent.MAX_QUERIES_PER_INVOCATION]:
+                    try:
+                        results = await wia.search(q)
+                    except Exception:
+                        results = []
+                    if not results:
+                        continue
+                    pages = []
+                    # Dedup + cap
+                    seen: set = set()
+                    ranked = sorted(results, key=lambda r: r.authority, reverse=True)
+                    for r in ranked[: WebIntelAgent.MAX_FETCH_PER_INVOCATION]:
+                        if r.url in seen:
+                            continue
+                        seen.add(r.url)
+                        body = await wia.fetch_page(r.url)
+                        if body:
+                            pages.append((r, body))
+                    if not pages:
+                        continue
+                    hints = await wia.extract_hints(pages, self._intel)
+                    if hints:
+                        self._intel.setdefault("web_intel_hints", []).extend(
+                            h.to_dict() for h in hints
+                        )
+                        hints_total += len(hints)
+                if hints_total:
+                    await self.emit_reasoning(
+                        step       = "web_intel_proactive_done",
+                        reasoning  = f"Harvested {hints_total} exploit hints from authoritative sources",
+                        decision   = "Hints stashed on intel['web_intel_hints'] for exploit-phase planner",
+                        next_action= "Continue to vuln/exploit phase",
+                    )
+        except Exception as _wia_err:
+            import logging as _l
+            _l.getLogger(__name__).warning(
+                "Proactive web-intel harvest failed (non-fatal): %s", _wia_err
+            )
+
     # ─── PHASE: Exploitation ──────────────────────────────────
 
     async def _phase_exploit(self, target: str):

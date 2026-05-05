@@ -200,6 +200,7 @@ class HypothesisEngine:
             obj_answers=obj_answers,
             tools_excluded=tools_excl,
             state_summary=state_summary,
+            web_intel_hints=intel.get("web_intel_hints") or [],
         )
 
         try:
@@ -346,10 +347,12 @@ class HypothesisEngine:
         obj_answers:      dict = None,
         tools_excluded:   set  = None,
         state_summary:    str  = "",
+        web_intel_hints:  list = None,
     ) -> str:
-        objectives     = objectives     or []
-        obj_answers    = obj_answers    or {}
-        tools_excluded = tools_excluded or set()
+        objectives      = objectives     or []
+        obj_answers     = obj_answers    or {}
+        tools_excluded  = tools_excluded or set()
+        web_intel_hints = web_intel_hints or []
 
         # ── Section 1: Current State ─────────────────────────────────────────
         sections = [
@@ -390,6 +393,40 @@ class HypothesisEngine:
         # ── Section 6: Knowledge base context ────────────────────────────────
         if kb_context:
             sections += ["", "=== RELEVANT KNOWLEDGE ===", kb_context]
+
+        # ── Section 6b: Web-intel hints (proactive harvest from OSINT phase) ─
+        # When master_agent's _phase_osint pre-populated authoritative-source
+        # exploit hints into intel['web_intel_hints'], surface them here so
+        # the hypothesis LLM treats them as evidence-backed candidates.
+        # Each entry already passed validation (tool name in catalog, source
+        # quote attached, target-substituted args).
+        if web_intel_hints:
+            wi_lines = [
+                "",
+                "=== WEB-INTEL HINTS (extracted from authoritative pentest sources) ===",
+                "Each hint below is a runnable command vetted against the tool catalog.",
+                "Confidence is the extractor's grade (0..1).  Use these as PRIMARY",
+                "evidence when they reference services we've actually observed.",
+                "",
+            ]
+            for h in web_intel_hints[:10]:
+                if not isinstance(h, dict):
+                    continue
+                tool = h.get("tool", "")
+                args = h.get("args", "")[:120]
+                conf = h.get("confidence", 0.0)
+                cve  = h.get("cve") or ""
+                desc = (h.get("description") or "")[:100]
+                src  = h.get("source_url") or ""
+                wi_lines.append(
+                    f"  • [{conf:.2f}] {tool} {args}"
+                    + (f"  (CVE={cve})" if cve else "")
+                )
+                if desc:
+                    wi_lines.append(f"      — {desc}")
+                if src:
+                    wi_lines.append(f"      source: {src[:90]}")
+            sections += wi_lines
 
         # ── Section 7: Immediate priority objective ───────────────────────────
         first_pending = None

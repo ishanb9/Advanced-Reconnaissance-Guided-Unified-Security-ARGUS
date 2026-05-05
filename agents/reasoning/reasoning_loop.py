@@ -92,6 +92,9 @@ class ReasoningLoop:
         # Tracks last validated hypothesis node for graph edge chaining
         self._last_validated_node_id: Optional[str]  = None
 
+        # Web-intelligence pivot agent — lazy-init on first stuck-state event
+        self._web_intel: Optional[Any] = None
+
         # ── Improvement #17 — reasoning trace ("Why?" panel) ──────────
         try:
             from agents.reasoning.reasoning_trace import ReasoningTrace
@@ -376,9 +379,43 @@ class ReasoningLoop:
                 gather_result = await self._gather_more_evidence()
                 # Re-run QE after fresh evidence
                 await self._question_engine.answer_all(self._intel, "")
-                if not gather_result:
-                    await self._emit_status("No more actions available — loop complete", "DONE")
-                    break
+                if gather_result:
+                    continue
+
+                # ── WEB-INTELLIGENCE PIVOT ────────────────────────────────
+                # Last-resort intelligence step before giving up.  When all
+                # primer chains have run, all hypotheses are exhausted, and
+                # gather_more_evidence returned nothing, search the web for
+                # exploitation techniques specific to the discovered
+                # service+version / CVE / framework hints.  Successfully
+                # extracted hints become new hypotheses and the loop
+                # continues; otherwise we exit as before.
+                try:
+                    web_intel = self._get_or_init_web_intel()
+                    if web_intel is not None:
+                        injected = await web_intel.run(self._intel, self._hypotheses)
+                        if injected > 0:
+                            await self._emit_reasoning(
+                                f"Web intel pivot injected {injected} new "
+                                f"hypothesis branches — resuming loop"
+                            )
+                            # Re-rank attack paths so the new hypotheses
+                            # compete fairly with surviving ones
+                            try:
+                                self._ranked_paths = await self._attack_planner.rank_paths(
+                                    self._hypotheses, self._intel,
+                                )
+                            except Exception:
+                                pass
+                            continue
+                except Exception as exc:
+                    import logging as _l
+                    _l.getLogger(__name__).warning(
+                        "[web_intel] pivot failed (non-fatal): %s", exc
+                    )
+
+                await self._emit_status("No more actions available — loop complete", "DONE")
+                break
                 continue
 
             # ── CONFIRMATION GATE ────────────────────────────────────────
@@ -1415,6 +1452,28 @@ class ReasoningLoop:
     # ------------------------------------------------------------------
     # Specialist evidence gathering
     # ------------------------------------------------------------------
+
+    def _get_or_init_web_intel(self) -> Optional[Any]:
+        """Lazy-init the WebIntelAgent.  Returns ``None`` if the module
+        isn't importable (e.g. unit-test harness) so the calling site can
+        proceed without it."""
+        if self._web_intel is not None:
+            return self._web_intel
+        try:
+            from agents.reasoning.web_intel_agent import WebIntelAgent
+        except Exception as exc:
+            import logging as _l
+            _l.getLogger(__name__).warning(
+                "[reasoning_loop] WebIntelAgent unavailable: %s", exc
+            )
+            return None
+        self._web_intel = WebIntelAgent(
+            master_agent = self._master,
+            session_id   = self._session_id,
+            target       = self._target,
+            broadcast    = self._emit,
+        )
+        return self._web_intel
 
     async def _gather_more_evidence(self) -> bool:
         """
