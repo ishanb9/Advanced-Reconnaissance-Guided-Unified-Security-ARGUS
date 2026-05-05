@@ -307,6 +307,11 @@ function reducer(state, action) {
     case 'SET_LLM_STATUS':
       return { ...state, llmStatus: { ...state.llmStatus, ...action.payload } };
 
+    case 'SET_PRIMER_TOOL_COVERAGE':
+      // Stash the chain coverage matrix so dedicated panels can render it.
+      // payload = {coverage:{chain:{deps,present,missing,coverage}}, present, total, missing, installHints, probeErrors}
+      return { ...state, primerToolCoverage: action.payload };
+
     case 'LLM_THINKING':
       return { ...state, llmThinking: action.payload };
 
@@ -2613,14 +2618,90 @@ function routeWsEvent(msg, dispatch, shellListeners, sessionId) {
     case 'reasoning_decision': {
       // Emitted by DecisionEngine — decision about which action to take
       const msg_text = data?.message || '';
+      const component = data?.component || '';
+      // Tag primer/web-intel decisions with a colour-coded prefix in the feed
+      let prefix = '🎯';
+      if (component === 'web_intel')     prefix = '🌐';
+      else if (msg_text.startsWith('[cred-primer]'))   prefix = '🔑';
+      else if (msg_text.startsWith('[nocreds-ad]'))    prefix = '🏰';
+      else if (msg_text.startsWith('[default-creds]')) prefix = '🔐';
+      else if (msg_text.startsWith('[web-primer]'))    prefix = '🕸';
+      else if (msg_text.startsWith('[post-foothold]')) prefix = '📦';
+      else if (msg_text.startsWith('[lateral]'))       prefix = '↔';
+      else if (msg_text.startsWith('[primer]'))        prefix = '🚀';
       dispatch({ type: 'REASONING_ENTRY', payload: {
         ts, agent: 'master', phase: 'exploit',
-        step: 'decision', reasoning: msg_text, decision: msg_text,
+        step: component || 'decision', reasoning: msg_text, decision: msg_text,
         next_action: '', data
       }});
       dispatch({ type: 'FEED_ENTRY', payload: {
         ts, agent: 'master', eventType: 'reasoning_decision',
-        message: `🎯 ${msg_text.slice(0, 120)}`, data
+        message: `${prefix} ${msg_text.slice(0, 120)}`, data
+      }});
+      break;
+    }
+
+    // ── New: primer-tool availability matrix (B4 / Quick-Fix-3) ──────
+    case 'primer_tool_availability': {
+      const cov = data?.chain_coverage || {};
+      const missing = data?.tools_missing || [];
+      const present = data?.tools_present ?? 0;
+      const total   = data?.tools_total ?? 0;
+      // Stash full state so a dedicated panel can render the matrix
+      dispatch({ type: 'SET_PRIMER_TOOL_COVERAGE', payload: {
+        coverage: cov,
+        present, total, missing,
+        installHints: data?.install_hints || {},
+        probeErrors:  data?.probe_errors  || {},
+      }});
+      // Compact feed message
+      const broken = Object.keys(cov).filter(k => (cov[k]?.missing||[]).length);
+      const summary = broken.length
+        ? `🧰 Primer tool coverage ${present}/${total} — ${broken.length} chain(s) degraded: ${broken.slice(0,4).join(', ')}`
+        : `🧰 Primer tool coverage ${present}/${total} — all chains have full tool coverage`;
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'master', eventType: 'primer_tool_availability',
+        message: summary, data
+      }});
+      break;
+    }
+
+    // ── New: listener manager lifecycle (Recommendation C) ──────────
+    case 'listener_manager_ready': {
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'master', eventType: 'listener_manager_ready',
+        message: `📡 Listener manager ready — backend=${data?.backend} lhost=${data?.lhost}`, data
+      }});
+      break;
+    }
+    case 'listener_started': {
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'master', eventType: 'listener_started',
+        message: `📡 Listener spawned ${data?.lhost}:${data?.lport} (${data?.backend}) payload=${data?.payload||''}`, data
+      }});
+      break;
+    }
+    case 'listener_stopped': {
+      const captured = data?.captured ? '✓ captured' : '✗ no callback';
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'master', eventType: 'listener_stopped',
+        message: `📡 Listener :${data?.lport} stopped — ${captured}`, data
+      }});
+      break;
+    }
+    case 'listener_lhost_changed': {
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'master', eventType: 'listener_lhost_changed',
+        message: `📡 LHOST changed ${data?.old} → ${data?.new} (${data?.reason||''})`, data
+      }});
+      break;
+    }
+
+    // ── New: exfil pipeline lifecycle (Recommendation #7) ──────────
+    case 'exfil_pipeline_ready': {
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'master', eventType: 'exfil_pipeline_ready',
+        message: `💎 Loot pipeline ready — patterns=${data?.patterns||0} loot_dir=${data?.loot_dir||''}`, data
       }});
       break;
     }
@@ -3069,6 +3150,13 @@ function extractFeedMessage(type, agent, data) {
     case 'hypotheses_generated':    return `🧠 ${(data?.hypotheses||[]).length} hypotheses generated`;
     case 'action_score_update':     return `Score ${data?.delta >= 0 ? '+' : ''}${data?.delta ?? 0} → ${data?.total ?? 0}`;
     case 'negative_memory_added':   return `🚫 ${data?.tool} on ${data?.target_service} failed`;
+    // New events for primer / web-intel / listener / exfil
+    case 'primer_tool_availability': return `🧰 Primer tools ${data?.tools_present||0}/${data?.tools_total||0}`;
+    case 'listener_manager_ready':   return `📡 Listener manager ready (${data?.backend||''})`;
+    case 'listener_started':         return `📡 Listener spawned ${data?.lhost||''}:${data?.lport||''}`;
+    case 'listener_stopped':         return `📡 Listener :${data?.lport||''} stopped${data?.captured ? ' (captured)' : ''}`;
+    case 'listener_lhost_changed':   return `📡 LHOST: ${data?.old||''} → ${data?.new||''}`;
+    case 'exfil_pipeline_ready':     return `💎 Loot pipeline ready (${data?.patterns||0} DoI patterns)`;
     default:                        return data?.message || null;
   }
 }
