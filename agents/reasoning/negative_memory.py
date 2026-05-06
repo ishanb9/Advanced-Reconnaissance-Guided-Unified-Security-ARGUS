@@ -234,6 +234,53 @@ class NegativeMemory:
     # Reading
     # ------------------------------------------------------------------
 
+    # ── B-9 — success memory (mirrors negative-memory shape) ──────────
+    # Tracks (tool, service, args_signature) tuples that have already run
+    # successfully so primer dispatchers don't re-fire a step the LLM
+    # already ran.  Stored in-memory only — successes are durable in the
+    # findings store; we only need this lookup index per session.
+    _success_index: Dict[str, int] = None  # type: ignore  (init in __init__ below)
+
+    def record_success(
+        self,
+        tool:           str,
+        target_service: str,
+        args:           Optional[str] = None,
+    ) -> None:
+        """B-9 — Record a successful (tool, service[, args]) execution.
+
+        Mirrors the dedup keys used by ``has_failed_before`` so primer
+        dispatchers can call ``has_succeeded_before`` to skip steps the
+        LLM-driven path already executed successfully.
+        """
+        if not hasattr(self, "_success_index") or self._success_index is None:
+            self._success_index = {}   # lazy-init for back-compat with old instances
+        sig = self._args_signature(tool, args or "") if args is not None else ""
+        fine_key = f"{tool}:{target_service}:{sig}" if sig else f"{tool}:{target_service}"
+        self._success_index[fine_key] = self._success_index.get(fine_key, 0) + 1
+        # Also record the coarse pair so `has_succeeded_before(args=None)` works.
+        coarse_key = f"{tool}:{target_service}"
+        self._success_index[coarse_key] = self._success_index.get(coarse_key, 0) + 1
+
+    def has_succeeded_before(
+        self,
+        tool:           str,
+        target_service: str,
+        args:           Optional[str] = None,
+    ) -> bool:
+        """B-9 — return True when this (tool, service[, args]) tuple has
+        already executed successfully in the current session.  Primer
+        dispatchers consult this before proposing a step that the LLM
+        path may have already run successfully."""
+        if not hasattr(self, "_success_index") or self._success_index is None:
+            return False
+        if args is not None:
+            sig = self._args_signature(tool, args)
+            fine_key = f"{tool}:{target_service}:{sig}"
+            if fine_key in self._success_index:
+                return True
+        return f"{tool}:{target_service}" in self._success_index
+
     def has_failed_before(
         self,
         tool:           str,

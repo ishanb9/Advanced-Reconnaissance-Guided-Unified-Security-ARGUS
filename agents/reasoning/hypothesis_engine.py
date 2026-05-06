@@ -409,7 +409,17 @@ class HypothesisEngine:
                 "evidence when they reference services we've actually observed.",
                 "",
             ]
-            for h in web_intel_hints[:10]:
+            # B-12 — sort hints by confidence DESC before truncating, so
+            # the strongest signals always make it into the top-10 the
+            # prompt shows.  Without this sort, a 0.95-confidence hint
+            # at index 11 was dropped while a 0.55-confidence hint at
+            # index 3 was kept.
+            _ranked_hints = sorted(
+                (h for h in web_intel_hints if isinstance(h, dict)),
+                key=lambda h: float(h.get("confidence", 0) or 0),
+                reverse=True,
+            )
+            for h in _ranked_hints[:10]:
                 if not isinstance(h, dict):
                     continue
                 tool = h.get("tool", "")

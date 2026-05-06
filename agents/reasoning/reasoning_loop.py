@@ -234,11 +234,33 @@ class ReasoningLoop:
             self._iteration = iteration
 
             # ── PAUSE CHECK ──────────────────────────────────────────────
+            # B-1 — On pause, AWAIT the operator's resume instead of breaking
+            # out of the loop.  The previous behaviour exited the loop on
+            # first pause, so a pause/resume cycle terminated the scan.
             try:
                 should_pause = await self._check_pause()
                 if should_pause:
                     await self._emit_status("Paused at iteration boundary", "WAITING")
-                    break
+                    # Wait for the operator to clear the pause signal.
+                    # The master's `_pause_event` is set when running and
+                    # cleared when paused; `pause_event.wait()` blocks
+                    # until the operator clicks Resume.  We poll every
+                    # 1 s so an explicit Stop request is still picked up
+                    # promptly via the stop-check below.
+                    while True:
+                        # Stop overrides pause — exit cleanly if the
+                        # operator decided to stop instead of resume.
+                        if getattr(self._master, "_stop_requested", False):
+                            await self._emit_status("Stop requested while paused — exiting", "DONE")
+                            return
+                        try:
+                            still_paused = await self._check_pause()
+                        except Exception:
+                            still_paused = False
+                        if not still_paused:
+                            await self._emit_status("Resumed", "RUNNING")
+                            break
+                        await asyncio.sleep(1.0)
             except Exception:
                 pass
 
@@ -706,6 +728,31 @@ class ReasoningLoop:
                 None
             )
             validated  = await self._validate(action, result, active_hyp)
+
+            # ── B-7 — NOISE BUDGET REFUND for actions that produced no
+            # real network traffic.  Refund full cost when the tool died
+            # before reaching the target (MCP unknown-tool, immediate
+            # connect-refused, OS spawn failure).  Refund half on auth
+            # failures (handshake DID happen but no follow-up).
+            if nb is not None:
+                try:
+                    refund_fraction = self._noise_refund_fraction(action, result, validated)
+                    if refund_fraction > 0:
+                        returned = nb.refund(action, fraction=refund_fraction,
+                                             note=f"failed:{action.target_service or ''}")
+                        if returned > 0:
+                            await self._emit({
+                                "type":       "noise_budget_updated",
+                                "session_id": self._session_id,
+                                "agent":      "master",
+                                "data": {
+                                    **nb.to_dict(),
+                                    "last_tool":   action.tool,
+                                    "last_refund": returned,
+                                },
+                            })
+                except Exception:
+                    pass
 
             # Improvement #17 — record validate step
             self._last_validate_step_id = await self._record_trace_step(
@@ -1332,6 +1379,16 @@ class ReasoningLoop:
           - Update action score
           - Persist to DB
         """
+        # B-2 — Credential-validation observer.  The credentialed primer
+        # gates its expensive steps on intel['ad']['creds_validated'].
+        # We detect the outcome from the cheapest probe (crackmapexec smb
+        # without flags / sshpass+ssh) and set the flag.  Without this,
+        # the gate never opens and the heavy steps never run; OR a typo'd
+        # password silently runs the entire chain.
+        try:
+            self._observe_cred_validation(action, result)
+        except Exception:
+            pass
         # Update hypothesis status
         if hypothesis:
             if validated:
@@ -1386,7 +1443,7 @@ class ReasoningLoop:
             fa[key] = fa.get(key, 0) + 1
             self._intel["failed_attempts"] = fa
 
-        # B5 — Record SUCCESSFUL-BUT-UNINFORMATIVE outputs in negative_memory
+        # B-5 — Record SUCCESSFUL-BUT-UNINFORMATIVE outputs in negative_memory
         # too.  Without this, a curl `-w '%{http_code}' -o /dev/null` against
         # /admin returns "404\n" (short, exit-0) which the heuristic
         # validator marks `validated=True`, so the failure-record branch
@@ -1394,6 +1451,17 @@ class ReasoningLoop:
         # every iteration.  Tracking these as low-signal failures keyed on
         # (tool, args_signature) makes the dedup pre-flight check work.
         else:
+            # B-9 — record genuine successes in success_index so primer
+            # dispatchers know not to re-fire the same step.
+            try:
+                if isinstance(result.get("exit_code"), int) and result["exit_code"] == 0:
+                    self._neg_memory.record_success(
+                        tool           = action.tool,
+                        target_service = action.target_service,
+                        args           = action.args,
+                    )
+            except Exception:
+                pass
             low_signal_reason = self._classify_low_signal_result(action, result)
             if low_signal_reason:
                 stdout = (result.get("stdout") or result.get("output") or "")[:500]
@@ -2752,6 +2820,191 @@ class ReasoningLoop:
             if isinstance(sh, dict) and sh.get("elevated"):
                 return True
         return False
+
+    @staticmethod
+    def _noise_refund_fraction(action: Any, result: dict, validated: bool) -> float:
+        """B-7 — return the fraction (0..1) of noise budget to refund for
+        ``action`` based on how much actual traffic it generated.
+
+        Heuristic:
+          1.0  — tool failed before any wire interaction
+                 (MCP unknown-tool, spawn fail, immediate timeout < 1s)
+          0.7  — connect refused / no route / DNS failure
+          0.4  — auth failure (handshake happened, no payload)
+          0.2  — successful but uninformative (curl 404, gobuster zero results)
+          0.0  — action ran to completion (full noise stays charged)
+        """
+        exit_code = result.get("exit_code")
+        stdout    = (result.get("stdout") or "")
+        stderr    = (result.get("stderr") or "")
+        blob      = (stdout + " " + stderr).lower()
+
+        # 1.0 — never reached the wire
+        if isinstance(exit_code, int) and exit_code in (-1, -2, -3, -4, 127):
+            return 1.0
+        if "unknown tool" in blob or "command not found" in blob:
+            return 1.0
+        if "spawn failed" in blob or "module not found" in blob:
+            return 1.0
+
+        # 0.7 — network unreachable
+        if any(s in blob for s in (
+            "connection refused", "no route to host", "network is unreachable",
+            "could not resolve host", "name or service not known",
+            "could not connect to server",
+        )):
+            return 0.7
+
+        # 0.4 — auth failure
+        if any(s in blob for s in (
+            "authentication failed", "permission denied", "access is denied",
+            "access denied for user", "login failed for user",
+            "invalid credentials", "status_logon_failure", "401 unauthorized",
+        )):
+            return 0.4
+
+        # 0.2 — succeeded but produced no actionable signal
+        if validated is False and isinstance(exit_code, int) and exit_code == 0:
+            return 0.2
+
+        return 0.0
+
+    def _observe_cred_validation(
+        self,
+        action: JustifiedAction,
+        result: dict,
+    ) -> None:
+        """B-2 — observe whether a credential-using action proved the
+        operator-supplied creds work or not, and stamp
+        ``intel['ad']['creds_validated']`` / ``creds_invalid`` accordingly.
+
+        Detection patterns:
+
+        SUCCESS markers (any of):
+          * crackmapexec / netexec ``[+] domain\\user:pass`` (with or
+            without ``Pwn3d!``)
+          * crackmapexec banner ``(name:DC01) (domain:...)`` followed by
+            no auth-error within the same response
+          * sshpass+ssh containing ``uid=`` (id command output)
+          * evil-winrm reaching ``*Evil-WinRM* PS C:\\>`` prompt
+          * impacket-* tools producing TGS/AS-REP hashes
+          * ``register_shell`` already fired during this update (handled
+            by the master agent, but mirrored here as fallback)
+
+        FAILURE markers:
+          * ``STATUS_LOGON_FAILURE`` (Windows SMB)
+          * ``STATUS_ACCESS_DENIED``
+          * ``ldap_bind: Invalid credentials (49)``
+          * ``Permission denied`` from sshpass+ssh (followed by exit 5/255)
+          * ``Authentication failed.``  (msfconsole / hydra / impacket)
+          * ``Access is denied.``
+          * 401 Unauthorized headers in HTTP basic-auth probe
+        """
+        import re as _re
+        tool = (action.tool or "").lower()
+        # Only observe credential-using tools
+        if tool not in (
+            "crackmapexec", "cme", "nxc", "netexec",
+            "sshpass", "ssh",
+            "evil-winrm", "evilwinrm",
+            "impacket-getuserspns", "impacket-GetUserSPNs",
+            "impacket-getnpusers", "impacket-GetNPUsers",
+            "impacket-secretsdump",
+            "impacket-mssqlclient", "impacket-psexec", "impacket-wmiexec",
+            "ldapsearch",
+            "curl", "wget",
+            "mysql", "psql", "mongosh", "redis-cli",
+            "hydra",
+        ):
+            return
+
+        stdout = (result.get("stdout") or result.get("output") or "")
+        stderr = (result.get("stderr") or "")
+        blob   = (stdout + "\n" + stderr)
+        if not blob.strip():
+            return
+
+        ad_state = self._intel.setdefault("ad", {}) if isinstance(self._intel.get("ad"), dict) else {}
+        if not isinstance(self._intel.get("ad"), dict):
+            self._intel["ad"] = {}
+            ad_state = self._intel["ad"]
+
+        # Already locked-in either way?  Don't downgrade success → failure
+        # without operator intervention; auth flapping is real but rare.
+        if ad_state.get("creds_validated"):
+            return
+
+        # ── SUCCESS detection ─────────────────────────────────────────
+        success_re = _re.compile(
+            r"(?:"
+            r"\[\+\][^\n]*?(?:\\\\|\\)"     # CrackMapExec [+] domain\user
+            r"|Pwn3d!|"                     # CME admin-creds marker
+            r"\buid=\d+\("                  # `id` output
+            r"|\*Evil-WinRM\*\s*PS\s+[A-Z]:\\"  # evil-winrm prompt
+            r"|\$krb5tgs\$"                 # kerberoast hash captured
+            r"|\$krb5asrep\$"               # AS-REP hash captured
+            r"|Service Principal Name"      # GetUserSPNs success header
+            r"|Trying to connect\.\.\.OK"   # impacket-secretsdump initial connect
+            r")",
+            _re.I,
+        )
+        # Validate-only specific: crackmapexec smb without -p Pwn3d! still
+        # produces a banner line if creds are valid:
+        # `SMB  10.0.0.1  445  DC01  [+] domain\\user:pass`
+        cme_validated = _re.search(
+            r"SMB\s+\S+\s+\d+\s+\S+\s+\[\+\]\s+\S+:\S+",
+            blob, _re.I,
+        )
+
+        if success_re.search(blob) or cme_validated:
+            ad_state["creds_validated"] = True
+            ad_state["creds_invalid"]   = False
+            ad_state["validated_via"]   = action.tool
+            try:
+                import logging as _l
+                _l.getLogger(__name__).info(
+                    "[B-2 creds_validated=True] via %s — heavy primer steps unlocked",
+                    action.tool,
+                )
+            except Exception:
+                pass
+            return
+
+        # ── FAILURE detection ─────────────────────────────────────────
+        failure_patterns = (
+            "STATUS_LOGON_FAILURE",
+            "STATUS_ACCESS_DENIED",
+            "STATUS_ACCOUNT_DISABLED",
+            "STATUS_ACCOUNT_LOCKED_OUT",
+            "STATUS_PASSWORD_EXPIRED",
+            "Invalid credentials (49)",       # ldapsearch
+            "ldap_bind: Invalid credentials",
+            "Authentication failed",
+            "authentication failure",
+            "Access is denied",
+            "Access denied for user",         # MySQL
+            "password authentication failed", # PostgreSQL
+            "Login failed for user",          # MSSQL
+            "WinRMAuthorizationError",
+            "401 Unauthorized",
+        )
+        if any(p.lower() in blob.lower() for p in failure_patterns):
+            # Increment a fail counter — only flip creds_invalid after
+            # 2+ distinct failures.  A single flap (ldap server rejecting
+            # auth on first try) shouldn't kill the chain.
+            ad_state["cred_fail_count"] = int(ad_state.get("cred_fail_count", 0)) + 1
+            if ad_state["cred_fail_count"] >= 2:
+                ad_state["creds_invalid"]   = True
+                ad_state["creds_validated"] = False
+                try:
+                    import logging as _l
+                    _l.getLogger(__name__).warning(
+                        "[B-2 creds_invalid=True] %d auth failures — "
+                        "halting credentialed primer chain",
+                        ad_state["cred_fail_count"],
+                    )
+                except Exception:
+                    pass
 
     def _classify_low_signal_result(
         self,

@@ -1291,6 +1291,10 @@ class MasterAgent(BaseAgent):
                     self._scan_logger.log_info("session_cancel", "User cancelled scan")
             except Exception:
                 pass
+            # B-3 — release listeners + B-5 — terminate shell PTYs even on
+            # cancel.  Otherwise ports 4444-4474 stay bound and orphan
+            # msfconsole/ncat/evil-winrm processes leak across scans.
+            await self._teardown_runtime_resources()
             close_scan_logger(session_id)
             return {"status": "cancelled"}
         except Exception as e:
@@ -1356,15 +1360,11 @@ class MasterAgent(BaseAgent):
             "intel":      self._intel,
             "message":    "Pentest complete — review Findings Board and generate report."
         })
-        # Recommendation C — release every still-running listener so a
-        # subsequent engagement on the same process doesn't collide on
-        # ports 4444-4474 and so msfconsole/ncat/nc handlers don't leak.
-        lm = getattr(self, "listener_manager", None)
-        if lm is not None:
-            try:
-                await lm.shutdown()
-            except Exception as _le:
-                logger.warning("listener_manager shutdown failed: %s", _le)
+        # B-3 / B-5 — Recommendation C: release every still-running listener
+        # AND terminate every spawned shell PTY so a subsequent engagement
+        # on the same process doesn't collide on ports 4444-4474 and so
+        # msfconsole/ncat/evil-winrm handlers don't leak.
+        await self._teardown_runtime_resources()
         # Flush and close the per-session scan log
         try:
             close_scan_logger(session_id)
@@ -1695,6 +1695,21 @@ class MasterAgent(BaseAgent):
                 _intel_snap["services"] = {
                     str(k): v for k, v in _intel_snap["services"].items()
                 }
+            # B-6 — augment the snapshot with exfil-pipeline state so the
+            # report generator can render the Loot / Web-Intel / Primer
+            # sections.  Without these, the new report sections would
+            # always be empty even when loot was harvested.
+            try:
+                xp = getattr(self, "_exfil_pipeline", None)
+                if xp is not None:
+                    _intel_snap["loot_entries"] = xp.list_entries()
+                    _intel_snap["loot_summary"] = xp.manifest_summary()
+            except Exception:
+                pass
+            # Mongo cannot serialise sets — convert any "_*_fired" sets to lists.
+            for k, v in list(_intel_snap.items()):
+                if isinstance(v, set):
+                    _intel_snap[k] = sorted(v)
             cid = await db.store_checkpoint(
                 session_id            = self._session_id,
                 host                  = self._target,
@@ -3174,6 +3189,40 @@ class MasterAgent(BaseAgent):
         except Exception:
             pass
 
+    async def _teardown_runtime_resources(self) -> None:
+        """B-3 / B-5 — Single teardown helper called from BOTH the
+        complete path and the cancel path.  Releases:
+          1. ListenerManager — kills all multi/handler / nc / ncat
+             listeners and frees ports 4444-4474.
+          2. ShellAgent PTYs — terminates any spawned evil-winrm /
+             ssh / nc / socat shell processes that would otherwise
+             keep running after the scan ends.
+        Failures are logged at WARNING and never raised, so a partial
+        teardown on a degraded system still completes the scan exit.
+        """
+        # ── Listener manager ─────────────────────────────────
+        lm = getattr(self, "listener_manager", None)
+        if lm is not None:
+            try:
+                await lm.shutdown()
+            except Exception as _le:
+                logger.warning("listener_manager shutdown failed: %s", _le)
+
+        # ── Shell agent PTYs ─────────────────────────────────
+        sa = getattr(self, "_shell_agent", None)
+        if sa is not None and hasattr(sa, "_shells"):
+            try:
+                shell_ids = list(sa._shells.keys())
+            except Exception:
+                shell_ids = []
+            for sid in shell_ids:
+                try:
+                    await sa.terminate_shell(sid)
+                except Exception as _se:
+                    logger.warning(
+                        "shell_agent.terminate_shell(%s) failed: %s", sid, _se
+                    )
+
     async def _broadcast_raw(self, event: dict) -> None:
         """
         Emit a raw event dict to the WebSocket broadcast system.
@@ -3401,9 +3450,15 @@ class MasterAgent(BaseAgent):
             "ts":     datetime.utcnow().isoformat(),
         })
 
-        # Track session list for ListenerManager + ShellManager surface.
+        # B-8 — Track session list for ListenerManager + ShellManager surface.
+        # If a previous optimistic registration already added a `pending`
+        # entry for this same session_id, UPGRADE that entry in place
+        # instead of appending a duplicate.  This keeps intel['shells']
+        # bounded across many capture/release cycles and gives the UI a
+        # single canonical row per shell.
         if session_id or rhost:
-            self._intel.setdefault("shells", []).append({
+            shells_list = self._intel.setdefault("shells", [])
+            entry_new = {
                 "session_id": session_id or "",
                 "user":       user,
                 "host":       host,
@@ -3412,7 +3467,21 @@ class MasterAgent(BaseAgent):
                 "source":     source,
                 "method":     method,
                 "ts":         datetime.utcnow().isoformat(),
-            })
+                "pending":    False,    # explicit — confirmed
+            }
+            upgraded = False
+            if session_id:
+                for i, ex in enumerate(shells_list):
+                    if isinstance(ex, dict) and ex.get("session_id") == session_id:
+                        # Preserve the original timestamp (when listener
+                        # spawned), update everything else to the
+                        # confirmed view.
+                        entry_new["ts"] = ex.get("ts") or entry_new["ts"]
+                        shells_list[i] = entry_new
+                        upgraded = True
+                        break
+            if not upgraded:
+                shells_list.append(entry_new)
 
         # Best-effort logging — never block the foothold registration.
         try:
@@ -3581,6 +3650,48 @@ class MasterAgent(BaseAgent):
 
             await self._init_reasoning_components(session_id, target)
             await self._reasoning_loop_run(session_id, target, plan, resume_from)
+
+            # ── B-4: REPORT GENERATION IN DEFAULT (REASONING-LOOP) MODE ─────
+            # CRITICAL: when use_reasoning_loop=True (the default) the
+            # original linear executor below was bypassed via `return`.
+            # That meant `_phase_evidence_collection` and `_phase_reporting`
+            # NEVER ran in default mode — the platform completed scans
+            # without ever generating a report.  We now invoke evidence
+            # collection + report generation explicitly after the
+            # reasoning loop exits.  Both calls are wrapped with
+            # try/except so a broken report generator can't poison the
+            # session-end teardown / DB updates.
+            try:
+                await self._wait_for_agents_idle(timeout=120.0)
+            except Exception:
+                pass
+            try:
+                await self._phase_evidence_collection(session_id, target)
+            except Exception as _ec_err:
+                import logging as _l
+                _l.getLogger(__name__).warning(
+                    "evidence_collection failed (non-fatal): %s", _ec_err
+                )
+            try:
+                await self._emit("plan_step_update", {
+                    "step_id": "reporting", "status": "active",
+                    "result":  "Generating penetration test report",
+                    "detail":  "", "found": None, "ts": datetime.utcnow().isoformat()
+                })
+                await self._transition_state("REPORT_GENERATION")
+                await self._phase_reporting(session_id, target)
+                await self._emit("plan_step_update", {
+                    "step_id": "reporting", "status": "done",
+                    "result":  "Penetration test report ready",
+                    "detail":  f"Findings: {self._intel.get('findingsSummary',{})}",
+                    "found":   True, "ts": datetime.utcnow().isoformat()
+                })
+                await self._transition_state("COMPLETE")
+            except Exception as _r_err:
+                import logging as _l
+                _l.getLogger(__name__).warning(
+                    "report generation failed (non-fatal): %s", _r_err
+                )
             return
         # ── END REASONING LOOP ROUTING ──────────────────────────────────────
         phases = self._phases_to_run
@@ -4892,6 +5003,12 @@ class MasterAgent(BaseAgent):
         # stash any extractable hints on intel['web_intel_hints'] so the
         # exploit phase planner sees them in the prompt context.
         try:
+            # B-11 — make the proactive harvest IDEMPOTENT.  When _phase_osint
+            # is called multiple times (resume from checkpoint, manual
+            # re-trigger from UI), without this guard the harvest re-runs
+            # and burns Google CSE quota + duplicates intel['web_intel_hints'].
+            if self._intel.get("_web_intel_proactive_done"):
+                return
             from agents.reasoning.web_intel_agent import WebIntelAgent
             wia = getattr(self, "_web_intel_agent", None)
             if wia is None:
@@ -4945,6 +5062,10 @@ class MasterAgent(BaseAgent):
                         decision   = "Hints stashed on intel['web_intel_hints'] for exploit-phase planner",
                         next_action= "Continue to vuln/exploit phase",
                     )
+            # B-11 — mark complete so a re-run of _phase_osint won't repeat
+            # the harvest.  Operator can clear the flag manually if they
+            # want to re-harvest after collecting more intel.
+            self._intel["_web_intel_proactive_done"] = True
         except Exception as _wia_err:
             import logging as _l
             _l.getLogger(__name__).warning(

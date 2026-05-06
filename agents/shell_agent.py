@@ -67,20 +67,60 @@ class PtyShell:
         self._set_winsize(cols, rows)
 
     async def write(self, data: str):
+        """B-10 — Robust non-blocking write with retry.
+
+        The PTY master fd is set non-blocking (O_NONBLOCK), so when the
+        kernel buffer fills up ``os.write`` raises ``BlockingIOError``
+        (a subclass of OSError).  Treating that as fatal would close the
+        shell on any large primer command (linpeas wrapper, b64-encoded
+        payload, etc.).  Instead we:
+          1. Catch BlockingIOError separately
+          2. Yield to the event loop and retry up to N times with brief
+             back-off so the read-loop can drain the buffer
+          3. Only treat real fatal errors (EBADF, EPIPE, EIO) as a close
+        """
         if not self.active or self.master is None:
             return
-        try:
-            os.write(self.master, data.encode("utf-8", errors="replace"))
-            self._buf += data
-            if "\r" in data or "\n" in data:
-                cmd = self._buf.replace("\r", "").replace("\n", "").strip()
-                if cmd:
-                    self._cmd_history.append({
-                        "cmd": cmd, "output": "", "ts": datetime.utcnow().isoformat()
-                    })
-                self._buf = ""
-        except OSError:
-            await self._on_close()
+        if not data:
+            return
+
+        encoded = data.encode("utf-8", errors="replace")
+        offset  = 0
+        retries = 0
+        MAX_RETRIES = 80      # ~8 s max wait at 100 ms back-off
+        while offset < len(encoded):
+            try:
+                n = os.write(self.master, encoded[offset:])
+                if n <= 0:
+                    # Should not happen on success, but guard against it
+                    break
+                offset += n
+            except BlockingIOError:
+                # PTY buffer full — wait briefly and retry
+                retries += 1
+                if retries > MAX_RETRIES:
+                    # Real backpressure stall — treat as soft failure
+                    print(f"[PTY] write stalled after {MAX_RETRIES} retries on shell {self.shell_id}")
+                    return
+                await asyncio.sleep(0.1)
+                continue
+            except OSError as exc:
+                # EBADF (9) / EPIPE (32) / EIO (5) are genuinely fatal
+                if getattr(exc, "errno", None) in (5, 9, 32):
+                    await self._on_close()
+                    return
+                # Anything else — log and bail without closing
+                print(f"[PTY] write OSError errno={getattr(exc,'errno',None)} on {self.shell_id}: {exc}")
+                return
+
+        self._buf += data
+        if "\r" in data or "\n" in data:
+            cmd = self._buf.replace("\r", "").replace("\n", "").strip()
+            if cmd:
+                self._cmd_history.append({
+                    "cmd": cmd, "output": "", "ts": datetime.utcnow().isoformat()
+                })
+            self._buf = ""
 
     async def _read_loop(self):
         loop = asyncio.get_event_loop()

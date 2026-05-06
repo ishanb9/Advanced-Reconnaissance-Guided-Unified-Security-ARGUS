@@ -1106,6 +1106,20 @@ class DecisionEngine:
             fired = set(fired)
             intel["_cred_primers_fired"] = fired
 
+        # B-2 — Cred validation gate.  Step #1 of the chain is always the
+        # cheapest validate-only probe.  Subsequent expensive steps
+        # (kerberoast, secretsdump, evil-winrm) only fire when validation
+        # has produced positive evidence.  Without this, a typo'd password
+        # blasts the DC with 10 sequential auth attempts before stopping.
+        ad = intel.get("ad", {}) if isinstance(intel.get("ad"), dict) else {}
+        creds_validated = bool(ad.get("creds_validated"))
+        creds_invalid   = bool(ad.get("creds_invalid"))
+        if creds_invalid:
+            # Operator's notes had bad creds — stop the entire chain.
+            # Re-arm only when operator updates notes (which clears
+            # creds_invalid via the master agent's notes-update path).
+            return None
+
         # Stash the parsed creds on intel so other components (extractors,
         # post-ex agents) can read them without re-parsing notes.  Two
         # locations: ad{} for AD-aware code, credentials[] for generic
@@ -1127,6 +1141,17 @@ class DecisionEngine:
             if entry not in cred_list:
                 cred_list.append(entry)
 
+        # B-2 — Validation steps that prove creds work.  Until at least one
+        # of these has fired AND register_shell succeeded OR the validate-
+        # specific marker `creds_validated` was set by the result handler,
+        # the heavy steps stay gated.
+        VALIDATION_STEPS = {"ad_creds_validate_smb", "ssh_creds_login"}
+        HEAVY_STEPS = {
+            "ad_creds_kerberoast", "ad_creds_asreproast",
+            "ad_creds_bloodhound", "ad_creds_secretsdump_try",
+            "ad_creds_winrm_shell",
+        }
+
         for primer in self._CRED_PRIMERS:
             # Need at least one of the listed ports open
             if not (set(primer["ports"]) & open_ports):
@@ -1136,6 +1161,15 @@ class DecisionEngine:
                 continue
             tool = primer["tool"]
             svc  = primer["service_label"]
+
+            # B-2 — Heavy steps wait for cred validation.  When the LLM
+            # post-execute handler sets intel['ad']['creds_validated']
+            # after observing a `(name:DC01) (domain:...) [+]` style line
+            # in crackmapexec output (or `Pwn3d!`), this gate opens.
+            if primer_key in HEAVY_STEPS and not creds_validated:
+                # Don't mark fired — we may want to fire it later once
+                # validation lands.  Just skip this iteration.
+                continue
 
             # Skip if a placeholder needed by this primer is unfilled.
             # {domain} and {base_dn} are AD-only; defer them until recon
@@ -1163,6 +1197,18 @@ class DecisionEngine:
             if negative_memory.has_failed_before(tool, svc, args=args_filled):
                 fired.add(primer_key)
                 continue
+
+            # B-9 — Success-memory check.  If the LLM-driven path already
+            # ran this exact (tool, service, args) successfully, don't
+            # re-fire from the primer chain.  Mark it as fired so the
+            # primer chain advances to the next step.
+            try:
+                if hasattr(negative_memory, "has_succeeded_before") and \
+                   negative_memory.has_succeeded_before(tool, svc, args=args_filled):
+                    fired.add(primer_key)
+                    continue
+            except Exception:
+                pass
 
             fired.add(primer_key)
 

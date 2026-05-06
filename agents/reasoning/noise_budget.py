@@ -221,6 +221,42 @@ class NoiseBudget:
             ))
         return taken
 
+    def refund(self, action: Any, *, fraction: float = 1.0, note: str = "") -> int:
+        """B-7 — Return budget for an action that failed before producing
+        meaningful traffic.
+
+        Without this method, ``consume()`` charges the full cost on
+        dispatch even when the tool errors out before sending any packets
+        (MCP "unknown tool", auth-fail before second handshake, instant
+        timeout).  Over a long session those phantom charges exhaust the
+        budget and block productive actions.
+
+        ``fraction`` lets callers tune partial refunds — e.g. an auth
+        failure that DID send the auth packet but no follow-up should
+        refund maybe 0.5 of the cost.  Default 1.0 = full refund for
+        actions that produced no observable traffic.
+
+        Returns the credits actually restored (capped so total never
+        exceeds the budget).
+        """
+        cost = int(round(score_action_noise(action) * max(0.0, min(1.0, fraction))))
+        if cost <= 0:
+            return 0
+        with self._lock:
+            new_remaining = min(self.total, self.remaining + cost)
+            actually_returned = new_remaining - self.remaining
+            self.remaining = new_remaining
+            tool = (action.get("tool") if isinstance(action, dict)
+                    else getattr(action, "tool", "")) or "?"
+            self._history.append(_ConsumeEntry(
+                ts    = datetime.now(timezone.utc).isoformat(),
+                tool  = str(tool),
+                cost  = -actually_returned,   # negative = refund
+                after = self.remaining,
+                note  = (note or "refund") + (f" frac={fraction}" if fraction != 1.0 else ""),
+            ))
+        return actually_returned
+
     def reset(self, total: Optional[int] = None) -> None:
         with self._lock:
             if total is not None:
