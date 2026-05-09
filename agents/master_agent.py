@@ -709,13 +709,53 @@ class MasterAgent(BaseAgent):
     ) -> Dict:
         self._use_reasoning_loop = _REASONING_AVAILABLE  # Always use reasoning if available
         self._session_id     = session_id
-        self._target         = target
+
+        # ── Target normalisation (NEW: domain / URL / app support) ──────
+        # Classify the operator-supplied target string into ip / cidr /
+        # hostname / url / app and stash all four facets on intel so
+        # downstream consumers (web phase, primers, scope guard) can use
+        # the right form for the right tool.  Every existing IP / CIDR
+        # path is bit-exact preserved because for those kinds, host==raw.
+        try:
+            from utils.target_normalizer import normalise_target
+            _norm = normalise_target(
+                target,
+                target_type_hint = target_type,
+                resolve_dns      = True,
+            )
+        except Exception as _norm_err:
+            # If normalisation itself blows up, fall back to legacy behaviour
+            # so the engagement still launches.
+            _norm = type("NT", (), {
+                "raw": target, "kind": "hostname", "host": target, "url": None,
+                "port": None, "scheme": None, "resolved_ip": None,
+                "scope_hosts": [target], "primary_for_tools": lambda: target,
+                "primary_url": lambda: None, "to_dict": lambda: {"raw": target},
+            })()
+            import logging as _l
+            _l.getLogger(__name__).warning(
+                "[target] normalise_target failed: %s — using legacy mode", _norm_err,
+            )
+
+        # `self._target` stays as the raw form for backwards compatibility
+        # of every existing call site.  The tool-friendly host form is
+        # available as self._target_host for new code paths.
+        self._target          = target
+        self._target_host     = _norm.primary_for_tools() if hasattr(_norm, "primary_for_tools") else target
+        self._target_url      = _norm.primary_url() if hasattr(_norm, "primary_url") else None
+        self._target_kind     = _norm.kind
         self._target_type    = target_type
         self._auto_exploit        = auto_exploit
         self._confirm_web         = confirm_web
         self._web_phase_timeout   = web_phase_timeout
         self._intel["target"]     = target
         self._intel["target_type"] = target_type
+        # New intel fields surfaced to ALL consumers
+        self._intel["target_kind"]   = _norm.kind
+        self._intel["target_host"]   = self._target_host
+        self._intel["target_url"]    = self._target_url
+        self._intel["target_scope"]  = list(getattr(_norm, "scope_hosts", []) or [target])
+        self._intel["target_resolved_ip"] = getattr(_norm, "resolved_ip", None)
         self._phases_to_run  = phases or [p.value for p in AttackPhase]
 
         # ── Mission brief (Improvement #1) — coerce to MissionBrief model ───
@@ -1365,6 +1405,37 @@ class MasterAgent(BaseAgent):
         # on the same process doesn't collide on ports 4444-4474 and so
         # msfconsole/ncat/evil-winrm handlers don't leak.
         await self._teardown_runtime_resources()
+
+        # ── Forensic snapshots before close ─────────────────────────────
+        # Persist the FINAL intel dict and findings list to the per-session
+        # log directory so the bundle is self-contained.  Excludes the
+        # ``raw_outputs`` blob (often megabytes) — those are still written
+        # to ``tool_calls.jsonl`` per-call, no need to duplicate.
+        try:
+            from utils.scan_logger import (
+                snapshot_intel as _snap_intel,
+                snapshot_findings as _snap_finds,
+            )
+            intel_for_log = {k: v for k, v in (self._intel or {}).items()
+                             if k != "raw_outputs"}
+            _snap_intel(session_id, intel_for_log)
+
+            # Pull final findings from Mongo so the snapshot reflects
+            # post-dedup state.  Falls back to in-memory intel.findings
+            # on error so the bundle never lacks the findings file.
+            findings_list: list = []
+            try:
+                _dbh = db.get_db()
+                cursor = _dbh.findings.find({"session_id": session_id})
+                async for doc in cursor:
+                    doc.pop("_id", None)
+                    findings_list.append(doc)
+            except Exception:
+                findings_list = list(self._intel.get("findings") or [])
+            _snap_finds(session_id, findings_list)
+        except Exception:
+            pass
+
         # Flush and close the per-session scan log
         try:
             close_scan_logger(session_id)
@@ -1947,9 +2018,20 @@ class MasterAgent(BaseAgent):
                     if any(x in (s.get("service", "") if isinstance(s, dict) else str(s)).lower()
                            for x in ("http", "https"))
                 ][:4]
-            # Always ensure at least one URL to test — fall back to plain http/https on target
+            # Always ensure at least one URL to test.  When the operator
+            # supplied an explicit URL/app target (intel.target_url) put
+            # that FIRST so web tools hit the operator's exact endpoint
+            # instead of the synthesised root.  Fall back to the legacy
+            # http/https-on-host pair for IP / hostname targets.
             if not web_urls:
-                web_urls = [f"http://{target}", f"https://{target}"]
+                explicit = self._intel.get("target_url")
+                host     = self._intel.get("target_host") or target
+                if explicit:
+                    web_urls = [explicit, f"http://{host}", f"https://{host}"]
+                    # dedup
+                    seen = set(); web_urls = [u for u in web_urls if not (u in seen or seen.add(u))]
+                else:
+                    web_urls = [f"http://{host}", f"https://{host}"]
             coros = []
             for url in web_urls[:3]:
                 coros += [
@@ -3234,10 +3316,25 @@ class MasterAgent(BaseAgent):
         loop can pivot mid-iteration without waiting for the next
         decision boundary.
         """
+        event_type = "reasoning_event"
+        data: dict = {}
         try:
             event_type = event.get("type", "reasoning_event")
             data       = event.get("data", event)
             await self._emit(event_type, data)
+        except Exception:
+            pass
+
+        # Forensic scan-log mirror — _emit() already logs WebAgent /
+        # subagent events.  This catches reasoning_engine / wstg_phase_*
+        # events that take the _broadcast_raw path instead.
+        try:
+            from utils.scan_logger import log_ws_event as _slog_ws
+            _slog_ws(self._session_id, event_type, data)
+            # Dedicated WSTG stream
+            if event_type == "wstg_phase_update":
+                from utils.scan_logger import log_wstg_phase as _slog_wstg
+                _slog_wstg(self._session_id, data)
         except Exception:
             pass
 
@@ -3788,6 +3885,28 @@ class MasterAgent(BaseAgent):
                 web_ports.append(port)
         # Deduplicate and sort
         web_ports = sorted(set(int(str(p).split("/")[0]) for p in web_ports))
+
+        # ── Force web phase for URL/app targets even without port scan ──
+        # When the operator gave a URL or app target, port-scan output may
+        # not be available yet (or never — for app-only mode the operator
+        # explicitly skipped network probes).  Derive web_ports from the
+        # URL itself so the web phase still fires.
+        if (not web_ports) and self._intel.get("target_url"):
+            try:
+                from urllib.parse import urlparse as _up
+                _u = _up(self._intel["target_url"])
+                _port = _u.port or (443 if _u.scheme == "https" else 80)
+                web_ports = [int(_port)]
+            except Exception:
+                web_ports = [443 if str(self._intel.get("target_url","")).startswith("https") else 80]
+
+        # When kind=hostname/url/app, also force the standard ports if no
+        # other web ports detected — mass scanners + WAFs sometimes hide
+        # the actual service behind 80/443 on hosts that don't expose
+        # other classic ports.
+        if (not web_ports) and self._intel.get("target_kind") in ("hostname", "url", "app"):
+            web_ports = [80, 443]
+
         if web_ports and not already_done("web_testing"):
             parallel_coros.append(("web", self._phase_web_testing(target, web_ports)))
 
@@ -4255,6 +4374,59 @@ class MasterAgent(BaseAgent):
                     next_action= "IoT testing will run after exploitation phase"
                 )
 
+        # ── Device-type classification (NEW) ──────────────────
+        # Run the deterministic classifier over the recon evidence to
+        # stamp `intel['device_classification']` with a TaxonomyKind +
+        # playbook list.  Downstream phases / primer dispatchers will
+        # use this to route per-device chains (IoT vs Linux vs DC vs
+        # web app vs database).  Failure is non-fatal — we just keep
+        # the legacy is_iot heuristic as the only signal.
+        try:
+            from agents.reasoning.device_classifier import classify_device
+            web_tech = []
+            for t in (result.get("technologies") or []):
+                if isinstance(t, dict):
+                    name = t.get("name") or t.get("tech") or ""
+                    if name: web_tech.append(name)
+                elif t:
+                    web_tech.append(str(t))
+            classification = classify_device(
+                open_ports  = self._intel.get("open_ports") or [],
+                services    = self._intel.get("services") or {},
+                os_guess    = self._intel.get("os_guess") or "",
+                web_tech    = web_tech,
+                banners     = self._intel.get("banners") or {},
+                target_kind = self._intel.get("target_kind") or "ip",
+                raw_target  = self._target,
+            )
+            self._intel["device_classification"] = classification.to_dict()
+            await self.emit_reasoning(
+                step       = "device_classification",
+                reasoning  = (
+                    f"Recon evidence scored against device taxonomy — "
+                    f"{classification.notes}"
+                ),
+                decision   = (
+                    f"Classified as {classification.kind.value!r} "
+                    f"(os={classification.os_family}, conf={classification.confidence:.2f}, "
+                    f"priority={classification.priority})"
+                ),
+                next_action= (
+                    f"Playbook chain: {' → '.join(classification.playbooks[:5])}"
+                ),
+            )
+            await self._broadcast_raw({
+                "type":       "device_classified",
+                "session_id": self._session_id,
+                "agent":      "master",
+                "data": classification.to_dict(),
+            })
+        except Exception as _cl_err:
+            import logging as _l
+            _l.getLogger(__name__).warning(
+                "device classifier failed (non-fatal): %s", _cl_err,
+            )
+
         # ── Round 2: Master plans service-specific enumeration ─
         ports = self._intel["open_ports"]
         svcs  = self._intel["services"]
@@ -4493,6 +4665,40 @@ class MasterAgent(BaseAgent):
         agent = WebAgent(broadcast=self.broadcast)
         agent._session_id = self._session_id
         self._web_agent   = agent
+
+        # ── WSTG-aligned WebOrchestrator (NEW) ──────────────────────
+        # Runs the full 14-phase WSTG pipeline INSTEAD of the legacy
+        # ad-hoc stages below.  Each phase emits live `wstg_phase_*`
+        # events so the WebTesting GUI page can render the matrix.
+        # The legacy stage code further down stays as a defensive
+        # fallback only when the orchestrator import fails.
+        try:
+            from agents.web.web_orchestrator import WebOrchestrator
+            orchestrator = WebOrchestrator(
+                master_agent = self,
+                web_agent    = agent,
+                target       = target,
+                web_ports    = web_ports,
+                intel        = self._intel,
+            )
+            orch_summary = await orchestrator.run()
+            self._intel["wstg_summary"] = orch_summary
+            await self._emit("plan_step_update", {
+                "step_id": "web_testing", "status": "done",
+                "result":  f"WSTG: {orch_summary.get('total_findings', 0)} findings across "
+                           f"{len(orch_summary.get('phases', {}))} phases",
+                "detail":  ", ".join(orch_summary.get("targets") or [])[:200],
+                "found":   orch_summary.get("total_findings", 0) > 0,
+                "ts":      datetime.utcnow().isoformat(),
+            })
+            return    # WSTG-orchestrator handled everything — skip legacy stages
+        except Exception as _orch_err:
+            import logging as _l
+            _l.getLogger(__name__).warning(
+                "WebOrchestrator unavailable, falling back to legacy stages: %s",
+                _orch_err,
+            )
+            # fall through to the legacy stage code below
 
         os_guess     = self._intel.get("os_guess", "unknown").lower()
         technologies = list(self._intel.get("technologies", []))
