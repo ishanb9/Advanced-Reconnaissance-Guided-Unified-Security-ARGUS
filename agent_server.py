@@ -94,6 +94,19 @@ class WebSocketManager:
         "shell_obtained", "network_scan_complete", "phase_start", "phase_complete",
         # Attack graph / chain analysis events
         "chain_analysis", "chain_analysis_status", "graph_refresh",
+        # Primer / web-intel / listener / exfil lifecycle events
+        # (so late-joining WS clients see the chain-coverage matrix
+        # and listener history that fired before they connected)
+        "primer_tool_availability",
+        "listener_manager_ready", "listener_started", "listener_stopped",
+        "listener_lhost_changed",
+        "exfil_pipeline_ready",
+        "reasoning_decision",
+        # Device-classifier verdict — late-join clients need this to
+        # render the host taxonomy panel without re-running recon.
+        "device_classified",
+        # WSTG web-orchestrator events — phase matrix + per-phase updates
+        "wstg_phase_matrix", "wstg_phase_update",
     }
     BUFFER_SIZE = 200  # max buffered events per session
 
