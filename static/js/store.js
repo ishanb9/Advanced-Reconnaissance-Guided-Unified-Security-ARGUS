@@ -74,6 +74,15 @@ const INIT = {
   goalTimeline:      null, // #18 — live goal-progress timeline payload
   toolOutputs:     {},
   findingsSummary: { critical: 0, high: 0, medium: 0, low: 0, info: 0, total: 0 },
+
+  // Device taxonomy (NEW v2.5 — multi-device engagement support)
+  deviceClassification: null,        // single-host classification verdict
+  hostClassifications:  {},          // {host: classification}  for multi-host scans
+  primerToolCoverage:   null,        // primer-deps tool availability matrix
+
+  // WSTG web-testing state (NEW — driven by WebOrchestrator)
+  wstgMatrix:   null,                // {phases:[{id,label,wstg}], targets:[urls]}
+  wstgPhases:   {},                  // {phase_id: PhaseResult}
   flags:           [],
   shells:          [],
   payloads:        [],
@@ -281,6 +290,13 @@ function reducer(state, action) {
       return { ...state, sessions: action.payload };
 
     case 'REMOVE_SESSION':
+      // Clear localStorage pin if the deleted session was the pinned one
+      try {
+        if (typeof localStorage !== 'undefined' &&
+            localStorage.getItem('argus.activeSessionId') === action.payload) {
+          localStorage.removeItem('argus.activeSessionId');
+        }
+      } catch {}
       return { ...state,
         sessions: state.sessions.filter(s => s.id !== action.payload),
         // clear active session if it was deleted
@@ -289,6 +305,19 @@ function reducer(state, action) {
       };
 
     case 'SET_SESSION':
+      // ── B-RELOAD: persist active session ID to localStorage ────────
+      // On browser reload the StoreProvider boot effect reads this key
+      // and re-fetches + reconnects.  Without persistence the user had
+      // to manually re-pick the session every reload.
+      try {
+        if (typeof localStorage !== 'undefined') {
+          if (action.payload?.id) {
+            localStorage.setItem('argus.activeSessionId', action.payload.id);
+          } else {
+            localStorage.removeItem('argus.activeSessionId');
+          }
+        }
+      } catch {}
       return {
         ...state,
         activeSession:       action.payload,
@@ -311,6 +340,34 @@ function reducer(state, action) {
       // Stash the chain coverage matrix so dedicated panels can render it.
       // payload = {coverage:{chain:{deps,present,missing,coverage}}, present, total, missing, installHints, probeErrors}
       return { ...state, primerToolCoverage: action.payload };
+
+    case 'SET_DEVICE_CLASSIFICATION':
+      // Single classification (single-host engagement).  Risk dashboard
+      // and findings filter both consume this.
+      return { ...state, deviceClassification: action.payload };
+
+    case 'SET_HOST_CLASSIFICATION': {
+      // Per-host classification for multi-target / CIDR engagements.
+      // Merges into hostClassifications keyed on host string.
+      const { host, classification } = action.payload || {};
+      if (!host) return state;
+      return {
+        ...state,
+        hostClassifications: { ...(state.hostClassifications || {}), [host]: classification },
+      };
+    }
+
+    case 'SET_WSTG_MATRIX':
+      return { ...state, wstgMatrix: action.payload, wstgPhases: state.wstgPhases || {} };
+
+    case 'WSTG_PHASE_UPDATE': {
+      const phase = action.payload || {};
+      if (!phase.phase_id) return state;
+      return {
+        ...state,
+        wstgPhases: { ...(state.wstgPhases || {}), [phase.phase_id]: phase },
+      };
+    }
 
     case 'LLM_THINKING':
       return { ...state, llmThinking: action.payload };
@@ -1359,6 +1416,45 @@ function StoreProvider({ children }) {
   }, []);
 
   useEffect(() => { refreshSessions(); }, []);
+
+  // ── B-RELOAD: restore active session on browser reload ─────────────
+  // Reads the persisted session ID from localStorage, validates it is
+  // still ACTIVE/PAUSED on the server, and if so re-fetches the
+  // session document + WS connection.  All findings, graph, and
+  // reasoning state then flow back through their normal endpoints.
+  useEffect(() => {
+    let cancelled = false;
+    async function restore() {
+      try {
+        if (typeof localStorage === 'undefined') return;
+        const pinnedId = localStorage.getItem('argus.activeSessionId');
+        if (!pinnedId) return;
+        const { session } = await window.API.sessions.get(pinnedId);
+        if (cancelled || !session) return;
+        // Reject sessions that have already completed — operator can re-pick from history
+        const status = (session.status || '').toLowerCase();
+        if (['completed','archived','cancelled','error'].includes(status)) {
+          localStorage.removeItem('argus.activeSessionId');
+          return;
+        }
+        dispatch({ type: 'SET_SESSION', payload: session });
+        connectWS(session.id);
+        // Re-hydrate findings + graph from REST so the UI shows real
+        // data immediately instead of waiting for the WS event replay.
+        try {
+          const fr = await window.API.findings(session.id);
+          if (fr?.summary) dispatch({ type: 'SET_FINDINGS_SUMMARY', payload: fr.summary });
+        } catch {}
+        try { await loadGraph(session.id); } catch {}
+        try { await loadNeo4jGraph(session.id); } catch {}
+      } catch (e) {
+        // Stale ID, server unreachable, etc. — silently drop the pin
+        try { localStorage.removeItem('argus.activeSessionId'); } catch {}
+      }
+    }
+    restore();
+    return () => { cancelled = true; };
+  }, []);
 
   const value = { state, dispatch, connectWS, disconnectWS, sendWS,
                   registerShellListener, refreshSessions, loadGraph,
@@ -2702,6 +2798,52 @@ function routeWsEvent(msg, dispatch, shellListeners, sessionId) {
       dispatch({ type: 'FEED_ENTRY', payload: {
         ts, agent: 'master', eventType: 'exfil_pipeline_ready',
         message: `💎 Loot pipeline ready — patterns=${data?.patterns||0} loot_dir=${data?.loot_dir||''}`, data
+      }});
+      break;
+    }
+
+    // ── New: WSTG web orchestrator events ──────────────────────────
+    case 'wstg_phase_matrix': {
+      dispatch({ type: 'SET_WSTG_MATRIX', payload: data || null });
+      const tcount = (data?.targets || []).length;
+      const pcount = (data?.phases || []).length;
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'web', eventType: 'wstg_phase_matrix',
+        message: `🕸 WSTG matrix engaged — ${pcount} phases × ${tcount} target${tcount !== 1 ? 's' : ''}`,
+        data
+      }});
+      break;
+    }
+    case 'wstg_phase_update': {
+      const p = data || {};
+      dispatch({ type: 'WSTG_PHASE_UPDATE', payload: p });
+      // Only feed-emit terminal-status updates (not every "running")
+      if (p.status === 'done' || p.status === 'failed' || p.status === 'skipped') {
+        const icon = p.status === 'done' ? '✓' : p.status === 'failed' ? '✗' : '○';
+        dispatch({ type: 'FEED_ENTRY', payload: {
+          ts, agent: 'web', eventType: 'wstg_phase_update',
+          message: `🕸 [${icon}] ${p.label || p.phase_id} — ${p.findings || 0} finding(s)`,
+          data: p
+        }});
+      }
+      break;
+    }
+
+    // ── New: device classifier verdict (per-host taxonomy) ──────────
+    case 'device_classified': {
+      const c = data || {};
+      // Stash the latest classification on global state for dashboards
+      dispatch({ type: 'SET_DEVICE_CLASSIFICATION', payload: c });
+      // Per-host: when message carries a host_id we also update that host
+      const hostId = msg.host_id;
+      if (hostId) {
+        dispatch({ type: 'SET_HOST_CLASSIFICATION', payload: { host: hostId, classification: c } });
+      }
+      const kindLabel = (c.kind || 'unknown').replace(/_/g, ' ');
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'master', eventType: 'device_classified',
+        message: `🔍 Device classified: ${kindLabel} (conf=${(c.confidence||0).toFixed(2)}, priority=${c.priority||0})`,
+        data: c
       }});
       break;
     }

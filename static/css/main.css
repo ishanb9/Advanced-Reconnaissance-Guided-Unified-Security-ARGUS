@@ -6,7 +6,16 @@
 /* ─── Google Fonts (self-hosted fallback chain) ───────────── */
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
 
-/* ─── Design Tokens ──────────────────────────────────────── */
+/* ─── Theme Switcher (NEW v2) ───────────────────────────────
+   The :root block below is the DEFAULT theme (=`midnight`).
+   Additional themes are defined as `[data-theme="<name>"]` overrides
+   later in this file.  Apply a theme at runtime by setting:
+     document.documentElement.dataset.theme = 'graphite'
+   The theme switcher in the UI persists the choice in localStorage so
+   reloads remember the operator's preference.
+   ──────────────────────────────────────────────────────────── */
+
+/* ─── Design Tokens (default = MIDNIGHT) ─────────────────── */
 :root {
   /* ── Background layers (4-level depth model) ── */
   --bg-base:      #0D0E14;   /* page canvas */
@@ -95,6 +104,140 @@
   --trans-slow: 0.25s ease;
 }
 
+/* ═══════════════════════════════════════════════════════════
+   THEME OVERRIDES
+   Apply at runtime via:
+     document.documentElement.dataset.theme = '<name>'
+   Available themes:
+     (default — no attribute)  Midnight (deep blue-black, teal accent)
+     graphite                  Charcoal (neutral grey, cyan accent)
+     amber                     Hacker amber (CRT-style, orange/yellow)
+     sapphire                  Saturated blue (corporate-friendly)
+     contrast                  High-contrast (a11y, white/black/yellow)
+     daylight                  Light theme (white surfaces, dark text)
+   ═══════════════════════════════════════════════════════════ */
+
+/* ── Graphite — neutral charcoal with cyan accents ───────── */
+[data-theme="graphite"] {
+  --bg-base:      #15171C;
+  --bg-surface:   #1C1F26;
+  --bg-panel:     #252932;
+  --bg-elevated:  #303540;
+  --bg-sidebar:   #131418;
+  --accent:       #38BDF8;    /* cyan as primary */
+  --accent-dim:   #0EA5E9;
+  --accent-glow:  rgba(56, 189, 248, 0.18);
+  --accent-subtle:rgba(56, 189, 248, 0.06);
+  --violet:       #A78BFA;
+  --border:       #2A2F3B;
+  --border-light: #353B49;
+  --border-bright:#454B5C;
+  --text-primary:   #ECF0F8;
+  --text-secondary: #A0A7B8;
+  --text-muted:     #5C6378;
+}
+
+/* ── Amber — hacker CRT vibe ─────────────────────────────── */
+[data-theme="amber"] {
+  --bg-base:      #0E0B05;
+  --bg-surface:   #15110A;
+  --bg-panel:     #1F1810;
+  --bg-elevated:  #2A2014;
+  --bg-sidebar:   #0A0703;
+  --accent:       #FFB22A;    /* warm amber */
+  --accent-dim:   #C68A18;
+  --accent-glow:  rgba(255, 178, 42, 0.22);
+  --accent-subtle:rgba(255, 178, 42, 0.06);
+  --violet:       #FF8C42;
+  --cyan:         #FFD68A;
+  --border:       #2B2415;
+  --border-light: #3A3120;
+  --border-bright:#5A4830;
+  --text-primary:   #F5E8C8;
+  --text-secondary: #C9B690;
+  --text-muted:     #6E5F3F;
+}
+
+/* ── Sapphire — saturated corporate blue ─────────────────── */
+[data-theme="sapphire"] {
+  --bg-base:      #0A0F1F;
+  --bg-surface:   #11182C;
+  --bg-panel:     #182240;
+  --bg-elevated:  #202D54;
+  --bg-sidebar:   #070C1A;
+  --accent:       #4F8DFD;    /* royal blue */
+  --accent-dim:   #2E66D9;
+  --accent-glow:  rgba(79, 141, 253, 0.22);
+  --accent-subtle:rgba(79, 141, 253, 0.06);
+  --violet:       #9F7CFF;
+  --cyan:         #5BC0EB;
+  --border:       #1F2B4D;
+  --border-light: #2B3A60;
+  --border-bright:#3D4F7B;
+  --text-primary:   #E5EBF8;
+  --text-secondary: #95A1BD;
+  --text-muted:     #4F5A78;
+}
+
+/* ── Contrast — accessibility ────────────────────────────── */
+[data-theme="contrast"] {
+  --bg-base:      #000000;
+  --bg-surface:   #0A0A0A;
+  --bg-panel:     #161616;
+  --bg-elevated:  #222222;
+  --bg-sidebar:   #000000;
+  --accent:       #FFE600;    /* high-vis yellow */
+  --accent-dim:   #CCB800;
+  --accent-glow:  rgba(255, 230, 0, 0.30);
+  --accent-subtle:rgba(255, 230, 0, 0.10);
+  --violet:       #FF66CC;
+  --cyan:         #00E5FF;
+  --critical:     #FF3333;
+  --border:       #444444;
+  --border-light: #666666;
+  --border-bright:#888888;
+  --text-primary:   #FFFFFF;
+  --text-secondary: #DDDDDD;
+  --text-muted:     #999999;
+}
+
+/* ── Daylight — light theme ──────────────────────────────── */
+[data-theme="daylight"] {
+  --bg-base:      #F4F6FB;
+  --bg-surface:   #FFFFFF;
+  --bg-panel:     #F0F3F9;
+  --bg-elevated:  #E5EAF2;
+  --bg-sidebar:   #ECEFF5;
+  --accent:       #00A372;    /* darker for white background */
+  --accent-dim:   #007D58;
+  --accent-glow:  rgba(0, 163, 114, 0.18);
+  --accent-subtle:rgba(0, 163, 114, 0.06);
+  --violet:       #5B4EC4;
+  --cyan:         #0EA5E9;
+  --critical:     #DC2626;
+  --high:         #EA580C;
+  --medium:       #CA8A04;
+  --low:          #16A34A;
+  --info:         #0EA5E9;
+  --border:       #D7DDE7;
+  --border-light: #C5CCD8;
+  --border-bright:#A8B0C0;
+  --text-primary:   #0F1422;
+  --text-secondary: #4D556B;
+  --text-muted:     #828B9D;
+  --shadow-sm:     0 1px 3px rgba(15,20,34,0.08);
+  --shadow-md:     0 4px 12px rgba(15,20,34,0.12);
+  --shadow-lg:     0 8px 32px rgba(15,20,34,0.18);
+}
+[data-theme="daylight"] body,
+[data-theme="daylight"] html {
+  background: var(--bg-base);
+  color: var(--text-primary);
+}
+
+/* All themes share these base smoothing rules */
+html { transition: background-color var(--trans-slow); }
+
 /* ─── Base Reset ─────────────────────────────────────────── */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -112,11 +255,61 @@ html, body, #root {
 a { color: var(--cyan); text-decoration: none; }
 a:hover { color: var(--accent); }
 
-/* ─── Scrollbars ─────────────────────────────────────────── */
-::-webkit-scrollbar { width: 4px; height: 4px; }
+/* ─── Scrollbars (refined v2) ────────────────────────────── */
+::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 4px; }
-::-webkit-scrollbar-thumb:hover { background: var(--accent-dim); }
+::-webkit-scrollbar-thumb {
+  background: rgba(255,255,255,0.06);
+  border-radius: 6px;
+  transition: background 0.15s ease;
+}
+::-webkit-scrollbar-thumb:hover { background: rgba(0,229,160,0.4); }
+::-webkit-scrollbar-corner { background: transparent; }
+* { scrollbar-color: rgba(255,255,255,0.08) transparent; scrollbar-width: thin; }
+
+/* ─── v2 micro-animations & utilities ───────────────────── */
+@keyframes argus-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.55; }
+}
+@keyframes argus-fade-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes argus-shimmer {
+  0%   { background-position: -400px 0; }
+  100% { background-position: 400px 0; }
+}
+
+.argus-fade-in { animation: argus-fade-in 0.22s ease-out both; }
+
+/* Visible focus ring without breaking native button look */
+button:focus-visible,
+input:focus-visible,
+[role="button"]:focus-visible,
+a:focus-visible {
+  outline: 2px solid rgba(0,229,160,0.55);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* Glass surface utility — opt-in via class="argus-glass" */
+.argus-glass {
+  background: rgba(19,21,30,0.78);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid var(--border-light);
+}
+
+/* Subtle elevation for cards on hover */
+.argus-card-hover {
+  transition: transform 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
+}
+.argus-card-hover:hover {
+  transform: translateY(-1px);
+  border-color: var(--border-bright);
+  box-shadow: var(--shadow-md);
+}
 
 /* ─── Ant Design Overrides ───────────────────────────────── */
 .ant-layout { background: var(--bg-base) !important; }

@@ -24,19 +24,33 @@ const ALL_PHASES = [
   { key: 'iot',          label: 'IoT',          desc: 'Device fingerprint, default creds, MQTT/CoAP/Modbus, firmware CVEs (auto-detected)' },
 ];
 
-// Detect input mode from target string — mirrors server-side _detect_session_mode()
+// Detect target shape — mirrors server-side normalise_target() classification.
+// Returns one of: SINGLE | CIDR | MULTI | URL | DOMAIN | APP | null
+const _IPV4 = /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/;
+const _IPV6 = /^[0-9a-fA-F:]+:[0-9a-fA-F:]+$/;
+const _URL  = /^https?:\/\//i;
+const _FQDN = /^(?=.{1,253}$)(?:(?!-)[A-Za-z0-9-]{1,63}(?<!-)\.)+[A-Za-z]{2,63}$/;
+const _HOSTPORT = /^[A-Za-z0-9.-]+:\d{1,5}$/;
+
 function detectMode(val) {
   if (!val || !val.trim()) return null;
   const v = val.trim();
-  if (v.includes('/')) return 'CIDR';
   if (v.includes(',')) return 'MULTI';
-  return 'SINGLE';
+  if (v.includes('/') && !_URL.test(v)) return 'CIDR';
+  if (_URL.test(v))                     return 'URL';
+  if (_IPV4.test(v) || _IPV6.test(v))   return 'SINGLE';
+  if (_FQDN.test(v))                    return 'DOMAIN';
+  if (_HOSTPORT.test(v))                return 'DOMAIN';   // host:port
+  return v.includes('.') ? 'DOMAIN' : 'SINGLE';
 }
 
 const MODE_META = {
-  SINGLE: { label: 'Single Host',    color: '#00d4ff', icon: '🎯',  desc: 'One target IP' },
-  CIDR:   { label: 'Network Range',  color: '#73d13d', icon: '📡',  desc: 'All live hosts in CIDR' },
-  MULTI:  { label: 'Multi-Target',   color: '#faad14', icon: '🗂',  desc: 'Each IP tested in parallel' },
+  SINGLE: { label: 'IP Address',     color: '#00d4ff', icon: '◉',  desc: 'Single host (IPv4 or IPv6)' },
+  CIDR:   { label: 'Network Range',  color: '#73d13d', icon: '◫',  desc: 'All live hosts in CIDR' },
+  MULTI:  { label: 'Multi-Target',   color: '#faad14', icon: '⬡',  desc: 'Each target tested in parallel' },
+  DOMAIN: { label: 'Domain / Host',  color: '#7B6CF6', icon: '◆',  desc: 'Hostname or FQDN — resolves to IP for network probes' },
+  URL:    { label: 'URL / Web App',  color: '#FF8C42', icon: '◊',  desc: 'Web application target — focus on HTTP-layer testing' },
+  APP:    { label: 'Application',    color: '#FF4560', icon: '⊠',  desc: 'Pure application target — skip network probes' },
 };
 
 function TargetConfig() {
@@ -96,7 +110,7 @@ function TargetConfig() {
   }
 
   async function launch() {
-    if (!form.target_ip.trim()) { setError('Target IP is required'); return; }
+    if (!form.target_ip.trim()) { setError('Target is required (IP, CIDR, domain, or URL)'); return; }
     setError(''); setLoading(true);
     try {
       // Assemble the formal mission brief from the dedicated form fields
@@ -305,11 +319,19 @@ function TargetConfig() {
         )
       ),
 
-      // Main input
+      // Helper text describing accepted formats
+      React.createElement('div', {
+        style: {
+          fontSize: 10, color: 'var(--text-muted)', marginBottom: 6,
+          letterSpacing: 0.3, lineHeight: 1.5,
+        }
+      }, 'Accepts IP, CIDR range, comma-separated list, hostname/FQDN, or full URL. Domains are auto-resolved before scanning. URLs route web-aware tools to the exact endpoint.'),
+
+      // Main input — placeholder now reflects expanded scope
       React.createElement('input', {
         type: 'text',
         value: form.target_ip,
-        placeholder: '10.10.10.1  or  10.10.10.0/24  or  10.0.0.1,10.0.0.2',
+        placeholder: '10.10.10.5  ·  10.10.10.0/24  ·  app.example.com  ·  https://target.com/login',
         onChange: e => set('target_ip', e.target.value),
         style: {
           ...inp,
@@ -323,16 +345,17 @@ function TargetConfig() {
         style: { display: 'flex', gap: 6, marginTop: 8, flexWrap: 'wrap' }
       },
         [
-          { example: '10.10.10.5',         label: 'Single IP' },
-          { example: '10.10.10.0/24',       label: 'CIDR /24' },
-          { example: '10.10.10.0/16',       label: 'CIDR /16' },
-          { example: '10.0.1.1,10.0.1.2',   label: 'Multi-IP' },
+          { example: '10.10.10.5',                  label: 'IP' },
+          { example: '10.10.10.0/24',               label: 'CIDR' },
+          { example: '10.0.1.1,10.0.1.2',           label: 'Multi' },
+          { example: 'app.example.com',             label: 'Domain' },
+          { example: 'https://target.com/login',    label: 'URL' },
         ].map(({ example, label: chipLabel }) =>
           React.createElement('div', {
             key: example,
             onClick: () => set('target_ip', example),
             style: {
-              padding: '2px 9px', borderRadius: 4, cursor: 'pointer',
+              padding: '3px 10px', borderRadius: 4, cursor: 'pointer',
               fontSize: 10, fontFamily: 'var(--font-mono)',
               border: '1px solid var(--border)',
               color: form.target_ip === example ? 'var(--cyan)' : 'var(--text-muted)',
