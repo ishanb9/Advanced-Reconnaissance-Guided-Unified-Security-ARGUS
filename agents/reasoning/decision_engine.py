@@ -2088,11 +2088,34 @@ class DecisionEngine:
         negative_memory:    NegativeMemory,
     ) -> Optional[JustifiedAction]:
         """Web-exploitation chain dispatcher.  Skips when shell already
-        obtained (post-foothold takes over) or when no http(s) port open."""
+        obtained (post-foothold takes over) or when no http(s) port open.
+
+        URL/app targets: when intel['target_url'] was set by the master
+        agent at session start (operator gave a domain/URL), the primer
+        uses the URL's actual scheme + port instead of inferring from
+        nmap.  This unblocks engagements where the only visible service
+        is a web app behind a load balancer (no scannable ports).
+        """
         if intel.get("shell_access"):
             return None
         open_ports = self._collect_open_ports(intel)
         web_ports = open_ports & {"80", "443", "8080", "8443", "8000", "8888", "8001", "8081", "5000", "5001", "9000"}
+
+        # When the operator gave an explicit URL/app, treat it as a
+        # confirmed web port even if nmap hasn't been run yet.  This is
+        # essential for bug-bounty / pre-prod-app engagements where you
+        # already know the entry point and don't need a port scan.
+        target_url  = (intel.get("target_url") or "").strip()
+        target_kind = (intel.get("target_kind") or "").lower()
+        if target_url and not web_ports:
+            try:
+                from urllib.parse import urlparse as _up
+                _u = _up(target_url)
+                _port = _u.port or (443 if _u.scheme == "https" else 80)
+                web_ports = {str(_port)}
+            except Exception:
+                web_ports = {"443" if target_url.startswith("https") else "80"}
+
         if not web_ports:
             return None
 
@@ -2101,6 +2124,18 @@ class DecisionEngine:
         port_suffix = "" if port in ("80", "443") else f":{port}"
         # http vs https — naive but works most of the time
         scheme = "https" if port in ("443", "8443") else "http"
+        # Override scheme/port_suffix when an explicit URL is set
+        if target_url:
+            try:
+                from urllib.parse import urlparse as _up
+                _u = _up(target_url)
+                if _u.scheme: scheme = _u.scheme
+                if _u.port:
+                    port_suffix = f":{_u.port}"
+                else:
+                    port_suffix = ""
+            except Exception:
+                pass
 
         fired = intel.setdefault("_web_exploit_fired", set())
         if isinstance(fired, list):

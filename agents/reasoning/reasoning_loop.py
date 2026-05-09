@@ -2634,13 +2634,23 @@ class ReasoningLoop:
                                          phase_slug="vuln_id",
                                          target=self._target),
             ))
-            # Web testing — any web port discovered.
+            # Web testing — any web port discovered, OR explicit URL/app target.
             web_ports = sorted({
                 int(str(p.get("port") if isinstance(p, dict) else p).split("/")[0])
                 for p in intel.get("open_ports", [])
                 if (isinstance(p, dict) and str(p.get("port", "")).split("/")[0].isdigit())
                    or (not isinstance(p, dict) and str(p).split("/")[0].isdigit())
             } & {80, 443, 8080, 8443, 8000, 8888, 3000, 5000, 9090, 9443})
+            # Force-include web ports when a URL/app target is set
+            if (not web_ports) and intel.get("target_url"):
+                try:
+                    from urllib.parse import urlparse as _up
+                    _u = _up(intel["target_url"])
+                    web_ports = [int(_u.port or (443 if _u.scheme == "https" else 80))]
+                except Exception:
+                    web_ports = [443] if str(intel.get("target_url","")).startswith("https") else [80]
+            elif (not web_ports) and intel.get("target_kind") in ("hostname", "url", "app"):
+                web_ports = [80, 443]
             candidates.append((
                 "web_testing",
                 bool(web_ports) and "gobuster" not in tools_excl,
