@@ -1302,7 +1302,14 @@ Return JSON:
 
     # ─── LLM Reasoning (Master Agent Only) ────────────────────
 
-    async def think(self, prompt: str, system_context: str = "", timeout: int = LLM_THINK_TIMEOUT) -> str:
+    async def think(
+        self,
+        prompt:         str,
+        system_context: str = "",
+        timeout:        int = LLM_THINK_TIMEOUT,
+        *,
+        _skip_slog:     bool = False,
+    ) -> str:
         """
         Query the LLM via STREAMING so no wall-clock timeout ever fires.
 
@@ -1408,6 +1415,9 @@ Return JSON:
         ]
 
         # ── Retry loop ──────────────────────────────────────────
+        # Track wall-clock latency across all attempts so the scan log
+        # reflects the operator's perspective, not just a single attempt.
+        _slog_t0 = time.monotonic()
         for attempt in range(1, _LLM_MAX_RETRIES + 1):
             try:
                 async with httpx.AsyncClient(
@@ -1460,6 +1470,31 @@ Return JSON:
                     "model":    MODEL_NAME,
                     "ts":       datetime.utcnow().isoformat()
                 })
+
+                # ── Forensic scan-log entry ───────────────────────
+                # Skipped when caller is think_json — that wrapper logs its
+                # own entry with parsed-decision detail.  Without this hook,
+                # subagents that call think() directly (most do) had their
+                # LLM activity invisible in the per-session log.
+                if not _skip_slog:
+                    try:
+                        first_line = (prompt.strip().splitlines() or [""])[0]
+                        _slog_llm(
+                            self._session_id,
+                            (first_line[:60] or "think"),
+                            prompt_chars   = len(prompt),
+                            response_chars = len(content),
+                            latency        = time.monotonic() - _slog_t0,
+                            model          = MODEL_NAME,
+                            agent          = str(self.name),
+                            decision       = "",
+                            reasoning      = "",
+                            parse_error    = False,
+                            prompt_tail    = prompt,
+                            raw_tail       = content,
+                        )
+                    except Exception:
+                        pass
                 return content
 
             except httpx.ConnectError:
@@ -1632,7 +1667,12 @@ Return JSON:
     async def think_json(self, prompt: str, system_context: str = "", timeout: int = LLM_THINK_TIMEOUT) -> Dict:
         """Query LLM expecting a JSON response. Extracts and parses JSON."""
         _t0 = time.monotonic()
-        raw = await self.think(prompt + "\n\nRespond ONLY with valid JSON. No markdown, no explanation.", system_context, timeout)
+        # Pass _skip_slog=True so think() does not also log this call —
+        # we emit a richer entry here with the parsed decision summary.
+        raw = await self.think(
+            prompt + "\n\nRespond ONLY with valid JSON. No markdown, no explanation.",
+            system_context, timeout, _skip_slog=True,
+        )
         _latency = time.monotonic() - _t0
         # Derive a short step label from the first line of the prompt
         _step_label = ""
@@ -1656,9 +1696,14 @@ Return JSON:
                     response_chars = len(raw),
                     latency        = _latency,
                     model          = MODEL_NAME,
+                    agent          = str(self.name),
                     decision       = str(decision),
                     reasoning      = str(result.get("reasoning", "")) if isinstance(result, dict) else "",
                     parse_error    = parse_error,
+                    # Persist the raw response on parse error so we can
+                    # diagnose why the JSON extraction failed.
+                    raw_tail       = raw if parse_error else "",
+                    prompt_tail    = prompt if parse_error else "",
                 )
             except Exception:
                 pass
@@ -2003,6 +2048,15 @@ Return JSON:
             await self.broadcast(msg)
         except Exception as e:
             print(f"[BROADCAST ERROR] {e}")
+
+        # Forensic scan-log mirror — every broadcast gets logged so the
+        # bundle reflects exactly what the GUI saw.  Heavy/spammy event
+        # types (tool_output_chunk, …) are filtered out inside the proxy.
+        try:
+            from utils.scan_logger import log_ws_event as _slog_ws
+            _slog_ws(self._session_id, event_type, data)
+        except Exception:
+            pass
 
     async def _log_action(
         self,

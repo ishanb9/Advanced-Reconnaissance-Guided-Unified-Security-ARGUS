@@ -1,28 +1,37 @@
 """
-scan_logger.py — Per-session end-to-end scan logger for ARGUS.
+scan_logger.py — Per-session forensic-grade scan logger for ARGUS.
 
-Produces three files per pentest session under ``logs/<session_id>/``:
+Produces a forensic-quality bundle per pentest session under
+``logs/<ts>_<session_id>/``.  Every file is append-only and the writer is
+non-raising so a bad log write never kills a pentest.
 
-1. ``scan.log``        — human-readable text log.  Captures every
-   ``logging.info/warning/error`` from every module (root-logger handler
-   installed for the session's lifetime).  Use this when you want to read
-   the scan like a story.
+Files written
+-------------
+- ``scan.log``            human-readable narrative (filtered: httpx /
+                          urllib3 / httpcore noise routed to ``http.log``)
+- ``http.log``            httpx / urllib3 / httpcore traffic (own file so
+                          it doesn't drown the narrative)
+- ``events.jsonl``        structured event stream (phase / reasoning /
+                          info / session_start / session_end)
+- ``tool_calls.jsonl``    one line per tool invocation (MCP/local/subagent)
+                          with args, duration, exit code, stderr/stdout tails
+- ``llm_calls.jsonl``     one line per LLM invocation (model, latency,
+                          prompt/response sizes, decision summary, raw tail
+                          on parse error)
+- ``subagents.jsonl``     subagent lifecycle (start/end with status,
+                          findings_added, duration, errors)
+- ``findings.jsonl``      one line per finding as it is discovered
+- ``ws_events.jsonl``     mirror of the WebSocket event stream so we can
+                          replay exactly what the GUI saw
+- ``wstg.jsonl``          WSTG phase matrix updates from WebOrchestrator
+- ``errors.log``          plain-text error list with full tracebacks
+- ``intel_final.json``    full intel snapshot at session-end
+- ``findings_final.json`` full findings list at session-end (deduped)
+- ``summary.json``        counters, durations, top tools, phase history,
+                          per-phase budgets
 
-2. ``events.jsonl``    — structured JSON-lines event stream.  One line per
-   high-value event (phase change, finding, error, LLM decision).  Use
-   ``jq`` / Python / grep to filter and analyse.
-
-3. ``tool_calls.jsonl``— one line per tool invocation (MCP or local) with
-   the full command, duration, exit code, stderr tail and truncated
-   stdout tail.  This is what you send back to the developer when a tool
-   "should have found something but didn't".
-
-A summary header is written at session start (target, mode, tool count)
-and a summary footer at session end (counts of tools/findings/errors,
-duration, top errors).
-
-Usage
------
+Public API
+----------
 >>> from utils.scan_logger import start_scan_logger, get_scan_logger, close_scan_logger
 >>> slog = start_scan_logger(session_id, target=target, engagement_type="pentest")
 >>> slog.log_phase("recon", "start")
@@ -31,11 +40,12 @@ Usage
 >>> slog.log_llm("plan_vuln_scan", prompt_chars=2400, response_chars=800,
 ...              latency=5.2, model="glm-5")
 >>> slog.log_finding("CRITICAL", "RCE on 10.0.0.1:80", "Apache 2.4.49 path traversal")
->>> slog.log_error("phase_exploit", exc=RuntimeError("msfconsole not found"))
+>>> slog.log_subagent("SqliSubagent", "start", target="http://x/login")
+>>> slog.log_ws_event("plan_step_update", {...})
+>>> slog.log_wstg_phase({"phase_id":"info","status":"running",...})
+>>> slog.snapshot_intel({...})
+>>> slog.snapshot_findings([{...}, ...])
 >>> close_scan_logger(session_id)
-
-The logger is designed to never raise — any IO/serialisation error is
-swallowed so a bad log write never kills a pentest.
 """
 
 from __future__ import annotations
@@ -65,9 +75,54 @@ _ACTIVE: Dict[str, "ScanLogger"] = {}
 _LOCK = threading.Lock()
 
 
+# WS event types that arrive in such high volume they would drown the
+# ws_events.jsonl file.  Their absence is fine — narrative is preserved
+# in scan.log + tool_calls.jsonl.
+_WS_NOISE_EVENTS = frozenset({
+    "tool_output_chunk",
+    "subagent_tool_line",
+    "subagent_tool_progress",
+    "agent_status_tick",
+    "session_heartbeat",
+    "live_metric",
+    "tool_progress",
+})
+
+
 def _safe_id(session_id: str) -> str:
     """Sanitise session id for use as a directory name."""
     return "".join(c for c in str(session_id) if c.isalnum() or c in ("-", "_")) or "unknown"
+
+
+def _shrink(value: Any, *, max_str: int = 600, max_items: int = 40) -> Any:
+    """Recursively cap string lengths and list/dict size for log payloads.
+
+    Keeps the structure intact so JSON stays valid; just prevents 5 MB
+    log lines when an event carries a giant raw_outputs blob.
+    """
+    try:
+        if value is None or isinstance(value, (bool, int, float)):
+            return value
+        if isinstance(value, str):
+            return value if len(value) <= max_str else (value[: max_str] + "…")
+        if isinstance(value, (list, tuple)):
+            sliced = list(value)[: max_items]
+            extra  = len(value) - len(sliced)
+            out = [_shrink(v, max_str=max_str, max_items=max_items) for v in sliced]
+            if extra > 0:
+                out.append(f"…(+{extra} more)")
+            return out
+        if isinstance(value, dict):
+            out: Dict[str, Any] = {}
+            for i, (k, v) in enumerate(value.items()):
+                if i >= max_items:
+                    out["…"] = f"+{len(value) - max_items} more keys"
+                    break
+                out[str(k)] = _shrink(v, max_str=max_str, max_items=max_items)
+            return out
+        return str(value)[: max_str]
+    except Exception:
+        return None
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -98,6 +153,13 @@ class ScanLogger:
         self._tool_names: Dict[str, int] = {}
         self._phase_history: list[Dict[str, Any]] = []
 
+        # Per-phase budget tracking — how much each phase contributes
+        # (tool calls, llm calls, findings, errors, duration).
+        self._phase_budget: Dict[str, Dict[str, Any]] = {}
+        self._current_phase: Optional[str] = None
+        self._phase_started_ts: float = self._t_monotonic
+        self._phase_start_counters: Dict[str, int] = dict(self.counters)
+
         ts_dir = self.started_at.strftime("%Y%m%d-%H%M%S")
         self.dir = _LOGS_ROOT / f"{ts_dir}_{_safe_id(session_id)}"
         try:
@@ -105,23 +167,63 @@ class ScanLogger:
         except Exception:
             # Fall back to a temp-like location
             self.dir = _LOGS_ROOT
-        self.text_path   = self.dir / "scan.log"
-        self.events_path = self.dir / "events.jsonl"
-        self.tools_path  = self.dir / "tool_calls.jsonl"
-        self.summary_path = self.dir / "summary.json"
+        # Primary text streams
+        self.text_path     = self.dir / "scan.log"
+        self.http_path     = self.dir / "http.log"
+        self.errors_path   = self.dir / "errors.log"
+        # Structured streams (JSON Lines)
+        self.events_path   = self.dir / "events.jsonl"
+        self.tools_path    = self.dir / "tool_calls.jsonl"
+        self.llm_path      = self.dir / "llm_calls.jsonl"
+        self.subagents_path= self.dir / "subagents.jsonl"
+        self.findings_path = self.dir / "findings.jsonl"
+        self.ws_path       = self.dir / "ws_events.jsonl"
+        self.wstg_path     = self.dir / "wstg.jsonl"
+        # End-of-session snapshots
+        self.summary_path        = self.dir / "summary.json"
+        self.intel_final_path    = self.dir / "intel_final.json"
+        self.findings_final_path = self.dir / "findings_final.json"
 
-        # Root-logger handler so EVERY module's logger.info/warning/error
-        # is mirrored into scan.log for the session's lifetime.
+        # ── Root-logger handlers ───────────────────────────────────────
+        # Two FileHandlers are installed for the session's lifetime:
+        #   1. main_handler  → scan.log    (filters httpx / urllib3 / httpcore)
+        #   2. http_handler  → http.log    (only httpx / urllib3 / httpcore)
+        # Without the filter, scan.log is dominated by Ollama POST chatter
+        # and the operator can't see the actual phase / tool / finding
+        # narrative.  See ARGUS log-rev plan.
         fmt = logging.Formatter(
             "%(asctime)s %(levelname)-7s %(name)s — %(message)s",
             datefmt="%H:%M:%S",
         )
+
+        class _NotHTTP(logging.Filter):
+            _NOISE = ("httpx", "httpcore", "urllib3", "asyncio", "anyio")
+            def filter(self, record: logging.LogRecord) -> bool:
+                n = record.name or ""
+                return not any(n == p or n.startswith(p + ".") for p in self._NOISE)
+
+        class _OnlyHTTP(logging.Filter):
+            _NOISE = ("httpx", "httpcore", "urllib3")
+            def filter(self, record: logging.LogRecord) -> bool:
+                n = record.name or ""
+                return any(n == p or n.startswith(p + ".") for p in self._NOISE)
+
         self._file_handler = logging.FileHandler(
             self.text_path, mode="a", encoding="utf-8"
         )
         self._file_handler.setLevel(logging.INFO)
         self._file_handler.setFormatter(fmt)
+        self._file_handler.addFilter(_NotHTTP())
         logging.getLogger().addHandler(self._file_handler)
+
+        self._http_handler = logging.FileHandler(
+            self.http_path, mode="a", encoding="utf-8"
+        )
+        self._http_handler.setLevel(logging.INFO)
+        self._http_handler.setFormatter(fmt)
+        self._http_handler.addFilter(_OnlyHTTP())
+        logging.getLogger().addHandler(self._http_handler)
+
         # Ensure root is at least INFO so our handler actually receives records.
         # Don't lower it below the operator's configured level.
         if logging.getLogger().level > logging.INFO or logging.getLogger().level == logging.NOTSET:
@@ -176,7 +278,22 @@ class ScanLogger:
                 "counters":        self.counters,
                 "top_tools":       tool_top,
                 "phase_history":   self._phase_history,
+                "phase_budget":    list(self._phase_budget.values()),
                 "recent_errors":   self._recent_errors[-50:],
+                "files": {
+                    "scan_log":        str(self.text_path.name),
+                    "http_log":        str(self.http_path.name),
+                    "errors_log":      str(self.errors_path.name),
+                    "events":          str(self.events_path.name),
+                    "tool_calls":      str(self.tools_path.name),
+                    "llm_calls":       str(self.llm_path.name),
+                    "subagents":       str(self.subagents_path.name),
+                    "findings":        str(self.findings_path.name),
+                    "ws_events":       str(self.ws_path.name),
+                    "wstg":            str(self.wstg_path.name),
+                    "intel_final":     str(self.intel_final_path.name),
+                    "findings_final":  str(self.findings_final_path.name),
+                },
             }
             self.summary_path.write_text(
                 json.dumps(summary, indent=2, default=str),
@@ -214,7 +331,12 @@ class ScanLogger:
     # ── Public helpers ─────────────────────────────────────────────────
 
     def log_phase(self, phase: str, status: str, detail: str = "", **extra: Any) -> None:
-        """Phase transition: status in {"start","done","skip","fail"}."""
+        """Phase transition: status in {"start","done","skip","fail"}.
+
+        Tracks per-phase budgets — when a phase ends we record the delta
+        in tool_calls / llm_calls / findings / errors / duration and dump
+        it into ``self._phase_budget`` so ``summary.json`` carries it.
+        """
         self.counters["phase_changes"] += 1
         rec = {
             "phase":  phase,
@@ -225,7 +347,44 @@ class ScanLogger:
         self._phase_history.append(
             {**rec, "ts": datetime.now(timezone.utc).isoformat()}
         )
-        self._append_text(f"[PHASE] {phase.upper():<12} {status:<5}  {detail}")
+
+        # Phase budget bookkeeping
+        if status == "start":
+            self._current_phase = phase
+            self._phase_started_ts = time.monotonic()
+            self._phase_start_counters = dict(self.counters)
+        elif status in ("done", "skip", "fail"):
+            try:
+                dur = time.monotonic() - self._phase_started_ts
+                start = self._phase_start_counters or {}
+                budget = {
+                    "phase":           phase,
+                    "status":          status,
+                    "duration_sec":    round(dur, 2),
+                    "tool_calls":      self.counters["tool_calls"]   - start.get("tool_calls", 0),
+                    "tool_errors":     self.counters["tool_errors"]  - start.get("tool_errors", 0),
+                    "llm_calls":       self.counters["llm_calls"]    - start.get("llm_calls", 0),
+                    "findings":        self.counters["findings"]     - start.get("findings", 0),
+                    "errors":          self.counters["errors"]       - start.get("errors", 0),
+                    "ts":              datetime.now(timezone.utc).isoformat(),
+                }
+                # Keep the most recent budget entry per phase id (a phase can
+                # be re-run; we keep the latest).
+                self._phase_budget[str(phase)] = budget
+                # Append delta line to scan.log so the operator sees it inline
+                self._append_text(
+                    f"[PHASE] {str(phase).upper():<12} {status:<5}  "
+                    f"Δ tool={budget['tool_calls']:<3} llm={budget['llm_calls']:<3} "
+                    f"find={budget['findings']:<3} err={budget['errors']:<3} "
+                    f"in {budget['duration_sec']:>6.1f}s — {detail}"
+                )
+                self._write_event("phase_done", budget)
+            except Exception:
+                pass
+            self._current_phase = None
+            return
+
+        self._append_text(f"[PHASE] {str(phase).upper():<12} {status:<5}  {detail}")
         self._write_event("phase", rec)
 
     def log_tool_call(
@@ -288,44 +447,180 @@ class ScanLogger:
         decision:        str = "",
         reasoning:       str = "",
         parse_error:     bool = False,
+        raw_tail:        str = "",
+        prompt_tail:     str = "",
+        agent:           str = "",
     ) -> None:
-        """Record one LLM invocation (planner / extractor / evaluator)."""
+        """Record one LLM invocation (planner / extractor / evaluator).
+
+        Writes to both ``llm_calls.jsonl`` (structured, per-call) and
+        ``events.jsonl`` (so the unified event stream stays complete).
+        On parse-error, persists the raw response tail so we can debug
+        what the model actually said.
+        """
         self.counters["llm_calls"] += 1
         err_flag = " !" if parse_error else ""
         self._append_text(
             f"[LLM]   {step:<24} {latency:>6.2f}s  "
             f"in={prompt_chars}ch out={response_chars}ch {model}{err_flag}"
+            + (f" agent={agent}" if agent else "")
         )
         if decision:
             self._append_text(f"        └─ decision: {decision[:240]}")
         if reasoning and reasoning != decision:
             self._append_text(f"        └─ reasoning: {reasoning[:240]}")
-        self._write_event("llm", {
+        if parse_error and raw_tail:
+            self._append_text(f"        └─ raw[!]:    {raw_tail[:300]}")
+        rec = {
             "step":           step,
             "model":          model,
+            "agent":          agent,
             "prompt_chars":   prompt_chars,
             "response_chars": response_chars,
             "latency_sec":    round(latency, 3),
             "parse_error":    parse_error,
-            "decision":       decision[:600],
-            "reasoning":      reasoning[:1200],
-        })
+            "decision":       (decision or "")[:600],
+            "reasoning":      (reasoning or "")[:1200],
+            "raw_tail":       (raw_tail or "")[-2000:],
+            "prompt_tail":    (prompt_tail or "")[-1500:],
+            "phase":          self._current_phase or "",
+        }
+        # Per-call dedicated stream
+        self._write_json_line(self.llm_path, rec)
+        # Mirrored into the unified event stream
+        self._write_event("llm", rec)
 
     def log_finding(
         self,
-        severity: str,
-        title:    str,
+        severity: str = "",
+        title:    str = "",
         description: str = "",
         **extra: Any,
     ) -> None:
+        """Record a discovered finding.
+
+        Writes to ``findings.jsonl`` (per-finding) AND ``events.jsonl``.
+        Accepts arbitrary ``**extra`` so callers can attach finding_id,
+        agent, subagent, target, phase, evidence, cves, etc.
+        """
         self.counters["findings"] += 1
-        self._append_text(f"[FIND]  {severity:<8} {title[:140]}")
-        self._write_event("finding", {
-            "severity":    severity,
-            "title":       title,
-            "description": description[:800],
-            **extra,
+        sev = (severity or extra.get("severity") or "").upper()
+        ttl = title or extra.get("title") or ""
+        self._append_text(
+            f"[FIND]  {sev:<8} {(ttl or '')[:140]}"
+            + (f"  ({extra['phase']})" if extra.get("phase") else "")
+        )
+        rec = {
+            "severity":    sev,
+            "title":       ttl,
+            "description": (description or "")[:1200],
+            "phase":       self._current_phase or extra.get("phase", ""),
+            **{k: v for k, v in (extra or {}).items()
+               if k not in ("severity", "title", "description")},
+        }
+        self._write_json_line(self.findings_path, rec)
+        self._write_event("finding", rec)
+
+    # ── New first-class signals ────────────────────────────────────────
+
+    def log_subagent(
+        self,
+        name:        str,
+        status:      str,                # start | end | failed | skipped
+        *,
+        target:      str = "",
+        duration:    float = 0.0,
+        findings_added: int = 0,
+        agent:       str = "",
+        phase:       str = "",
+        notes:       str = "",
+        error:       str = "",
+    ) -> None:
+        """Record a subagent lifecycle event.
+
+        Operators repeatedly ask "did SqliSubagent fire on URL X?" — this
+        method makes the answer one ``grep`` away.
+        """
+        self._append_text(
+            f"[SUB]   {status:<7} {name:<28} on={target[:60]:<60} "
+            + (f"+{findings_added} find  {duration:>6.1f}s" if status != "start" else "")
+            + (f"  err={error[:120]}" if error else "")
+        )
+        self._write_json_line(self.subagents_path, {
+            "name":            name,
+            "status":          status,
+            "target":          target,
+            "duration_sec":    round(duration, 3),
+            "findings_added":  findings_added,
+            "agent":           agent,
+            "phase":           phase or self._current_phase or "",
+            "notes":           (notes or "")[:1200],
+            "error":           (error or "")[:1200],
         })
+        self._write_event("subagent", {
+            "name":   name,
+            "status": status,
+            "target": target,
+            "phase":  phase or self._current_phase or "",
+        })
+
+    def log_ws_event(self, event_type: str, data: Optional[Dict[str, Any]] = None) -> None:
+        """Mirror a WebSocket broadcast so we can replay what the GUI saw.
+
+        High-volume / chunked event types are skipped to keep the file
+        legible.
+        """
+        if event_type in _WS_NOISE_EVENTS:
+            return
+        try:
+            self._write_json_line(self.ws_path, {
+                "type": event_type,
+                "data": _shrink(data, max_str=600, max_items=40),
+            })
+        except Exception:
+            pass
+
+    def log_wstg_phase(self, payload: Dict[str, Any]) -> None:
+        """Mirror a single WSTG phase update from WebOrchestrator.
+
+        ``payload`` is the dict produced by ``PhaseResult.to_dict()`` —
+        we keep the full record so the file IS the WSTG audit trail.
+        """
+        try:
+            self._write_json_line(self.wstg_path, dict(payload or {}))
+            phase_id = (payload or {}).get("phase_id", "?")
+            status   = (payload or {}).get("status",   "?")
+            findings = (payload or {}).get("findings", 0)
+            self._append_text(
+                f"[WSTG]  {phase_id:<10} {status:<7} findings={findings}"
+            )
+        except Exception:
+            pass
+
+    def snapshot_intel(self, intel: Dict[str, Any]) -> None:
+        """Persist the full intel dict to ``intel_final.json``.
+
+        Excludes a few high-volume keys (``raw_outputs``) by default — pass
+        ``intel`` with those stripped if you want them included.
+        """
+        try:
+            self.intel_final_path.write_text(
+                json.dumps(_shrink(intel, max_str=4000, max_items=200),
+                           indent=2, default=str),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+
+    def snapshot_findings(self, findings: list) -> None:
+        """Persist the full final findings list to ``findings_final.json``."""
+        try:
+            self.findings_final_path.write_text(
+                json.dumps(findings, indent=2, default=str),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
 
     def log_error(
         self,
@@ -343,6 +638,7 @@ class ScanLogger:
             "where":   where,
             "type":    err_type,
             "message": err_msg,
+            "phase":   self._current_phase or extra.get("phase", ""),
             **extra,
         }
         self._recent_errors.append(rec)
@@ -351,6 +647,21 @@ class ScanLogger:
             for line in tb.splitlines()[-12:]:
                 self._append_text(f"        {line}")
         self._write_event("error", {**rec, "traceback": tb[:4000]})
+
+        # Dedicated errors.log so a deep traceback list is reviewable
+        # without grepping through the noisy main scan log.
+        try:
+            with self.errors_path.open("a", encoding="utf-8") as f:
+                ts = datetime.now(timezone.utc).isoformat()
+                f.write(
+                    f"\n{'─' * 78}\n"
+                    f"[{ts}]  where={where}  phase={rec['phase']}  type={err_type}\n"
+                    f"message: {err_msg}\n"
+                )
+                if tb and tb.strip() != "NoneType: None":
+                    f.write(tb if tb.endswith("\n") else tb + "\n")
+        except Exception:
+            pass
 
     def log_reasoning(self, step: str, reasoning: str = "", decision: str = "", next_action: str = "") -> None:
         """Mirror of master_agent.emit_reasoning — human-readable."""
@@ -377,11 +688,14 @@ class ScanLogger:
         try:
             self._write_footer()
         finally:
-            try:
-                logging.getLogger().removeHandler(self._file_handler)
-                self._file_handler.close()
-            except Exception:
-                pass
+            for h in (getattr(self, "_file_handler", None),
+                      getattr(self, "_http_handler", None)):
+                try:
+                    if h is not None:
+                        logging.getLogger().removeHandler(h)
+                        h.close()
+                except Exception:
+                    pass
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -454,3 +768,23 @@ def log_info(session_id: Optional[str], *args: Any, **kwargs: Any) -> None:
 
 def log_reasoning(session_id: Optional[str], *args: Any, **kwargs: Any) -> None:
     _proxy(session_id, "log_reasoning", *args, **kwargs)
+
+
+def log_subagent(session_id: Optional[str], *args: Any, **kwargs: Any) -> None:
+    _proxy(session_id, "log_subagent", *args, **kwargs)
+
+
+def log_ws_event(session_id: Optional[str], *args: Any, **kwargs: Any) -> None:
+    _proxy(session_id, "log_ws_event", *args, **kwargs)
+
+
+def log_wstg_phase(session_id: Optional[str], *args: Any, **kwargs: Any) -> None:
+    _proxy(session_id, "log_wstg_phase", *args, **kwargs)
+
+
+def snapshot_intel(session_id: Optional[str], *args: Any, **kwargs: Any) -> None:
+    _proxy(session_id, "snapshot_intel", *args, **kwargs)
+
+
+def snapshot_findings(session_id: Optional[str], *args: Any, **kwargs: Any) -> None:
+    _proxy(session_id, "snapshot_findings", *args, **kwargs)

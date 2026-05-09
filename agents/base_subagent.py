@@ -91,14 +91,16 @@ def _kill_proc_tree(proc) -> None:
 # Per-session scan logger proxies — safe no-op if no active session logger.
 try:
     from utils.scan_logger import (
-        log_finding as _slog_finding,
-        log_error   as _slog_error,
+        log_finding   as _slog_finding,
+        log_error     as _slog_error,
+        log_subagent  as _slog_subagent,
         log_info    as _slog_info,
     )
 except Exception:  # pragma: no cover
-    def _slog_finding(*a, **kw): pass
-    def _slog_error(*a, **kw):   pass
-    def _slog_info(*a, **kw):    pass
+    def _slog_finding(*a, **kw):  pass
+    def _slog_error(*a, **kw):    pass
+    def _slog_subagent(*a, **kw): pass
+    def _slog_info(*a, **kw):     pass
 
 # ── Global subagent registry — allows agent_server to cancel by name ──────────
 _SUBAGENT_REGISTRY: dict[str, "BaseSubagent"] = {}
@@ -982,11 +984,25 @@ class BaseSubagent(ABC):
         """
         await self._emit_start()
         start_time = time.monotonic()
+        # ── Forensic scan-log: subagent start ────────────────────────────
+        try:
+            _slog_subagent(
+                self.session_id,
+                self.SUBAGENT_NAME or self.__class__.__name__,
+                "start",
+                target=str(self.target or ""),
+                agent=getattr(self, "AGENT_NAME", "") or "",
+            )
+        except Exception:
+            pass
+        # Pre-count findings so we can emit a delta on completion
+        _findings_at_start = len(self._findings)
         result = SubagentResult(
             session_id=self.session_id,
             subagent_name=self.SUBAGENT_NAME,
             target=self.target,
         )
+        _exec_error: str = ""
         try:
             # Pre-run RAG lookup — gives subagents tool command examples
             query = f"{self.SUBAGENT_NAME} {self.target} techniques commands"
@@ -1006,6 +1022,7 @@ class BaseSubagent(ABC):
                     result.tool_outputs[tool] = output
         except Exception as exc:  # noqa: BLE001
             error_msg = f"{type(exc).__name__}: {exc}"
+            _exec_error = error_msg
             logger.exception("Subagent %s raised an error", self.SUBAGENT_NAME)
             result.error = error_msg
             result.findings = self._findings
@@ -1015,6 +1032,20 @@ class BaseSubagent(ABC):
             result.duration_seconds = time.monotonic() - start_time
             if self._http_client and not self._http_client.is_closed:
                 await self._http_client.aclose()
+            # ── Forensic scan-log: subagent end ───────────────────────
+            try:
+                _slog_subagent(
+                    self.session_id,
+                    self.SUBAGENT_NAME or self.__class__.__name__,
+                    "failed" if _exec_error else "end",
+                    target=str(self.target or ""),
+                    duration=float(result.duration_seconds or 0.0),
+                    findings_added=max(0, len(result.findings) - _findings_at_start),
+                    agent=getattr(self, "AGENT_NAME", "") or "",
+                    error=_exec_error,
+                )
+            except Exception:
+                pass
 
         await self._store_result(result)
         await self._emit_complete(result)
