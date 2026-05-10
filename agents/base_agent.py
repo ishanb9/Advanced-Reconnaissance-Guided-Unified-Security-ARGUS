@@ -109,6 +109,10 @@ except ImportError:
     _AUTO_INGEST_AVAILABLE = False
 
 # ── RAG Knowledge Base (shared by all agents) ─────────────────────────────────
+# v3 retriever — Tier-0 curated playbooks → Tier-1 hybrid (vector + BM25) →
+# Tier-2 HyDE → Tier-3 BGE-reranker + MMR → Tier-4 outcome/recency boost.
+# Falls back to the legacy ``knowledge_base`` module when v3 isn't importable
+# (e.g. air-gapped install missing pyyaml or sentence-transformers).
 try:
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "knowledge"))
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), "knowledge"))
@@ -117,10 +121,77 @@ try:
 except ImportError:
     _KB_AVAILABLE = False
 
+try:
+    # New retriever lives at ``knowledge/retriever/`` — see PROGRESS.md.
+    from knowledge.retriever import retrieve as _retrieve_v3
+    _RETRIEVER_V3 = True
+except Exception:   # pragma: no cover — silent best-effort
+    _RETRIEVER_V3 = False
+
+
+def _intel_for_retriever(self_obj) -> Dict:
+    """Best-effort extraction of an intel dict from any agent ``self``.
+
+    The retriever uses intel for Tier-0 playbook trigger matching and
+    Tier-1 metadata pre-filtering.  Most agents carry intel via the
+    master-agent reference (``self._master._intel``); subagents stash
+    it in ``self._intel``; some have neither — we tolerate all three.
+    """
+    for attr_chain in (
+        ("_intel",),
+        ("_master", "_intel"),
+        ("master_agent", "_intel"),
+        ("intel",),
+    ):
+        cur = self_obj
+        ok = True
+        for a in attr_chain:
+            cur = getattr(cur, a, None)
+            if cur is None:
+                ok = False
+                break
+        if ok and isinstance(cur, dict):
+            return cur
+    return {}
+
+
+async def _kb_context_async(self_obj, query: str, *,
+                            phase: Optional[str] = None,
+                            outcome: Optional[str] = None,
+                            chunk_type_filter: Optional[str] = None,
+                            top_k: int = 4) -> str:
+    """Async retrieval — the preferred entry point.
+
+    When available, uses the v3 multi-tier retriever and passes the agent's
+    own ``think`` coroutine as the LLM hook for HyDE + self-query.  Falls
+    back to the legacy ``_kb_context`` synchronous shim on any error.
+    """
+    if _RETRIEVER_V3:
+        try:
+            llm = getattr(self_obj, "think", None)
+            res = await _retrieve_v3(
+                query,
+                intel = _intel_for_retriever(self_obj),
+                top_k = top_k,
+                phase = phase,
+                llm   = llm if callable(llm) else None,
+            )
+            if res.text:
+                return res.text
+        except Exception:
+            pass
+    return _kb_context(query, phase=phase, outcome_filter=outcome,
+                       chunk_type_filter=chunk_type_filter, top_k=top_k)
+
 
 def _kb_context(query: str, phase: str = None, outcome: str = None,
                 phase_filter: str = None, outcome_filter: str = None,
                 chunk_type_filter: str = None, top_k: int = 4) -> str:
+    """Synchronous legacy shim — kept for callers that can't await.
+
+    Always returns a string (empty if nothing useful).  Prefer
+    ``_kb_context_async`` from new call sites.
+    """
     if not _KB_AVAILABLE:
         return ""
     try:

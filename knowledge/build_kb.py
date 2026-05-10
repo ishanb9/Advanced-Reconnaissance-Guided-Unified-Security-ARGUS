@@ -1,29 +1,26 @@
 #!/usr/bin/env python3
 """
-ingest.py — Enhanced ingestion pipeline for the Kali Pentest Platform RAG v2
+build_kb.py — Build / refresh the ARGUS RAG knowledge base.
 
-Improvements over v1:
-  - Structure-aware chunking (respects headers, code blocks, procedures, commands)
-  - Chunk type classification (command/script/procedure/technique/tip/finding/tool_usage)
-  - MHTML support (.mhtml — HackTheBox writeup format from 0xdf)
-  - Incremental manifest: only re-ingest new or modified files
-  - MITRE ATT&CK TTP extraction (T#### patterns)
-  - Expanded tool list (130+ tools), attack patterns (50+), service patterns (50+)
-  - Section title preserved in chunk metadata for better context
-  - Configurable chunk sizes per content type
+Drop ANY supported files into ``knowledge/data/`` (PDFs, markdown, YAML
+playbooks, HTML, text, JSON — any subfolder structure).  Then run:
 
-Usage:
-  python3 ingest.py /path/to/writeups/          # ingest (incremental by default)
-  python3 ingest.py /path/to/single.pdf         # ingest one file
-  python3 ingest.py /path/to/dir --force        # re-ingest all files ignoring manifest
-  python3 ingest.py /path/to/dir --stats        # just print current stats
-  python3 ingest.py /path/to/dir --reset        # wipe KB and re-ingest everything
-  python3 ingest.py /path/to/dir --search QUERY # test a search query
+    python knowledge/build_kb.py                # incremental — only changed files
+    python knowledge/build_kb.py --reset        # wipe and rebuild from scratch
+    python knowledge/build_kb.py --stats        # print KB stats and exit
+    python knowledge/build_kb.py --search "..." # test a query against the live KB
+    python knowledge/build_kb.py /custom/path   # ingest a different folder
 
-Supports: .pdf, .md, .markdown, .html, .htm, .mhtml, .txt, .json, .yaml, .yml
+What lives where:
+    knowledge/data/                       <- your source content (anything)
+    knowledge/data/playbooks/*.yml        <- Tier-0 playbooks (NOT embedded —
+                                             loaded directly at query time)
+    knowledge/db/                         <- built ChromaDB vector store
+
+Supported types: .pdf .md .markdown .html .htm .mhtml .txt .json .yaml .yml
 
 Install once:
-  pip install chromadb sentence-transformers pypdf beautifulsoup4 tqdm lxml
+    pip install -r requirements.txt
 """
 
 import os
@@ -43,7 +40,7 @@ logging.basicConfig(
     format="%(asctime)s  %(levelname)-8s  %(message)s",
     datefmt="%H:%M:%S",
 )
-logger = logging.getLogger("ingest")
+logger = logging.getLogger("build_kb")
 
 # ── Chunk size config (in approximate words) ────────────────────────────────────
 CHUNK_SIZES = {
@@ -61,8 +58,15 @@ CHUNK_SIZES = {
 CHUNK_OVERLAP = 80      # Word overlap between consecutive chunks (same type)
 MIN_CHUNK_LEN = 60      # Minimum chars for a chunk to be stored
 
-# ── Manifest for incremental ingestion ──────────────────────────────────────────
-MANIFEST_FILE = os.path.join(os.path.dirname(__file__), "chroma_db", "ingest_manifest.json")
+# ── Default paths ───────────────────────────────────────────────────────────────
+# All RAG data lives in ``knowledge/data/`` (any subfolder structure the user
+# wants).  The built vector store lives in ``knowledge/db/``.
+_HERE        = os.path.dirname(__file__)
+DEFAULT_DATA = os.path.join(_HERE, "data")
+DEFAULT_DB   = os.path.join(_HERE, "db")
+
+# Manifest for incremental ingestion — stored alongside the DB.
+MANIFEST_FILE = os.path.join(DEFAULT_DB, "ingest_manifest.json")
 
 
 def load_manifest() -> Dict[str, Any]:
@@ -102,6 +106,28 @@ def needs_ingest(path: str, manifest: Dict[str, Any], force: bool = False) -> bo
     if not rec:
         return True
     return rec.get("hash") != file_hash(path)
+
+
+def _is_playbook_yaml(path: str) -> bool:
+    """Detect ARGUS-format playbook YAMLs without a full YAML parse.
+
+    A playbook is a YAML file with all three top-level keys:
+        id:        <string>
+        trigger:   {...}
+        steps:     [...]
+
+    Used by ingest_directory() to skip these files — they are consumed
+    by the deterministic Tier-0 retriever, not embedded.
+    """
+    if not path.lower().endswith((".yml", ".yaml")):
+        return False
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            head = f.read(4096)
+    except Exception:
+        return False
+    head = "\n" + head
+    return "\nid:" in head and "\ntrigger:" in head and "\nsteps:" in head
 
 
 # ── Metadata extraction patterns ────────────────────────────────────────────────
@@ -1052,10 +1078,23 @@ def ingest_directory(
         manifest = {}
 
     paths = []
+    playbook_skipped = 0
     for root, _, files in os.walk(directory):
         for fname in files:
-            if Path(fname).suffix.lower() in EXTRACTORS:
-                paths.append(os.path.join(root, fname))
+            if Path(fname).suffix.lower() not in EXTRACTORS:
+                continue
+            full = os.path.join(root, fname)
+            # Playbook YAMLs are loaded deterministically by the Tier-0
+            # retriever (knowledge/retriever/playbook_lookup.py) — do NOT
+            # embed them, that would dilute results with their own keywords.
+            if _is_playbook_yaml(full):
+                playbook_skipped += 1
+                continue
+            paths.append(full)
+
+    if playbook_skipped:
+        logger.info(f"Skipped {playbook_skipped} playbook YAML(s) — "
+                    f"loaded directly by Tier-0 retriever, not embedded")
 
     # Filter to only files that need ingesting
     to_ingest = [p for p in paths if needs_ingest(p, manifest, force=force)]
@@ -1090,19 +1129,24 @@ def ingest_directory(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Ingest CTF writeups and pentest content into the RAG knowledge base",
+        description="Build / refresh the ARGUS RAG knowledge base.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Examples:
-  python3 ingest.py ./data/                   # incremental ingest of data folder
-  python3 ingest.py ./data/ --force           # re-ingest all files
-  python3 ingest.py report.pdf                # ingest single file
-  python3 ingest.py ./data/ --stats           # show KB statistics
-  python3 ingest.py ./data/ --search "apache exploit"  # test search
-  python3 ingest.py ./data/ --reset           # wipe and re-ingest
+Quick start:
+  Drop any supported files (PDF / MD / TXT / YAML / HTML / JSON) into
+  knowledge/data/ -- any subfolder structure is fine -- then run:
+
+    python knowledge/build_kb.py            # incremental: only changed files
+    python knowledge/build_kb.py --reset    # wipe & rebuild from scratch
+    python knowledge/build_kb.py --stats    # print current KB stats
+    python knowledge/build_kb.py --search "apache rce"
+
+Playbook YAMLs (id + trigger + steps schema) live in knowledge/data/playbooks/
+and are loaded directly by the retriever -- they are NOT embedded.
         """
     )
-    parser.add_argument("path",     nargs="?",         help="File or directory to ingest")
+    parser.add_argument("path",     nargs="?", default=DEFAULT_DATA,
+                        help=f"File or directory to ingest (default: {DEFAULT_DATA})")
     parser.add_argument("--stats",  action="store_true", help="Print knowledge base stats and exit")
     parser.add_argument("--reset",  action="store_true", help="Wipe KB and re-ingest from scratch")
     parser.add_argument("--force",  action="store_true", help="Re-ingest all files (ignore manifest)")
@@ -1135,13 +1179,13 @@ Examples:
             os.remove(MANIFEST_FILE)
         args.force = True  # After reset, force re-ingest
 
-    if not args.path:
-        parser.print_help()
-        return
-
     target = os.path.expanduser(args.path)
     if not os.path.exists(target):
-        logger.error(f"Path does not exist: {target}")
+        logger.error(
+            f"Path does not exist: {target}\n"
+            f"Drop your PDFs / markdown / YAMLs / text files into "
+            f"{DEFAULT_DATA}/ and re-run."
+        )
         sys.exit(1)
 
     logger.info("Loading embedding model (first run downloads ~80 MB)...")
@@ -1181,6 +1225,1069 @@ Examples:
         print("\nSample search: 'apache exploit shell'")
         sample = kb_module.search("apache exploit shell", top_k=2)
         print(sample[:600] if sample else "(no results)")
+
+
+# ════════════════════════════════════════════════════════════════════════════
+#                         R E T R I E V A L   E N G I N E
+# ════════════════════════════════════════════════════════════════════════════
+#
+# Everything below this line is the QUERY-time engine consumed by the agents
+# (``agents/base_agent._kb_context_async`` calls ``retrieve()`` from here).
+#
+# It is intentionally co-located with the ingest code so users see ONE file
+# in ``knowledge/`` instead of a maze of submodules.  The two halves are
+# logically independent — ingest writes to ChromaDB, retrieval reads.
+#
+# Pipeline (all tiers in one place):
+#
+#   Tier 0  ── Curated playbook lookup (YAML, deterministic intel match)
+#   Tier 1  ── Hybrid retrieval (dense vectors + BM25 / FTS5 + RRF fusion)
+#   Tier 2  ── HyDE query rewrite (LLM-driven, optional)
+#   Tier 3  ── Cross-encoder rerank (BGE-reranker-v2-m3) + MMR diversity
+#   Tier 4  ── Outcome / recency scoring boost
+#
+# Agents call ``retrieve(query, intel=..., llm=agent.think)`` and get back a
+# ``RetrievalResult`` with playbooks + chunks + a prompt-ready ``.text``.
+# ════════════════════════════════════════════════════════════════════════════
+
+import math
+import sqlite3
+import unicodedata
+from dataclasses import dataclass, field
+from typing import Awaitable, Callable, Iterable, Sequence
+
+# ── Retrieval constants ─────────────────────────────────────────────────────
+
+_RAG_DATA_DIR    = Path(DEFAULT_DATA)
+_RAG_LEGACY_PB_DIR = Path(_HERE) / "playbooks"     # back-compat for old layouts
+_RAG_DB_DIR      = Path(DEFAULT_DB)
+_RAG_DB_FILE     = _RAG_DB_DIR / "chroma.sqlite3"
+
+_RAG_COLLECTION  = "pentest_knowledge"
+_RAG_EMBED_MODEL = os.environ.get("KB_EMBED_MODEL",  "BAAI/bge-m3")
+_RAG_RERANK_MODEL = os.environ.get(
+    "KB_RERANK_MODEL", "BAAI/bge-reranker-v2-m3",
+)
+_RAG_RERANK_FALLBACK = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+_RAG_RRF_K       = 60         # Cormack et al. recommend k=60
+_RAG_MMR_LAMBDA  = float(os.environ.get("KB_MMR_LAMBDA", "0.65"))
+
+
+# ── Public types ────────────────────────────────────────────────────────────
+
+
+@dataclass
+class Playbook:
+    """A single curated YAML playbook (Tier 0)."""
+    id:               str
+    title:            str
+    phase:            str
+    mitre:            List[str]
+    trigger:          Dict[str, Any]
+    keywords:         List[str]
+    preconditions:    List[str]
+    steps:            List[Dict[str, Any]]
+    expected_outcome: str
+    fallbacks:        List[str]
+    references:       List[str]
+    raw:              Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class PlaybookHit:
+    playbook:   Playbook
+    relevance:  float
+    matched_on: List[str] = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id":               self.playbook.id,
+            "title":            self.playbook.title,
+            "phase":            self.playbook.phase,
+            "mitre":            self.playbook.mitre,
+            "relevance":        round(self.relevance, 3),
+            "matched_on":       self.matched_on,
+            "trigger":          self.playbook.trigger,
+            "steps":            self.playbook.steps,
+            "expected_outcome": self.playbook.expected_outcome,
+            "fallbacks":        self.playbook.fallbacks,
+            "references":       self.playbook.references,
+        }
+
+    def to_prompt_block(self) -> str:
+        pb = self.playbook
+        lines = [
+            f"[PLAYBOOK · {pb.id}]  {pb.title}  ({self.relevance:.2f})",
+            f"  matched: {', '.join(self.matched_on) or '(generic)'}",
+        ]
+        if pb.preconditions:
+            lines.append(f"  pre: {'; '.join(pb.preconditions)}")
+        for i, st in enumerate(pb.steps[:8], 1):
+            lines.append(f"  {i}. {st.get('tool', '?')} :: {st.get('cmd', '')}")
+            if st.get("why"):
+                lines.append(f"     why: {st['why']}")
+        if pb.expected_outcome:
+            lines.append(f"  expect: {pb.expected_outcome}")
+        if pb.fallbacks:
+            lines.append("  fallbacks:")
+            for fb in pb.fallbacks[:3]:
+                lines.append(f"    - {fb}")
+        return "\n".join(lines)
+
+
+@dataclass
+class RetrievedChunk:
+    """One chunk returned by hybrid retrieval (Tier 1)."""
+    text:          str
+    source_file:   str
+    chunk_index:   Any        = 0
+    chunk_type:    str        = ""
+    phase:         str        = ""
+    outcome:       str        = ""
+    tools:         List[str]  = field(default_factory=list)
+    cves:          List[str]  = field(default_factory=list)
+    mitre_ttps:    List[str]  = field(default_factory=list)
+    attack_types:  List[str]  = field(default_factory=list)
+    services:      List[str]  = field(default_factory=list)
+    box_name:      str        = ""
+    os:            str        = ""
+    section_title: str        = ""
+    relevance:     float      = 0.0
+    sources_hit:   List[str]  = field(default_factory=list)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "text":          self.text,
+            "source_file":   self.source_file,
+            "chunk_index":   self.chunk_index,
+            "chunk_type":    self.chunk_type,
+            "phase":         self.phase,
+            "outcome":       self.outcome,
+            "tools":         self.tools,
+            "cves":          self.cves,
+            "mitre_ttps":    self.mitre_ttps,
+            "attack_types":  self.attack_types,
+            "services":      self.services,
+            "box_name":      self.box_name,
+            "os":            self.os,
+            "section_title": self.section_title,
+            "relevance":     round(float(self.relevance), 3),
+            "sources_hit":   self.sources_hit,
+        }
+
+    def to_prompt_block(self) -> str:
+        tags: List[str] = []
+        if self.tools:        tags.append("tools: " + ", ".join(self.tools[:6]))
+        if self.cves:         tags.append("cves: "  + ", ".join(self.cves[:3]))
+        if self.mitre_ttps:   tags.append("mitre: " + ", ".join(self.mitre_ttps[:4]))
+        if self.attack_types: tags.append("tech: "  + ", ".join(self.attack_types[:4]))
+
+        head = f"[CHUNK · {self.source_file}"
+        if self.box_name:      head += f" · {self.box_name}"
+        if self.section_title: head += f" § {self.section_title[:60]}"
+        if self.phase:         head += f" · {self.phase}"
+        head += f"]  ({self.relevance:.2f}, via {','.join(self.sources_hit) or 'dense'})"
+
+        body = (self.text or "").strip()
+        max_body = 800 if self.chunk_type in ("command", "script", "procedure") else 600
+        if len(body) > max_body:
+            body = body[: max_body - 1] + "…"
+
+        out = [head]
+        if tags:
+            out.append("  " + " | ".join(tags))
+        out.append("  " + body.replace("\n", "\n  "))
+        return "\n".join(out)
+
+
+@dataclass
+class RetrievalResult:
+    """Everything an agent needs from a single retrieval call."""
+    query:            str
+    playbooks:        List[PlaybookHit]    = field(default_factory=list)
+    chunks:           List[RetrievedChunk] = field(default_factory=list)
+    used_hyde:        bool                 = False
+    inferred_filters: Dict[str, Any]       = field(default_factory=dict)
+    text:             str                  = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "query":            self.query,
+            "playbooks":        [p.to_dict() for p in self.playbooks],
+            "chunks":           [c.to_dict() for c in self.chunks],
+            "used_hyde":        self.used_hyde,
+            "inferred_filters": self.inferred_filters,
+            "text":             self.text,
+        }
+
+
+# ── Tier 0: Playbook lookup ─────────────────────────────────────────────────
+
+
+_RAG_PB_CACHE: Optional[List[Playbook]] = None
+_RAG_TOKEN_RE = re.compile(r"[a-z0-9_.\-]+")
+
+
+def _rag_norm(s: Any) -> str:
+    return unicodedata.normalize("NFKC", str(s or "")).strip().lower()
+
+
+def _rag_tokens(s: Any) -> List[str]:
+    return _RAG_TOKEN_RE.findall(_rag_norm(s))
+
+
+def _rag_playbook_paths() -> List[Path]:
+    """Find every YAML in data/ that has the playbook schema."""
+    out: List[Path] = []
+    for root in (_RAG_DATA_DIR, _RAG_LEGACY_PB_DIR):
+        if not root.exists():
+            continue
+        for path in root.rglob("*.y*ml"):
+            if not path.is_file():
+                continue
+            try:
+                head = path.read_text(encoding="utf-8", errors="ignore")[:4096]
+            except Exception:
+                continue
+            if ("\nid:"      in "\n" + head
+                    and "\ntrigger:" in "\n" + head
+                    and "\nsteps:"   in "\n" + head):
+                out.append(path)
+    return sorted(set(out))
+
+
+def _rag_load_yaml(path: Path) -> Optional[Dict[str, Any]]:
+    try:
+        import yaml  # type: ignore
+        with path.open("r", encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+        return data if isinstance(data, dict) else None
+    except Exception as exc:
+        logger.warning("yaml load failed for %s: %s", path.name, exc)
+        return None
+
+
+def _rag_coerce_playbook(data: Dict[str, Any], path: Path) -> Optional[Playbook]:
+    if not isinstance(data, dict):
+        return None
+    return Playbook(
+        id=str(data.get("id") or path.stem),
+        title=str(data.get("title") or data.get("id") or path.stem),
+        phase=str(data.get("phase") or "general"),
+        mitre=list(data.get("mitre") or []),
+        trigger=dict(data.get("trigger") or {}),
+        keywords=[str(k).lower() for k in (data.get("keywords") or [])],
+        preconditions=list(data.get("preconditions") or []),
+        steps=[dict(s) for s in (data.get("steps") or [])],
+        expected_outcome=str(data.get("expected_outcome") or ""),
+        fallbacks=list(data.get("fallbacks") or []),
+        references=list(data.get("references") or []),
+        raw=data,
+    )
+
+
+def load_playbooks(force_reload: bool = False) -> List[Playbook]:
+    """Load and cache every playbook YAML found under ``knowledge/data/``."""
+    global _RAG_PB_CACHE
+    if _RAG_PB_CACHE is not None and not force_reload:
+        return _RAG_PB_CACHE
+    out: List[Playbook] = []
+    for path in _rag_playbook_paths():
+        data = _rag_load_yaml(path)
+        if not data:
+            continue
+        pb = _rag_coerce_playbook(data, path)
+        if pb:
+            out.append(pb)
+    _RAG_PB_CACHE = out
+    logger.info("Loaded %d playbooks from %s", len(out), _RAG_DATA_DIR)
+    return out
+
+
+def has_playbooks() -> bool:
+    return bool(_rag_playbook_paths())
+
+
+def _rag_intel_haystack(intel: Dict[str, Any]) -> Dict[str, List[str]]:
+    h: Dict[str, List[str]] = {
+        "services": [], "ports": [], "technologies": [], "cves": [],
+        "os": [], "mitre": [], "phase": [], "keywords": [],
+    }
+    if not intel:
+        return h
+    for key, dest in (("services", "services"),
+                      ("technologies", "technologies")):
+        v = intel.get(key)
+        if isinstance(v, dict):
+            for k in v.keys():
+                h[dest].append(_rag_norm(k))
+        elif isinstance(v, list):
+            for it in v:
+                if isinstance(it, dict):
+                    for kk in ("name", "service", "product"):
+                        if it.get(kk):
+                            h[dest].append(_rag_norm(it[kk]))
+                else:
+                    h[dest].append(_rag_norm(it))
+    for p in (intel.get("open_ports") or intel.get("ports") or []):
+        h["ports"].append(_rag_norm(p))
+    for c in (intel.get("cves") or []):
+        h["cves"].append(_rag_norm(c))
+    if intel.get("os_guess"): h["os"].append(_rag_norm(intel["os_guess"]))
+    if intel.get("os"):       h["os"].append(_rag_norm(intel["os"]))
+    for t in (intel.get("mitre_ttps") or []):
+        h["mitre"].append(_rag_norm(t))
+    if intel.get("phase"):
+        h["phase"].append(_rag_norm(intel["phase"]))
+    blob: List[str] = []
+    for k in ("target_url", "target_host", "target_kind", "target",
+              "engagement_type", "summary"):
+        if intel.get(k):
+            blob.append(_rag_norm(intel[k]))
+    h["keywords"] = blob
+    return h
+
+
+def _rag_overlap(needles: Iterable[str], haystack: List[str],
+                 *, numeric: bool = False) -> List[str]:
+    out: List[str] = []
+    if numeric:
+        hset = {_rag_norm(h) for h in haystack if h is not None}
+        for n in needles:
+            k = _rag_norm(n)
+            if k and k in hset:
+                out.append(k)
+        return out
+    hay_tokens = [set(_rag_tokens(h)) for h in haystack if h]
+    seen = set()
+    for n in needles:
+        nn = _rag_norm(n)
+        if not nn or nn in seen:
+            continue
+        ntok = set(_rag_tokens(nn))
+        if not ntok:
+            continue
+        for ht in hay_tokens:
+            if not ht: continue
+            if ntok == ht:
+                out.append(nn); seen.add(nn); break
+            inter, union = ntok & ht, ntok | ht
+            if inter and len(inter) / max(1, len(union)) >= 0.5:
+                out.append(nn); seen.add(nn); break
+            if ntok.issubset(ht) or ht.issubset(ntok):
+                out.append(nn); seen.add(nn); break
+    return out
+
+
+def _rag_trigger_score(pb: Playbook, intel: Dict[str, List[str]],
+                       qtokens: List[str]) -> Tuple[float, List[str]]:
+    matched: List[str] = []
+    score = 0.0
+    trig = pb.trigger or {}
+
+    cve_match = _rag_overlap(trig.get("cves") or [], intel["cves"])
+    if cve_match:
+        score += 1.00 * len(cve_match);  matched.append(f"cves:{','.join(cve_match)}")
+    svc_match = _rag_overlap(trig.get("services") or [], intel["services"])
+    if svc_match:
+        score += 0.40 * len(svc_match);  matched.append(f"services:{','.join(svc_match)}")
+    port_match = _rag_overlap([str(p) for p in (trig.get("ports") or [])],
+                              intel["ports"], numeric=True)
+    if port_match:
+        score += 0.30 * len(port_match); matched.append(f"ports:{','.join(port_match)}")
+    tech_match = _rag_overlap(trig.get("technologies") or [], intel["technologies"])
+    if tech_match:
+        score += 0.45 * len(tech_match); matched.append(f"tech:{','.join(tech_match)}")
+    os_match = _rag_overlap(trig.get("os_any") or [], intel["os"])
+    if os_match:
+        score += 0.20 * len(os_match);   matched.append(f"os:{','.join(os_match)}")
+    mitre_match = _rag_overlap(pb.mitre or [], intel["mitre"])
+    if mitre_match:
+        score += 0.15 * len(mitre_match); matched.append(f"mitre:{','.join(mitre_match)}")
+
+    if qtokens and pb.keywords:
+        kw_tokens: set = set()
+        for kw in pb.keywords:
+            kw_tokens.update(_rag_tokens(kw))
+        overlap = set(qtokens) & kw_tokens
+        if overlap:
+            score += 0.20 * min(len(overlap), 5)
+            matched.append(f"kw:{','.join(sorted(overlap))[:60]}")
+
+    if pb.phase and intel["phase"] and pb.phase == intel["phase"][0]:
+        score += 0.10
+        matched.append(f"phase:{pb.phase}")
+
+    # Specificity gate — generic-only matches get demoted 0.35× so they can't
+    # crowd out playbooks that hit a CVE / tech / keyword signal.
+    has_specific = bool(cve_match or tech_match or mitre_match)
+    has_keyword  = any(m.startswith("kw:") for m in matched)
+    if score > 0 and not has_specific and not has_keyword:
+        score *= 0.35
+
+    return score, matched
+
+
+def lookup_playbooks(query: str, *,
+                     intel: Optional[Dict[str, Any]] = None,
+                     top_k: int = 6,
+                     min_score: float = 0.20) -> List[PlaybookHit]:
+    pbs = load_playbooks()
+    if not pbs:
+        return []
+    qtokens = _rag_tokens(query)
+    intel_h = _rag_intel_haystack(intel or {})
+    hits: List[PlaybookHit] = []
+    for pb in pbs:
+        s, why = _rag_trigger_score(pb, intel_h, qtokens)
+        if s < min_score:
+            continue
+        hits.append(PlaybookHit(playbook=pb, relevance=min(1.0, s / 2.0),
+                                matched_on=why))
+    hits.sort(key=lambda h: h.relevance, reverse=True)
+    return hits[:top_k]
+
+
+# ── Tier 1: Hybrid retrieval (dense vectors + BM25) ─────────────────────────
+
+
+_RAG_EMBEDDER  = None
+_RAG_COLL      = None
+_RAG_RERANKER  = None
+_RAG_RERANKER_LOADED = False
+_RAG_FTS_TOKEN_RE = re.compile(r"[a-z0-9_.\-/]+")
+
+
+def has_vector_store() -> bool:
+    if not _RAG_DB_FILE.exists():
+        return False
+    try:
+        con = sqlite3.connect(f"file:{_RAG_DB_FILE.as_posix()}?mode=ro", uri=True)
+        try:
+            (n,) = con.execute("SELECT COUNT(*) FROM embeddings").fetchone()
+            return n > 0
+        finally:
+            con.close()
+    except Exception:
+        return False
+
+
+def _rag_get_embedder():
+    global _RAG_EMBEDDER
+    if _RAG_EMBEDDER is None:
+        from sentence_transformers import SentenceTransformer  # type: ignore
+        logger.info("loading embedder: %s", _RAG_EMBED_MODEL)
+        _RAG_EMBEDDER = SentenceTransformer(_RAG_EMBED_MODEL)
+        if "bge-m3" in _RAG_EMBED_MODEL:
+            _RAG_EMBEDDER.max_seq_length = 8192
+    return _RAG_EMBEDDER
+
+
+def _rag_get_collection():
+    global _RAG_COLL
+    if _RAG_COLL is None:
+        import chromadb  # type: ignore
+        from chromadb.config import Settings  # type: ignore
+        client = chromadb.PersistentClient(
+            path=str(_RAG_DB_DIR),
+            settings=Settings(anonymized_telemetry=False),
+        )
+        _RAG_COLL = client.get_or_create_collection(
+            name=_RAG_COLLECTION, metadata={"hnsw:space": "cosine"},
+        )
+    return _RAG_COLL
+
+
+def _rag_build_where(metadata: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    conds: List[Dict[str, Any]] = []
+    for k in ("phase", "outcome", "chunk_type", "box_name"):
+        v = metadata.get(k)
+        if v:
+            conds.append({k: {"$eq": str(v)}})
+    if not conds:           return None
+    if len(conds) == 1:     return conds[0]
+    return {"$and": conds}
+
+
+def _rag_dense_search(queries: Sequence[str], top_k: int,
+                      where: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    try:
+        col = _rag_get_collection()
+        embedder = _rag_get_embedder()
+    except Exception as exc:
+        logger.warning("dense backend unavailable: %s", exc)
+        return []
+    seen: Dict[str, Dict[str, Any]] = {}
+    for q in queries:
+        try:
+            emb = embedder.encode(q, normalize_embeddings=True).tolist()
+            kwargs: Dict[str, Any] = {
+                "query_embeddings": [emb], "n_results": top_k,
+                "include": ["documents", "metadatas", "distances"],
+            }
+            if where:
+                kwargs["where"] = where
+            res = col.query(**kwargs)
+        except Exception as exc:
+            logger.warning("dense query failed: %s", exc)
+            continue
+        ids   = (res.get("ids")        or [[]])[0]
+        docs  = (res.get("documents")  or [[]])[0]
+        metas = (res.get("metadatas")  or [[]])[0]
+        dists = (res.get("distances")  or [[]])[0]
+        for rank, (rid, doc, meta, dist) in enumerate(zip(ids, docs, metas, dists)):
+            key = rid or f"{(meta or {}).get('source_file','?')}:{(meta or {}).get('chunk_index','?')}"
+            entry = {"id": key, "doc": doc, "meta": meta or {},
+                     "dense_score": 1.0 - float(dist), "dense_rank": rank + 1}
+            if key not in seen or entry["dense_score"] > seen[key]["dense_score"]:
+                seen[key] = entry
+    return list(seen.values())
+
+
+def _rag_fts_query(text: str) -> str:
+    norm = unicodedata.normalize("NFKC", text or "").lower()
+    tokens = [t for t in _RAG_FTS_TOKEN_RE.findall(norm) if len(t) > 1]
+    return " OR ".join(t.replace('"', '') for t in tokens[:12])
+
+
+def _rag_bm25_search(query: str, top_k: int) -> List[Dict[str, Any]]:
+    if not _RAG_DB_FILE.exists():
+        return []
+    expr = _rag_fts_query(query)
+    if not expr:
+        return []
+    try:
+        con = sqlite3.connect(f"file:{_RAG_DB_FILE.as_posix()}?mode=ro", uri=True)
+    except Exception as exc:
+        logger.warning("FTS open failed: %s", exc)
+        return []
+    rows: List[Tuple] = []
+    try:
+        cur = con.execute(
+            """
+            SELECT efs.id, efs.string_value AS doc,
+                   bm25(embedding_fulltext_search) AS score
+            FROM   embedding_fulltext_search AS efs
+            WHERE  efs.string_value MATCH ?
+            ORDER  BY score
+            LIMIT  ?
+            """, (expr, top_k * 2),
+        )
+        rows = cur.fetchall()
+    except sqlite3.OperationalError:
+        try:
+            cur = con.execute(
+                """
+                SELECT rowid AS id, string_value AS doc,
+                       bm25(embedding_fulltext_search) AS score
+                FROM   embedding_fulltext_search
+                WHERE  string_value MATCH ?
+                ORDER  BY score
+                LIMIT  ?
+                """, (expr, top_k * 2),
+            )
+            rows = cur.fetchall()
+        except Exception as exc:
+            logger.warning("FTS fallback failed: %s", exc)
+    except Exception as exc:
+        logger.warning("FTS query failed: %s", exc)
+    finally:
+        con.close()
+    out: List[Dict[str, Any]] = []
+    for rank, (rid, doc, score) in enumerate(rows[:top_k]):
+        s = max(0.0, min(1.0, 1.0 - (-float(score) / 25.0)))
+        out.append({
+            "id": str(rid), "doc": doc, "meta": {},
+            "bm25_score": s, "bm25_rank": rank + 1,
+        })
+    return out
+
+
+def _rag_hydrate_meta(con: sqlite3.Connection, doc_id: str) -> Dict[str, Any]:
+    out: Dict[str, Any] = {}
+    try:
+        cur = con.execute(
+            "SELECT key, string_value, int_value, float_value, bool_value "
+            "FROM embedding_metadata WHERE id = ?", (doc_id,)
+        )
+        for key, sv, iv, fv, bv in cur.fetchall():
+            if   sv is not None: out[key] = sv
+            elif iv is not None: out[key] = iv
+            elif fv is not None: out[key] = fv
+            elif bv is not None: out[key] = bool(bv)
+    except Exception:
+        pass
+    return out
+
+
+def _rag_rrf_merge(dense: List[Dict[str, Any]], bm25: List[Dict[str, Any]],
+                   k: int = _RAG_RRF_K) -> List[Dict[str, Any]]:
+    pool: Dict[str, Dict[str, Any]] = {}
+    for entry in dense:
+        rid = entry["id"]
+        rrf = 1.0 / (k + entry.get("dense_rank", 999))
+        pool[rid] = {**entry, "rrf": rrf, "sources_hit": ["dense"]}
+    for entry in bm25:
+        rid = entry["id"]
+        rrf = 1.0 / (k + entry.get("bm25_rank", 999))
+        if rid in pool:
+            pool[rid]["rrf"] += rrf
+            pool[rid]["sources_hit"].append("bm25")
+            pool[rid].setdefault("bm25_score", entry.get("bm25_score", 0.0))
+        else:
+            pool[rid] = {**entry, "rrf": rrf, "sources_hit": ["bm25"]}
+    return sorted(pool.values(), key=lambda r: r["rrf"], reverse=True)
+
+
+def _rag_to_chunk(entry: Dict[str, Any]) -> RetrievedChunk:
+    meta = entry.get("meta") or {}
+    def _list(key: str) -> List[str]:
+        v = meta.get(key)
+        if not v:
+            return []
+        if isinstance(v, list):
+            return [str(x) for x in v]
+        try:
+            parsed = json.loads(v)
+            if isinstance(parsed, list):
+                return [str(x) for x in parsed]
+        except Exception:
+            pass
+        return [str(v)]
+    dense = entry.get("dense_score", 0.0) or 0.0
+    bm25  = entry.get("bm25_score", 0.0)  or 0.0
+    rrf   = entry.get("rrf",        0.0)  or 0.0
+    rel   = max(dense, bm25, rrf * 4.0)
+    return RetrievedChunk(
+        text         = entry.get("doc") or "",
+        source_file  = str(meta.get("source_file") or "unknown"),
+        chunk_index  = meta.get("chunk_index") or 0,
+        chunk_type   = str(meta.get("chunk_type")    or ""),
+        phase        = str(meta.get("phase")         or ""),
+        outcome      = str(meta.get("outcome")       or ""),
+        tools        = _list("tools"),
+        cves         = _list("cves"),
+        mitre_ttps   = _list("mitre_ttps"),
+        attack_types = _list("attack_types"),
+        services     = _list("services"),
+        box_name     = str(meta.get("box_name")      or ""),
+        os           = str(meta.get("os")            or ""),
+        section_title= str(meta.get("section_title") or ""),
+        relevance    = float(rel),
+        sources_hit  = list(entry.get("sources_hit") or []),
+    )
+
+
+def hybrid_search(queries: Sequence[str], *, top_k: int = 25,
+                  phase: Optional[str] = None,
+                  metadata: Optional[Dict[str, Any]] = None) -> List[RetrievedChunk]:
+    if not queries:
+        return []
+    md = dict(metadata or {})
+    if phase:
+        md.setdefault("phase", phase)
+    where = _rag_build_where(md)
+    dense_hits = _rag_dense_search(queries, top_k=top_k, where=where)
+    bm25_hits  = _rag_bm25_search(queries[0], top_k=top_k) if queries else []
+    fused = _rag_rrf_merge(dense_hits, bm25_hits)
+    if bm25_hits and _RAG_DB_FILE.exists():
+        try:
+            con = sqlite3.connect(f"file:{_RAG_DB_FILE.as_posix()}?mode=ro", uri=True)
+            try:
+                for entry in fused:
+                    if not entry.get("meta"):
+                        entry["meta"] = _rag_hydrate_meta(con, entry["id"])
+            finally:
+                con.close()
+        except Exception:
+            pass
+    return [_rag_to_chunk(e) for e in fused[:top_k]]
+
+
+# ── Tier 2: HyDE query rewrite ──────────────────────────────────────────────
+
+
+_HYDE_SYSTEM = (
+    "You are a senior penetration testing engineer. "
+    "Given a question, write a concise, technical 3-5 sentence answer in "
+    "the style of an HTB/THM writeup or pentest report — concrete tools, "
+    "exact commands, and outcomes. Do NOT add disclaimers, headers, or "
+    "markdown. Output the paragraph only."
+)
+
+
+def _rag_intel_brief(intel: Dict[str, Any]) -> str:
+    if not intel:
+        return ""
+    bits: List[str] = []
+    for k in ("target_kind", "os_guess", "engagement_type"):
+        if intel.get(k):
+            bits.append(f"{k}={intel[k]}")
+    services = intel.get("services") or []
+    if isinstance(services, dict):
+        services = list(services.keys())
+    if services:
+        bits.append(f"services={','.join(map(str, services[:6]))}")
+    ports = intel.get("open_ports") or intel.get("ports") or []
+    if ports:
+        bits.append(f"ports={','.join(map(str, ports[:8]))}")
+    techs = intel.get("technologies") or []
+    if techs:
+        bits.append(f"tech={','.join(map(str, techs[:6]))}")
+    return " | ".join(bits)
+
+
+async def maybe_hyde_rewrite(query: str, *,
+                             intel: Optional[Dict[str, Any]] = None,
+                             llm:   Optional[Callable[..., Awaitable[str]]] = None,
+                             max_tokens_hint: int = 250) -> Optional[str]:
+    if not llm or not query or len(query.strip()) < 8:
+        return None
+    brief = _rag_intel_brief(intel or {})
+    user_prompt = (
+        f"Question: {query.strip()}\n"
+        + (f"Context: {brief}\n" if brief else "")
+        + "Write the hypothetical answer paragraph now."
+    )
+    try:
+        out = await llm(user_prompt, _HYDE_SYSTEM)
+    except TypeError:
+        try:
+            out = await llm(user_prompt)
+        except Exception:
+            return None
+    except Exception:
+        return None
+    if not out:
+        return None
+    out = out.strip()
+    if any(out.lower().startswith(b) for b in ("i cannot", "i'm sorry", "as an ai", "{}", "null")):
+        return None
+    return out[: max_tokens_hint * 6]
+
+
+# ── Tier 3: Cross-encoder rerank + MMR diversity ────────────────────────────
+
+
+def _rag_get_reranker():
+    global _RAG_RERANKER, _RAG_RERANKER_LOADED
+    if _RAG_RERANKER_LOADED:
+        return _RAG_RERANKER
+    _RAG_RERANKER_LOADED = True
+    try:
+        from sentence_transformers import CrossEncoder  # type: ignore
+        try:
+            logger.info("loading reranker: %s", _RAG_RERANK_MODEL)
+            _RAG_RERANKER = CrossEncoder(_RAG_RERANK_MODEL, max_length=512)
+        except Exception as exc:
+            logger.warning("reranker %s unavailable (%s) — fallback %s",
+                           _RAG_RERANK_MODEL, exc, _RAG_RERANK_FALLBACK)
+            _RAG_RERANKER = CrossEncoder(_RAG_RERANK_FALLBACK, max_length=512)
+    except Exception as exc:
+        logger.warning("no reranker available (%s) — skipping", exc)
+        _RAG_RERANKER = None
+    return _RAG_RERANKER
+
+
+def _rag_jaccard(a: set, b: set) -> float:
+    if not a or not b:
+        return 0.0
+    inter = len(a & b)
+    return inter / len(a | b) if inter else 0.0
+
+
+def _rag_mmr_select(query: str, ranked: List[RetrievedChunk],
+                    top_k: int, lam: float = _RAG_MMR_LAMBDA) -> List[RetrievedChunk]:
+    if len(ranked) <= top_k:
+        return ranked
+    chosen: List[RetrievedChunk] = []
+    chosen_tokens: List[set] = []
+    pool = list(ranked)
+    qtok = set(_rag_tokens(query))
+    while pool and len(chosen) < top_k:
+        best_idx, best_score = 0, float("-inf")
+        for i, c in enumerate(pool):
+            ctok = set(_rag_tokens(c.text))
+            penalty = max((_rag_jaccard(ctok, ct) for ct in chosen_tokens), default=0.0)
+            qoverlap = _rag_jaccard(ctok, qtok) if qtok else 0.0
+            mmr = lam * (c.relevance + 0.05 * qoverlap) - (1.0 - lam) * penalty
+            if mmr > best_score:
+                best_score, best_idx = mmr, i
+        chosen.append(pool.pop(best_idx))
+        chosen_tokens.append(set(_rag_tokens(chosen[-1].text)))
+    return chosen
+
+
+def rerank_with_diversity(query: str, candidates: Sequence[RetrievedChunk],
+                          *, top_k: int = 6) -> List[RetrievedChunk]:
+    if not candidates:
+        return []
+    cands = list(candidates)
+    rer = _rag_get_reranker()
+    if rer is not None and len(cands) > 1:
+        try:
+            scores = rer.predict([(query, c.text) for c in cands])
+            for c, s in zip(cands, scores):
+                c.relevance = float(s)
+        except Exception as exc:
+            logger.warning("rerank predict failed: %s", exc)
+    cands.sort(key=lambda c: c.relevance, reverse=True)
+    return _rag_mmr_select(query, cands[: max(top_k * 4, 20)], top_k=top_k)
+
+
+# ── Tier 4: Outcome × recency boost ─────────────────────────────────────────
+
+
+_OUTCOME_TABLE = {
+    "root":             1.50,  "shell":          1.40,  "shell obtained":   1.40,
+    "user flag":        1.30,  "domain admin":   1.50,  "credential":       1.20,
+    "credential found": 1.20,  "rce":            1.40,  "success":          1.20,
+    "":                 1.00,  "unknown":        1.00,  "info":             0.95,
+    "failed":           0.70,  "blocked":        0.65,  "denied":           0.65,
+}
+
+
+def _rag_outcome_weight(outcome: str) -> float:
+    if not outcome:
+        return 1.0
+    key = outcome.lower().strip()
+    if key in _OUTCOME_TABLE:
+        return _OUTCOME_TABLE[key]
+    for k, w in _OUTCOME_TABLE.items():
+        if k and k in key:
+            return w
+    return 1.0
+
+
+def apply_outcome_recency_boost(chunks: List[RetrievedChunk]) -> List[RetrievedChunk]:
+    for c in chunks:
+        c.relevance = float(c.relevance) * _rag_outcome_weight(c.outcome)
+    return chunks
+
+
+# ── Self-query (heuristic + optional LLM) ───────────────────────────────────
+
+
+_RAG_CVE_RE   = re.compile(r"cve-\d{4}-\d{4,7}", re.IGNORECASE)
+_RAG_MITRE_RE = re.compile(r"\bT\d{4}(?:\.\d{3})?\b")
+_RAG_PORT_RE  = re.compile(r"\b(?:port\s*)?(\d{2,5})/(?:tcp|udp)\b", re.IGNORECASE)
+
+_RAG_PHASE_HINTS = {
+    "recon":   ("recon","enum","scan","discover","fingerprint","nmap","subdomain","dns"),
+    "exploit": ("exploit","rce","shell","payload","reverse","foothold","cve-","msf"),
+    "privesc": ("privesc","escalat","root","sudo","suid","linpeas","winpeas","kernel"),
+    "web":     ("web","http","sqli","xss","lfi","rfi","ssrf","ssti","burp","jwt"),
+    "post":    ("loot","exfil","creds","hash","lsass","dpapi","persistence"),
+    "lateral": ("lateral","pivot","smb","winrm","psexec","kerberos","bloodhound","mimikatz"),
+}
+_RAG_OS_HINTS = {
+    "linux":   ("linux","ubuntu","debian","kernel","/etc/passwd","bash","www-data"),
+    "windows": ("windows","active directory","kerberos","ntlm","domain admin","powershell"),
+    "macos":   ("macos","darwin","osx"),
+}
+_RAG_SVC_HINTS = {
+    "smb":      ("smb","samba","445","139","netbios"),
+    "http":     ("http","https","apache","nginx","iis"),
+    "ssh":      ("ssh","openssh","22"),
+    "ftp":      ("ftp","vsftpd","21"),
+    "mysql":    ("mysql","mariadb","3306"),
+    "mssql":    ("mssql","sqlserver","1433"),
+    "ldap":     ("ldap","389","636"),
+    "kerberos": ("kerberos","88"),
+    "redis":    ("redis","6379"),
+    "mongodb":  ("mongodb","27017"),
+}
+
+
+def _rag_heuristic_extract(query: str) -> Dict[str, Any]:
+    out: Dict[str, Any] = {}
+    q = query.lower()
+    cves = _RAG_CVE_RE.findall(query)
+    if cves:  out["cves"] = [c.upper() for c in cves]
+    mitre = _RAG_MITRE_RE.findall(query)
+    if mitre: out["mitre"] = list(dict.fromkeys(mitre))
+    ports = [int(m.group(1)) for m in _RAG_PORT_RE.finditer(query)]
+    if ports: out["ports"] = ports
+    for phase, hints in _RAG_PHASE_HINTS.items():
+        if any(h in q for h in hints):
+            out["phase"] = phase
+            break
+    for os_name, hints in _RAG_OS_HINTS.items():
+        if any(h in q for h in hints):
+            out["os"] = os_name
+            break
+    services: List[str] = []
+    for svc, hints in _RAG_SVC_HINTS.items():
+        if any(h in q for h in hints):
+            services.append(svc)
+    if services:
+        out["services"] = services
+    return out
+
+
+async def infer_metadata_filters(query: str, *,
+                                 intel: Optional[Dict[str, Any]] = None,
+                                 llm:   Optional[Callable[..., Awaitable[str]]] = None
+                                 ) -> Dict[str, Any]:
+    base = _rag_heuristic_extract(query)
+    if llm is None:
+        return base
+    sys_prompt = (
+        "You extract structured search filters from pentest queries. "
+        "Output valid JSON only — no commentary. Keys you may use: "
+        "phase, services, ports, os, technologies, cves, mitre. "
+        "Empty/null any key you can't determine."
+    )
+    try:
+        raw = await llm(f"Query: {query}\nReturn only the JSON object.", sys_prompt)
+    except TypeError:
+        try:
+            raw = await llm(f"Query: {query}\nReturn only the JSON object.")
+        except Exception:
+            return base
+    except Exception:
+        return base
+    if not raw:
+        return base
+    try:
+        ext = {k: v for k, v in (json.loads(raw) or {}).items() if v}
+    except Exception:
+        m = re.search(r"\{.*\}", raw, re.DOTALL)
+        if not m:
+            return base
+        try:
+            ext = {k: v for k, v in (json.loads(m.group(0)) or {}).items() if v}
+        except Exception:
+            return base
+    merged = dict(ext or {})
+    merged.update(base)   # heuristic CVE/MITRE/port wins over LLM
+    return merged
+
+
+# ── Public retrieval API ────────────────────────────────────────────────────
+
+
+def available() -> bool:
+    """True if either curated playbooks or the vector store are usable."""
+    try:
+        if has_playbooks():
+            return True
+    except Exception:
+        pass
+    try:
+        return has_vector_store()
+    except Exception:
+        return False
+
+
+def _rag_format_for_prompt(r: RetrievalResult) -> str:
+    out: List[str] = []
+    if r.playbooks:
+        out.append("=== ARGUS PLAYBOOKS ===")
+        for pb in r.playbooks:
+            out.append(pb.to_prompt_block())
+        out.append("=== END PLAYBOOKS ===")
+    if r.chunks:
+        out.append("\n=== ARGUS KNOWLEDGE BASE ===")
+        for c in r.chunks:
+            out.append(c.to_prompt_block())
+        out.append("=== END KNOWLEDGE BASE ===")
+    if not out:
+        return ""
+    out.append(
+        "\nApply the playbooks first (they are field-validated). "
+        "Use the knowledge-base chunks to refine commands and adapt to the "
+        "current target's intel."
+    )
+    return "\n".join(out)
+
+
+async def retrieve(query: str, *,
+                   intel:           Optional[Dict[str, Any]] = None,
+                   top_k:           int = 6,
+                   phase:           Optional[str] = None,
+                   use_hyde:        bool = True,
+                   use_rerank:      bool = True,
+                   use_self_query:  bool = True,
+                   llm:             Optional[Callable[..., Awaitable[str]]] = None
+                   ) -> RetrievalResult:
+    """Run the full 4-tier retrieval pipeline.
+
+    Pass the agent's ``think`` coroutine as ``llm`` to enable HyDE +
+    LLM-driven self-query metadata extraction.  When ``llm=None`` those
+    tiers are silently skipped and we fall back to dense + BM25 only.
+    """
+    intel = dict(intel or {})
+    result = RetrievalResult(query=query)
+    if not query or len(query.strip()) < 3:
+        return result
+
+    # Tier 0
+    try:
+        result.playbooks = lookup_playbooks(query, intel=intel, top_k=top_k)
+    except Exception as exc:
+        logger.warning("Tier 0 (playbooks) failed: %s", exc)
+
+    # Self-query
+    inferred: Dict[str, Any] = {}
+    if use_self_query:
+        try:
+            inferred = await infer_metadata_filters(query, intel=intel, llm=llm)
+            result.inferred_filters = inferred
+        except Exception as exc:
+            logger.warning("self-query failed: %s", exc)
+
+    # Tier 2 — HyDE (only when llm is callable)
+    queries: List[str] = [query]
+    if use_hyde and llm is not None:
+        try:
+            hyde_doc = await maybe_hyde_rewrite(query, intel=intel, llm=llm)
+            if hyde_doc:
+                queries.append(hyde_doc)
+                result.used_hyde = True
+        except Exception as exc:
+            logger.warning("HyDE rewrite failed: %s", exc)
+
+    # Tier 1 — hybrid retrieval
+    candidates: List[RetrievedChunk] = []
+    try:
+        candidates = hybrid_search(queries=queries,
+                                   top_k=max(top_k * 4, 25),
+                                   phase=phase, metadata=inferred)
+    except Exception as exc:
+        logger.warning("Tier 1 (hybrid) failed: %s", exc)
+        candidates = []
+
+    # Tier 4 — outcome boost (before rerank)
+    candidates = apply_outcome_recency_boost(candidates)
+
+    # Tier 3 — rerank + MMR
+    if use_rerank and candidates:
+        try:
+            candidates = rerank_with_diversity(query=query,
+                                               candidates=candidates, top_k=top_k)
+        except Exception as exc:
+            logger.warning("Tier 3 (rerank) failed: %s", exc)
+            candidates = candidates[:top_k]
+    else:
+        candidates = candidates[:top_k]
+
+    result.chunks = candidates
+    result.text   = _rag_format_for_prompt(result)
+    return result
+
+
+async def retrieve_text(query: str, *,
+                        intel: Optional[Dict[str, Any]] = None,
+                        top_k: int = 6,
+                        phase: Optional[str] = None,
+                        llm:   Optional[Callable[..., Awaitable[str]]] = None) -> str:
+    """Convenience wrapper — return the prompt-ready text only."""
+    res = await retrieve(query, intel=intel, top_k=top_k, phase=phase, llm=llm)
+    return res.text
+
+
+# ── End of retrieval engine ─────────────────────────────────────────────────
 
 
 if __name__ == "__main__":

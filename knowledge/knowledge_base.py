@@ -26,7 +26,20 @@ from typing import Optional, List, Dict, Any, Tuple
 logger = logging.getLogger("knowledge_base")
 
 # ── Config ──────────────────────────────────────────────────────────────────────
-CHROMA_PATH   = os.path.join(os.path.dirname(__file__), "chroma_db")
+# Vector store directory.  Default location is ``knowledge/db/`` (clean
+# separation from the source corpus in ``knowledge/data/``).  Falls back
+# to the legacy ``knowledge/chroma_db/`` for in-place upgrades.
+def _resolve_chroma_path() -> str:
+    base = os.path.dirname(__file__)
+    new = os.path.join(base, "db")
+    legacy = os.path.join(base, "chroma_db")
+    if os.path.isdir(new):
+        return new
+    if os.path.isdir(legacy):
+        return legacy
+    return new   # default for fresh installs
+
+CHROMA_PATH   = os.environ.get("KB_DB_PATH") or _resolve_chroma_path()
 COLLECTION    = "pentest_knowledge"
 
 # Primary embedding model — choose one:
