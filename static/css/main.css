@@ -1974,3 +1974,180 @@ pre {
     scroll-behavior: auto !important;
   }
 }
+
+/* ═══════════════════════════════════════════════════════════════
+   Auth pages — login + MFA challenge + admin user mgmt
+   (Sits inside main.css so every skin can override via tokens.)
+   ═══════════════════════════════════════════════════════════════ */
+.auth-shell {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-base);
+  padding: 40px 20px;
+}
+.auth-card {
+  width: 100%;
+  max-width: 420px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  padding: 32px;
+  font-family: var(--font-ui);
+}
+.auth-brand {
+  display: flex; align-items: center; gap: 12px;
+  margin-bottom: 6px;
+}
+.auth-brand-mark {
+  width: 36px; height: 36px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 8px;
+  background: var(--accent-subtle);
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  font-size: 20px;
+  font-family: var(--font-mono);
+}
+.auth-brand-text {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 20px;
+  letter-spacing: 2px;
+  color: var(--text-primary);
+}
+.auth-subtitle {
+  font-size: 13px;
+  color: var(--text-muted);
+  margin-bottom: 20px;
+}
+.auth-tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 16px;
+  border-bottom: 1px solid var(--border-dim);
+}
+.auth-tab {
+  flex: 1;
+  padding: 8px 12px;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-family: var(--font-ui);
+  cursor: pointer;
+  letter-spacing: 0.5px;
+}
+.auth-tab[data-active="true"] {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+  font-weight: 600;
+}
+.auth-form { display: flex; flex-direction: column; gap: 12px; }
+.auth-label {
+  display: flex; flex-direction: column; gap: 5px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  font-weight: 600;
+}
+.auth-label input {
+  font-size: 14px;
+  padding: 9px 12px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+}
+.auth-label input:focus {
+  border-color: var(--accent);
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-glow);
+}
+.auth-error {
+  background: var(--critical-bg);
+  border: 1px solid var(--critical-bd);
+  color: var(--critical);
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  font-size: 12px;
+}
+.auth-submit {
+  background: var(--accent);
+  color: #fff;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  padding: 10px 16px;
+  font-family: var(--font-ui);
+  font-weight: 600;
+  font-size: 14px;
+  cursor: pointer;
+  transition: background 0.15s, transform 0.15s;
+}
+.auth-submit:hover:not([disabled]) {
+  background: var(--accent-dim);
+  transform: translateY(-1px);
+}
+.auth-submit[disabled] { opacity: 0.5; cursor: not-allowed; }
+.auth-sso { display: flex; flex-direction: column; gap: 8px; }
+.auth-sso-btn {
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 14px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-primary);
+  text-decoration: none;
+  font-size: 13px;
+  font-weight: 500;
+}
+.auth-sso-btn:hover { border-color: var(--accent); background: var(--accent-subtle); }
+.auth-sso-kind {
+  font-size: 9px;
+  background: var(--accent);
+  color: #fff;
+  padding: 2px 6px;
+  border-radius: 999px;
+  letter-spacing: 0.5px;
+}
+.auth-factor-row {
+  display: flex; gap: 6px; margin-bottom: 12px;
+}
+.auth-factor-badge {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  background: var(--accent-subtle);
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  padding: 2px 8px;
+  border-radius: 999px;
+  text-transform: uppercase;
+}
+.auth-mfa-switch {
+  margin-top: 12px;
+  text-align: center;
+}
+.auth-link {
+  background: transparent;
+  border: none;
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 12px;
+  text-decoration: underline;
+  font-family: var(--font-ui);
+}
+.auth-footer {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border-dim);
+  font-size: 11px;
+  color: var(--text-muted);
+  text-align: center;
+}
+.auth-muted { color: var(--text-muted); font-size: 12px; }
