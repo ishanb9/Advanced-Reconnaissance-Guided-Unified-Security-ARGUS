@@ -5,10 +5,45 @@ Naming: <Action><Resource>Request / <Resource>Response.
 """
 from __future__ import annotations
 
+import re
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Annotated, Any, Dict, List, Optional
 
-from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic import BaseModel, BeforeValidator, Field, field_validator
+
+# ─────────────────────────────────────────────────────────────────
+#  Permissive email validator
+# ─────────────────────────────────────────────────────────────────
+# Pydantic's `EmailStr` defers to `email-validator`, which rejects
+# special-use reserved TLDs (.test, .local, .internal, .lan, .home,
+# .corp) per RFC 6761 + 8375.  Real enterprise deployments routinely
+# use those for intranet/lab/CI accounts, so we apply structural
+# (RFC 5321-ish) validation instead and skip the TLD allow-list.
+#
+# Pattern:
+#   <local-part>@<one or more labels separated by dots>
+#   local-part   = printable ASCII, no whitespace
+#   each label   = letters, digits, hyphens; 1..63 chars
+#   total length ≤ 320 (RFC 5321 §4.5.3.1.3)
+_EMAIL_RE = re.compile(
+    r"^[A-Za-z0-9!#$%&'*+/=?^_`{|}~.\-]{1,64}"
+    r"@(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+"
+    r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$"
+)
+
+
+def _validate_email(v: Any) -> str:
+    if not isinstance(v, str):
+        raise ValueError("email must be a string")
+    e = v.strip()
+    if len(e) > 320:
+        raise ValueError("email exceeds RFC 5321 maximum (320 chars)")
+    if not _EMAIL_RE.match(e):
+        raise ValueError("not a valid email address (RFC 5321 structure)")
+    return e.lower()
+
+
+EmailStr = Annotated[str, BeforeValidator(_validate_email)]
 
 
 # ─────────────────────────────────────────────────────────────────

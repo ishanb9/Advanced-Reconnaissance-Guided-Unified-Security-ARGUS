@@ -114,8 +114,11 @@ def create_session(db: DbSession, *,
     db.add(s)
     db.flush()
 
-    state = SessionState(session_id=s.id, state={})
-    db.add(state)
+    # SessionState is now per-user (1:1 with User), so it follows the
+    # operator across devices and sessions.  Create lazily — first
+    # login of a brand-new user installs an empty row.
+    if db.get(SessionState, user.id) is None:
+        db.add(SessionState(user_id=user.id, state={}))
 
     # Issue refresh token
     family_id = s.id      # initial family == session.id
@@ -319,21 +322,26 @@ def _revoke_family(db: DbSession, family_id: str, *, reason: str) -> None:
 # ─────────────────────────────────────────────────────────────────
 
 
-def get_state(db: DbSession, session_id: str) -> Dict[str, Any]:
-    st = db.get(SessionState, session_id)
+def get_state(db: DbSession, user_id: str) -> Dict[str, Any]:
+    """Look up the user's persistent UI state.
+
+    Keyed by user_id (not session_id) so state follows the operator
+    across devices.
+    """
+    st = db.get(SessionState, user_id)
     return (st.state or {}) if st else {}
 
 
-def patch_state(db: DbSession, session_id: str,
+def patch_state(db: DbSession, user_id: str,
                 patch: Dict[str, Any]) -> Dict[str, Any]:
-    """Shallow-merge `patch` into the persisted state for the session.
+    """Shallow-merge `patch` into the persisted state for this user.
 
     The frontend writes through localStorage + PATCHes here so state
-    survives reload, tab close, and reboot.
+    survives reload, tab close, reboot, and device switch.
     """
-    st = db.get(SessionState, session_id)
+    st = db.get(SessionState, user_id)
     if st is None:
-        st = SessionState(session_id=session_id, state={})
+        st = SessionState(user_id=user_id, state={})
         db.add(st)
     merged = dict(st.state or {})
     merged.update(patch or {})

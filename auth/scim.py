@@ -74,7 +74,11 @@ def _verify_bearer(authorization: Optional[str],
         select(ScimBearerToken).where(ScimBearerToken.token_hash == th)
     ).scalar_one_or_none()
     now = datetime.now(timezone.utc)
-    if (row is None or row.revoked_at is not None or row.expires_at <= now):
+    # SQLite returns naive datetimes from DateTime(timezone=True) — coerce
+    from auth.sessions import _as_aware
+    exp = _as_aware(row.expires_at) if row else None
+    if (row is None or row.revoked_at is not None
+            or (exp is not None and exp <= now)):
         # log denied access
         try:
             audit_log(action="scim.auth_denied",

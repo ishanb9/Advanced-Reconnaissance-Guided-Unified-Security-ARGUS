@@ -282,6 +282,22 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="ARGUS Pentest Platform", version="3.0.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
+# ── Enterprise auth (additive — see auth/README.md & DEPLOYMENT.md) ──
+# install_auth() mounts /auth/* and /scim/v2/* on this app, creates the
+# auth DB tables on first import, and bootstraps the OWNER account from
+# AUTH_INITIAL_OWNER_EMAIL / AUTH_INITIAL_OWNER_PASSWORD env vars (or
+# prints a generated dev password to stderr).  Failure to install is
+# non-fatal — ARGUS keeps booting if the auth module has missing deps.
+try:
+    from auth.integration import install_auth
+    install_auth(app)
+except Exception as _auth_err:                                    # pragma: no cover
+    import logging as _lg
+    _lg.getLogger("argus").warning(
+        "auth module not installed: %s — install via `pip install -r auth/requirements.txt`",
+        _auth_err,
+    )
+
 
 # ══════════════════════════════════════════════════════════════
 #  STATIC FILES & TEMPLATES

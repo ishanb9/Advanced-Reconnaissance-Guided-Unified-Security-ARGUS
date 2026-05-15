@@ -463,7 +463,7 @@ def me(ctx = Depends(current_auth_context),
         attributes=user.attributes or {},
         created_at=user.created_at,
         last_login_at=user.last_login_at,
-        session_state=get_state(db, ctx.session.id),
+        session_state=get_state(db, ctx.user.id),
     )
 
 
@@ -472,7 +472,7 @@ def me_patch_state(body: PatchStateRequest,
                    _csrf=Depends(require_csrf),
                    ctx = Depends(current_auth_context),
                    db: DbSession = Depends(get_db)):
-    merged = patch_state(db, ctx.session.id, body.state)
+    merged = patch_state(db, ctx.user.id, body.state)
     return {"ok": True, "state": merged}
 
 
@@ -519,6 +519,9 @@ def me_change_password(body: ChangePasswordRequest,
 def list_my_sessions(user: User = Depends(get_current_user),
                      db: DbSession = Depends(get_db)):
     rows = list_active_sessions(db, user.id)
+    # Per-user pinned session lives in the user's SessionState row now
+    user_state = db.get(__import__('auth.models', fromlist=['SessionState']).SessionState, user.id)
+    pinned = user_state.pinned_pentest_session_id if user_state else None
     return [
         SessionSummary(
             id=s.id, user_id=s.user_id,
@@ -527,8 +530,7 @@ def list_my_sessions(user: User = Depends(get_current_user),
             user_agent=s.user_agent,
             current_tenant_id=s.current_tenant_id,
             revoked_at=s.revoked_at,
-            pinned_pentest_session_id=getattr(s.state, "pinned_pentest_session_id", None)
-                if s.state else None,
+            pinned_pentest_session_id=pinned,
         ) for s in rows
     ]
 

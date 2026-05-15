@@ -105,6 +105,12 @@ const HUBS = [
       { key: 'knowledge', label: 'Knowledge Base', comp: 'KnowledgePage' },
       { key: 'metrics',   label: 'Metrics',        comp: 'MetricsDash' },
     ] },
+
+  // ── Enterprise · User & access management ──
+  // RBAC-gated by the backend; the FE renders the hub but the tabs
+  // pull data through /auth/admin/* which 403s for non-admin users.
+  { key: 'users',      icon: '◭', label: 'Users & Access',  group: 'Reporting',
+    tabs: [{ key: 'admin', label: 'User Admin', comp: 'UserAdminPage' }] },
 ];
 
 // Per-mode hub visibility (Spec §10.3)
@@ -118,6 +124,7 @@ const HUB_MODE_VISIBILITY = {
   workshop:   { OPERATOR: true,  BRIEFING: false, PRESENT: false, CLIENT: false },
   reports:    { OPERATOR: true,  BRIEFING: true,  PRESENT: true,  CLIENT: true  },
   system:     { OPERATOR: true,  BRIEFING: false, PRESENT: false, CLIENT: false },
+  users:      { OPERATOR: true,  BRIEFING: false, PRESENT: false, CLIENT: false },
 };
 
 function isHubVisible(hubKey, mode) {
@@ -169,6 +176,7 @@ const PRESENT_SLIDES = [
 
 // Map component-name strings to lazy window.<Name> getters.
 const COMP_FOR = {
+  UserAdminPage:       () => window.UserAdminPage,
   RiskDashboard:       () => window.RiskDashboard,
   MissionControl:      () => window.MissionControl,
   AgentConsole:        () => window.AgentConsole,
@@ -1187,7 +1195,7 @@ function App() {
     } catch (_) {}
   }, []);
 
-  // Persist UI prefs
+  // Persist UI prefs (localStorage write-through)
   useEffect(() => {
     savePrefs({
       currentHub, currentTab,
@@ -1197,6 +1205,36 @@ function App() {
     });
   }, [currentHub, currentTab, state.hubTabMemory, sidebarCollapsed, groupOpen, theme,
       state.viewMode, state.client, state.present]);
+
+  // Mirror UI state to the server so it survives reboot + device switch.
+  // Debounced — coalesce rapid prefs flips into one PATCH.  The server
+  // is source-of-truth on next cold-boot; localStorage is a cache.
+  useEffect(() => {
+    if (!window.ArgusAuth?.me) return;          // auth not installed/required
+    const csrf = (document.cookie.split('; ').find(c => c.startsWith('argus_csrf=')) || '')
+                  .split('=')[1];
+    if (!csrf) return;
+    const skin = (typeof window.ArgusSkin?.current === 'function')
+                  ? window.ArgusSkin.current() : null;
+    const payload = {
+      skin, theme,
+      audience_mode: state.viewMode,
+      sidebar_collapsed: sidebarCollapsed,
+      current_hub: currentHub, current_tab: currentTab,
+      hub_tab_memory: state.hubTabMemory,
+      pinned_pentest_session_id: state.activeSession?.id || null,
+    };
+    const id = setTimeout(() => {
+      fetch('/auth/me/state', {
+        method: 'PATCH', credentials: 'include',
+        headers: { 'Content-Type': 'application/json',
+                    'X-CSRF-Token': decodeURIComponent(csrf) },
+        body: JSON.stringify({ state: payload }),
+      }).catch(() => {});                       // best-effort
+    }, 800);
+    return () => clearTimeout(id);
+  }, [currentHub, currentTab, sidebarCollapsed, theme, state.viewMode,
+      state.activeSession?.id, state.hubTabMemory]);
 
   // Restore audience-mode + client branding from prefs on cold boot (T5)
   useEffect(() => {
@@ -1540,13 +1578,16 @@ function App() {
       // Audience-mode picker (T5) — sits left of theme switcher
       React.createElement(ModePicker),
 
-      // Visual-skin chooser (7 skins: Stellar, Apollo, Tactical,
-      // Bloomberg, Glass, Editorial, Spatial-3D).  Sits between
-      // mode-picker and theme switcher.
+      // Visual-skin chooser (18 skins across 3 families).
       window.SkinChooser ? React.createElement(window.SkinChooser) : null,
 
-      // Theme switcher (always visible, right-most before logout-style icons)
-      React.createElement(ThemeSwitcher, { current: theme, onPick: setTheme })
+      // Theme switcher (color theme within the active skin)
+      React.createElement(ThemeSwitcher, { current: theme, onPick: setTheme }),
+
+      // Auth user chip — only renders when window.ArgusAuth.me is set
+      // (i.e. the auth module is installed AND user is authenticated).
+      // Bypasses gracefully when /auth/me isn't mounted.
+      window.UserChip ? React.createElement(window.UserChip) : null
     ),
 
     // ════════════════════════════════ CLIENT-MODE RIBBON (T5B) ══
@@ -1744,10 +1785,210 @@ function App() {
   );
 }
 
-// Bootstrap
+// ─── Auth boundary ──────────────────────────────────────────────
+// Gates the entire app behind /auth/me.  Renders the cinematic
+// LoginPage when unauthenticated, the cockpit when authenticated.
+// Hydrates persisted session state from the server so cockpit prefs
+// (skin, audience mode, sidebar collapsed, current hub/tab) survive
+// reboots + device switches.
+//
+// When the auth backend isn't installed (404 on /auth/me) the boundary
+// falls through to the cockpit so the platform stays usable in dev
+// without the auth module mounted.
+function AuthBoundary({ children }) {
+  const [phase, setPhase] = useState('checking');     // checking | login | authed | bypass
+  const [me, setMe] = useState(null);
+
+  function recheck() {
+    setPhase('checking');
+    fetch('/auth/me', { credentials: 'include' })
+      .then(async (r) => {
+        if (r.status === 401) { setPhase('login'); return null; }
+        if (r.status === 404) {
+          // Auth module not installed — fall through to cockpit
+          console.info('[argus] /auth/me returned 404 — auth module not installed; bypassing.');
+          setPhase('bypass'); return null;
+        }
+        if (!r.ok) throw new Error('unexpected status ' + r.status);
+        return r.json();
+      })
+      .then((data) => {
+        if (!data) return;
+        setMe(data);
+        // Hydrate persisted session state (server is source of truth)
+        const st = data.session_state || {};
+        if (st.skin && window.ArgusSkin) {
+          try { window.ArgusSkin.save(st.skin); window.ArgusSkin.apply(st.skin); } catch {}
+        } else if (window.ArgusSkin && !localStorage.getItem('argus.ui.skin.v1')) {
+          // No saved skin — pick the default for the user's primary role
+          const primary = (data.roles || [])[0];
+          const defaults = {
+            OWNER: 'stellar', PLATFORM_ADMIN: 'veteran',
+            SECURITY_MANAGER: 'manager', OPERATOR: 'redcell',
+            ANALYST: 'novice', EXECUTIVE: 'executive',
+            AUDITOR: 'auditor', CLIENT: 'editorial',
+          };
+          const target = defaults[primary] || 'stellar';
+          try { window.ArgusSkin.save(target); window.ArgusSkin.apply(target); } catch {}
+        }
+        if (st.viewMode || st.audience_mode) {
+          // Merged into the existing local-prefs flow on next render
+          try {
+            const prefs = JSON.parse(localStorage.getItem('argus.ui.prefs.v2') || '{}');
+            const next = { ...prefs, viewMode: st.viewMode || st.audience_mode, ...st };
+            localStorage.setItem('argus.ui.prefs.v2', JSON.stringify(next));
+          } catch {}
+        }
+        setPhase('authed');
+      })
+      .catch((err) => {
+        console.warn('[argus] auth check error:', err);
+        setPhase('bypass');
+      });
+  }
+  useEffect(recheck, []);
+
+  // Expose `me` + recheck globally so children + dev tools can read
+  useEffect(() => {
+    window.ArgusAuth = { me, refresh: recheck, logout: doLogout };
+  }, [me]);
+
+  async function doLogout() {
+    try {
+      const csrf = (document.cookie.split('; ').find(c => c.startsWith('argus_csrf=')) || '')
+                    .split('=')[1];
+      await fetch('/auth/logout', {
+        method: 'POST', credentials: 'include',
+        headers: csrf ? { 'X-CSRF-Token': decodeURIComponent(csrf) } : {},
+      });
+    } catch {}
+    try { localStorage.removeItem('argus.access_token'); } catch {}
+    setMe(null); setPhase('login');
+  }
+
+  if (phase === 'checking') {
+    // Cinematic in-place spinner — matches the auth stage aesthetic
+    return React.createElement('div', { className: 'auth-stage' },
+      React.createElement('div', { className: 'auth-stage-mesh', 'aria-hidden': 'true' }),
+      React.createElement('div', { className: 'auth-stage-center' },
+        React.createElement('div', {
+          style: { display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 16,
+                    color: 'var(--accent)' },
+        },
+          React.createElement('div', { className: 'auth-orbit',
+            style: { width: 36, height: 36 } },
+            React.createElement('div', { className: 'auth-orbit-ring' }),
+            React.createElement('div', { className: 'auth-orbit-dot' }),
+          ),
+          React.createElement('div', {
+            style: { fontFamily: 'var(--font-mono)', fontSize: 11,
+                      letterSpacing: 3, textTransform: 'uppercase',
+                      color: 'var(--text-secondary)' },
+          }, 'Verifying session…'),
+        )
+      ),
+    );
+  }
+
+  if (phase === 'login') {
+    if (window.LoginPage) {
+      return React.createElement(window.LoginPage, {
+        onSuccess: () => { window.location.reload(); },
+      });
+    }
+    // LoginPage hasn't loaded yet (race) — show spinner
+    return React.createElement('div', null, 'Loading sign-in…');
+  }
+
+  // 'authed' or 'bypass' — show the cockpit
+  return children;
+}
+
+// ─── User chip — shown in header when authenticated ─────────────
+function UserChip() {
+  const [open, setOpen] = useState(false);
+  const [me, setMe] = useState(window.ArgusAuth?.me || null);
+  const ref = useRef(null);
+
+  useEffect(() => {
+    function poll() {
+      const m = window.ArgusAuth?.me;
+      if (m && (!me || me.id !== m.id)) setMe(m);
+    }
+    const id = setInterval(poll, 500);
+    return () => clearInterval(id);
+  }, [me]);
+
+  useEffect(() => {
+    function close(e) { if (ref.current && !ref.current.contains(e.target)) setOpen(false); }
+    if (open) document.addEventListener('mousedown', close);
+    return () => document.removeEventListener('mousedown', close);
+  }, [open]);
+
+  if (!me) return null;
+  const initials = (me.display_name || me.email || '?').split(/[\s@]+/).filter(Boolean)
+                    .slice(0, 2).map(s => s[0].toUpperCase()).join('') || '?';
+  const primaryRole = (me.roles || [])[0] || 'USER';
+
+  return React.createElement('div', { ref, style: { position: 'relative' } },
+    React.createElement('button', {
+      className: 'auth-user-chip',
+      onClick: () => setOpen(o => !o),
+      title: `${me.email} · ${primaryRole}`,
+    },
+      React.createElement('span', { className: 'auth-user-chip-avatar' }, initials),
+      React.createElement('span', null,
+        React.createElement('span', { style: { fontWeight: 600 } }, me.display_name || me.email),
+        React.createElement('span', {
+          style: { display: 'block', fontSize: 9, opacity: 0.6,
+                    letterSpacing: 1, textTransform: 'uppercase' }
+        }, primaryRole),
+      ),
+      React.createElement('span', { style: { fontSize: 9, opacity: 0.5 } }, '▾'),
+    ),
+    open && React.createElement('div', { className: 'auth-user-menu' },
+      React.createElement('div', {
+        className: 'auth-user-menu-row',
+        onClick: () => {
+          setOpen(false);
+          window.dispatchEvent(new CustomEvent('navigate', { detail: 'users' }));
+        },
+      }, '👥 User & access management'),
+      React.createElement('div', {
+        className: 'auth-user-menu-row',
+        onClick: () => {
+          setOpen(false);
+          window.open('/auth/me', '_blank');
+        },
+      }, '🔐 My security'),
+      React.createElement('div', {
+        className: 'auth-user-menu-row',
+        onClick: () => {
+          setOpen(false);
+          window.open('/auth/sessions', '_blank');
+        },
+      }, '📋 My sessions'),
+      React.createElement('div', { className: 'auth-user-menu-divider' }),
+      React.createElement('div', {
+        className: 'auth-user-menu-row danger',
+        onClick: () => { setOpen(false); window.ArgusAuth?.logout?.(); },
+      }, '↪ Sign out'),
+    )
+  );
+}
+
+// Make components globally accessible to other files
+window.UserChip = UserChip;
+window.AuthBoundary = AuthBoundary;
+
+// Bootstrap — wrap the cockpit in AuthBoundary so the cinematic login
+// page renders for unauthenticated users.  Bypasses gracefully when
+// the auth backend isn't installed (so dev without auth still works).
 const root = ReactDOM.createRoot(document.getElementById('root'));
 root.render(
-  React.createElement(window.StoreProvider, null,
-    React.createElement(App)
+  React.createElement(AuthBoundary, null,
+    React.createElement(window.StoreProvider, null,
+      React.createElement(App)
+    )
   )
 );

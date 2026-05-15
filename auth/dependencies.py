@@ -36,42 +36,27 @@ logger = logging.getLogger("argus.auth.dependencies")
 
 
 # ─────────────────────────────────────────────────────────────────
-#  Token extraction
-# ─────────────────────────────────────────────────────────────────
-
-
-def _extract_access_token(request: Request,
-                          authorization: Optional[str]) -> Optional[str]:
-    """Look in Authorization: Bearer <jwt> first, then in cookie."""
-    if authorization and authorization.lower().startswith("bearer "):
-        return authorization.split(None, 1)[1].strip()
-    cookie = request.cookies.get(CONFIG.session_cookie_name)
-    return cookie or None
-
-
-# ─────────────────────────────────────────────────────────────────
 #  Core dependency: current user + active session
+# ─────────────────────────────────────────────────────────────────
+#
+# Two auth paths, both supported:
+#   • API clients : Authorization: Bearer <JWT>           → verify, extract sid
+#   • Browsers    : Cookie argus_session=<session-uuid>   → direct DB lookup
+# Both end up resolving the same Session row + User; the routes don't
+# care which path was used.
 # ─────────────────────────────────────────────────────────────────
 
 
 class _AuthContext:
     """Lightweight container the dependency returns + reuses."""
     def __init__(self, user: User, session: SessionRow,
-                 claims: AccessTokenClaims):
+                 claims: Optional[AccessTokenClaims] = None):
         self.user = user
         self.session = session
         self.claims = claims
 
 
-def _do_auth(request: Request, authorization: Optional[str],
-             db: DbSession, require: bool) -> Optional[_AuthContext]:
-    token = _extract_access_token(request, authorization)
-    if not token:
-        if require:
-            raise HTTPException(status.HTTP_401_UNAUTHORIZED,
-                                detail="Not authenticated.")
-        return None
-
+def _resolve_via_jwt(token: str, db: DbSession, require: bool) -> Optional[_AuthContext]:
     try:
         claims = verify_access_token(token)
     except ExpiredSignatureError:
@@ -86,29 +71,69 @@ def _do_auth(request: Request, authorization: Optional[str],
             raise HTTPException(status.HTTP_401_UNAUTHORIZED,
                                 detail="Invalid token.")
         return None
-
     session = load_active_session(db, claims.sid)
     if session is None:
         if require:
             raise HTTPException(status.HTTP_401_UNAUTHORIZED,
                                 detail="Session revoked or expired.")
         return None
-
     user = db.get(User, claims.sub)
     if user is None or user.deleted_at is not None or user.status.value != "ACTIVE":
         if require:
             raise HTTPException(status.HTTP_403_FORBIDDEN,
                                 detail="Account inactive.")
         return None
-
-    # Idle bump — keeps the session warm
-    try:
-        ip = request.client.host if request.client else None
-        touch_session(db, session, ip_address=ip)
-    except Exception:
-        pass
-
     return _AuthContext(user=user, session=session, claims=claims)
+
+
+def _resolve_via_cookie(session_id: str, db: DbSession,
+                         require: bool) -> Optional[_AuthContext]:
+    session = load_active_session(db, session_id)
+    if session is None:
+        if require:
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED,
+                                detail="Session revoked or expired.")
+        return None
+    user = db.get(User, session.user_id)
+    if user is None or user.deleted_at is not None or user.status.value != "ACTIVE":
+        if require:
+            raise HTTPException(status.HTTP_403_FORBIDDEN,
+                                detail="Account inactive.")
+        return None
+    return _AuthContext(user=user, session=session, claims=None)
+
+
+def _do_auth(request: Request, authorization: Optional[str],
+             db: DbSession, require: bool) -> Optional[_AuthContext]:
+    # ── Path 1: Authorization: Bearer JWT (API clients, SCIM, integrations)
+    if authorization and authorization.lower().startswith("bearer "):
+        token = authorization.split(None, 1)[1].strip()
+        ctx = _resolve_via_jwt(token, db, require)
+        if ctx:
+            try:
+                ip = request.client.host if request.client else None
+                touch_session(db, ctx.session, ip_address=ip)
+            except Exception:
+                pass
+        return ctx
+
+    # ── Path 2: Cookie argus_session=<session-uuid> (browser)
+    sid = request.cookies.get(CONFIG.session_cookie_name)
+    if sid:
+        ctx = _resolve_via_cookie(sid, db, require)
+        if ctx:
+            try:
+                ip = request.client.host if request.client else None
+                touch_session(db, ctx.session, ip_address=ip)
+            except Exception:
+                pass
+        return ctx
+
+    # No credentials supplied
+    if require:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED,
+                            detail="Not authenticated.")
+    return None
 
 
 def get_current_user(request: Request,

@@ -429,7 +429,6 @@ class Session(Base):
     last_mfa_at:   Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
 
     user            = relationship("User",   back_populates="sessions")
-    state           = relationship("SessionState", back_populates="session", uselist=False, cascade="all, delete-orphan")
     refresh_tokens  = relationship("RefreshToken", back_populates="session", cascade="all, delete-orphan")
 
     __table_args__ = (
@@ -439,21 +438,22 @@ class Session(Base):
 
 
 class SessionState(Base):
-    """Persistent UI / app state that follows the user across reload,
-    reboot, and device switch.  Written by the frontend via PATCH
-    /auth/me/state.
+    """Persistent UI / app state that follows the USER across reload,
+    reboot, and device switch.
+
+    Keyed by user_id (NOT session_id) so an operator who logs in on a
+    different machine sees the same skin, audience mode, pinned pentest
+    session, etc.  Written by the frontend via PATCH /auth/me/state.
 
     The `state` JSON blob's shape is documented in README §5.
     """
     __tablename__ = "auth_session_states"
 
-    session_id:   Mapped[str] = mapped_column(String(36), ForeignKey("auth_sessions.id", ondelete="CASCADE"),
+    user_id:      Mapped[str] = mapped_column(String(36), ForeignKey("auth_users.id", ondelete="CASCADE"),
                                               primary_key=True)
     state:        Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     pinned_pentest_session_id: Mapped[Optional[str]] = mapped_column(String(64))
     updated_at:   Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False)
-
-    session = relationship("Session", back_populates="state")
 
 
 class RefreshToken(Base):

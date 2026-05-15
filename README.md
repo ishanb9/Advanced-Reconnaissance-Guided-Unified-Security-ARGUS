@@ -1,293 +1,496 @@
-# ARGUS — Advanced Reconnaissance & Guided Unified Security
+# ARGUS
 
-An AI-driven autonomous penetration testing platform. ARGUS orchestrates a fleet of specialist agents through a full pentest lifecycle, powered by a local LLM (Ollama), with a real-time React dashboard for operator oversight.
+**Advanced Reconnaissance & Guided Unified Security**
+
+An AI-driven autonomous penetration testing platform with enterprise
+identity, granular RBAC/ABAC, full SCIM 2.0 + SSO, 18 visual skins
+spanning operator + management personas, and a fleet of specialist
+agents orchestrated by a local LLM.
+
+> ARGUS turns a single operator into a senior red team. The platform
+> plans the engagement, runs the tools, validates the findings, scores
+> the risk, and writes the report — under the supervision of role-
+> appropriate humans.
+
+```
+        ┌──────────────────────────────────────────────────────────────┐
+        │   First impression                                           │
+        │     Cinematic login page · 18 runtime-switchable skins       │
+        │     Apollo · Tactical · Bloomberg · Glass · Editorial · …    │
+        ├──────────────────────────────────────────────────────────────┤
+        │   Enterprise identity                                        │
+        │     Local + OIDC + SAML 2.0 + SCIM 2.0 · TOTP MFA            │
+        │     8 hierarchical roles · RBAC + ABAC · DB-backed sessions  │
+        │     Append-only audit log · 7-year retention · hash-chain    │
+        ├──────────────────────────────────────────────────────────────┤
+        │   Pentest core                                               │
+        │     MasterAgent + 23 specialist agent folders · MITRE T-IDs  │
+        │     RAG-powered reasoning · CVSS scoring · attack graph      │
+        │     Manual override · pause/resume · live PTY shells         │
+        └──────────────────────────────────────────────────────────────┘
+```
 
 ---
 
-## Architecture Overview
+## 60-second quick start
 
-```
-┌─────────────────────────────────────────────────────┐
-│                  React Frontend (port 5001)          │
-│  MissionControl · FindingsBoard · ShellManager      │
-│  AttackGraph · OsintIntel · PayloadBuilder · ...    │
-└────────────────────┬────────────────────────────────┘
-                     │  REST + WebSocket
-┌────────────────────▼────────────────────────────────┐
-│             agent_server.py  (FastAPI)               │
-│  Session management · WS broadcast · Shell PTY       │
-└──┬─────────────┬──────────────┬──────────────────────┘
-   │             │              │
-   ▼             ▼              ▼
-MasterAgent  CIDROrchestrator  ShellAgent / PayloadAgent
-   │
-   │  AgentBus (pub/sub)
-   ▼
-Specialist Slave Agents (recon, vuln, web, exploit, post, privesc, ...)
-   │
-   ▼
-MongoDB  (argus_pentest)  +  Ollama LLM  +  MCP Tool Server
+```bash
+# 1. Install everything (one unified requirements file)
+pip install -r requirements.txt
+
+# 2. One command does ALL first-time setup
+python -m auth.bootstrap quickstart --email admin@yourdomain.com
+#   ▸ Generates AUTH_JWT_SECRET + AUTH_PASSWORD_PEPPER + OWNER password
+#   ▸ Writes .env.local (chmod 600)
+#   ▸ Creates auth DB tables + the OWNER account
+
+# 3. Source the generated env file and start ARGUS
+set -a; source .env.local; set +a
+uvicorn agent_server:app --host 0.0.0.0 --port 8000
+
+# 4. Browse to http://localhost:8000  →  sign in with the credentials
+#    that quickstart printed.  You'll be forced to rotate the password
+#    on first login.
 ```
 
-**MasterAgent** is the sole LLM interface. It plans each phase, issues typed `Instruction` objects to slave agents via `AgentBus`, collects results, and re-consults the LLM to decide next steps. All reasoning is streamed to the frontend in real time.
+For everything that follows (production deployment, Docker, SSO,
+SCIM, retention, troubleshooting) see [`DEPLOYMENT.md`](DEPLOYMENT.md).
 
 ---
 
-## Tech Stack
+## What ARGUS is — three pillars
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│  PILLAR 1 · Pentest core                       see agents/README │
+│  ──────────────────────────────────────────────────────────────  │
+│  MasterAgent (LLM-driven) → AgentBus → 23 specialist agents      │
+│    recon · osint · vuln · web · exploit · privesc · lateral      │
+│    post · evasion · c2 · cloud · container · iot · wireless      │
+│    traffic · forensics · evidence · reasoning · campaign · …     │
+│  Tooling via MCP server · MITRE ATT&CK techniques on every step  │
+└──────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│  PILLAR 2 · Enterprise auth                      see auth/README │
+│  ──────────────────────────────────────────────────────────────  │
+│  Local username + password (Argon2id RFC 9106 + per-user pepper) │
+│  TOTP MFA + backup codes + WebAuthn-ready                        │
+│  OIDC (PKCE-S256) + SAML 2.0 + SCIM 2.0 (Okta, Azure, Google, …) │
+│  8 roles · RBAC + ABAC · DB-backed sessions · rotating refresh   │
+│  Tamper-evident audit log · OWNER-only deletion · 7yr retention  │
+└──────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│  PILLAR 3 · Operator UI                        see static/README │
+│  ──────────────────────────────────────────────────────────────  │
+│  React via Babel-standalone — no build step                      │
+│  18 runtime-switchable skins across 3 families:                  │
+│    Aesthetic   (Stellar, Apollo, Tactical, Bloomberg, Glass, …)  │
+│    Operator    (Veteran, Novice, GenZ, RedCell, Hunter, CTF)     │
+│    Management  (Auditor, Manager, Executive, CFO, Legal)         │
+│  Cinematic login · live attack graph · PTY shells · WebSocket    │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Documentation map
+
+| Document | Purpose |
+|----------|---------|
+| **[README.md](README.md)** *(this file)* | Front page · architecture · doc index |
+| **[DEPLOYMENT.md](DEPLOYMENT.md)** | Quickstart · first-login · env vars · Docker · SSO setup · troubleshooting · compliance |
+| **[auth/README.md](auth/README.md)** | Enterprise auth architecture · role matrix · RBAC/ABAC engine · audit log · sessions |
+| **[agents/README.md](agents/README.md)** | Agent fleet · dispatch pattern · adding a new specialist |
+| **[static/README.md](static/README.md)** | Frontend architecture · React-via-Babel · components · pages |
+| **[static/css/skins/README.md](static/css/skins/README.md)** | 18-skin catalogue · how to author a new skin |
+| **[knowledge/README.md](knowledge/README.md)** | RAG knowledge base · 4-tier retriever · playbook layer |
+| **[knowledge/PLAYBOOK_GUIDE.md](knowledge/PLAYBOOK_GUIDE.md)** | Authoring deterministic playbooks |
+| **[knowledge/TROUBLESHOOTING.md](knowledge/TROUBLESHOOTING.md)** | RAG ingestion + retrieval troubleshooting |
+| **[db/README.md](db/README.md)** | Data stores · Mongo · Neo4j · cache |
+| **[utils/README.md](utils/README.md)** | Small utility helpers · CVSS · LLM provider abstraction |
+| **[docs/README.md](docs/README.md)** | Design specs + implementation plans |
+
+---
+
+## Architecture
+
+```
+                  ┌──────────────────────────────────────────────────┐
+                  │                React Frontend                    │
+                  │  Cinematic LoginPage · 18 skins · UserAdminPage  │
+                  │  Cockpit: MissionControl · FindingsBoard · …     │
+                  │  AttackGraph · ReasoningEngine · LateralPostPage │
+                  └────────────────────┬─────────────────────────────┘
+                                       │  REST + WebSocket
+                                       │  Cookie session + Bearer JWT
+                  ┌────────────────────▼─────────────────────────────┐
+                  │  agent_server.py  (FastAPI · port 8000)          │
+                  │                                                  │
+                  │  • install_auth(app)   ← /auth/* + /scim/v2/*    │
+                  │  • Session WebSocket   ← live events             │
+                  │  • Shell PTY proxy     ← interactive ops         │
+                  │  • Tool MCP gateway    ← nmap, sqlmap, etc.      │
+                  └─┬───────────────┬──────────────┬─────────────────┘
+                    │               │              │
+        ┌───────────▼──┐    ┌───────▼──────┐  ┌────▼─────────────┐
+        │ MasterAgent  │    │ AuthModule   │  │ KnowledgeBase    │
+        │  (LLM-led)   │    │ (RBAC+ABAC)  │  │ (RAG · 4-tier)   │
+        └──────┬───────┘    └──────────────┘  └──────────────────┘
+               │
+               │  AgentBus (typed Instructions, pub/sub)
+               ▼
+        ┌──────────────────────────────────────────────────────┐
+        │  23 specialist agent folders                         │
+        │  recon · osint · vuln · web · exploit · privesc      │
+        │  lateral · post · evasion · c2 · cloud · container   │
+        │  iot · wireless · traffic · forensics · reasoning …  │
+        └──────────────────────────────────────────────────────┘
+               │
+               ▼
+        ┌──────────────────────────────────────────────────────┐
+        │  Data layer (see db/README.md)                       │
+        │   MongoDB    — engagement state + findings           │
+        │   Neo4j      — semantic attack graph (optional)      │
+        │   SQLite/PG  — auth tables (users, sessions, audit)  │
+        │   ChromaDB   — RAG embeddings + corpus               │
+        │   filesystem — session loot, reports, audit exports  │
+        └──────────────────────────────────────────────────────┘
+```
+
+---
+
+## Capability surfaces (compact)
+
+| Surface | Highlights |
+|---------|-----------|
+| **Agents** | Reconnaissance · OSINT · vulnerability scan · web (WSTG) · exploit · privilege escalation · lateral movement · post-exploitation · evasion (AV bypass) · C2 (Sliver) · cloud (AWS/Azure/GCP) · container/K8s · IoT · wireless · network traffic · digital forensics · evidence chain · campaign mgmt · reasoning loop · meta-agents · training |
+| **Reasoning** | Hypothesis-driven tree · LLM-led plan-execute-validate loop · MITRE ATT&CK technique annotation on every action · per-finding evidence chain · explainable next-step suggestions |
+| **Authentication** | Local (Argon2id RFC 9106 + per-deployment pepper) · OIDC w/ PKCE-S256 · SAML 2.0 (XSW-resistant via python3-saml) · SCIM 2.0 RFC 7644 (Okta + Azure + Google + OneLogin + JumpCloud + Auth0) |
+| **MFA** | TOTP (RFC 6238, ±1 step skew, Fernet-encrypted secrets) · 10 single-use backup codes (argon2-hashed) · WebAuthn interface ready |
+| **RBAC + ABAC** | 8 hierarchical roles: OWNER · PLATFORM_ADMIN · SECURITY_MANAGER · OPERATOR · ANALYST · EXECUTIVE · AUDITOR · CLIENT · ABAC predicates for engagement scoping + severity filters + client-redaction |
+| **Sessions** | DB-backed (SQLite/PG) · rotating refresh tokens · OAuth 2.1 §6.1 theft detection · idle + absolute TTL · per-user UI state survives reload + reboot + device switch |
+| **Audit log** | Append-only by design · OWNER-only deletion w/ reason · admin-configurable retention · optional SHA-256 hash chain · JSONL export before purge |
+| **Visual skins** | 18 runtime-switchable skins across 3 families · live preview · per-user persistence · WebGL skin lazy-loads Three.js scene · all use free fonts (Google Fonts + Press Start 2P + IBM Plex) |
+| **Audience modes** | OPERATOR / BRIEFING / PRESENT / CLIENT — F1–F4 hotkeys · hub visibility per mode · severity-redaction for CLIENT |
+| **Knowledge base** | 4-tier RAG retriever · ~1.1 GB embedder + reranker · YAML-authored deterministic playbooks · auto-ingestion of scan outputs |
+| **Pentest tooling** | Via MCP tool gateway — nmap, masscan, rustscan, nuclei, sqlmap, gobuster, ffuf, hydra, crackmapexec, impacket, metasploit, bloodhound, mimikatz, sliver, evil-winrm, … (full list in `mcp-server.js`) |
+
+---
+
+## Tech stack
 
 | Layer | Technology |
-|-------|-----------|
-| Backend | Python 3.11+, FastAPI, Uvicorn |
-| Frontend | React 18 (CDN, no build step), Babel standalone |
-| Database | MongoDB 7+ via Motor (async) |
-| LLM | Ollama (configurable model, default `glm-5:cloud`) |
-| Tool execution | MCP server (`mcp-server.js`, port 3000) |
-| Shell PTY | WebSocket + `pty` / `subprocess` |
-| Payloads | msfvenom wrapper |
-| Reports | Jinja2 HTML → optional PDF |
+|-------|------------|
+| Backend | Python 3.11+ · FastAPI 0.111 · Uvicorn · SQLAlchemy 2.0 · asyncio |
+| Frontend | React 18 via Babel-standalone · pure ES2019 · no build step |
+| Data — operational | MongoDB (engagement state) · Neo4j (attack graph, optional) |
+| Data — auth | SQLite (dev) · PostgreSQL (prod) · same SQLAlchemy code |
+| Data — RAG | ChromaDB · sentence-transformers (bge-small) |
+| Crypto | argon2-cffi · cryptography · PyJWT[crypto] · pyotp |
+| SSO | authlib (OIDC) · python3-saml (SAML 2.0) |
+| LLM | Ollama (local) · pluggable via `utils/llm_providers.py` |
+| Tooling gateway | Node MCP server (`mcp-server.js`) bridging pentest tools |
 
 ---
 
-## Pentest Methodology
+## Pentest methodology
 
-ARGUS follows the Standard Penetration testing methodology:
+8-phase lifecycle, each phase driven by the MasterAgent in conversation
+with the LLM and the knowledge base:
 
-```
-RECON → ENUM → VULN_ID → WEB_TESTING → EXPLOIT → POST_EXPLOIT → PRIVESC → REPORTING
-```
+1. **Reconnaissance** — scope discovery, host enumeration, OSINT
+2. **Scanning** — port + service + version detection (nmap, masscan, rustscan)
+3. **Enumeration** — deep service interrogation per protocol
+4. **Vulnerability assessment** — nuclei + version-CVE correlation + CVSS scoring
+5. **Exploitation** — chained payloads, attack-graph traversal, evasion ladders
+6. **Post-exploitation** — credential harvest, privilege escalation, persistence
+7. **Lateral movement** — pivoting, AD enumeration, kerberoasting, NTLM relay
+8. **Reporting** — exec summary · technical detail · evidence chain · MITRE mapping
 
-Optional phases (auto-enabled based on target type):
-- `OSINT` · `LATERAL` · `EVASION` · `EVIDENCE` · `WIRELESS` · `IOT` · `CLOUD` · `CONTAINER` · `TRAFFIC` · `FORENSICS`
-
----
-
-## Agent Fleet
-
-### Orchestration
-| Agent | Role |
-|-------|------|
-| `MasterAgent` | LLM-driven planner; sole LLM interface |
-| `CIDROrchestrator` | Manages parallel scans across CIDR/multi-target sessions |
-| `AttackGraphAgent` | Builds live attack graph from findings |
-
-### Specialist Agents (Slave)
-| Domain | Subagents |
-|--------|-----------|
-| **Recon** | DNS recon, network scan, service banner, web fingerprint |
-| **Vuln** | CVE lookup, SMB, SSH, SSL, LDAP, FTP, service vuln |
-| **Web** | Dir fuzz, SQLi, XSS, SSRF, auth bypass, broken access control, CMS, injection, Burp integration |
-| **Exploit** | Metasploit, searchsploit, exploit chain, credential spray, post-module |
-| **Post-Exploit** | Local cred harvest, persistence, data exfil, C2 deploy, log evasion |
-| **Privesc** | Linux/Windows enum & exploit, container escape, cloud metadata |
-| **Lateral** | AD enum, Kerberos, NTLM capture |
-| **Evasion** | AMSI bypass, defense enumeration |
-| **Evidence** | Flag capture, screenshot, artifact collection |
-| **Forensics** | Memory analysis, timeline, artifact collect |
-| **Cloud** | AWS, Azure, GCP enumeration |
-| **Container** | Docker audit, Kubernetes audit |
-| **Wireless** | WiFi scan, WPA2 crack, evil twin |
-| **IoT** | Device scan, default creds, firmware, protocol |
-| **Traffic** | PCAP capture, MITM, credential sniff |
-| **OSINT** | Open-source intelligence gathering |
-| **Shell** | PTY shell management |
-| **Payload** | msfvenom payload generation |
-
----
-
-## Session Modes
-
-| Mode | Description |
-|------|-------------|
-| **Single target** | One IP/hostname — full sequential methodology |
-| **CIDR / multi-target** | Subnet or comma-separated IPs — `CIDROrchestrator` fans out parallel `MasterAgent` instances with configurable concurrency |
-
----
-
-## Key Features
-
-### Real-time Dashboard
-- Live phase timeline (Gantt-style) with per-step status
-- Attack tree / attack graph visualization
-- Findings board with severity filtering
-- Agent console (per-agent log streaming)
-- OSINT intel panel
-- Shell manager (interactive PTY shells over WebSocket)
-- Payload builder (msfvenom)
-- Lateral/post-exploit tracker (credentials, tunnels, persistence)
-- Subagent console
-- MITRE ATT&CK mapping
-- AI observability (LLM reasoning trace)
-- Metrics dashboard
-
-### Pause & Resume
-- Pause a running scan at any phase boundary
-- Full agent state serialized to `session_checkpoints` in MongoDB
-- Resume restores all phase results and continues from the next phase
-- No LLM re-planning on resume; plan is cached in the checkpoint
-- Plan steps retain their done/active/pending status in the UI (never reset)
-
-### Session Archiving
-- Archive completed sessions (moved to `archived_*` collections)
-- Inline report HTML stored in `session_archives`
-- Unarchive at any time
-
-### Knowledge Base (RAG)
-- Ingest pentest playbooks, command references, technique guides
-- Injected as context into LLM prompts per-phase
-- Searchable from the UI (Knowledge page)
-
-### Long-term Memory
-- Store and recall cross-session findings and patterns
-- `/memory/store`, `/memory/recall`, `/memory/stats` endpoints
-
-### Manual Control
-- Tool Workshop: run any tool manually with live streaming output
-- Subagent Console: trigger any registered subagent on demand
-- Operator guidance: inject freeform guidance mid-scan
-- Human-in-the-loop phase confirmations (optional)
-
----
-
-## Database Schema
-
-MongoDB database: **`argus_pentest`**
-
-| Collection | Contents |
-|-----------|----------|
-| `sessions` | Session metadata, status, config |
-| `findings` | Vulnerabilities with severity, CVSS, MITRE tags |
-| `agent_logs` | Full agent action log (TTL: 90 days) |
-| `agent_logs_realtime` | Capped 100MB ring buffer for live streaming |
-| `tool_outputs` | Raw tool stdout/stderr (64KB cap, TTL: 180 days) |
-| `shell_sessions` | PTY shell state |
-| `flags` | CTF-style captured flags |
-| `osint_results` | OSINT findings |
-| `attack_trees` | Attack tree snapshots |
-| `chain_analyses` | Exploit chain analysis |
-| `rag_history` | LLM conversation history (TTL: 30 days) |
-| `credentials` | Harvested credentials |
-| `tunnels` | Active tunnel state |
-| `persistence` | Persistence mechanism records |
-| `lateral_movement` | Lateral movement records |
-| `session_checkpoints` | Pause/resume state (auto-checkpoints TTL: 30 days) |
-| `archived_sessions` | Archived session metadata |
-| `session_archives` | Archived session report HTML |
+Each phase emits findings into the operational DB with full provenance
+(tool · raw output · CVSS · MITRE technique · timestamp · operator).
+The reasoning agent stitches them into a hypothesis tree visible in the
+cockpit.
 
 ---
 
 ## Installation
 
-### Prerequisites
-- Python 3.11+
-- MongoDB 7+ (running on `localhost:27017`)
-- Node.js (for MCP server)
-- Ollama with a model loaded (default: `glm-5:cloud`)
-- Kali Linux or equivalent (for pentest tools: nmap, metasploit, etc.)
-
-### Setup
+### Quickest path (development)
 
 ```bash
-# 1. Install Python dependencies
-pip install -r requirements.txt --break-system-packages
-
-# 2. Install MCP server dependencies
-npm install
-
-# 3. Set environment variables (optional — defaults shown)
-export OLLAMA_URL=http://192.168.0.100:11434
-export OLLAMA_MODEL=glm-5:cloud
-export MONGO_URI=mongodb://localhost:27017
-
-# 4. Start the MCP tool server
-node mcp-server.js &
-
-# 5. Start the agent server
-python agent_server.py
+pip install -r requirements.txt
+python -m auth.bootstrap quickstart --email admin@yourdomain.com
+set -a; source .env.local; set +a
+uvicorn agent_server:app --host 0.0.0.0 --port 8000
 ```
 
-Access the dashboard at: **http://localhost:5001**
+### Production
 
----
+See **[DEPLOYMENT.md](DEPLOYMENT.md)** for:
 
-## API Reference
+- Environment-variable reference (40+ tunables)
+- Docker + Compose templates
+- Reverse-proxy (nginx) recipe
+- PostgreSQL for multi-process deployment
+- SSO setup (Okta, Azure AD, Google Workspace)
+- SCIM provisioning
+- Production checklist
+- Backup OWNER pattern
+- Compliance mapping (SOC 2, ISO 27001, NIST 800-53/63B, PCI DSS, HIPAA, GDPR, SOX)
+- Troubleshooting (locked accounts, lost MFA, refresh-token theft, SQLite locking)
 
-### Sessions
-| Method | Endpoint | Description |
-|--------|---------|-------------|
-| `POST` | `/sessions` | Create & start a new pentest session |
-| `GET` | `/sessions` | List all sessions |
-| `GET` | `/sessions/{id}` | Get session detail |
-| `POST` | `/sessions/{id}/stop` | Stop a session |
-| `POST` | `/sessions/{id}/pause` | Pause at next phase boundary |
-| `POST` | `/sessions/{id}/resume` | Resume from latest checkpoint |
-| `DELETE` | `/sessions/{id}` | Delete session and all data |
-| `POST` | `/sessions/{id}/archive` | Archive session |
-| `POST` | `/sessions/{id}/unarchive` | Unarchive session |
-| `GET` | `/sessions/{id}/checkpoints` | List checkpoints |
+### Prerequisites
 
-### Session Data
-| Method | Endpoint | Description |
-|--------|---------|-------------|
-| `GET` | `/sessions/{id}/findings` | Findings (filterable by severity/phase) |
-| `GET` | `/sessions/{id}/logs` | Agent logs |
-| `GET` | `/sessions/{id}/tool-outputs` | Tool stdout/stderr |
-| `GET` | `/sessions/{id}/hosts` | Multi-host scan status |
-| `GET` | `/sessions/{id}/shells` | Active shells |
-| `GET` | `/sessions/{id}/credentials` | Harvested credentials |
-| `GET` | `/sessions/{id}/attack-tree` | Attack tree |
-| `GET` | `/sessions/{id}/mitre` | MITRE ATT&CK mapping |
-| `GET` | `/sessions/{id}/report?format=html` | Generated report |
-
-### Tools & Shells
-| Method | Endpoint | Description |
-|--------|---------|-------------|
-| `GET` | `/tools` | List available tools |
-| `GET` | `/tools/stream` | Stream tool execution (SSE) |
-| `POST` | `/shells/create` | Create a new PTY shell |
-| `POST` | `/shells/{id}/cmd` | Send command to shell |
-| `POST` | `/payloads/generate` | Generate msfvenom payload |
-
-### WebSocket
-```
-ws://localhost:5001/ws/{session_id}
-```
-Streams all agent events in real time. The frontend subscribes on session activation.
+| Component | Version | Required for |
+|-----------|---------|--------------|
+| Python | 3.11+ | Backend + auth + RAG |
+| Node.js | 18+ | MCP tool gateway (`mcp-server.js`) |
+| MongoDB | 6.x | Operational engagement state |
+| Ollama | latest | Local LLM provider (or set `OLLAMA_HOST` to a remote) |
+| Neo4j | 5.x | *Optional* — semantic attack graph |
+| libxml2 + libxmlsec1 | system pkg | *Optional* — SAML 2.0 SSO (Debian/Ubuntu only) |
 
 ---
 
 ## Configuration
 
-| Environment Variable | Default | Description |
-|---------------------|---------|-------------|
-| `OLLAMA_URL` | `http://192.168.0.100:11434` | Ollama API endpoint |
-| `OLLAMA_MODEL` | `glm-5:cloud` | Model name to use |
-| `MONGO_URI` | `mongodb://localhost:27017` | MongoDB connection string |
+ARGUS is 12-factor — every tunable is exposed as an environment
+variable. See:
+
+- **[`auth/config.py`](auth/config.py)** — auth-module knobs (40+)
+- **[`DEPLOYMENT.md §3`](DEPLOYMENT.md#3--environment-variable-reference)** — full reference
+- **MCP server config** — `mcp-server.js`
+- **Knowledge base config** — `knowledge/README.md`
+
+The `quickstart` command generates the security-critical secrets
+automatically and writes them to `.env.local`; you only need to
+hand-tune for production (cookie domain, retention windows, IdP config,
+PostgreSQL URL).
 
 ---
 
-## Frontend Pages
+## Security posture
 
-| Page | Route fragment | Description |
-|------|---------------|-------------|
-| Target Config | `#target` | Configure target, mode, scope, options |
-| Mission Control | `#mission` | Live scan dashboard — primary operator view |
-| Findings Board | `#findings` | All findings, filterable, exportable |
-| Shell Manager | `#shells` | Interactive PTY shells |
-| Payload Builder | `#payloads` | msfvenom payload generation |
-| OSINT Intel | `#osint` | OSINT results panel |
-| Lateral/Post | `#lateral` | Credentials, tunnels, persistence |
-| Attack Graph | `#graph` | Visual attack path graph |
-| Agent Console | `#agents` | Per-agent log view |
-| Subagent Console | `#subagents` | Manual subagent execution |
-| Tool Workshop | `#tools` | Manual tool execution |
-| Knowledge Base | `#knowledge` | RAG knowledge ingestion & search |
-| Report | `#report` | Generated pentest report |
-| Session History | `#history` | All past sessions |
-| Metrics | `#metrics` | Platform performance metrics |
-| AI Observability | `#observability` | LLM reasoning trace |
+| Concern | Mitigation |
+|---------|------------|
+| Password storage | Argon2id m=64MiB t=3 p=4 (RFC 9106 §4) + per-deployment HMAC pepper |
+| Brute force | Per-account 5-fail / 15-min sliding-window lockout + global rate limit |
+| Session theft | httpOnly + Secure + SameSite=Lax cookies · CSRF double-submit · IP+UA fingerprint |
+| Refresh-token theft | Rotating tokens; reuse triggers OAuth 2.1 §6.1 family revocation |
+| MFA bypass | Step-up re-auth required for sensitive ops (role grant, audit delete, SCIM-token issue) |
+| Privilege escalation | OWNER-only for OWNER + PLATFORM_ADMIN grants · hierarchical grant rules |
+| Audit-log tampering | Append-only by design · optional SHA-256 hash chain · JSONL export before purge |
+| OIDC code injection | PKCE-S256 enforced |
+| SAML XSW | python3-saml ≥ 1.16 mitigates known XML-signature wrapping |
+| SCIM token leak | Hashed at rest · rotation API · audit on every use |
+| Timing oracles | Constant-time argon2 verify + dummy-hash for unknown users |
+
+Full audit-evidence-chain options + tamper proofs are documented in
+**[`auth/audit.py`](auth/audit.py)** and **[`DEPLOYMENT.md §11`](DEPLOYMENT.md#11--compliance-notes)**.
 
 ---
 
-## Disclaimer
+## API surface
 
-ARGUS is intended for **authorized penetration testing only**. Use only against systems you own or have explicit written permission to test. Unauthorized use against third-party systems is illegal.
+All endpoints return JSON unless noted.
+
+| Group | Endpoint | Notes |
+|-------|----------|-------|
+| Health | `GET /healthz/auth` | Auth-DB reachability |
+| Auth | `POST /auth/login` | Local credentials → access + refresh + csrf |
+| Auth | `POST /auth/mfa/verify` | TOTP / backup-code second factor |
+| Auth | `POST /auth/refresh` | Rotating refresh-token exchange |
+| Auth | `POST /auth/logout` | Revoke session |
+| SSO | `GET /auth/sso/oidc/{idp}/start` | OIDC authz with PKCE |
+| SSO | `GET /auth/sso/oidc/{idp}/callback` | OIDC code exchange |
+| SSO | `POST /auth/sso/saml/{idp}/acs` | SAML 2.0 assertion consumer |
+| SSO | `GET /auth/sso/saml/{idp}/metadata` | SP metadata XML |
+| Me | `GET /auth/me` | Current user + persisted UI state |
+| Me | `PATCH /auth/me/state` | Update UI state (skin, audience mode, …) |
+| Me | `POST /auth/me/change-password` | Rotate own password |
+| Sessions | `GET /auth/sessions` | List own active sessions |
+| Sessions | `DELETE /auth/sessions/{id}` | Revoke own session |
+| Admin | `GET /auth/admin/users` | RBAC: `users:read` |
+| Admin | `POST /auth/admin/users` | RBAC: `users:create` |
+| Admin | `POST /auth/admin/users/{id}/role` | Hierarchical grant rules apply |
+| Admin | `GET /auth/admin/audit` | Audit log (scoped per RBAC) |
+| Admin | `POST /auth/admin/audit/delete` | OWNER-only |
+| Admin | `POST /auth/admin/scim-tokens` | Issue SCIM bearer |
+| SCIM | `GET /scim/v2/Users` | RFC 7644 with filter parser |
+| SCIM | `POST /scim/v2/Users` | Just-in-time provisioning |
+| SCIM | `PATCH /scim/v2/Users/{id}` | Activate / deactivate / rename |
+| SCIM | `GET /scim/v2/Groups` | ARGUS roles surface as SCIM groups |
+| Engagement | `POST /api/scan/start` | Begin a new pentest engagement |
+| Engagement | `GET /api/sessions/{id}` | Engagement state |
+| Engagement | `WS /api/ws/{session_id}` | Live event stream |
+
+Full OpenAPI surface auto-generated by FastAPI at `/docs` once
+ARGUS is running.
+
+---
+
+## CLI
+
+```bash
+# ── Bootstrap & secrets (auth module) ──
+python -m auth.bootstrap quickstart            # full first-time setup
+python -m auth.bootstrap gen-password          # one strong password
+python -m auth.bootstrap rotate-jwt-key        # new JWT secret
+python -m auth.bootstrap migrate               # create auth tables
+python -m auth.bootstrap create-owner          # interactive
+python -m auth.bootstrap issue-scim-token --description "Okta"
+python -m auth.bootstrap enforce-retention     # audit-log sweep
+
+# ── Knowledge base ──
+python knowledge/build_kb.py                   # build / rebuild RAG index
+python knowledge/dedupe_kb.py                  # dedupe corpus
+python knowledge/auto_ingest_scans.py          # ingest fresh scan output
+
+# ── Engagement-time ──
+uvicorn agent_server:app --host 0.0.0.0 --port 8000
+node mcp-server.js                             # start tool gateway (separate process)
+```
+
+---
+
+## Project layout
+
+```
+ARGUS/
+├── README.md                  ← you are here
+├── DEPLOYMENT.md              ← production deployment guide
+├── requirements.txt           ← unified Python deps
+│
+├── agent_server.py            ← FastAPI app entry + install_auth()
+├── schemas.py                 ← root engagement schemas
+├── mcp-server.js              ← Node tool gateway
+│
+├── agents/                    ← MasterAgent + 23 specialist folders
+│   ├── README.md
+│   ├── master_agent.py
+│   ├── base_agent.py
+│   ├── base_subagent.py
+│   ├── recon/  osint/  vuln/  web/  exploit/  privesc/  lateral/
+│   ├── post/   evasion/  c2/   cloud/  container/  iot/  wireless/
+│   ├── traffic/  forensics/  evidence/  reasoning/  campaign/
+│   ├── mission/  meta/   playbook/  training/
+│   └── …
+│
+├── auth/                      ← Enterprise auth (additive module)
+│   ├── README.md              ← architecture + role matrix + flows
+│   ├── config.py · db.py · models.py · schemas.py
+│   ├── rbac.py · sessions.py · audit.py · scim.py
+│   ├── dependencies.py · routes.py · bootstrap.py · integration.py
+│   ├── security/  ← passwords (Argon2id) · MFA (TOTP/WebAuthn) · tokens
+│   └── providers/ ← local · OIDC · SAML
+│
+├── static/                    ← Frontend assets (no build step)
+│   ├── README.md
+│   ├── api.js · app.jsx · store.js
+│   ├── components/            ← StatusBadge, LiveTerminal, FindingCard, …
+│   ├── pages/                 ← MissionControl, FindingsBoard, LoginPage, …
+│   ├── css/
+│   │   ├── main.css           ← base + token system
+│   │   └── skins/             ← 18 skins
+│   │       ├── README.md
+│   │       ├── apollo.css · tactical.css · bloomberg.css · …
+│   │       └── …
+│   ├── js/skins/webgl_scene.js
+│   └── vendor/                ← React, antd, dayjs, d3, xterm, babel
+│
+├── templates/index.html       ← cockpit HTML shell
+│
+├── knowledge/                 ← RAG knowledge base
+│   ├── README.md · PLAYBOOK_GUIDE.md · TROUBLESHOOTING.md
+│   ├── build_kb.py · knowledge_base.py · dedupe_kb.py · …
+│   └── data/                  ← 300+ corpus files (PDFs, MDs, playbooks)
+│
+├── db/                        ← Data-store adapters
+│   ├── README.md
+│   ├── mongo_client.py · neo4j_client.py · cache.py · schemas.py
+│   └── __init__.py
+│
+├── utils/                     ← Cross-cutting helpers
+│   ├── README.md
+│   ├── llm_providers.py · cvss_scorer.py · opsec_profiles.py · …
+│   └── __init__.py
+│
+└── docs/                      ← Design specs + plans
+    ├── README.md
+    ├── superpowers/specs/     ← design docs
+    ├── superpowers/plans/     ← implementation plans
+    └── project-state/         ← progress logs
+```
+
+---
+
+## Roles, in one screen
+
+8 hierarchical roles. The auth module enforces every action via RBAC +
+ABAC. See [`auth/README.md §2`](auth/README.md#2--role-hierarchy) for
+the full permission matrix.
+
+| Code | Display | Bypass RBAC | Scope | Default skin |
+|------|---------|-------------|-------|--------------|
+| `OWNER` | Platform Owner | ✅ god-mode | global | stellar |
+| `PLATFORM_ADMIN` | Platform Administrator | no | global · IT mgmt + SSO + SCIM + retention | veteran |
+| `SECURITY_MANAGER` | Security Manager | no | tenant · engagements + assignment | manager |
+| `OPERATOR` | Operator | no | engagement · full red-team capability | redcell |
+| `ANALYST` | Analyst | no | engagement · validation + non-destructive tools | novice |
+| `EXECUTIVE` | Executive | no | tenant · dashboards + decisions, no exec | executive |
+| `AUDITOR` | Auditor | no | global · read-only with evidence chain | auditor |
+| `CLIENT` | Client | no | scoped engagement · severity-redacted | editorial |
+
+---
+
+## Visual skins
+
+ARGUS ships **18 runtime-switchable skins**. Operators / managers /
+auditors pick whichever fits the moment. See
+[`static/css/skins/README.md`](static/css/skins/README.md) for the
+full catalogue and a guide to authoring new skins.
+
+```
+Aesthetic   (7) ── Stellar · Apollo · Tactical · Bloomberg · Glass · Editorial · Spatial 3D
+Operator    (6) ── Veteran · Novice · GenZ · RedCell · Hunter · CTF
+Management  (5) ── Auditor · Manager · Executive · CFO · Legal
+```
+
+The chooser sits in the header. The choice persists per-user in the
+auth DB (`session_state`) and follows the operator across devices.
+The WebGL skin lazy-loads its Three.js scene only when selected.
+
+---
+
+## License & disclaimer
+
+ARGUS is intended for **authorized penetration testing only**. Use only
+against systems you own or have explicit written permission to test.
+Unauthorized use against third-party systems is illegal in most
+jurisdictions.
+
+The maintainers are not responsible for misuse. Default deployments
+include an authorization-and-scope acknowledgement step before any
+engagement starts.
+
+---
+
+## Contributing
+
+Read the relevant per-folder README first:
+
+- New agent type → [`agents/README.md`](agents/README.md)
+- New skin → [`static/css/skins/README.md`](static/css/skins/README.md)
+- Frontend page or component → [`static/README.md`](static/README.md)
+- Auth feature (MFA factor, IdP, SCIM ext.) → [`auth/README.md`](auth/README.md)
+- Knowledge-base corpus addition → [`knowledge/README.md`](knowledge/README.md)
+- Design specs / implementation plans → [`docs/README.md`](docs/README.md)
+
+Then keep this README's "Documentation map" in sync with anything new.
+
+---
+
+*"You don't grep your way to a finding. You think your way there.
+ARGUS is what that thinking looks like, at machine speed, supervised
+by the right humans."*

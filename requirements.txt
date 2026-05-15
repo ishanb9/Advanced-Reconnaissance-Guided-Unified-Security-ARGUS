@@ -1,38 +1,79 @@
-# ARGUS PENTEST PLATFORM — Python Requirements
-# Install: pip install -r requirements.txt --break-system-packages
+# ─────────────────────────────────────────────────────────────────
+#  ARGUS · Advanced Reconnaissance & Guided Unified Security
+#  Unified Python requirements (core + auth + RAG + everything)
+# ─────────────────────────────────────────────────────────────────
+#
+#  Install:
+#      pip install -r requirements.txt
+#
+#  On distros where `pip` is externally-managed (Debian 12+, Ubuntu 23.10+),
+#  add the override flag:
+#      pip install -r requirements.txt --break-system-packages
+#
+#  Optional native deps for python3-saml (SAML 2.0 SSO):
+#      Debian/Ubuntu  :  sudo apt install libxml2-dev libxmlsec1-dev libxmlsec1-openssl pkg-config
+#      macOS          :  brew install libxml2 libxmlsec1
+#      Windows        :  use the prebuilt wheel from PyPI (works out of the box)
+#
+# ─────────────────────────────────────────────────────────────────
 
-# Web framework
+
+# ── Web framework ──────────────────────────────────────────────
 fastapi==0.111.0
 uvicorn[standard]==0.30.0
 python-multipart==0.0.9
 jinja2==3.1.4
 aiofiles==23.2.1
+starlette==0.37.2
 
-# Database
-motor==3.4.0          # Async MongoDB driver
-pymongo==4.7.2        # Sync MongoDB + bson
-dnspython==2.6.1      # Required by motor
+# ── Data validation ────────────────────────────────────────────
+pydantic==2.7.1
+email-validator>=2.1                   # parses RFC 5321 emails for auth/schemas.py
 
-# HTTP client
+# ── Operational data stores ────────────────────────────────────
+motor==3.4.0                           # async MongoDB driver — engagement state
+pymongo==4.7.2                         # sync MongoDB + bson
+dnspython==2.6.1                       # required by motor
+neo4j==5.20.0                          # semantic attack graph (optional)
+cachetools==5.3.3                      # TTL cache used by MasterAgent + db.cache
+
+# ── Auth module data store ─────────────────────────────────────
+# auth/ uses SQLAlchemy 2.0 — works against SQLite (dev) and PostgreSQL
+# (prod) without code changes.  See auth/README.md §3.
+SQLAlchemy>=2.0,<3
+
+# ── Networking + HTTP clients ──────────────────────────────────
 httpx==0.27.0
-
-# System / network
+requests>=2.31                         # used by auth/providers/oidc.py for JWKS fetch
 psutil==5.9.8
 netifaces==0.11.0
 
-# Data validation
-pydantic==2.7.1
-
-# CORS
-starlette==0.37.2
-
-# Utilities
+# ── Utilities ──────────────────────────────────────────────────
 python-dotenv==1.0.1
 
-# Graph database (Neo4j — optional, Phase 2 semantic graph)
-# Install Neo4j Community Edition separately; driver auto-detects availability
-neo4j==5.20.0
+# ── Cryptography ───────────────────────────────────────────────
+# Used by the enterprise auth module for password hashing, MFA secret
+# encryption, JWT signing, and SAML XML-signature validation.
+argon2-cffi>=23.1                      # password hashing (RFC 9106)
+cryptography>=42.0                     # Fernet for MFA-secret encryption at rest
+PyJWT[crypto]>=2.8                     # access-token JWT issue + verify
 
-# Phase 4 — Caching, Storage & Performance
-# Provides TTLCache (LRU + per-entry TTL) used by db.cache and MasterAgent
-cachetools==5.3.3
+# ── Multi-factor authentication ────────────────────────────────
+pyotp>=2.9                             # RFC 6238 TOTP
+qrcode[pil]>=7.4                       # enrolment QR-code generation
+
+# ── Single sign-on (SSO) ───────────────────────────────────────
+authlib>=1.3                           # OIDC (PKCE-S256, JWKS) — auth/providers/oidc.py
+python3-saml>=1.16                     # SAML 2.0 SP — auth/providers/saml.py
+                                       # NOTE: native libxml2/libxmlsec1 needed on Linux
+
+# ── RAG knowledge base ─────────────────────────────────────────
+# Used by knowledge/build_kb.py for the 4-tier retriever.  Models
+# auto-download on first run (~1.1 GB embedding model + reranker).
+chromadb>=0.5.0                        # vector store
+sentence-transformers>=3.0.0           # bge-small embedder + reranker
+pypdf>=4.0.0                           # PDF text extraction
+beautifulsoup4>=4.12.0                 # HTML cleaning
+lxml>=5.0.0                            # XML/HTML parser (also used by python3-saml)
+tqdm>=4.66.0                           # progress bars during ingestion
+pyyaml>=6.0.0                          # YAML playbook parsing

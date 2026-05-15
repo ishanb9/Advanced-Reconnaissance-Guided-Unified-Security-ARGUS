@@ -46,6 +46,11 @@
   <script type="text/babel" src="/static/js/components/VoIRankingPanel.jsx?v=1"></script>
   <script type="text/babel" src="/static/js/components/SkinChooser.jsx?v=2"></script>
 
+  <!-- Auth (must load before app.jsx so window.LoginPage exists at boot) -->
+  <script type="text/babel" src="/static/js/components/MfaChallenge.jsx?v=2"></script>
+  <script type="text/babel" src="/static/js/pages/LoginPage.jsx?v=2"></script>
+  <script type="text/babel" src="/static/js/pages/UserAdminPage.jsx?v=1"></script>
+
   <!-- Pages (Phase 1/2) -->
   <!-- v2 UI revamp: Risk Dashboard is the new default landing page -->
   <script type="text/babel" src="/static/js/pages/RiskDashboard.jsx?v=4"></script>
@@ -78,6 +83,6 @@
   <script type="text/babel" src="/static/js/pages/WebTesting.jsx?v=3"></script>
 
   <!-- App router (must be last) -->
-  <script type="text/babel" src="/static/js/app.jsx?v=16"></script>
+  <script type="text/babel" src="/static/js/app.jsx?v=17"></script>
 </body>
 </html>

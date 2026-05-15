@@ -29,9 +29,9 @@ def _int(name: str, default: int) -> int:
 
 def _list(name: str, default: List[str]) -> List[str]:
     v = os.environ.get(name)
-    if not v:
+    if v is None:                # unset → use default
         return list(default)
-    return [x.strip() for x in v.split(",") if x.strip()]
+    return [x.strip() for x in v.split(",") if x.strip()]   # empty str → []
 
 
 @dataclass(frozen=True)
