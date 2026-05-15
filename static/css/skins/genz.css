@@ -1,0 +1,336 @@
+/* ══════════════════════════════════════════════════════════════
+   ARGUS · SKIN — GENZ  (Cyberpunk / Vaporwave 1337)
+   ──────────────────────────────────────────────────────────────
+   For the 21-year-old red teamer who grew up on Cyberpunk 2077,
+   /r/unixporn, and TikTok hacker aesthetic videos.
+   - Animated conic-gradient RGB sweep on every accent
+   - Vaporwave magenta/cyan/violet palette
+   - Glitch effects on hover (RGB chromatic split + clip skew)
+   - Scanline + film-grain overlay
+   - Space Mono headers, lowercase chrome ("findings r cooking 🔥")
+   - Severity micro-copy: "BANGER / FIRE / MID / MEH / CRINGE"
+   - 80s grid horizon backdrop (subtle, not gimmicky)
+   - Background ambient hue shift
+   ══════════════════════════════════════════════════════════════ */
+
+@import url('https://fonts.googleapis.com/css2?family=Space+Mono:ital,wght@0,400;0,700;1,400&family=Space+Grotesk:wght@500;600;700&display=swap');
+
+:root[data-skin="genz"] {
+  --bg-base:        #14002A;
+  --bg-void:        #08001A;
+  --bg-surface:     rgba(35, 8, 64, 0.78);
+  --bg-panel:       rgba(35, 8, 64, 0.78);
+  --bg-elevated:    rgba(50, 12, 90, 0.85);
+  --bg-glass:       rgba(35, 8, 64, 0.65);
+  --bg-sidebar:     rgba(15, 0, 32, 0.85);
+
+  --border-dim:     rgba(255, 100, 235, 0.15);
+  --border:         rgba(255, 100, 235, 0.32);
+  --border-light:   rgba(255, 100, 235, 0.32);
+  --border-bright:  #FF55E0;
+
+  --accent:         #FF55E0;       /* hot vaporwave magenta */
+  --accent-dim:     #C03BAE;
+  --accent-glow:    rgba(255,  85, 224, 0.45);
+  --accent-subtle:  rgba(255,  85, 224, 0.10);
+
+  --cyan:           #00F0FF;
+  --violet:         #B14AFF;
+
+  --text-primary:   #F5E8FF;
+  --text-secondary: rgba(245, 232, 255, 0.78);
+  --text-muted:     rgba(245, 232, 255, 0.45);
+
+  --critical:       #FF3FAB;
+  --high:           #FF7A1E;
+  --medium:         #FFE03F;
+  --amber:          #FFE03F;
+  --low:            #3FFFAB;
+  --supernova:      #FF55E0;
+
+  --critical-bg:    rgba(255,  63, 171, 0.20);
+  --critical-bd:    rgba(255,  63, 171, 0.55);
+  --high-bg:        rgba(255, 122,  30, 0.20);
+  --high-bd:        rgba(255, 122,  30, 0.55);
+  --medium-bg:      rgba(255, 224,  63, 0.20);
+  --medium-bd:      rgba(255, 224,  63, 0.55);
+  --low-bg:         rgba( 63, 255, 171, 0.20);
+  --low-bd:         rgba( 63, 255, 171, 0.55);
+
+  --font-ui:        'Space Grotesk', system-ui, sans-serif;
+  --font-display:   'Space Mono', 'Space Grotesk', monospace;
+  --font-mono:      'Space Mono', 'JetBrains Mono', monospace;
+
+  --radius:         3px;
+  --radius-md:      6px;
+  --radius-lg:      10px;
+  --radius-xl:      14px;
+
+  --shadow-sm:      0 0 8px rgba(255, 85, 224, 0.15);
+  --shadow-md:      0 0 20px rgba(255, 85, 224, 0.25), 0 0 40px rgba(0, 240, 255, 0.10);
+  --shadow-lg:      0 0 32px rgba(255, 85, 224, 0.35), 0 0 60px rgba(177, 74, 255, 0.18);
+}
+
+/* ── Body: synthwave horizon + animated gradient ── */
+[data-skin="genz"] body {
+  background: var(--bg-void);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  position: relative;
+  overflow-x: hidden;
+}
+[data-skin="genz"] body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background:
+    /* 80s perspective grid */
+    linear-gradient(rgba(255, 85, 224, 0.10) 1px, transparent 1px) 0 0 / 40px 40px,
+    linear-gradient(90deg, rgba(0, 240, 255, 0.10) 1px, transparent 1px) 0 0 / 40px 40px,
+    /* Hue gradient mesh */
+    radial-gradient(circle at 20% 80%, rgba(255, 85, 224, 0.30), transparent 50%),
+    radial-gradient(circle at 80% 20%, rgba(0, 240, 255, 0.25), transparent 50%),
+    radial-gradient(circle at 50% 100%, rgba(177, 74, 255, 0.35), transparent 60%),
+    var(--bg-void);
+  z-index: -2;
+  animation: genz-hue-drift 18s ease-in-out infinite alternate;
+}
+@keyframes genz-hue-drift {
+  0%   { filter: hue-rotate(0deg); }
+  100% { filter: hue-rotate(40deg); }
+}
+/* Film grain overlay */
+[data-skin="genz"] body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background:
+    repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.025) 0 1px, transparent 1px 3px);
+  pointer-events: none;
+  z-index: 9000;
+  mix-blend-mode: overlay;
+}
+
+/* ── Header with RGB sweep ── */
+[data-skin="genz"] .header,
+[data-skin="genz"] header {
+  background: rgba(20, 0, 42, 0.75);
+  backdrop-filter: blur(16px);
+  border-bottom: 1px solid var(--accent);
+  box-shadow: 0 0 24px var(--accent-glow), 0 1px 0 var(--accent);
+}
+[data-skin="genz"] .header h1,
+[data-skin="genz"] header h1,
+[data-skin="genz"] .brand,
+[data-skin="genz"] .splash-title {
+  font-family: var(--font-display);
+  font-weight: 700;
+  letter-spacing: 4px;
+  background: linear-gradient(90deg, var(--accent) 0%, var(--cyan) 50%, var(--violet) 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  text-shadow: 0 0 24px rgba(255, 85, 224, 0.40);
+  animation: genz-rgb-shift 4s linear infinite;
+}
+@keyframes genz-rgb-shift {
+  0%   { filter: hue-rotate(0deg); }
+  100% { filter: hue-rotate(360deg); }
+}
+
+/* ── Panels — neon glass with conic-gradient border ── */
+[data-skin="genz"] .panel,
+[data-skin="genz"] .card,
+[data-skin="genz"] .mc-panel,
+[data-skin="genz"] .agent-card,
+[data-skin="genz"] .finding-card {
+  background: rgba(35, 8, 64, 0.65);
+  backdrop-filter: blur(18px) saturate(160%);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+  position: relative;
+  transition: transform 0.2s, box-shadow 0.2s;
+}
+[data-skin="genz"] .panel:hover,
+[data-skin="genz"] .card:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-lg);
+  /* glitch RGB split */
+  text-shadow: 1px 0 0 var(--cyan), -1px 0 0 var(--accent);
+}
+
+/* Panel headers — uppercase neon */
+[data-skin="genz"] .panel-title,
+[data-skin="genz"] .card-title,
+[data-skin="genz"] h2,
+[data-skin="genz"] h3 {
+  font-family: var(--font-display);
+  font-weight: 700;
+  color: var(--cyan);
+  text-transform: uppercase;
+  letter-spacing: 3px;
+  font-size: 11px;
+  text-shadow: 0 0 12px rgba(0, 240, 255, 0.50);
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 6px;
+  margin-bottom: 10px;
+}
+
+/* ── Buttons — RGB conic sweep ── */
+[data-skin="genz"] button,
+[data-skin="genz"] .btn {
+  background: linear-gradient(135deg, var(--accent), var(--violet), var(--cyan));
+  background-size: 200% 200%;
+  border: 1px solid rgba(255, 255, 255, 0.32);
+  color: #FFFFFF;
+  border-radius: var(--radius);
+  font-family: var(--font-display);
+  font-weight: 700;
+  text-transform: lowercase;
+  letter-spacing: 1.5px;
+  font-size: 12px;
+  padding: 6px 16px;
+  box-shadow: 0 0 16px var(--accent-glow), inset 0 1px 0 rgba(255, 255, 255, 0.25);
+  animation: genz-gradient-shift 4s ease infinite;
+}
+@keyframes genz-gradient-shift {
+  0%, 100% { background-position: 0% 50%; }
+  50%      { background-position: 100% 50%; }
+}
+[data-skin="genz"] button:hover,
+[data-skin="genz"] .btn:hover {
+  box-shadow: 0 0 32px var(--accent-glow), 0 0 64px rgba(0, 240, 255, 0.32);
+  transform: translateY(-1px) scale(1.02);
+}
+
+/* ── Inputs ── */
+[data-skin="genz"] input,
+[data-skin="genz"] textarea,
+[data-skin="genz"] select {
+  background: rgba(8, 0, 26, 0.70);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  caret-color: var(--accent);
+}
+[data-skin="genz"] input:focus,
+[data-skin="genz"] textarea:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-subtle), 0 0 24px var(--accent-glow);
+}
+
+/* ── Sidebar ── */
+[data-skin="genz"] aside,
+[data-skin="genz"] .sidebar {
+  background: rgba(15, 0, 32, 0.78);
+  backdrop-filter: blur(16px);
+  border-right: 1px solid var(--accent);
+}
+[data-skin="genz"] .nav-item {
+  font-family: var(--font-display);
+  font-weight: 500;
+  text-transform: lowercase;
+  letter-spacing: 1px;
+  border-radius: var(--radius);
+  margin: 2px 6px;
+}
+[data-skin="genz"] .nav-item[data-active="true"] {
+  background: linear-gradient(90deg, var(--accent-subtle), transparent);
+  border-left: 2px solid var(--accent);
+  color: var(--accent);
+  text-shadow: 0 0 10px var(--accent-glow);
+}
+
+/* ── Severity micro-copy: BANGER / FIRE / MID / MEH / CRINGE ── */
+[data-skin="genz"] .badge,
+[data-skin="genz"] .severity-badge,
+[data-skin="genz"] .pill {
+  font-family: var(--font-display);
+  text-transform: uppercase;
+  letter-spacing: 1.5px;
+  font-weight: 700;
+  font-size: 10px;
+  border-radius: 999px;
+  padding: 2px 10px;
+  background: rgba(0, 0, 0, 0.32);
+  border: 1px solid currentColor;
+  text-shadow: 0 0 8px currentColor;
+}
+[data-skin="genz"] [data-severity="CRITICAL"]::after  { content: ' · BANGER 🔥'; opacity: 0.7; }
+[data-skin="genz"] [data-severity="HIGH"]::after      { content: ' · FIRE'; opacity: 0.7; }
+[data-skin="genz"] [data-severity="MEDIUM"]::after    { content: ' · MID'; opacity: 0.7; }
+[data-skin="genz"] [data-severity="LOW"]::after       { content: ' · MEH'; opacity: 0.7; }
+[data-skin="genz"] [data-severity="INFO"]::after      { content: ' · CRINGE'; opacity: 0.7; }
+
+[data-skin="genz"] table { font-family: var(--font-mono); font-size: 12px; }
+[data-skin="genz"] th {
+  background: var(--accent-subtle);
+  color: var(--cyan);
+  font-family: var(--font-display);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 1.5px;
+  font-size: 10px;
+  padding: 8px 12px;
+}
+[data-skin="genz"] td { padding: 8px 12px; border-bottom: 1px solid var(--border-dim); }
+[data-skin="genz"] tr:hover td { background: var(--accent-subtle); }
+
+[data-skin="genz"] pre,
+[data-skin="genz"] code {
+  background: rgba(8, 0, 26, 0.85);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-family: var(--font-mono);
+  color: var(--cyan);
+  text-shadow: 0 0 6px rgba(0, 240, 255, 0.4);
+}
+
+[data-skin="genz"] .hud-clock {
+  font-family: var(--font-mono);
+  color: var(--cyan);
+  letter-spacing: 2px;
+  text-shadow: 0 0 10px rgba(0, 240, 255, 0.5);
+}
+[data-skin="genz"] .hud-telemetry .bar {
+  background: linear-gradient(180deg, var(--accent), var(--violet));
+  border-radius: 2px;
+  box-shadow: 0 0 8px var(--accent-glow);
+}
+
+[data-skin="genz"] .phase-pill,
+[data-skin="genz"] .phase-timeline > * {
+  font-family: var(--font-display);
+  text-transform: lowercase;
+  letter-spacing: 1.5px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.32);
+  border: 1px solid var(--border);
+  backdrop-filter: blur(8px);
+  font-size: 11px;
+}
+[data-skin="genz"] .phase-pill[data-active="true"] {
+  background: linear-gradient(135deg, var(--accent), var(--cyan));
+  color: #FFFFFF;
+  border-color: var(--accent);
+  box-shadow: 0 0 24px var(--accent-glow);
+}
+
+[data-skin="genz"] ::-webkit-scrollbar { width: 8px; height: 8px; }
+[data-skin="genz"] ::-webkit-scrollbar-thumb {
+  background: linear-gradient(180deg, var(--accent), var(--cyan));
+  border-radius: 999px;
+}
+
+[data-skin="genz"] .mode-picker-trigger {
+  font-family: var(--font-display);
+  background: rgba(15, 0, 32, 0.7);
+  border: 1px solid var(--accent);
+  color: var(--cyan);
+  border-radius: 999px;
+  letter-spacing: 2px;
+  text-transform: lowercase;
+  text-shadow: 0 0 8px rgba(0, 240, 255, 0.4);
+}

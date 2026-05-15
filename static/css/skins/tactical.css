@@ -1,0 +1,364 @@
+/* ══════════════════════════════════════════════════════════════
+   ARGUS · SKIN — TACTICAL  (Defense C2 / Palantir Gotham / Anduril)
+   ──────────────────────────────────────────────────────────────
+   Visual language:
+   - Olive-drab / OD-green base (#13180F) with map-paper texture
+   - Tactical green (#7BAB47), warning amber (#D9A441),
+     enemy red (#C03C3C) — the classic NATO map symbology palette
+   - Manrope + Space Grotesk (free, geom-graphic adjacent)
+   - SVG topographic contour overlay as backdrop (public-domain
+     contour-map vector built inline as a data: URI, no external
+     dependencies, no Mapbox tile fees)
+   - Classified-strip headers (top + bottom) reading
+     "SECRET//NOFORN — ARGUS-OP"
+   - Threat radar sweep widget on every Mission Control card
+   - Cross-hair overlays on important elements
+   ══════════════════════════════════════════════════════════════ */
+
+@import url('https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+:root[data-skin="tactical"] {
+  /* ── Surface layers — OD-green deepening to khaki shadow ── */
+  --bg-base:        #13180F;
+  --bg-void:        #0B0F0A;
+  --bg-surface:     #1B2114;
+  --bg-panel:       #1B2114;
+  --bg-elevated:    #232A1B;
+  --bg-glass:       rgba(27, 33, 20, 0.92);
+  --bg-sidebar:     #10160C;
+
+  /* ── Borders — desaturated khaki ── */
+  --border-dim:     #2D3922;
+  --border:         #4A5A33;
+  --border-light:   #4A5A33;
+  --border-bright:  #7BAB47;
+
+  /* ── Tactical green accent ── */
+  --accent:         #7BAB47;
+  --accent-dim:     #557A2D;
+  --accent-glow:    rgba(123, 171, 71, 0.32);
+  --accent-subtle:  rgba(123, 171, 71, 0.07);
+
+  /* ── Secondary — friendly cyan = sky-grey-blue, enemy = red ── */
+  --cyan:           #6BAFAA;
+  --violet:         #D9A441;
+
+  /* ── Text — bright kraft ── */
+  --text-primary:   #E2E5D0;
+  --text-secondary: #A9B091;
+  --text-muted:     #6B7556;
+
+  /* ── Severity — NATO-style ── */
+  --critical:       #C03C3C;
+  --high:           #D9694C;
+  --medium:         #D9A441;
+  --amber:          #D9A441;
+  --low:            #7BAB47;
+  --supernova:      #C03C3C;
+
+  --critical-bg:    rgba(192,  60,  60, 0.14);
+  --critical-bd:    rgba(192,  60,  60, 0.55);
+  --high-bg:        rgba(217, 105,  76, 0.14);
+  --high-bd:        rgba(217, 105,  76, 0.55);
+  --medium-bg:      rgba(217, 164,  65, 0.14);
+  --medium-bd:      rgba(217, 164,  65, 0.55);
+  --low-bg:         rgba(123, 171,  71, 0.14);
+  --low-bd:         rgba(123, 171,  71, 0.55);
+
+  /* ── Typography ── */
+  --font-ui:        'Manrope', system-ui, sans-serif;
+  --font-display:   'Space Grotesk', 'Manrope', sans-serif;
+  --font-mono:      'JetBrains Mono', 'Consolas', monospace;
+
+  /* ── Geometry — small sharpness ── */
+  --radius:         2px;
+  --radius-md:      3px;
+  --radius-lg:      4px;
+  --radius-xl:      6px;
+
+  --shadow-sm:      0 1px 0 rgba(0, 0, 0, 0.7);
+  --shadow-md:      0 4px 14px rgba(0, 0, 0, 0.55);
+  --shadow-lg:      0 12px 32px rgba(0, 0, 0, 0.7);
+}
+
+/* ── Body — topographic-contour-map backdrop  ──
+   The data: URI is a tiny hand-crafted SVG with contour lines + lat/lon
+   ticks, tiled across the viewport. Zero external dependencies, zero
+   bandwidth, fully public-domain (math, not graphics). */
+[data-skin="tactical"] body {
+  background:
+    /* topographic contour SVG (tile) */
+    url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 800 800'><g fill='none' stroke='%237BAB47' stroke-opacity='0.07' stroke-width='1'><path d='M 50 100 q 100 -50 200 0 t 200 0 t 200 0'/><path d='M 0 200 q 100 -30 200 0 t 200 0 t 200 0 t 200 0'/><path d='M 60 300 q 110 -40 220 0 t 220 0 t 220 0'/><path d='M 0 400 q 140 -50 280 0 t 280 0 t 280 0'/><path d='M 30 500 q 120 -30 240 0 t 240 0 t 240 0 t 240 0'/><path d='M 0 600 q 100 -40 200 0 t 200 0 t 200 0 t 200 0'/><path d='M 80 700 q 110 -50 220 0 t 220 0 t 220 0'/><circle cx='200' cy='250' r='28'/><circle cx='200' cy='250' r='52'/><circle cx='200' cy='250' r='84'/><circle cx='620' cy='480' r='22'/><circle cx='620' cy='480' r='44'/><circle cx='620' cy='480' r='72'/></g><g font-family='monospace' font-size='10' fill='%237BAB47' fill-opacity='0.12'><text x='10' y='15'>34°N 117°W</text><text x='600' y='15'>34°N 116°W</text><text x='10' y='790'>33°N 117°W</text><text x='600' y='790'>33°N 116°W</text></g></svg>") 0 0 / 800px 800px,
+    radial-gradient(ellipse 70% 50% at 50% 100%, rgba(123, 171, 71, 0.05), transparent 70%),
+    var(--bg-base);
+  background-attachment: fixed;
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+}
+
+/* ── Classified-strip top + bottom ── */
+[data-skin="tactical"] body::before {
+  content: 'SECRET//NOFORN · ARGUS-OP · AUTH RED-CELL · HANDLE VIA TS/SI CHANNELS';
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  background: #C03C3C;
+  color: #FFFFFF;
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: 10px;
+  letter-spacing: 4px;
+  text-align: center;
+  padding: 2px;
+  z-index: 9999;
+  text-transform: uppercase;
+  border-bottom: 1px solid #7A1A1A;
+  pointer-events: none;
+}
+[data-skin="tactical"] body::after {
+  content: 'SECRET//NOFORN — DOWNGRADE AUTHORITY: ARGUS-OP — NOT FOR PUBLIC RELEASE';
+  position: fixed;
+  bottom: 0; left: 0; right: 0;
+  background: #C03C3C;
+  color: #FFFFFF;
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: 10px;
+  letter-spacing: 4px;
+  text-align: center;
+  padding: 2px;
+  z-index: 9999;
+  text-transform: uppercase;
+  border-top: 1px solid #7A1A1A;
+  pointer-events: none;
+}
+
+/* Push everything down 20px to clear the classified strip */
+[data-skin="tactical"] #root {
+  padding-top: 18px;
+  padding-bottom: 18px;
+}
+
+/* ── Header — green steel band + grid ticks ── */
+[data-skin="tactical"] .header,
+[data-skin="tactical"] header {
+  background:
+    linear-gradient(0deg, rgba(0,0,0,0.4), transparent),
+    repeating-linear-gradient(90deg, rgba(123, 171, 71, 0.06) 0 1px, transparent 1px 80px),
+    var(--bg-panel);
+  border-bottom: 2px solid var(--accent);
+  font-family: var(--font-display);
+  letter-spacing: 2px;
+  text-transform: uppercase;
+}
+
+/* ── Wordmark — heavy geom-graphic ── */
+[data-skin="tactical"] .header h1,
+[data-skin="tactical"] header h1,
+[data-skin="tactical"] .brand,
+[data-skin="tactical"] .splash-title {
+  font-family: var(--font-display);
+  font-weight: 800;
+  letter-spacing: 8px;
+  color: var(--accent);
+  text-shadow: 0 0 8px rgba(123, 171, 71, 0.4);
+}
+
+/* ── Panels — military map cards ── */
+[data-skin="tactical"] .panel,
+[data-skin="tactical"] .card,
+[data-skin="tactical"] .mc-panel,
+[data-skin="tactical"] .agent-card,
+[data-skin="tactical"] .finding-card {
+  background:
+    repeating-linear-gradient(45deg, rgba(123, 171, 71, 0.018) 0 1px, transparent 1px 12px),
+    var(--bg-panel);
+  border: 1px solid var(--border);
+  border-top: 2px solid var(--accent);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md), inset 0 1px 0 rgba(123, 171, 71, 0.1);
+  position: relative;
+}
+
+/* Cross-hair corners on every panel */
+[data-skin="tactical"] .panel::before,
+[data-skin="tactical"] .card::before {
+  content: '+'; position: absolute;
+  top: 4px; left: 6px;
+  font-family: var(--font-mono); color: var(--accent);
+  font-size: 14px; opacity: 0.45; pointer-events: none;
+}
+[data-skin="tactical"] .panel::after,
+[data-skin="tactical"] .card::after {
+  content: '+'; position: absolute;
+  bottom: 4px; right: 6px;
+  font-family: var(--font-mono); color: var(--accent);
+  font-size: 14px; opacity: 0.45; pointer-events: none;
+}
+
+/* Panel headers — tactical strip with hash-mark prefix */
+[data-skin="tactical"] .panel-title,
+[data-skin="tactical"] .card-title,
+[data-skin="tactical"] h2,
+[data-skin="tactical"] h3 {
+  font-family: var(--font-display);
+  font-weight: 700;
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 3px;
+  font-size: 11px;
+  padding: 6px 0;
+  border-bottom: 1px dashed rgba(123, 171, 71, 0.30);
+  margin-bottom: 8px;
+}
+[data-skin="tactical"] .panel-title::before,
+[data-skin="tactical"] .card-title::before,
+[data-skin="tactical"] h2::before,
+[data-skin="tactical"] h3::before {
+  content: '◢ ';
+  color: var(--accent);
+  margin-right: 4px;
+  opacity: 0.7;
+}
+
+/* ── Buttons — chunky tactical chips ── */
+[data-skin="tactical"] button,
+[data-skin="tactical"] .btn {
+  background: linear-gradient(180deg, var(--accent), var(--accent-dim));
+  color: #0F1A07;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  font-family: var(--font-display);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 2px;
+  box-shadow: 0 2px 0 rgba(0, 0, 0, 0.4), inset 0 1px 0 rgba(255, 255, 255, 0.18);
+}
+[data-skin="tactical"] button:hover,
+[data-skin="tactical"] .btn:hover {
+  background: linear-gradient(180deg, #95C45A, var(--accent));
+  box-shadow: 0 3px 12px var(--accent-glow);
+}
+[data-skin="tactical"] button:active,
+[data-skin="tactical"] .btn:active {
+  transform: translateY(1px);
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.4);
+}
+
+/* ── Inputs — etched aluminum ── */
+[data-skin="tactical"] input,
+[data-skin="tactical"] textarea,
+[data-skin="tactical"] select {
+  background: rgba(11, 15, 10, 0.85);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+}
+[data-skin="tactical"] input:focus,
+[data-skin="tactical"] textarea:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-glow);
+}
+
+/* ── Sidebar — tactical nav rail ── */
+[data-skin="tactical"] aside,
+[data-skin="tactical"] .sidebar {
+  background:
+    linear-gradient(180deg, rgba(123, 171, 71, 0.04), transparent 30%),
+    var(--bg-sidebar);
+  border-right: 2px solid var(--accent);
+}
+[data-skin="tactical"] .nav-item {
+  font-family: var(--font-display);
+  text-transform: uppercase;
+  letter-spacing: 1.5px;
+  font-weight: 600;
+  border-left: 3px solid transparent;
+}
+[data-skin="tactical"] .nav-item[data-active="true"] {
+  background: linear-gradient(90deg, rgba(123, 171, 71, 0.18), transparent);
+  border-left-color: var(--accent);
+}
+
+/* ── Radar-sweep widget — overlay on Mission Control hero ── */
+[data-skin="tactical"] .panel[data-tactical-radar]::before,
+[data-skin="tactical"] .mc-hero::before {
+  content: '';
+  position: absolute;
+  top: 8px; right: 8px;
+  width: 56px; height: 56px;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle, transparent 30%, rgba(123, 171, 71, 0.15) 31%, transparent 32%),
+    radial-gradient(circle, transparent 55%, rgba(123, 171, 71, 0.15) 56%, transparent 57%),
+    radial-gradient(circle, transparent 80%, rgba(123, 171, 71, 0.15) 81%, transparent 82%),
+    conic-gradient(from 0deg, rgba(123, 171, 71, 0.5), transparent 30%);
+  border: 1px solid var(--accent);
+  animation: tactical-radar-sweep 4s linear infinite;
+  pointer-events: none;
+}
+@keyframes tactical-radar-sweep {
+  to { transform: rotate(360deg); }
+}
+
+/* ── Severity badges ── */
+[data-skin="tactical"] .badge,
+[data-skin="tactical"] .severity-badge,
+[data-skin="tactical"] .pill {
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 1.5px;
+  font-weight: 700;
+  border-radius: var(--radius);
+  padding: 2px 8px;
+  border: 1px solid currentColor;
+}
+[data-skin="tactical"] [data-severity="CRITICAL"],
+[data-skin="tactical"] .sev-critical,
+[data-skin="tactical"] .critical {
+  background: var(--critical-bg);
+  color: var(--critical);
+  border-color: var(--critical-bd);
+  box-shadow: 0 0 12px rgba(192, 60, 60, 0.4);
+}
+
+/* ── Tables ── */
+[data-skin="tactical"] table { font-family: var(--font-mono); }
+[data-skin="tactical"] th {
+  background: var(--bg-elevated);
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 2px;
+  font-family: var(--font-display);
+  font-weight: 700;
+  border-bottom: 2px solid var(--accent);
+}
+[data-skin="tactical"] td { border-bottom: 1px solid var(--border-dim); }
+[data-skin="tactical"] tr:hover td { background: rgba(123, 171, 71, 0.05); }
+
+/* ── HUD ── */
+[data-skin="tactical"] .hud-clock {
+  font-family: var(--font-mono);
+  color: var(--accent);
+  letter-spacing: 2px;
+}
+
+/* ── Splash ── */
+[data-skin="tactical"] .splash {
+  background:
+    url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 800 800'><g fill='none' stroke='%237BAB47' stroke-opacity='0.10' stroke-width='1'><circle cx='400' cy='400' r='100'/><circle cx='400' cy='400' r='180'/><circle cx='400' cy='400' r='260'/><line x1='400' y1='100' x2='400' y2='700'/><line x1='100' y1='400' x2='700' y2='400'/></g></svg>") center center / 600px 600px no-repeat,
+    var(--bg-base);
+}
+[data-skin="tactical"] .splash-title {
+  font-family: var(--font-display);
+  letter-spacing: 10px;
+}
+
+/* ── Scrollbars ── */
+[data-skin="tactical"] ::-webkit-scrollbar { width: 10px; height: 10px; }
+[data-skin="tactical"] ::-webkit-scrollbar-track { background: var(--bg-void); }
+[data-skin="tactical"] ::-webkit-scrollbar-thumb {
+  background: var(--accent-dim);
+  border: 1px solid var(--border);
+  border-radius: 0;
+}

@@ -1,0 +1,401 @@
+/* ══════════════════════════════════════════════════════════════
+   ARGUS · SKIN — HYPERREAL GLASS  (visionOS / Apple spatial UI)
+   ──────────────────────────────────────────────────────────────
+   Visual language:
+   - Animated gradient-mesh background (auroral magenta→cyan→violet)
+     with slow drift, simulating ambient depth
+   - Frosted glass panels:  backdrop-filter: blur(40px) saturate(140%)
+     with white-tint borders + inner highlight
+   - Inter Display (free SF Pro substitute) — soft, geometric, premium
+   - Z-axis lift parallax on hover (panel rises + casts shadow)
+   - Ambient orb in upper-right that shifts hue based on risk posture
+   - 96px+ display weights for risk-summary metrics
+   - Generous spacing — luxury whitespace
+   - Subtle inner glow on every surface
+   ══════════════════════════════════════════════════════════════ */
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@200;300;400;500;600;700;800;900&family=Inter+Tight:wght@400;500;600;700;800;900&display=swap');
+
+:root[data-skin="glass"] {
+  /* ── Surfaces — deep indigo base with glass overlays ── */
+  --bg-base:        #0E0F1F;
+  --bg-void:        #07081A;
+  --bg-surface:     rgba(255, 255, 255, 0.04);
+  --bg-panel:       rgba(255, 255, 255, 0.04);
+  --bg-elevated:    rgba(255, 255, 255, 0.08);
+  --bg-glass:       rgba(255, 255, 255, 0.05);
+  --bg-sidebar:     rgba(255, 255, 255, 0.03);
+
+  /* ── Borders — soft white wash ── */
+  --border-dim:     rgba(255, 255, 255, 0.06);
+  --border:         rgba(255, 255, 255, 0.12);
+  --border-light:   rgba(255, 255, 255, 0.12);
+  --border-bright:  rgba(255, 255, 255, 0.24);
+
+  /* ── Iridescent accent ── */
+  --accent:         #A1A8FF;
+  --accent-dim:     #6F77E0;
+  --accent-glow:    rgba(161, 168, 255, 0.40);
+  --accent-subtle:  rgba(161, 168, 255, 0.10);
+
+  --cyan:           #73E8FF;
+  --violet:         #FF96D5;
+
+  /* ── Text — high luminance ── */
+  --text-primary:   #FFFFFF;
+  --text-secondary: rgba(255, 255, 255, 0.74);
+  --text-muted:     rgba(255, 255, 255, 0.42);
+
+  /* ── Severity — pastel premium ── */
+  --critical:       #FF6F91;
+  --high:           #FFB36F;
+  --medium:         #FFD86F;
+  --amber:          #FFD86F;
+  --low:            #8EFFC4;
+  --supernova:      #FF6FB5;
+
+  --critical-bg:    rgba(255, 111, 145, 0.16);
+  --critical-bd:    rgba(255, 111, 145, 0.40);
+  --high-bg:        rgba(255, 179, 111, 0.16);
+  --high-bd:        rgba(255, 179, 111, 0.40);
+  --medium-bg:      rgba(255, 216, 111, 0.16);
+  --medium-bd:      rgba(255, 216, 111, 0.40);
+  --low-bg:         rgba(142, 255, 196, 0.14);
+  --low-bd:         rgba(142, 255, 196, 0.40);
+
+  /* ── Typography — premium geometric ── */
+  --font-ui:        'Inter', 'SF Pro Display', system-ui, sans-serif;
+  --font-display:   'Inter Tight', 'Inter', system-ui, sans-serif;
+  --font-mono:      'JetBrains Mono', 'SF Mono', monospace;
+
+  /* ── Geometry — generous rounding ── */
+  --radius:         14px;
+  --radius-md:      18px;
+  --radius-lg:      24px;
+  --radius-xl:      32px;
+
+  --shadow-sm:      0 4px 14px rgba(0, 0, 0, 0.18), 0 1px 2px rgba(0, 0, 0, 0.10);
+  --shadow-md:      0 12px 32px rgba(0, 0, 0, 0.32), 0 2px 6px rgba(0, 0, 0, 0.18);
+  --shadow-lg:      0 32px 64px rgba(0, 0, 0, 0.48), 0 4px 12px rgba(0, 0, 0, 0.28);
+}
+
+/* ── Body — animated gradient mesh ── */
+[data-skin="glass"] body {
+  background: var(--bg-void);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  position: relative;
+  overflow-x: hidden;
+}
+[data-skin="glass"] body::before {
+  content: '';
+  position: fixed;
+  inset: -10%;
+  background:
+    radial-gradient(circle at 20% 30%, rgba(161, 168, 255, 0.35), transparent 35%),
+    radial-gradient(circle at 80% 20%, rgba(255, 150, 213, 0.25), transparent 35%),
+    radial-gradient(circle at 70% 80%, rgba(115, 232, 255, 0.20), transparent 40%),
+    radial-gradient(circle at 30% 90%, rgba(255, 216, 111, 0.18), transparent 40%),
+    linear-gradient(135deg, #1A1B2E 0%, #0E0F1F 50%, #1F1840 100%);
+  z-index: -1;
+  filter: blur(40px);
+  animation: glass-aurora-drift 30s linear infinite;
+}
+@keyframes glass-aurora-drift {
+  0%   { transform: rotate(0deg) translate(0, 0); }
+  50%  { transform: rotate(180deg) translate(2%, 1%); }
+  100% { transform: rotate(360deg) translate(0, 0); }
+}
+
+/* ── Ambient hue-shifting orb (top-right) ── */
+[data-skin="glass"] body::after {
+  content: '';
+  position: fixed;
+  top: 80px; right: 40px;
+  width: 200px; height: 200px;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle, rgba(161, 168, 255, 0.4), transparent 70%);
+  filter: blur(60px);
+  z-index: -1;
+  animation: glass-orb-hue 12s ease-in-out infinite;
+  pointer-events: none;
+}
+@keyframes glass-orb-hue {
+  0%, 100% { background: radial-gradient(circle, rgba(161, 168, 255, 0.40), transparent 70%); }
+  33%      { background: radial-gradient(circle, rgba(255, 150, 213, 0.40), transparent 70%); }
+  66%      { background: radial-gradient(circle, rgba(115, 232, 255, 0.40), transparent 70%); }
+}
+
+/* ── Header — translucent top bar ── */
+[data-skin="glass"] .header,
+[data-skin="glass"] header {
+  background: rgba(255, 255, 255, 0.04);
+  backdrop-filter: blur(40px) saturate(160%);
+  -webkit-backdrop-filter: blur(40px) saturate(160%);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.10);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 1px 24px rgba(0, 0, 0, 0.32);
+}
+
+/* ── Wordmark ── */
+[data-skin="glass"] .header h1,
+[data-skin="glass"] header h1,
+[data-skin="glass"] .brand,
+[data-skin="glass"] .splash-title {
+  font-family: var(--font-display);
+  font-weight: 800;
+  letter-spacing: -1px;
+  background: linear-gradient(120deg, #FFFFFF, var(--accent));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+/* ── Panels — frosted glass with inner highlight ── */
+[data-skin="glass"] .panel,
+[data-skin="glass"] .card,
+[data-skin="glass"] .mc-panel,
+[data-skin="glass"] .agent-card,
+[data-skin="glass"] .finding-card {
+  background: rgba(255, 255, 255, 0.05);
+  backdrop-filter: blur(40px) saturate(160%);
+  -webkit-backdrop-filter: blur(40px) saturate(160%);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: var(--radius-lg);
+  box-shadow:
+    var(--shadow-md),
+    inset 0 1px 0 rgba(255, 255, 255, 0.10),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.04);
+  transition: transform 0.3s cubic-bezier(0.2, 0.8, 0.2, 1), box-shadow 0.3s ease;
+}
+[data-skin="glass"] .panel:hover,
+[data-skin="glass"] .card:hover,
+[data-skin="glass"] .agent-card:hover,
+[data-skin="glass"] .finding-card:hover {
+  transform: translateY(-2px) scale(1.005);
+  box-shadow:
+    var(--shadow-lg),
+    inset 0 1px 0 rgba(255, 255, 255, 0.15),
+    0 0 60px rgba(161, 168, 255, 0.10);
+}
+
+/* ── Panel headers — soft + airy ── */
+[data-skin="glass"] .panel-title,
+[data-skin="glass"] .card-title,
+[data-skin="glass"] h2,
+[data-skin="glass"] h3 {
+  font-family: var(--font-display);
+  font-weight: 600;
+  color: var(--text-primary);
+  letter-spacing: -0.2px;
+  margin-bottom: 12px;
+}
+
+/* ── Display metric numerals — 96px + */
+[data-skin="glass"] .metric-value,
+[data-skin="glass"] .big-num,
+[data-skin="glass"] [data-display-numeral] {
+  font-family: var(--font-display);
+  font-weight: 200;
+  font-size: 96px;
+  line-height: 1;
+  letter-spacing: -4px;
+  color: var(--text-primary);
+  text-shadow: 0 4px 24px rgba(161, 168, 255, 0.3);
+}
+
+/* ── Buttons — premium pill ── */
+[data-skin="glass"] button,
+[data-skin="glass"] .btn {
+  background: rgba(255, 255, 255, 0.10);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  color: var(--text-primary);
+  border-radius: 999px;
+  font-family: var(--font-ui);
+  font-weight: 600;
+  padding: 8px 18px;
+  letter-spacing: 0;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12), 0 2px 8px rgba(0, 0, 0, 0.18);
+  transition: all 0.2s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+[data-skin="glass"] button:hover,
+[data-skin="glass"] .btn:hover {
+  background: rgba(255, 255, 255, 0.18);
+  transform: translateY(-1px);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.2), 0 6px 20px rgba(0, 0, 0, 0.32);
+}
+[data-skin="glass"] button:active,
+[data-skin="glass"] .btn:active {
+  transform: translateY(0);
+}
+
+/* Primary button — accent gradient */
+[data-skin="glass"] button.primary,
+[data-skin="glass"] .btn-primary {
+  background: linear-gradient(135deg, var(--accent), var(--violet));
+  border-color: rgba(255, 255, 255, 0.32);
+  color: #FFFFFF;
+  box-shadow: 0 4px 24px rgba(161, 168, 255, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.32);
+}
+
+/* ── Inputs ── */
+[data-skin="glass"] input,
+[data-skin="glass"] textarea,
+[data-skin="glass"] select {
+  background: rgba(255, 255, 255, 0.06);
+  backdrop-filter: blur(20px) saturate(160%);
+  -webkit-backdrop-filter: blur(20px) saturate(160%);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: var(--radius-md);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  padding: 8px 14px;
+}
+[data-skin="glass"] input:focus,
+[data-skin="glass"] textarea:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(161, 168, 255, 0.20);
+}
+
+/* ── Sidebar — glass column ── */
+[data-skin="glass"] aside,
+[data-skin="glass"] .sidebar {
+  background: rgba(255, 255, 255, 0.04);
+  backdrop-filter: blur(40px) saturate(160%);
+  -webkit-backdrop-filter: blur(40px) saturate(160%);
+  border-right: 1px solid rgba(255, 255, 255, 0.08);
+}
+[data-skin="glass"] .nav-item {
+  font-family: var(--font-ui);
+  font-weight: 500;
+  letter-spacing: -0.1px;
+  border-radius: var(--radius-md);
+  margin: 2px 8px;
+  transition: background 0.2s;
+}
+[data-skin="glass"] .nav-item[data-active="true"] {
+  background: rgba(255, 255, 255, 0.10);
+  color: var(--text-primary);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.10), 0 2px 8px rgba(0, 0, 0, 0.18);
+}
+
+/* ── Severity badges — pastel pills ── */
+[data-skin="glass"] .badge,
+[data-skin="glass"] .severity-badge,
+[data-skin="glass"] .pill {
+  font-family: var(--font-ui);
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  border-radius: 999px;
+  padding: 4px 12px;
+  border: 1px solid currentColor;
+  background: rgba(255, 255, 255, 0.06);
+  backdrop-filter: blur(20px);
+}
+
+/* ── Tables ── */
+[data-skin="glass"] table { font-family: var(--font-ui); }
+[data-skin="glass"] th {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-secondary);
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  text-transform: uppercase;
+  font-size: 11px;
+  padding: 10px 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.10);
+}
+[data-skin="glass"] td {
+  padding: 10px 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+[data-skin="glass"] tr:hover td { background: rgba(255, 255, 255, 0.04); }
+
+/* ── Splash ── */
+[data-skin="glass"] .splash {
+  background: var(--bg-void);
+  position: relative;
+  overflow: hidden;
+}
+[data-skin="glass"] .splash::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(circle at 30% 40%, rgba(161, 168, 255, 0.5), transparent 50%),
+    radial-gradient(circle at 70% 60%, rgba(255, 150, 213, 0.4), transparent 50%);
+  filter: blur(80px);
+}
+
+/* ── HUD ── */
+[data-skin="glass"] .hud-clock {
+  font-family: var(--font-display);
+  font-weight: 200;
+  color: var(--text-primary);
+  font-size: 14px;
+  letter-spacing: 1px;
+}
+[data-skin="glass"] .hud-telemetry .bar {
+  background: linear-gradient(180deg, var(--accent), var(--violet));
+  border-radius: 4px;
+  box-shadow: 0 0 12px var(--accent-glow);
+}
+
+/* ── Code blocks ── */
+[data-skin="glass"] pre,
+[data-skin="glass"] code {
+  background: rgba(0, 0, 0, 0.32);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: var(--radius-md);
+  font-family: var(--font-mono);
+}
+
+/* ── Scrollbars — invisible-until-hover ── */
+[data-skin="glass"] ::-webkit-scrollbar { width: 8px; height: 8px; }
+[data-skin="glass"] ::-webkit-scrollbar-track { background: transparent; }
+[data-skin="glass"] ::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.16);
+  border-radius: 999px;
+}
+[data-skin="glass"] ::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.32); }
+
+/* ── Phase pills — premium glass capsules ── */
+[data-skin="glass"] .phase-pill,
+[data-skin="glass"] .phase-timeline > * {
+  font-family: var(--font-ui);
+  font-weight: 500;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  padding: 4px 12px;
+  backdrop-filter: blur(20px);
+}
+[data-skin="glass"] .phase-pill[data-active="true"] {
+  background: linear-gradient(135deg, var(--accent), var(--violet));
+  border-color: rgba(255, 255, 255, 0.32);
+  color: #FFFFFF;
+  box-shadow: 0 4px 16px var(--accent-glow);
+}
+
+/* ── Mode picker ── */
+[data-skin="glass"] .mode-picker-trigger {
+  font-family: var(--font-ui);
+  font-weight: 600;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 999px;
+  backdrop-filter: blur(20px);
+  color: var(--text-primary);
+}
+[data-skin="glass"] .mode-picker-popover {
+  background: rgba(255, 255, 255, 0.06);
+  backdrop-filter: blur(40px) saturate(180%);
+  -webkit-backdrop-filter: blur(40px) saturate(180%);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+}

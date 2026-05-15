@@ -1,0 +1,308 @@
+/* ══════════════════════════════════════════════════════════════
+   ARGUS · SKIN — NOVICE  (Friendly / Learning Mode)
+   ──────────────────────────────────────────────────────────────
+   For junior pentesters / trainees / blue-team-converting-to-red.
+   - Tooltips visible by default, big icons, generous spacing
+   - MITRE T-codes translated to plain English alongside the code
+   - Encouraging color palette (teal/green not red/black)
+   - Help-banner pinned to every panel header explaining what it shows
+   - Rounded corners, soft shadows, friendly micro-copy tone
+   - Severity badges include a "what this means" subtitle
+   ══════════════════════════════════════════════════════════════ */
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Lexend:wght@400;500;600;700&display=swap');
+
+:root[data-skin="novice"] {
+  --bg-base:        #F5F8FA;
+  --bg-void:        #E8EEF3;
+  --bg-surface:     #FFFFFF;
+  --bg-panel:       #FFFFFF;
+  --bg-elevated:    #F0F4F8;
+  --bg-glass:       rgba(255, 255, 255, 0.96);
+  --bg-sidebar:     #FFFFFF;
+
+  --border-dim:     #E1E8EE;
+  --border:         #C9D5DF;
+  --border-light:   #C9D5DF;
+  --border-bright:  #2EB68F;
+
+  --accent:         #2EB68F;       /* friendly teal */
+  --accent-dim:     #1F8967;
+  --accent-glow:    rgba(46, 182, 143, 0.25);
+  --accent-subtle:  rgba(46, 182, 143, 0.08);
+
+  --cyan:           #3FA7E0;
+  --violet:         #8965CD;
+
+  --text-primary:   #1F2A36;
+  --text-secondary: #4C5A6B;
+  --text-muted:     #7C8A99;
+
+  --critical:       #E0594E;
+  --high:           #E89E4E;
+  --medium:         #E8C24E;
+  --amber:          #E8C24E;
+  --low:            #2EB68F;
+  --supernova:      #E0594E;
+
+  --critical-bg:    rgba(224,  89,  78, 0.14);
+  --critical-bd:    rgba(224,  89,  78, 0.45);
+  --high-bg:        rgba(232, 158,  78, 0.14);
+  --high-bd:        rgba(232, 158,  78, 0.45);
+  --medium-bg:      rgba(232, 194,  78, 0.14);
+  --medium-bd:      rgba(232, 194,  78, 0.45);
+  --low-bg:         rgba( 46, 182, 143, 0.14);
+  --low-bd:         rgba( 46, 182, 143, 0.45);
+
+  --font-ui:        'Lexend', 'Inter', system-ui, sans-serif;
+  --font-display:   'Lexend', 'Inter', system-ui, sans-serif;
+  --font-mono:      'JetBrains Mono', monospace;
+
+  --radius:         8px;
+  --radius-md:      10px;
+  --radius-lg:      14px;
+  --radius-xl:      18px;
+
+  --shadow-sm:      0 1px 2px rgba(31, 42, 54, 0.05);
+  --shadow-md:      0 6px 16px rgba(31, 42, 54, 0.08);
+  --shadow-lg:      0 16px 36px rgba(31, 42, 54, 0.10);
+}
+
+[data-skin="novice"] body {
+  background: var(--bg-base);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+[data-skin="novice"] .header,
+[data-skin="novice"] header {
+  background: #FFFFFF;
+  border-bottom: 1px solid var(--border-dim);
+  font-family: var(--font-ui);
+  box-shadow: var(--shadow-sm);
+}
+
+[data-skin="novice"] .header h1,
+[data-skin="novice"] header h1,
+[data-skin="novice"] .brand {
+  font-family: var(--font-ui);
+  font-weight: 700;
+  color: var(--accent);
+  letter-spacing: -0.5px;
+}
+
+[data-skin="novice"] .panel,
+[data-skin="novice"] .card,
+[data-skin="novice"] .mc-panel,
+[data-skin="novice"] .agent-card,
+[data-skin="novice"] .finding-card {
+  background: #FFFFFF;
+  border: 1px solid var(--border-dim);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
+  padding: 16px;
+  transition: box-shadow 0.2s, transform 0.2s;
+}
+[data-skin="novice"] .panel:hover,
+[data-skin="novice"] .card:hover {
+  box-shadow: var(--shadow-md);
+}
+
+[data-skin="novice"] .panel-title,
+[data-skin="novice"] .card-title,
+[data-skin="novice"] h2,
+[data-skin="novice"] h3 {
+  font-family: var(--font-ui);
+  font-weight: 600;
+  color: var(--text-primary);
+  font-size: 16px;
+  letter-spacing: -0.2px;
+  margin-bottom: 10px;
+}
+
+[data-skin="novice"] button,
+[data-skin="novice"] .btn {
+  background: var(--accent);
+  color: #FFFFFF;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  font-family: var(--font-ui);
+  font-weight: 600;
+  font-size: 13px;
+  padding: 8px 18px;
+  box-shadow: 0 2px 6px rgba(46, 182, 143, 0.22);
+  transition: all 0.15s;
+}
+[data-skin="novice"] button:hover,
+[data-skin="novice"] .btn:hover {
+  background: var(--accent-dim);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(46, 182, 143, 0.32);
+}
+
+[data-skin="novice"] input,
+[data-skin="novice"] textarea,
+[data-skin="novice"] select {
+  background: #FFFFFF;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: 14px;
+  padding: 8px 12px;
+}
+[data-skin="novice"] input:focus,
+[data-skin="novice"] textarea:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-subtle);
+}
+
+[data-skin="novice"] aside,
+[data-skin="novice"] .sidebar {
+  background: #FFFFFF;
+  border-right: 1px solid var(--border-dim);
+}
+[data-skin="novice"] .nav-item {
+  font-family: var(--font-ui);
+  font-size: 14px;
+  font-weight: 500;
+  border-radius: var(--radius);
+  margin: 2px 8px;
+  padding: 7px 12px;
+  color: var(--text-secondary);
+}
+[data-skin="novice"] .nav-item[data-active="true"] {
+  background: var(--accent-subtle);
+  color: var(--accent-dim);
+}
+
+[data-skin="novice"] table {
+  font-family: var(--font-ui);
+  font-size: 13px;
+}
+[data-skin="novice"] th {
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-size: 11px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+}
+[data-skin="novice"] td {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border-dim);
+}
+[data-skin="novice"] tr:hover td { background: var(--accent-subtle); }
+
+[data-skin="novice"] .badge,
+[data-skin="novice"] .severity-badge,
+[data-skin="novice"] .pill {
+  font-family: var(--font-ui);
+  font-weight: 600;
+  letter-spacing: 0.2px;
+  font-size: 12px;
+  border-radius: 999px;
+  padding: 3px 10px;
+  border: 1px solid currentColor;
+}
+
+/* MITRE-code translation tags — plain-English subtitle appears via CSS
+   on any element with class .mitre-code and a data-mitre attribute */
+[data-skin="novice"] .mitre-code[data-mitre]::after {
+  content: " (" attr(data-mitre-plain) ")";
+  font-style: italic;
+  font-weight: 400;
+  color: var(--text-muted);
+  font-size: 0.9em;
+}
+
+/* Per-panel help hint banner — appears as a subtle teal strip on cards
+   that opt-in via data-help-hint="..." attribute */
+[data-skin="novice"] [data-help-hint]::before {
+  content: '💡 ' attr(data-help-hint);
+  display: block;
+  font-size: 12px;
+  color: var(--accent-dim);
+  background: var(--accent-subtle);
+  border-radius: var(--radius);
+  padding: 6px 10px;
+  margin-bottom: 10px;
+  border-left: 3px solid var(--accent);
+}
+
+[data-skin="novice"] .splash-title {
+  font-family: var(--font-ui);
+  letter-spacing: -1px;
+  color: var(--accent);
+}
+
+[data-skin="novice"] pre,
+[data-skin="novice"] code {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-dim);
+  border-radius: var(--radius);
+  font-family: var(--font-mono);
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+[data-skin="novice"] .hud-clock {
+  font-family: var(--font-ui);
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+[data-skin="novice"] .phase-pill,
+[data-skin="novice"] .phase-timeline > * {
+  font-family: var(--font-ui);
+  font-weight: 600;
+  border-radius: 999px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  padding: 4px 12px;
+  font-size: 12px;
+}
+[data-skin="novice"] .phase-pill[data-active="true"] {
+  background: var(--accent);
+  color: #FFFFFF;
+  border-color: var(--accent);
+}
+
+[data-skin="novice"] ::-webkit-scrollbar { width: 10px; height: 10px; }
+[data-skin="novice"] ::-webkit-scrollbar-track { background: transparent; }
+[data-skin="novice"] ::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 999px;
+  border: 2px solid var(--bg-base);
+}
+
+[data-skin="novice"] .mode-picker-trigger {
+  font-family: var(--font-ui);
+  font-weight: 600;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  color: var(--text-primary);
+  border-radius: 999px;
+}
+
+/* Friendly footer encouraging exploration */
+[data-skin="novice"] body::before {
+  content: '💡 New here? Press Ctrl+K for the command palette · Hover any badge for a plain-English explanation';
+  position: fixed;
+  bottom: 8px; left: 50%;
+  transform: translateX(-50%);
+  font-family: var(--font-ui);
+  font-size: 11px;
+  color: var(--text-muted);
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid var(--border-dim);
+  border-radius: 999px;
+  padding: 5px 14px;
+  pointer-events: none;
+  z-index: 2;
+  box-shadow: var(--shadow-sm);
+}

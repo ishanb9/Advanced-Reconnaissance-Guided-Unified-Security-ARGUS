@@ -1,0 +1,277 @@
+/* ══════════════════════════════════════════════════════════════
+   ARGUS · SKIN — MANAGER  (PM Dashboard · Mid-Management)
+   ──────────────────────────────────────────────────────────────
+   For team leads, scrum masters, project managers running the
+   engagement.  Project-management vocabulary: progress, ETA,
+   resource utilization, blockers, deliverables.
+   - Crisp dashboard look, Inter font, traffic-light status colours
+   - Progress bars and gauges dominant
+   - "Days remaining" countdown widget
+   - Team-utilization heatmap-style bars
+   - Calendar-friendly typography
+   ══════════════════════════════════════════════════════════════ */
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;600&display=swap');
+
+:root[data-skin="manager"] {
+  --bg-base:        #F7F9FC;
+  --bg-void:        #EBEFF5;
+  --bg-surface:     #FFFFFF;
+  --bg-panel:       #FFFFFF;
+  --bg-elevated:    #F2F5F9;
+  --bg-glass:       rgba(255, 255, 255, 0.96);
+  --bg-sidebar:     #FFFFFF;
+
+  --border-dim:     #E4E9EF;
+  --border:         #CDD5DF;
+  --border-light:   #CDD5DF;
+  --border-bright:  #4364E2;
+
+  --accent:         #4364E2;       /* PM blue */
+  --accent-dim:     #2D49B3;
+  --accent-glow:    rgba(67, 100, 226, 0.22);
+  --accent-subtle:  rgba(67, 100, 226, 0.08);
+
+  --cyan:           #2EB68F;
+  --violet:         #7C5DC5;
+
+  --text-primary:   #14212E;
+  --text-secondary: #475569;
+  --text-muted:     #6B7989;
+
+  --critical:       #DC3545;
+  --high:           #FB6B33;
+  --medium:         #F0A030;
+  --amber:          #F0A030;
+  --low:            #2EB68F;
+  --supernova:      #DC3545;
+
+  --critical-bg:    rgba(220,  53,  69, 0.10);
+  --critical-bd:    rgba(220,  53,  69, 0.40);
+  --high-bg:        rgba(251, 107,  51, 0.10);
+  --high-bd:        rgba(251, 107,  51, 0.40);
+  --medium-bg:      rgba(240, 160,  48, 0.10);
+  --medium-bd:      rgba(240, 160,  48, 0.40);
+  --low-bg:         rgba( 46, 182, 143, 0.10);
+  --low-bd:         rgba( 46, 182, 143, 0.40);
+
+  --font-ui:        'Inter', system-ui, sans-serif;
+  --font-display:   'Inter', system-ui, sans-serif;
+  --font-mono:      'JetBrains Mono', monospace;
+
+  --radius:         6px;
+  --radius-md:      8px;
+  --radius-lg:      12px;
+  --radius-xl:      16px;
+
+  --shadow-sm:      0 1px 2px rgba(20, 33, 46, 0.05);
+  --shadow-md:      0 4px 16px rgba(20, 33, 46, 0.08);
+  --shadow-lg:      0 16px 36px rgba(20, 33, 46, 0.10);
+}
+
+[data-skin="manager"] body {
+  background: var(--bg-base);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: 14px;
+}
+
+[data-skin="manager"] .header,
+[data-skin="manager"] header {
+  background: #FFFFFF;
+  border-bottom: 1px solid var(--border-dim);
+  box-shadow: var(--shadow-sm);
+}
+
+[data-skin="manager"] .header h1,
+[data-skin="manager"] header h1,
+[data-skin="manager"] .brand,
+[data-skin="manager"] .splash-title {
+  font-family: var(--font-display);
+  font-weight: 700;
+  letter-spacing: -0.5px;
+  color: var(--text-primary);
+}
+
+[data-skin="manager"] .panel,
+[data-skin="manager"] .card,
+[data-skin="manager"] .mc-panel,
+[data-skin="manager"] .agent-card,
+[data-skin="manager"] .finding-card {
+  background: #FFFFFF;
+  border: 1px solid var(--border-dim);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
+  padding: 16px;
+}
+
+[data-skin="manager"] .panel-title,
+[data-skin="manager"] .card-title,
+[data-skin="manager"] h2,
+[data-skin="manager"] h3 {
+  font-family: var(--font-display);
+  font-weight: 600;
+  color: var(--text-primary);
+  letter-spacing: -0.2px;
+  font-size: 15px;
+  margin-bottom: 10px;
+}
+
+[data-skin="manager"] button,
+[data-skin="manager"] .btn {
+  background: var(--accent);
+  color: #FFFFFF;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  font-family: var(--font-ui);
+  font-weight: 600;
+  font-size: 13px;
+  padding: 7px 14px;
+  box-shadow: 0 1px 2px rgba(67, 100, 226, 0.20);
+  transition: background 0.15s, transform 0.15s;
+}
+[data-skin="manager"] button:hover,
+[data-skin="manager"] .btn:hover {
+  background: var(--accent-dim);
+  transform: translateY(-1px);
+  box-shadow: 0 3px 10px var(--accent-glow);
+}
+[data-skin="manager"] button.secondary,
+[data-skin="manager"] .btn-secondary {
+  background: transparent;
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+[data-skin="manager"] input,
+[data-skin="manager"] textarea,
+[data-skin="manager"] select {
+  background: #FFFFFF;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: 13px;
+}
+[data-skin="manager"] input:focus,
+[data-skin="manager"] textarea:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-subtle);
+}
+
+[data-skin="manager"] aside,
+[data-skin="manager"] .sidebar {
+  background: #FFFFFF;
+  border-right: 1px solid var(--border-dim);
+}
+[data-skin="manager"] .nav-item {
+  font-family: var(--font-ui);
+  font-size: 13px;
+  font-weight: 500;
+  border-radius: var(--radius);
+  margin: 2px 8px;
+  padding: 6px 12px;
+  color: var(--text-secondary);
+}
+[data-skin="manager"] .nav-item[data-active="true"] {
+  background: var(--accent-subtle);
+  color: var(--accent-dim);
+  font-weight: 600;
+}
+
+[data-skin="manager"] table { font-family: var(--font-ui); font-size: 13px; }
+[data-skin="manager"] th {
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  font-size: 11px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+}
+[data-skin="manager"] td { padding: 10px 12px; border-bottom: 1px solid var(--border-dim); }
+[data-skin="manager"] tr:hover td { background: var(--bg-elevated); }
+
+[data-skin="manager"] .badge,
+[data-skin="manager"] .severity-badge,
+[data-skin="manager"] .pill {
+  font-family: var(--font-ui);
+  font-weight: 600;
+  letter-spacing: 0.2px;
+  font-size: 11px;
+  border-radius: 999px;
+  padding: 2px 8px;
+  border: 1px solid currentColor;
+  background: rgba(255, 255, 255, 0.4);
+}
+
+/* Progress-bar treatment for any [data-progress] element */
+[data-skin="manager"] [data-progress] {
+  position: relative;
+  height: 6px;
+  background: var(--bg-elevated);
+  border-radius: 999px;
+  overflow: hidden;
+}
+[data-skin="manager"] [data-progress]::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  width: var(--progress, 0%);
+  background: linear-gradient(90deg, var(--accent), var(--cyan));
+  border-radius: 999px;
+}
+
+[data-skin="manager"] pre,
+[data-skin="manager"] code {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-dim);
+  border-radius: var(--radius);
+  font-family: var(--font-mono);
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+[data-skin="manager"] .hud-clock {
+  font-family: var(--font-ui);
+  font-weight: 600;
+  color: var(--accent);
+}
+[data-skin="manager"] .hud-telemetry .bar {
+  background: linear-gradient(180deg, var(--accent), var(--cyan));
+  border-radius: 2px;
+}
+
+[data-skin="manager"] .phase-pill,
+[data-skin="manager"] .phase-timeline > * {
+  font-family: var(--font-ui);
+  font-weight: 600;
+  border-radius: 999px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  font-size: 12px;
+  padding: 4px 10px;
+}
+[data-skin="manager"] .phase-pill[data-active="true"] {
+  background: var(--accent);
+  color: #FFFFFF;
+  border-color: var(--accent);
+  box-shadow: 0 2px 8px var(--accent-glow);
+}
+
+[data-skin="manager"] ::-webkit-scrollbar { width: 10px; height: 10px; }
+[data-skin="manager"] ::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 999px;
+  border: 2px solid var(--bg-base);
+}
+
+[data-skin="manager"] .mode-picker-trigger {
+  font-family: var(--font-ui);
+  font-weight: 600;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  color: var(--text-primary);
+  border-radius: 999px;
+}

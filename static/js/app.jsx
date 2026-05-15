@@ -1175,6 +1175,18 @@ function App() {
   // Apply persisted theme on mount + whenever it changes
   useEffect(() => { applyTheme(theme); }, [theme]);
 
+  // Apply persisted visual skin on cold boot (idempotent — the
+  // SkinChooser component handles subsequent in-session changes).
+  // Use a single-shot effect so cold-boot loads the correct skin
+  // stylesheet before any panel renders.
+  useEffect(() => {
+    try {
+      if (window.ArgusSkin) {
+        window.ArgusSkin.apply(window.ArgusSkin.load());
+      }
+    } catch (_) {}
+  }, []);
+
   // Persist UI prefs
   useEffect(() => {
     savePrefs({
@@ -1527,6 +1539,11 @@ function App() {
 
       // Audience-mode picker (T5) — sits left of theme switcher
       React.createElement(ModePicker),
+
+      // Visual-skin chooser (7 skins: Stellar, Apollo, Tactical,
+      // Bloomberg, Glass, Editorial, Spatial-3D).  Sits between
+      // mode-picker and theme switcher.
+      window.SkinChooser ? React.createElement(window.SkinChooser) : null,
 
       // Theme switcher (always visible, right-most before logout-style icons)
       React.createElement(ThemeSwitcher, { current: theme, onPick: setTheme })

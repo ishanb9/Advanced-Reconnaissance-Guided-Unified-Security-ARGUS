@@ -1,0 +1,329 @@
+/* ══════════════════════════════════════════════════════════════
+   ARGUS · SKIN — AUDITOR  (Read-Only · Evidence-First)
+   ──────────────────────────────────────────────────────────────
+   For independent auditors, regulators, third-party assessors.
+   - Cool grey paper, no decoration, no animation
+   - Source Serif Pro for body + IBM Plex Sans for chrome
+   - Citation chain shown on every finding ("Source: nmap-scan @ 14:23 UTC")
+   - Hash watermark on every panel proving immutability
+   - "EVIDENCE PRESERVED" header bar
+   - Read-only cursor styling on all action buttons
+   - Hairline rules only, no shadows
+   ══════════════════════════════════════════════════════════════ */
+
+@import url('https://fonts.googleapis.com/css2?family=Source+Serif+4:ital,wght@0,300;0,400;0,500;0,600;0,700&family=IBM+Plex+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+:root[data-skin="auditor"] {
+  --bg-base:        #F4F4F2;
+  --bg-void:        #E8E8E5;
+  --bg-surface:     #FFFFFF;
+  --bg-panel:       #FFFFFF;
+  --bg-elevated:    #FAFAF9;
+  --bg-glass:       rgba(255, 255, 255, 0.96);
+  --bg-sidebar:     #ECECEA;
+
+  --border-dim:     rgba(20, 30, 50, 0.10);
+  --border:         rgba(20, 30, 50, 0.20);
+  --border-light:   rgba(20, 30, 50, 0.20);
+  --border-bright:  #1F2937;
+
+  --accent:         #2C4A6B;       /* steel blue */
+  --accent-dim:     #1F3550;
+  --accent-glow:    rgba( 44,  74, 107, 0.15);
+  --accent-subtle:  rgba( 44,  74, 107, 0.05);
+
+  --cyan:           #4A6B7C;
+  --violet:         #6B5F4A;
+
+  --text-primary:   #1F2937;
+  --text-secondary: #4B5563;
+  --text-muted:     #7F8896;
+
+  --critical:       #8B2C2C;
+  --high:           #A95E1F;
+  --medium:         #998433;
+  --amber:          #998433;
+  --low:            #2C5E3A;
+  --supernova:      #8B2C2C;
+
+  --critical-bg:    rgba(139,  44,  44, 0.06);
+  --critical-bd:    rgba(139,  44,  44, 0.30);
+  --high-bg:        rgba(169,  94,  31, 0.06);
+  --high-bd:        rgba(169,  94,  31, 0.30);
+  --medium-bg:      rgba(153, 132,  51, 0.06);
+  --medium-bd:      rgba(153, 132,  51, 0.30);
+  --low-bg:         rgba( 44,  94,  58, 0.06);
+  --low-bd:         rgba( 44,  94,  58, 0.30);
+
+  --font-ui:        'Source Serif 4', Georgia, serif;
+  --font-display:   'Source Serif 4', Georgia, serif;
+  --font-mono:      'JetBrains Mono', monospace;
+  --font-sans:      'IBM Plex Sans', system-ui, sans-serif;
+
+  --radius:         2px;
+  --radius-md:      3px;
+  --radius-lg:      4px;
+  --radius-xl:      6px;
+
+  --shadow-sm:      0 1px 0 rgba(20, 30, 50, 0.05);
+  --shadow-md:      none;
+  --shadow-lg:      0 0 0 1px rgba(20, 30, 50, 0.08);
+}
+
+[data-skin="auditor"] body {
+  background: var(--bg-base);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: 15px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+
+[data-skin="auditor"] .header,
+[data-skin="auditor"] header {
+  background: #FFFFFF;
+  border-bottom: 2px solid var(--text-primary);
+  font-family: var(--font-sans);
+}
+
+[data-skin="auditor"] .header h1,
+[data-skin="auditor"] header h1,
+[data-skin="auditor"] .brand {
+  font-family: var(--font-display);
+  font-weight: 700;
+  color: var(--text-primary);
+  letter-spacing: 0.5px;
+}
+
+/* Evidence-preserved banner */
+[data-skin="auditor"] body::before {
+  content: 'EVIDENCE PRESERVED · READ-ONLY VIEW · CHAIN-OF-CUSTODY ENFORCED';
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  background: var(--text-primary);
+  color: #F4F4F2;
+  font-family: var(--font-sans);
+  font-weight: 600;
+  font-size: 10px;
+  letter-spacing: 3px;
+  text-align: center;
+  padding: 3px;
+  z-index: 9999;
+  text-transform: uppercase;
+  pointer-events: none;
+}
+[data-skin="auditor"] #root { padding-top: 18px; }
+
+[data-skin="auditor"] .panel,
+[data-skin="auditor"] .card,
+[data-skin="auditor"] .mc-panel,
+[data-skin="auditor"] .agent-card,
+[data-skin="auditor"] .finding-card {
+  background: #FFFFFF;
+  border: 1px solid var(--border);
+  border-top: 3px solid var(--text-primary);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-sm);
+  padding: 16px;
+  position: relative;
+}
+
+[data-skin="auditor"] .panel-title,
+[data-skin="auditor"] .card-title,
+[data-skin="auditor"] h2,
+[data-skin="auditor"] h3 {
+  font-family: var(--font-display);
+  font-weight: 600;
+  color: var(--text-primary);
+  letter-spacing: -0.3px;
+  font-size: 18px;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 6px;
+  margin-bottom: 12px;
+}
+
+/* Citation footer on every finding card — appears via data-source attr */
+[data-skin="auditor"] [data-source]::after {
+  content: '— Source: ' attr(data-source);
+  display: block;
+  font-family: var(--font-sans);
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 10px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--border);
+  font-style: italic;
+}
+
+/* Hash watermark — appears on panels with data-hash attribute */
+[data-skin="auditor"] [data-hash]::before {
+  content: 'SHA-256: ' attr(data-hash);
+  position: absolute;
+  top: 4px; right: 12px;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: var(--text-muted);
+  opacity: 0.6;
+  letter-spacing: 0.5px;
+}
+
+[data-skin="auditor"] button,
+[data-skin="auditor"] .btn {
+  background: transparent;
+  color: var(--text-primary);
+  border: 1px solid var(--text-primary);
+  border-radius: var(--radius);
+  font-family: var(--font-sans);
+  font-weight: 500;
+  font-size: 13px;
+  padding: 5px 14px;
+  letter-spacing: 0.2px;
+}
+[data-skin="auditor"] button:hover,
+[data-skin="auditor"] .btn:hover {
+  background: var(--text-primary);
+  color: #FFFFFF;
+}
+/* Read-only cursor styling for action-class buttons */
+[data-skin="auditor"] .btn-action,
+[data-skin="auditor"] button[data-action="exec"],
+[data-skin="auditor"] button[data-action="run"] {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+[data-skin="auditor"] .btn-action::after,
+[data-skin="auditor"] button[data-action]::after {
+  content: ' 🔒';
+  font-size: 10px;
+}
+
+[data-skin="auditor"] input,
+[data-skin="auditor"] textarea,
+[data-skin="auditor"] select {
+  background: #FFFFFF;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: 14px;
+}
+[data-skin="auditor"] input:focus,
+[data-skin="auditor"] textarea:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-subtle);
+}
+
+[data-skin="auditor"] aside,
+[data-skin="auditor"] .sidebar {
+  background: var(--bg-sidebar);
+  border-right: 1px solid var(--border);
+}
+[data-skin="auditor"] .nav-item {
+  font-family: var(--font-sans);
+  font-size: 14px;
+  font-weight: 500;
+  border-left: 3px solid transparent;
+  padding: 6px 12px;
+}
+[data-skin="auditor"] .nav-item[data-active="true"] {
+  background: var(--accent-subtle);
+  border-left-color: var(--accent);
+  color: var(--accent-dim);
+  font-weight: 600;
+}
+
+[data-skin="auditor"] table { font-family: var(--font-ui); font-size: 14px; }
+[data-skin="auditor"] th {
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  font-size: 11px;
+  padding: 10px 12px;
+  border-bottom: 2px solid var(--text-primary);
+}
+[data-skin="auditor"] td { padding: 8px 12px; border-bottom: 1px solid var(--border-dim); }
+
+[data-skin="auditor"] .badge,
+[data-skin="auditor"] .severity-badge,
+[data-skin="auditor"] .pill {
+  font-family: var(--font-sans);
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  font-size: 11px;
+  border-radius: var(--radius);
+  padding: 2px 8px;
+  border: 1px solid currentColor;
+  background: transparent;
+  text-transform: uppercase;
+}
+
+[data-skin="auditor"] pre,
+[data-skin="auditor"] code {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-dim);
+  border-radius: var(--radius);
+  font-family: var(--font-mono);
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+[data-skin="auditor"] .hud-telemetry { display: none; }
+[data-skin="auditor"] .hud-consumables { display: none; }
+[data-skin="auditor"] .hud-clock {
+  font-family: var(--font-mono);
+  color: var(--text-secondary);
+  letter-spacing: 1px;
+}
+
+[data-skin="auditor"] .phase-pill,
+[data-skin="auditor"] .phase-timeline > * {
+  font-family: var(--font-sans);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  font-size: 10px;
+  border-radius: 0;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid var(--border);
+  padding: 4px 10px;
+  color: var(--text-muted);
+}
+[data-skin="auditor"] .phase-pill[data-active="true"] {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+  border-bottom-width: 3px;
+}
+
+[data-skin="auditor"] ::-webkit-scrollbar { width: 8px; height: 8px; }
+[data-skin="auditor"] ::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 999px;
+}
+
+[data-skin="auditor"] .mode-picker-trigger {
+  font-family: var(--font-sans);
+  font-weight: 500;
+  background: transparent;
+  border: 1px solid var(--text-primary);
+  color: var(--text-primary);
+  border-radius: var(--radius);
+}
+
+/* Page-number footer like a real audit report */
+[data-skin="auditor"] body::after {
+  content: 'ARGUS Audit Trail · Generated by automated assessment · Findings preserved per chain-of-custody policy v3.2';
+  position: fixed;
+  bottom: 6px; left: 50%;
+  transform: translateX(-50%);
+  font-family: var(--font-sans);
+  font-size: 10px;
+  color: var(--text-muted);
+  letter-spacing: 0.3px;
+  pointer-events: none;
+  z-index: 2;
+  font-style: italic;
+}

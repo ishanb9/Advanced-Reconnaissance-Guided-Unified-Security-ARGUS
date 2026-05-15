@@ -1,0 +1,310 @@
+/* ══════════════════════════════════════════════════════════════
+   ARGUS · SKIN — EXECUTIVE  (C-Suite / Boardroom)
+   ──────────────────────────────────────────────────────────────
+   For the CEO / CISO / Board.  Print-projector friendly.
+   - Clean white background, ultra-thin chrome
+   - Inter Display + Crimson Pro serif headlines
+   - ONE big metric: risk posture (96px+ display)
+   - Quarter-over-quarter comparisons baked-in via CSS pseudo-elements
+   - Trend arrows on every number (▲ ▼ →)
+   - Monetary exposure shown next to severity
+   - HUD telemetry hidden — minimalism rules
+   - Wide margins, board-deck spacing
+   ══════════════════════════════════════════════════════════════ */
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@200;300;400;500;600;700&family=Inter+Tight:wght@200;300;400;500;600;700;800;900&family=Crimson+Pro:ital,wght@0,400;0,500;0,600;0,700;1,400;1,500;1,600&display=swap');
+
+:root[data-skin="executive"] {
+  --bg-base:        #FFFFFF;
+  --bg-void:        #F7F7F5;
+  --bg-surface:     #FFFFFF;
+  --bg-panel:       #FFFFFF;
+  --bg-elevated:    #FAFAF8;
+  --bg-glass:       rgba(255, 255, 255, 0.98);
+  --bg-sidebar:     #FAFAF8;
+
+  --border-dim:     rgba(15, 23, 42, 0.06);
+  --border:         rgba(15, 23, 42, 0.14);
+  --border-light:   rgba(15, 23, 42, 0.14);
+  --border-bright:  #0F172A;
+
+  --accent:         #0F172A;       /* near-black premium */
+  --accent-dim:     #1F2937;
+  --accent-glow:    rgba(15, 23, 42, 0.10);
+  --accent-subtle:  rgba(15, 23, 42, 0.04);
+
+  --cyan:           #0E5C45;
+  --violet:         #5A3A8C;
+
+  --text-primary:   #0F172A;
+  --text-secondary: #475569;
+  --text-muted:     #94A3B8;
+
+  --critical:       #991B1B;
+  --high:           #C2410C;
+  --medium:         #A16207;
+  --amber:          #A16207;
+  --low:            #166534;
+  --supernova:      #991B1B;
+
+  --critical-bg:    rgba(153,  27,  27, 0.06);
+  --critical-bd:    rgba(153,  27,  27, 0.30);
+  --high-bg:        rgba(194,  65,  12, 0.06);
+  --high-bd:        rgba(194,  65,  12, 0.30);
+  --medium-bg:      rgba(161,  98,   7, 0.06);
+  --medium-bd:      rgba(161,  98,   7, 0.30);
+  --low-bg:         rgba( 22, 101,  52, 0.06);
+  --low-bd:         rgba( 22, 101,  52, 0.30);
+
+  --font-ui:        'Inter', system-ui, sans-serif;
+  --font-display:   'Crimson Pro', 'Inter Tight', serif;
+  --font-mono:      'JetBrains Mono', monospace;
+
+  --radius:         3px;
+  --radius-md:      4px;
+  --radius-lg:      6px;
+  --radius-xl:      8px;
+
+  --shadow-sm:      none;
+  --shadow-md:      0 1px 0 rgba(15, 23, 42, 0.06);
+  --shadow-lg:      0 8px 24px rgba(15, 23, 42, 0.06);
+}
+
+[data-skin="executive"] body {
+  background: var(--bg-base);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: 16px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+
+[data-skin="executive"] .header,
+[data-skin="executive"] header {
+  background: #FFFFFF;
+  border-bottom: 1px solid var(--border);
+  font-family: var(--font-ui);
+}
+
+[data-skin="executive"] .header h1,
+[data-skin="executive"] header h1,
+[data-skin="executive"] .brand,
+[data-skin="executive"] .splash-title {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-style: italic;
+  letter-spacing: -1px;
+  color: var(--text-primary);
+  font-size: 22px;
+}
+
+[data-skin="executive"] .panel,
+[data-skin="executive"] .card,
+[data-skin="executive"] .mc-panel,
+[data-skin="executive"] .agent-card,
+[data-skin="executive"] .finding-card {
+  background: #FFFFFF;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-md);
+  padding: 24px;
+}
+
+[data-skin="executive"] .panel-title,
+[data-skin="executive"] .card-title,
+[data-skin="executive"] h2,
+[data-skin="executive"] h3 {
+  font-family: var(--font-display);
+  font-weight: 600;
+  color: var(--text-primary);
+  letter-spacing: -0.8px;
+  font-size: 26px;
+  margin-bottom: 14px;
+}
+
+/* The big number — display 96px+, lightweight, serif */
+[data-skin="executive"] .big-num,
+[data-skin="executive"] .metric-value,
+[data-skin="executive"] [data-display-numeral] {
+  font-family: 'Inter Tight', 'Inter', sans-serif;
+  font-weight: 200;
+  font-size: 120px;
+  line-height: 0.95;
+  letter-spacing: -6px;
+  color: var(--text-primary);
+}
+
+/* Trend arrows next to numbers — opt-in via data-trend */
+[data-skin="executive"] [data-trend="up"]::after   { content: ' ▲'; color: var(--critical); font-size: 0.5em; }
+[data-skin="executive"] [data-trend="down"]::after { content: ' ▼'; color: var(--low); font-size: 0.5em; }
+[data-skin="executive"] [data-trend="flat"]::after { content: ' →'; color: var(--text-muted); font-size: 0.5em; }
+
+/* QoQ comparison subtitle for big numbers */
+[data-skin="executive"] [data-qoq]::after {
+  content: ' vs. last quarter: ' attr(data-qoq);
+  display: block;
+  font-family: var(--font-ui);
+  font-size: 13px;
+  font-weight: 400;
+  font-style: italic;
+  color: var(--text-muted);
+  letter-spacing: 0;
+  margin-top: 4px;
+}
+
+[data-skin="executive"] button,
+[data-skin="executive"] .btn {
+  background: var(--text-primary);
+  color: #FFFFFF;
+  border: 1px solid var(--text-primary);
+  border-radius: var(--radius);
+  font-family: var(--font-ui);
+  font-weight: 500;
+  font-size: 14px;
+  padding: 7px 18px;
+  letter-spacing: 0;
+}
+[data-skin="executive"] button:hover,
+[data-skin="executive"] .btn:hover {
+  background: var(--accent-dim);
+}
+[data-skin="executive"] button.secondary,
+[data-skin="executive"] .btn-secondary {
+  background: transparent;
+  color: var(--text-primary);
+}
+
+[data-skin="executive"] input,
+[data-skin="executive"] textarea,
+[data-skin="executive"] select {
+  background: #FFFFFF;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: 15px;
+}
+[data-skin="executive"] input:focus,
+[data-skin="executive"] textarea:focus {
+  border-color: var(--text-primary);
+  box-shadow: 0 0 0 2px var(--accent-subtle);
+}
+
+[data-skin="executive"] aside,
+[data-skin="executive"] .sidebar {
+  background: var(--bg-sidebar);
+  border-right: 1px solid var(--border);
+}
+[data-skin="executive"] .nav-item {
+  font-family: var(--font-ui);
+  font-size: 14px;
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+  padding: 6px 14px;
+  color: var(--text-secondary);
+  border-left: 2px solid transparent;
+}
+[data-skin="executive"] .nav-item[data-active="true"] {
+  border-left-color: var(--text-primary);
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+[data-skin="executive"] table { font-family: var(--font-ui); font-size: 14px; }
+[data-skin="executive"] th {
+  background: transparent;
+  color: var(--text-muted);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 1.2px;
+  font-size: 10px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--text-primary);
+}
+[data-skin="executive"] td { padding: 12px 12px; border-bottom: 1px solid var(--border-dim); }
+
+[data-skin="executive"] .badge,
+[data-skin="executive"] .severity-badge,
+[data-skin="executive"] .pill {
+  font-family: var(--font-ui);
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  font-size: 11px;
+  border-radius: var(--radius);
+  padding: 2px 8px;
+  border: 1px solid currentColor;
+  background: transparent;
+  text-transform: uppercase;
+}
+
+/* Monetary exposure annotation on findings */
+[data-skin="executive"] [data-exposure]::after {
+  content: ' · est. ' attr(data-exposure);
+  font-family: var(--font-ui);
+  font-size: 0.85em;
+  color: var(--text-secondary);
+  font-style: italic;
+  letter-spacing: 0;
+}
+
+[data-skin="executive"] pre,
+[data-skin="executive"] code {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-dim);
+  border-radius: var(--radius);
+  font-family: var(--font-mono);
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+/* Hide HUD — boardroom minimalism */
+[data-skin="executive"] .hud-telemetry { display: none; }
+[data-skin="executive"] .hud-consumables { display: none; }
+[data-skin="executive"] .hud-clock {
+  font-family: var(--font-ui);
+  color: var(--text-muted);
+  font-weight: 400;
+  font-size: 13px;
+}
+
+[data-skin="executive"] .phase-pill,
+[data-skin="executive"] .phase-timeline > * {
+  font-family: var(--font-ui);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 1.2px;
+  font-size: 10px;
+  border-radius: 0;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  padding: 4px 10px;
+  color: var(--text-muted);
+}
+[data-skin="executive"] .phase-pill[data-active="true"] {
+  color: var(--text-primary);
+  border-bottom-color: var(--text-primary);
+  border-bottom-width: 2px;
+}
+
+[data-skin="executive"] ::-webkit-scrollbar { width: 6px; height: 6px; }
+[data-skin="executive"] ::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 999px;
+}
+
+[data-skin="executive"] .mode-picker-trigger {
+  font-family: var(--font-ui);
+  font-weight: 500;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-primary);
+  border-radius: 999px;
+}
+
+/* Generous content margins — board-deck spacing */
+[data-skin="executive"] #root > div > div {
+  max-width: 1400px;
+  margin: 0 auto;
+}

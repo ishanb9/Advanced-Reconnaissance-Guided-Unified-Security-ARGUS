@@ -1,0 +1,404 @@
+/* ══════════════════════════════════════════════════════════════
+   ARGUS · SKIN — EDITORIAL  (Stripe Press / The Browser / Are.na)
+   ──────────────────────────────────────────────────────────────
+   Visual language:
+   - Off-white cream paper (#FAFAF7) — the unmistakable book/magazine feel
+   - Ink black (#1A1A1A) text — ultra-high contrast typography
+   - Spectral + EB Garamond serifs (free, premium editorial)
+   - Inter sans for chrome only
+   - Max 680px text columns — readable measure
+   - Data presented as sentences and tables, NOT charts
+   - Generous whitespace, magazine-style grid
+   - Hairline rules, never solid borders
+   - Display weights for headlines (96px+)
+   - Subtle deep-red + forest-green accent palette
+   - Drop caps on long-form panels
+   ══════════════════════════════════════════════════════════════ */
+
+@import url('https://fonts.googleapis.com/css2?family=Spectral:ital,wght@0,200;0,300;0,400;0,500;0,600;0,700;0,800;1,400;1,500&family=EB+Garamond:ital,wght@0,400;0,500;0,600;0,700;0,800;1,400;1,500&family=Source+Serif+4:ital,wght@0,300;0,400;0,500;0,600;0,700;1,400&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+:root[data-skin="editorial"] {
+  /* ── Surfaces — cream paper ── */
+  --bg-base:        #FAFAF7;
+  --bg-void:        #F4F3EE;
+  --bg-surface:     #FFFFFF;
+  --bg-panel:       #FFFFFF;
+  --bg-elevated:    #FAFAF7;
+  --bg-glass:       rgba(255, 255, 255, 0.96);
+  --bg-sidebar:     #F4F3EE;
+
+  /* ── Borders — hairline ink ── */
+  --border-dim:     rgba(26, 26, 26, 0.08);
+  --border:         rgba(26, 26, 26, 0.15);
+  --border-light:   rgba(26, 26, 26, 0.15);
+  --border-bright:  #1A1A1A;
+
+  /* ── Accent — Stripe Press red ── */
+  --accent:         #A8311F;
+  --accent-dim:     #861A0E;
+  --accent-glow:    rgba(168, 49, 31, 0.18);
+  --accent-subtle:  rgba(168, 49, 31, 0.06);
+
+  /* ── Secondary — forest green + chestnut ── */
+  --cyan:           #1A4D3A;
+  --violet:         #6B4423;
+
+  /* ── Text — ink black ── */
+  --text-primary:   #1A1A1A;
+  --text-secondary: #3D3D3D;
+  --text-muted:     #767676;
+
+  /* ── Severity — editorial inks ── */
+  --critical:       #A8311F;
+  --high:           #C16B1C;
+  --medium:         #B58B2B;
+  --amber:          #B58B2B;
+  --low:            #1A4D3A;
+  --supernova:      #A8311F;
+
+  --critical-bg:    rgba(168, 49, 31, 0.08);
+  --critical-bd:    rgba(168, 49, 31, 0.32);
+  --high-bg:        rgba(193, 107, 28, 0.08);
+  --high-bd:        rgba(193, 107, 28, 0.32);
+  --medium-bg:      rgba(181, 139, 43, 0.08);
+  --medium-bd:      rgba(181, 139, 43, 0.32);
+  --low-bg:         rgba( 26,  77,  58, 0.08);
+  --low-bd:         rgba( 26,  77,  58, 0.32);
+
+  /* ── Typography — serifs lead ── */
+  --font-ui:        'Spectral', 'EB Garamond', Georgia, serif;
+  --font-display:   'EB Garamond', 'Spectral', Georgia, serif;
+  --font-mono:      'JetBrains Mono', monospace;
+  --font-sans:      'Inter', system-ui, sans-serif;
+
+  /* ── Geometry — minimal rounding, paper feel ── */
+  --radius:         2px;
+  --radius-md:      3px;
+  --radius-lg:      4px;
+  --radius-xl:      6px;
+
+  --shadow-sm:      0 1px 0 rgba(26, 26, 26, 0.05);
+  --shadow-md:      0 4px 18px rgba(26, 26, 26, 0.06);
+  --shadow-lg:      0 14px 40px rgba(26, 26, 26, 0.08);
+}
+
+/* ── Body — cream paper ── */
+[data-skin="editorial"] body {
+  background: var(--bg-base);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: 16px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* ── Header — minimal masthead ── */
+[data-skin="editorial"] .header,
+[data-skin="editorial"] header {
+  background: #FFFFFF;
+  border-bottom: 1px solid var(--border);
+  font-family: var(--font-sans);
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+/* ── Wordmark — display serif ── */
+[data-skin="editorial"] .header h1,
+[data-skin="editorial"] header h1,
+[data-skin="editorial"] .brand,
+[data-skin="editorial"] .splash-title {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-style: italic;
+  letter-spacing: -1px;
+  color: var(--text-primary);
+}
+
+/* ── Panels — paper cards with thin rule ── */
+[data-skin="editorial"] .panel,
+[data-skin="editorial"] .card,
+[data-skin="editorial"] .mc-panel,
+[data-skin="editorial"] .agent-card,
+[data-skin="editorial"] .finding-card {
+  background: #FFFFFF;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-sm);
+  max-width: 100%;
+}
+
+/* ── Panel headers — display-serif with hairline rule under ── */
+[data-skin="editorial"] .panel-title,
+[data-skin="editorial"] .card-title,
+[data-skin="editorial"] h1,
+[data-skin="editorial"] h2,
+[data-skin="editorial"] h3 {
+  font-family: var(--font-display);
+  font-weight: 700;
+  color: var(--text-primary);
+  letter-spacing: -0.5px;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 8px;
+  margin-bottom: 14px;
+}
+[data-skin="editorial"] h1 { font-size: 36px; line-height: 1.1; }
+[data-skin="editorial"] h2 { font-size: 24px; line-height: 1.2; }
+[data-skin="editorial"] h3 { font-size: 18px; line-height: 1.3; }
+
+/* ── Paragraphs — 680px max measure ── */
+[data-skin="editorial"] p,
+[data-skin="editorial"] .prose {
+  font-family: var(--font-ui);
+  font-size: 16px;
+  line-height: 1.65;
+  max-width: 680px;
+  color: var(--text-primary);
+}
+
+/* ── Drop cap on first paragraph of long-form panels ── */
+[data-skin="editorial"] .prose > p:first-child::first-letter,
+[data-skin="editorial"] .long-form > p:first-child::first-letter {
+  font-family: var(--font-display);
+  font-size: 64px;
+  font-weight: 700;
+  line-height: 0.85;
+  float: left;
+  margin: 4px 8px 0 0;
+  color: var(--accent);
+}
+
+/* ── Buttons — editorial pill / linked ── */
+[data-skin="editorial"] button,
+[data-skin="editorial"] .btn {
+  background: var(--text-primary);
+  color: #FFFFFF;
+  border: 1px solid var(--text-primary);
+  border-radius: 999px;
+  font-family: var(--font-sans);
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+  padding: 6px 16px;
+  transition: background 0.15s, color 0.15s;
+}
+[data-skin="editorial"] button:hover,
+[data-skin="editorial"] .btn:hover {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+[data-skin="editorial"] button.secondary,
+[data-skin="editorial"] .btn-secondary {
+  background: transparent;
+  color: var(--text-primary);
+}
+[data-skin="editorial"] button.secondary:hover {
+  background: var(--text-primary);
+  color: #FFFFFF;
+}
+
+/* ── Inputs — minimal underline ── */
+[data-skin="editorial"] input,
+[data-skin="editorial"] textarea,
+[data-skin="editorial"] select {
+  background: #FFFFFF;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: 15px;
+  padding: 6px 12px;
+}
+[data-skin="editorial"] input:focus,
+[data-skin="editorial"] textarea:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-subtle);
+}
+
+/* ── Sidebar — magazine TOC ── */
+[data-skin="editorial"] aside,
+[data-skin="editorial"] .sidebar {
+  background: var(--bg-void);
+  border-right: 1px solid var(--border);
+}
+[data-skin="editorial"] .nav-item {
+  font-family: var(--font-ui);
+  font-size: 15px;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--text-primary);
+  border-left: 2px solid transparent;
+  padding: 5px 12px;
+}
+[data-skin="editorial"] .nav-item[data-active="true"] {
+  background: transparent;
+  border-left-color: var(--accent);
+  color: var(--accent);
+  font-style: italic;
+}
+
+/* ── Tables — editorial data-grid ── */
+[data-skin="editorial"] table {
+  font-family: var(--font-ui);
+  font-size: 14px;
+  border-collapse: collapse;
+}
+[data-skin="editorial"] th {
+  background: transparent;
+  color: var(--text-muted);
+  font-family: var(--font-sans);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  font-size: 10px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--text-primary);
+  text-align: left;
+}
+[data-skin="editorial"] td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border-dim);
+}
+[data-skin="editorial"] tr:hover td { background: var(--bg-void); }
+
+/* ── Severity — set in italic + colour ── */
+[data-skin="editorial"] .badge,
+[data-skin="editorial"] .severity-badge,
+[data-skin="editorial"] .pill {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-style: italic;
+  letter-spacing: 0;
+  text-transform: lowercase;
+  border-radius: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  font-size: 14px;
+}
+[data-skin="editorial"] [data-severity="CRITICAL"],
+[data-skin="editorial"] .sev-critical,
+[data-skin="editorial"] .critical {
+  color: var(--critical);
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+}
+
+/* ── Splash ── */
+[data-skin="editorial"] .splash {
+  background: var(--bg-base);
+  color: var(--text-primary);
+}
+[data-skin="editorial"] .splash-title {
+  font-family: var(--font-display);
+  font-style: italic;
+  letter-spacing: -2px;
+  font-weight: 800;
+  color: var(--text-primary);
+  font-size: 72px;
+}
+[data-skin="editorial"] .splash-subtitle {
+  font-family: var(--font-ui);
+  font-size: 18px;
+  color: var(--text-secondary);
+  letter-spacing: 0;
+  text-transform: lowercase;
+  font-style: italic;
+}
+[data-skin="editorial"] .splash-status {
+  font-family: var(--font-sans);
+  font-size: 12px;
+  color: var(--text-muted);
+  letter-spacing: 1px;
+  text-transform: uppercase;
+}
+
+/* ── HUD — hidden, except clock as elegant time stamp ── */
+[data-skin="editorial"] .hud-telemetry { display: none; }
+[data-skin="editorial"] .hud-consumables { display: none; }
+[data-skin="editorial"] .hud-clock {
+  font-family: var(--font-ui);
+  color: var(--text-muted);
+  font-style: italic;
+  letter-spacing: 0;
+}
+
+/* ── Code blocks — printed-page mono ── */
+[data-skin="editorial"] pre,
+[data-skin="editorial"] code {
+  background: var(--bg-void);
+  border: 1px solid var(--border-dim);
+  border-radius: var(--radius);
+  font-family: var(--font-mono);
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+/* ── Scrollbars — invisible scrollbar like Stripe Press ── */
+[data-skin="editorial"] ::-webkit-scrollbar { width: 6px; height: 6px; }
+[data-skin="editorial"] ::-webkit-scrollbar-track { background: transparent; }
+[data-skin="editorial"] ::-webkit-scrollbar-thumb {
+  background: rgba(26, 26, 26, 0.18);
+  border-radius: 999px;
+}
+
+/* ── Phase pills — small caps ── */
+[data-skin="editorial"] .phase-pill,
+[data-skin="editorial"] .phase-timeline > * {
+  font-family: var(--font-sans);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 1.5px;
+  font-size: 10px;
+  border-radius: 0;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  padding: 4px 8px;
+  color: var(--text-muted);
+}
+[data-skin="editorial"] .phase-pill[data-active="true"] {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+  border-bottom-width: 2px;
+}
+
+/* ── Pull-quote / risk callout ── */
+[data-skin="editorial"] blockquote,
+[data-skin="editorial"] .pull-quote {
+  font-family: var(--font-display);
+  font-style: italic;
+  font-weight: 500;
+  font-size: 22px;
+  line-height: 1.4;
+  color: var(--text-primary);
+  border-left: 3px solid var(--accent);
+  padding-left: 16px;
+  margin: 18px 0;
+}
+
+/* ── Mode picker ── */
+[data-skin="editorial"] .mode-picker-trigger {
+  font-family: var(--font-sans);
+  font-weight: 500;
+  text-transform: none;
+  letter-spacing: 0;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-primary);
+  border-radius: 999px;
+}
+
+/* ── Links — classic editorial underline ── */
+[data-skin="editorial"] a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+  text-decoration-color: var(--accent-glow);
+  transition: text-decoration-color 0.15s;
+}
+[data-skin="editorial"] a:hover {
+  text-decoration-color: var(--accent);
+}

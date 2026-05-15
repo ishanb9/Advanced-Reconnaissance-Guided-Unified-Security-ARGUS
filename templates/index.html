@@ -10,6 +10,11 @@
   <link rel="stylesheet" href="/static/vendor/antd.reset.min.css"/>
   <link rel="stylesheet" href="/static/vendor/xterm.min.css"/>
   <link rel="stylesheet" href="/static/css/main.css"/>
+  <!-- Visual-skin stylesheet slot (apollo / tactical / bloomberg / glass / editorial / webgl).
+       href is swapped at runtime by /static/js/components/SkinChooser.jsx based
+       on the user's saved choice in localStorage argus.ui.skin.v1.  When the
+       default "stellar" skin is active, this link has no href and main.css alone defines the look. -->
+  <link id="argus-skin" rel="stylesheet" href=""/>
 </head>
 <body>
   <div id="root"></div>
@@ -39,6 +44,7 @@
   <script type="text/babel" src="/static/js/components/ExpertPanel.jsx?v=1"></script>
   <script type="text/babel" src="/static/js/components/MissionBriefBanner.jsx?v=1"></script>
   <script type="text/babel" src="/static/js/components/VoIRankingPanel.jsx?v=1"></script>
+  <script type="text/babel" src="/static/js/components/SkinChooser.jsx?v=2"></script>
 
   <!-- Pages (Phase 1/2) -->
   <!-- v2 UI revamp: Risk Dashboard is the new default landing page -->
@@ -72,6 +78,6 @@
   <script type="text/babel" src="/static/js/pages/WebTesting.jsx?v=3"></script>
 
   <!-- App router (must be last) -->
-  <script type="text/babel" src="/static/js/app.jsx?v=15"></script>
+  <script type="text/babel" src="/static/js/app.jsx?v=16"></script>
 </body>
 </html>

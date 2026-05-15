@@ -1,0 +1,291 @@
+/* ══════════════════════════════════════════════════════════════
+   ARGUS · SKIN — CFO  (Finance Lens)
+   ──────────────────────────────────────────────────────────────
+   For the CFO / finance review.  Every risk gets a price tag.
+   - Light financial-app surface, Inter font, tabular numerics
+   - Cost-of-fix dollar figures dominant
+   - ROI / risk-reduction-per-dollar widget styling
+   - Budget burn-rate bars
+   - Financial-green up / red down (Bloomberg-adjacent but lighter)
+   - Right-aligned numerics throughout, $ prefix where appropriate
+   - Tabular charts dominate over icons
+   ══════════════════════════════════════════════════════════════ */
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+
+:root[data-skin="cfo"] {
+  --bg-base:        #F8FAFC;
+  --bg-void:        #ECF0F4;
+  --bg-surface:     #FFFFFF;
+  --bg-panel:       #FFFFFF;
+  --bg-elevated:    #F1F5F9;
+  --bg-glass:       rgba(255, 255, 255, 0.96);
+  --bg-sidebar:     #F1F5F9;
+
+  --border-dim:     #E2E8F0;
+  --border:         #CBD5E1;
+  --border-light:   #CBD5E1;
+  --border-bright:  #0F766E;
+
+  --accent:         #0F766E;       /* financial teal */
+  --accent-dim:     #0C5C56;
+  --accent-glow:    rgba(15, 118, 110, 0.22);
+  --accent-subtle:  rgba(15, 118, 110, 0.06);
+
+  --cyan:           #0E8A4A;       /* "up tick" finance green */
+  --violet:         #B45309;
+
+  --text-primary:   #0F172A;
+  --text-secondary: #475569;
+  --text-muted:     #94A3B8;
+
+  --critical:       #B91C1C;
+  --high:           #C2410C;
+  --medium:         #B45309;
+  --amber:          #B45309;
+  --low:            #0E8A4A;
+  --supernova:      #B91C1C;
+
+  --critical-bg:    rgba(185,  28,  28, 0.08);
+  --critical-bd:    rgba(185,  28,  28, 0.32);
+  --high-bg:        rgba(194,  65,  12, 0.08);
+  --high-bd:        rgba(194,  65,  12, 0.32);
+  --medium-bg:      rgba(180,  83,   9, 0.08);
+  --medium-bd:      rgba(180,  83,   9, 0.32);
+  --low-bg:         rgba( 14, 138,  74, 0.08);
+  --low-bd:         rgba( 14, 138,  74, 0.32);
+
+  --font-ui:        'Inter', system-ui, sans-serif;
+  --font-display:   'Inter', system-ui, sans-serif;
+  --font-mono:      'IBM Plex Mono', monospace;
+
+  --radius:         3px;
+  --radius-md:      4px;
+  --radius-lg:      6px;
+  --radius-xl:      8px;
+
+  --shadow-sm:      0 1px 0 rgba(15, 23, 42, 0.05);
+  --shadow-md:      0 2px 8px rgba(15, 23, 42, 0.07);
+  --shadow-lg:      0 12px 30px rgba(15, 23, 42, 0.08);
+}
+
+[data-skin="cfo"] body {
+  background: var(--bg-base);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+}
+
+[data-skin="cfo"] .header,
+[data-skin="cfo"] header {
+  background: #FFFFFF;
+  border-bottom: 1px solid var(--border);
+  box-shadow: var(--shadow-sm);
+}
+
+[data-skin="cfo"] .header h1,
+[data-skin="cfo"] header h1,
+[data-skin="cfo"] .brand,
+[data-skin="cfo"] .splash-title {
+  font-family: var(--font-display);
+  font-weight: 700;
+  color: var(--accent);
+  letter-spacing: -0.6px;
+}
+
+[data-skin="cfo"] .panel,
+[data-skin="cfo"] .card,
+[data-skin="cfo"] .mc-panel,
+[data-skin="cfo"] .agent-card,
+[data-skin="cfo"] .finding-card {
+  background: #FFFFFF;
+  border: 1px solid var(--border-dim);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-sm);
+  padding: 16px;
+}
+
+[data-skin="cfo"] .panel-title,
+[data-skin="cfo"] .card-title,
+[data-skin="cfo"] h2,
+[data-skin="cfo"] h3 {
+  font-family: var(--font-display);
+  font-weight: 600;
+  color: var(--text-primary);
+  font-size: 15px;
+  letter-spacing: -0.3px;
+  border-bottom: 1px solid var(--border-dim);
+  padding-bottom: 6px;
+  margin-bottom: 10px;
+}
+
+[data-skin="cfo"] button,
+[data-skin="cfo"] .btn {
+  background: var(--accent);
+  color: #FFFFFF;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  font-family: var(--font-ui);
+  font-weight: 600;
+  font-size: 13px;
+  padding: 6px 14px;
+}
+[data-skin="cfo"] button:hover,
+[data-skin="cfo"] .btn:hover {
+  background: var(--accent-dim);
+  box-shadow: 0 2px 8px var(--accent-glow);
+}
+
+[data-skin="cfo"] input,
+[data-skin="cfo"] textarea,
+[data-skin="cfo"] select {
+  background: #FFFFFF;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: 13px;
+}
+[data-skin="cfo"] input:focus,
+[data-skin="cfo"] textarea:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-subtle);
+}
+
+[data-skin="cfo"] aside,
+[data-skin="cfo"] .sidebar {
+  background: var(--bg-sidebar);
+  border-right: 1px solid var(--border-dim);
+}
+[data-skin="cfo"] .nav-item {
+  font-family: var(--font-ui);
+  font-size: 13px;
+  font-weight: 500;
+  border-radius: var(--radius);
+  margin: 1px 6px;
+  padding: 5px 10px;
+}
+[data-skin="cfo"] .nav-item[data-active="true"] {
+  background: var(--accent-subtle);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+[data-skin="cfo"] table {
+  font-family: var(--font-ui);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+[data-skin="cfo"] th {
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-size: 11px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--accent);
+}
+[data-skin="cfo"] td {
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--border-dim);
+}
+[data-skin="cfo"] td[data-numeric="true"], [data-skin="cfo"] .num {
+  text-align: right;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* $ prefix on findings with cost-of-fix */
+[data-skin="cfo"] [data-cost]::after {
+  content: ' · fix: $' attr(data-cost);
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+  color: var(--accent);
+  margin-left: 6px;
+  font-weight: 600;
+}
+
+/* up/down indicators */
+[data-skin="cfo"] .delta-up::before  { content: '▲ '; color: var(--low); }
+[data-skin="cfo"] .delta-down::before { content: '▼ '; color: var(--critical); }
+
+[data-skin="cfo"] .badge,
+[data-skin="cfo"] .severity-badge,
+[data-skin="cfo"] .pill {
+  font-family: var(--font-ui);
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  font-size: 11px;
+  border-radius: var(--radius);
+  padding: 1px 8px;
+  border: 1px solid currentColor;
+  background: rgba(255, 255, 255, 0.4);
+}
+
+[data-skin="cfo"] pre,
+[data-skin="cfo"] code {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-dim);
+  border-radius: var(--radius);
+  font-family: var(--font-mono);
+  color: var(--text-primary);
+  font-size: 12px;
+}
+
+[data-skin="cfo"] .hud-clock {
+  font-family: var(--font-mono);
+  color: var(--accent);
+  font-weight: 600;
+}
+[data-skin="cfo"] .hud-telemetry .bar {
+  background: var(--accent);
+  border-radius: 1px;
+}
+
+[data-skin="cfo"] .phase-pill,
+[data-skin="cfo"] .phase-timeline > * {
+  font-family: var(--font-ui);
+  font-weight: 600;
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  font-size: 11px;
+  padding: 3px 10px;
+}
+[data-skin="cfo"] .phase-pill[data-active="true"] {
+  background: var(--accent);
+  color: #FFFFFF;
+  border-color: var(--accent);
+}
+
+[data-skin="cfo"] ::-webkit-scrollbar { width: 8px; height: 8px; }
+[data-skin="cfo"] ::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 999px;
+}
+
+[data-skin="cfo"] .mode-picker-trigger {
+  font-family: var(--font-ui);
+  font-weight: 600;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  color: var(--text-primary);
+  border-radius: var(--radius);
+}
+
+/* Budget-burn footer indicator */
+[data-skin="cfo"] body::before {
+  content: '💰 ENGAGEMENT BUDGET · TOOLS · LLM TOKENS · ANALYST TIME · CLOSE-OUT REPORT';
+  position: fixed;
+  bottom: 4px; left: 50%;
+  transform: translateX(-50%);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-muted);
+  letter-spacing: 1.5px;
+  pointer-events: none;
+  z-index: 2;
+  text-transform: uppercase;
+}

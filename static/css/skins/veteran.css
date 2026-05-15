@@ -1,0 +1,282 @@
+/* ══════════════════════════════════════════════════════════════
+   ARGUS · SKIN — VETERAN  (Greybeard Operator)
+   ──────────────────────────────────────────────────────────────
+   For the operator who's been running engagements since BackTrack 2.
+   Density over decoration. MITRE T-codes raw. No tooltips. No
+   animations except where they convey information. Tabular numerics
+   tight. 11px base font. Vim-key affordances surfaced.
+   "If you have to ask, you don't belong here."
+   ══════════════════════════════════════════════════════════════ */
+
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600&display=swap');
+
+:root[data-skin="veteran"] {
+  --bg-base:        #0C0C0C;
+  --bg-void:        #060606;
+  --bg-surface:     #121212;
+  --bg-panel:       #121212;
+  --bg-elevated:    #1A1A1A;
+  --bg-glass:       rgba(18, 18, 18, 0.95);
+  --bg-sidebar:     #0A0A0A;
+
+  --border-dim:     #1F1F1F;
+  --border:         #2E2E2E;
+  --border-light:   #2E2E2E;
+  --border-bright:  #6E8B6E;
+
+  --accent:         #7AB87A;       /* muted forest green */
+  --accent-dim:     #527052;
+  --accent-glow:    rgba(122, 184, 122, 0.20);
+  --accent-subtle:  rgba(122, 184, 122, 0.05);
+
+  --cyan:           #6AB5B5;
+  --violet:         #B59C5C;
+
+  --text-primary:   #C8C8C8;
+  --text-secondary: #8A8A8A;
+  --text-muted:     #5C5C5C;
+
+  --critical:       #C44949;
+  --high:           #C97A3E;
+  --medium:         #BFA740;
+  --amber:          #BFA740;
+  --low:            #7AB87A;
+  --supernova:      #C44949;
+
+  --critical-bg:    rgba(196, 73, 73, 0.10);
+  --critical-bd:    rgba(196, 73, 73, 0.50);
+  --high-bg:        rgba(201, 122, 62, 0.10);
+  --high-bd:        rgba(201, 122, 62, 0.50);
+  --medium-bg:      rgba(191, 167, 64, 0.10);
+  --medium-bd:      rgba(191, 167, 64, 0.50);
+  --low-bg:         rgba(122, 184, 122, 0.10);
+  --low-bd:         rgba(122, 184, 122, 0.50);
+
+  --font-ui:        'JetBrains Mono', 'Consolas', monospace;
+  --font-display:   'JetBrains Mono', 'Consolas', monospace;
+  --font-mono:      'JetBrains Mono', 'Consolas', monospace;
+
+  --radius:         1px;
+  --radius-md:      2px;
+  --radius-lg:      3px;
+  --radius-xl:      4px;
+
+  --shadow-sm:      0 1px 0 rgba(0, 0, 0, 0.6);
+  --shadow-md:      none;
+  --shadow-lg:      0 0 0 1px rgba(122, 184, 122, 0.18);
+}
+
+[data-skin="veteran"] body {
+  background: var(--bg-base);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.4;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+}
+
+[data-skin="veteran"] .header,
+[data-skin="veteran"] header {
+  background: #0A0A0A;
+  border-bottom: 1px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-transform: none;
+}
+
+[data-skin="veteran"] .header h1,
+[data-skin="veteran"] header h1,
+[data-skin="veteran"] .brand {
+  font-family: var(--font-mono);
+  font-weight: 700;
+  color: var(--accent);
+  letter-spacing: 2px;
+}
+
+[data-skin="veteran"] .panel,
+[data-skin="veteran"] .card,
+[data-skin="veteran"] .mc-panel,
+[data-skin="veteran"] .agent-card,
+[data-skin="veteran"] .finding-card {
+  background: #101010;
+  border: 1px solid var(--border-dim);
+  border-radius: 0;
+  box-shadow: none;
+  padding: 6px 8px;
+}
+
+[data-skin="veteran"] .panel-title,
+[data-skin="veteran"] .card-title,
+[data-skin="veteran"] h2,
+[data-skin="veteran"] h3 {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  font-size: 10px;
+  border-bottom: 1px solid var(--border-dim);
+  padding-bottom: 3px;
+  margin-bottom: 6px;
+}
+[data-skin="veteran"] .panel-title::before,
+[data-skin="veteran"] .card-title::before { content: '$ '; opacity: 0.6; }
+
+[data-skin="veteran"] button,
+[data-skin="veteran"] .btn {
+  background: #1A1A1A;
+  color: var(--accent);
+  border: 1px solid var(--border);
+  border-radius: 0;
+  font-family: var(--font-mono);
+  font-weight: 500;
+  font-size: 11px;
+  padding: 3px 10px;
+  text-transform: lowercase;
+  letter-spacing: 0;
+}
+[data-skin="veteran"] button:hover,
+[data-skin="veteran"] .btn:hover {
+  background: var(--accent);
+  color: #0A0A0A;
+}
+
+[data-skin="veteran"] input,
+[data-skin="veteran"] textarea,
+[data-skin="veteran"] select {
+  background: #0A0A0A;
+  border: 1px solid var(--border);
+  border-radius: 0;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  caret-color: var(--accent);
+}
+[data-skin="veteran"] input:focus,
+[data-skin="veteran"] textarea:focus {
+  border-color: var(--accent);
+  box-shadow: none;
+  outline: none;
+}
+
+[data-skin="veteran"] aside,
+[data-skin="veteran"] .sidebar {
+  background: #080808;
+  border-right: 1px solid var(--border);
+}
+[data-skin="veteran"] .nav-item {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-transform: lowercase;
+  letter-spacing: 0;
+  border-left: 2px solid transparent;
+  padding: 3px 10px;
+}
+[data-skin="veteran"] .nav-item[data-active="true"] {
+  background: transparent;
+  border-left-color: var(--accent);
+  color: var(--accent);
+}
+
+[data-skin="veteran"] table {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  border-collapse: collapse;
+}
+[data-skin="veteran"] th {
+  background: transparent;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-size: 9px;
+  padding: 2px 6px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+}
+[data-skin="veteran"] td {
+  padding: 2px 6px;
+  border-bottom: 1px solid var(--border-dim);
+}
+
+[data-skin="veteran"] .badge,
+[data-skin="veteran"] .severity-badge,
+[data-skin="veteran"] .pill {
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-size: 9px;
+  font-weight: 600;
+  border-radius: 0;
+  padding: 0 4px;
+  border: 1px solid currentColor;
+  background: transparent;
+}
+
+[data-skin="veteran"] pre,
+[data-skin="veteran"] code {
+  background: #050505;
+  border: 1px solid var(--border-dim);
+  border-radius: 0;
+  font-family: var(--font-mono);
+  color: var(--accent);
+  font-size: 11px;
+}
+
+[data-skin="veteran"] .hud-clock {
+  font-family: var(--font-mono);
+  color: var(--accent);
+  font-size: 11px;
+}
+
+[data-skin="veteran"] .splash-title {
+  font-family: var(--font-mono);
+  letter-spacing: 3px;
+  font-weight: 700;
+  color: var(--accent);
+}
+
+[data-skin="veteran"] .phase-pill,
+[data-skin="veteran"] .phase-timeline > * {
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  font-size: 9px;
+  border-radius: 0;
+  background: transparent;
+  border: 1px solid var(--border);
+  padding: 1px 6px;
+}
+[data-skin="veteran"] .phase-pill[data-active="true"] {
+  background: var(--accent);
+  color: #0A0A0A;
+  border-color: var(--accent);
+}
+
+[data-skin="veteran"] ::-webkit-scrollbar { width: 6px; height: 6px; }
+[data-skin="veteran"] ::-webkit-scrollbar-track { background: #0A0A0A; }
+[data-skin="veteran"] ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 0; }
+
+[data-skin="veteran"] .mode-picker-trigger {
+  font-family: var(--font-mono);
+  background: #0A0A0A;
+  border: 1px solid var(--border);
+  color: var(--accent);
+  border-radius: 0;
+  text-transform: lowercase;
+  font-size: 11px;
+}
+
+/* Vim-shortcut hint footer */
+[data-skin="veteran"] body::before {
+  content: ': q  :w  :wq  :gd  ^F findings  ^T target  ^A agents  ^/  search  ^K palette';
+  position: fixed;
+  bottom: 4px; left: 12px;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: var(--text-muted);
+  pointer-events: none;
+  z-index: 2;
+  letter-spacing: 0.5px;
+}

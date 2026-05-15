@@ -1,0 +1,283 @@
+/* ══════════════════════════════════════════════════════════════
+   ARGUS · SKIN — HUNTER  (Bug-Bounty Stack)
+   ──────────────────────────────────────────────────────────────
+   For bug-bounty hunters / freelance researchers.
+   - Severity-sorted finding stack is the dominant viewport element
+   - Big bounty-$$$ counter widget
+   - Triaged / Confirmed / Fixed state pills
+   - Gold/amber palette for $$$, traffic-light severity
+   - "PWN" achievement badge styling for big finds
+   - Hall-of-fame typography for milestones
+   ══════════════════════════════════════════════════════════════ */
+
+@import url('https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Plus+Jakarta+Sans:wght@500;600;700;800&family=JetBrains+Mono:wght@500;600;700&display=swap');
+
+:root[data-skin="hunter"] {
+  --bg-base:        #1A1612;
+  --bg-void:        #110D09;
+  --bg-surface:     #221C16;
+  --bg-panel:       #221C16;
+  --bg-elevated:    #2D241B;
+  --bg-glass:       rgba(34, 28, 22, 0.92);
+  --bg-sidebar:     #161108;
+
+  --border-dim:     #38301F;
+  --border:         #4F4427;
+  --border-light:   #4F4427;
+  --border-bright:  #E8B53A;
+
+  --accent:         #E8B53A;
+  --accent-dim:     #B58A24;
+  --accent-glow:    rgba(232, 181, 58, 0.40);
+  --accent-subtle:  rgba(232, 181, 58, 0.08);
+
+  --cyan:           #4EC8A4;
+  --violet:         #C28D5C;
+
+  --text-primary:   #F2E8D8;
+  --text-secondary: #B8A582;
+  --text-muted:     #7C6E51;
+
+  --critical:       #E04A4A;
+  --high:           #E88134;
+  --medium:         #E8B53A;
+  --amber:          #E8B53A;
+  --low:            #4EC8A4;
+  --supernova:      #FFD030;
+
+  --critical-bg:    rgba(224,  74,  74, 0.16);
+  --critical-bd:    rgba(224,  74,  74, 0.55);
+  --high-bg:        rgba(232, 129,  52, 0.16);
+  --high-bd:        rgba(232, 129,  52, 0.55);
+  --medium-bg:      rgba(232, 181,  58, 0.16);
+  --medium-bd:      rgba(232, 181,  58, 0.55);
+  --low-bg:         rgba( 78, 200, 164, 0.14);
+  --low-bd:         rgba( 78, 200, 164, 0.55);
+
+  --font-ui:        'Plus Jakarta Sans', 'Manrope', system-ui, sans-serif;
+  --font-display:   'Manrope', 'Plus Jakarta Sans', sans-serif;
+  --font-mono:      'JetBrains Mono', monospace;
+
+  --radius:         6px;
+  --radius-md:      10px;
+  --radius-lg:      14px;
+  --radius-xl:      20px;
+
+  --shadow-sm:      0 2px 6px rgba(0, 0, 0, 0.32);
+  --shadow-md:      0 8px 24px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(232, 181, 58, 0.06);
+  --shadow-lg:      0 24px 56px rgba(0, 0, 0, 0.6), 0 0 32px rgba(232, 181, 58, 0.15);
+}
+
+[data-skin="hunter"] body {
+  background:
+    radial-gradient(ellipse 70% 40% at 50% 0%, rgba(232, 181, 58, 0.06), transparent 60%),
+    var(--bg-base);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+}
+
+[data-skin="hunter"] .header,
+[data-skin="hunter"] header {
+  background: linear-gradient(180deg, var(--bg-elevated), var(--bg-panel));
+  border-bottom: 1px solid var(--accent);
+  font-family: var(--font-display);
+  letter-spacing: -0.2px;
+}
+
+[data-skin="hunter"] .header h1,
+[data-skin="hunter"] header h1,
+[data-skin="hunter"] .brand,
+[data-skin="hunter"] .splash-title {
+  font-family: var(--font-display);
+  font-weight: 800;
+  letter-spacing: -1px;
+  background: linear-gradient(135deg, var(--accent) 0%, #FFD56F 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+[data-skin="hunter"] .panel,
+[data-skin="hunter"] .card,
+[data-skin="hunter"] .mc-panel,
+[data-skin="hunter"] .agent-card,
+[data-skin="hunter"] .finding-card {
+  background: linear-gradient(180deg, var(--bg-elevated), var(--bg-panel));
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+  transition: transform 0.2s, box-shadow 0.2s;
+}
+[data-skin="hunter"] .finding-card:hover,
+[data-skin="hunter"] .card:hover {
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-lg);
+  border-color: var(--accent);
+}
+
+[data-skin="hunter"] .panel-title,
+[data-skin="hunter"] .card-title,
+[data-skin="hunter"] h2,
+[data-skin="hunter"] h3 {
+  font-family: var(--font-display);
+  font-weight: 700;
+  color: var(--text-primary);
+  letter-spacing: -0.3px;
+  font-size: 15px;
+  margin-bottom: 10px;
+}
+
+[data-skin="hunter"] button,
+[data-skin="hunter"] .btn {
+  background: linear-gradient(135deg, var(--accent), #C99820);
+  color: #1A1612;
+  border: 1px solid var(--accent-dim);
+  border-radius: var(--radius);
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 13px;
+  padding: 7px 16px;
+  box-shadow: 0 2px 8px var(--accent-glow), inset 0 1px 0 rgba(255, 255, 255, 0.25);
+}
+[data-skin="hunter"] button:hover,
+[data-skin="hunter"] .btn:hover {
+  background: linear-gradient(135deg, #FFD56F, var(--accent));
+  transform: translateY(-1px);
+  box-shadow: 0 6px 18px var(--accent-glow);
+}
+
+[data-skin="hunter"] input,
+[data-skin="hunter"] textarea,
+[data-skin="hunter"] select {
+  background: var(--bg-void);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+}
+[data-skin="hunter"] input:focus,
+[data-skin="hunter"] textarea:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-subtle);
+}
+
+[data-skin="hunter"] aside,
+[data-skin="hunter"] .sidebar {
+  background: var(--bg-sidebar);
+  border-right: 1px solid var(--border);
+}
+[data-skin="hunter"] .nav-item {
+  font-family: var(--font-display);
+  font-weight: 600;
+  border-radius: var(--radius);
+  margin: 2px 8px;
+  padding: 6px 12px;
+}
+[data-skin="hunter"] .nav-item[data-active="true"] {
+  background: var(--accent-subtle);
+  color: var(--accent);
+}
+
+[data-skin="hunter"] table { font-family: var(--font-ui); }
+[data-skin="hunter"] th {
+  background: var(--bg-elevated);
+  color: var(--accent);
+  font-family: var(--font-display);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  font-size: 11px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--accent);
+}
+[data-skin="hunter"] td { padding: 10px 12px; border-bottom: 1px solid var(--border-dim); }
+[data-skin="hunter"] tr:hover td { background: var(--accent-subtle); }
+
+/* Severity → bounty-tier mapping */
+[data-skin="hunter"] .badge,
+[data-skin="hunter"] .severity-badge,
+[data-skin="hunter"] .pill {
+  font-family: var(--font-display);
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  font-size: 11px;
+  border-radius: 999px;
+  padding: 3px 10px;
+  border: 1px solid currentColor;
+  background: rgba(0, 0, 0, 0.18);
+}
+[data-skin="hunter"] [data-severity="CRITICAL"]::before { content: '💰 P1 · '; opacity: 0.85; }
+[data-skin="hunter"] [data-severity="HIGH"]::before     { content: '💵 P2 · '; opacity: 0.85; }
+[data-skin="hunter"] [data-severity="MEDIUM"]::before   { content: '💸 P3 · '; opacity: 0.85; }
+[data-skin="hunter"] [data-severity="LOW"]::before      { content: '🪙 P4 · '; opacity: 0.85; }
+
+/* Finding card — PWN highlight on confirmed criticals */
+[data-skin="hunter"] .finding-card[data-confirmed="true"][data-severity="CRITICAL"]::before {
+  content: '★ PWN ★';
+  position: absolute;
+  top: -10px; right: 12px;
+  background: linear-gradient(135deg, var(--accent), #FFD56F);
+  color: #1A1612;
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: 11px;
+  letter-spacing: 2px;
+  padding: 3px 12px;
+  border-radius: 999px;
+  box-shadow: 0 4px 16px var(--accent-glow);
+}
+
+/* Bounty $$ counter — toggleable widget hint */
+[data-skin="hunter"] .bounty-counter,
+[data-skin="hunter"] [data-bounty]::after {
+  font-family: var(--font-display);
+  font-weight: 800;
+  color: var(--accent);
+  letter-spacing: -0.5px;
+}
+
+[data-skin="hunter"] pre,
+[data-skin="hunter"] code {
+  background: var(--bg-void);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-family: var(--font-mono);
+  color: var(--accent);
+}
+
+[data-skin="hunter"] .hud-clock {
+  font-family: var(--font-mono);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+[data-skin="hunter"] .phase-pill,
+[data-skin="hunter"] .phase-timeline > * {
+  font-family: var(--font-display);
+  font-weight: 700;
+  border-radius: 999px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  font-size: 12px;
+}
+[data-skin="hunter"] .phase-pill[data-active="true"] {
+  background: linear-gradient(135deg, var(--accent), #C99820);
+  color: #1A1612;
+  border-color: var(--accent);
+  box-shadow: 0 4px 14px var(--accent-glow);
+}
+
+[data-skin="hunter"] ::-webkit-scrollbar { width: 8px; height: 8px; }
+[data-skin="hunter"] ::-webkit-scrollbar-thumb {
+  background: var(--accent-dim);
+  border-radius: 999px;
+}
+
+[data-skin="hunter"] .mode-picker-trigger {
+  font-family: var(--font-display);
+  font-weight: 600;
+  background: var(--bg-elevated);
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  border-radius: 999px;
+}

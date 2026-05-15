@@ -1,0 +1,395 @@
+/* ══════════════════════════════════════════════════════════════
+   ARGUS · SKIN — APOLLO  (Mission Control / NASA / SpaceX / JPL)
+   ──────────────────────────────────────────────────────────────
+   Visual language:
+   - Deep matte black surfaces (#0A0A0A) with thin phosphor borders
+   - Amber-yellow data colour (#FFB000) — the "console amber" of
+     JPL DSN consoles + SpaceX flight director displays
+   - Phosphor green (#33FF66) for nominal / success states
+   - Hot red (#FF3030) for FAULT / WARN only — used sparingly
+   - IBM Plex Mono everywhere (free, mission-control flavoured)
+   - ASCII single-line frames, schematic dotted grids
+   - Subtle scanline overlay simulating CRT phosphor
+   - Every panel header gets a status-light dot + system bus ID
+   - "Telemetry" prefix language on metrics
+
+   This skin OVERRIDES main.css tokens and adds Apollo-specific
+   decoration via :root[data-skin="apollo"] selectors.
+   ══════════════════════════════════════════════════════════════ */
+
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap');
+
+:root[data-skin="apollo"] {
+  /* ── Surface layers ── */
+  --bg-base:        #0A0A0A;
+  --bg-void:        #050505;
+  --bg-surface:     #111111;
+  --bg-panel:       #111111;
+  --bg-elevated:    #1A1A1A;
+  --bg-glass:       rgba(20, 20, 20, 0.92);
+  --bg-sidebar:     #080808;
+
+  /* ── Borders (thin phosphor lines) ── */
+  --border-dim:     #2A2A2A;
+  --border:         #3F3F3F;
+  --border-light:   #3F3F3F;
+  --border-bright:  #FFB000;
+
+  /* ── Console amber accent ── */
+  --accent:         #FFB000;
+  --accent-dim:     #B07700;
+  --accent-glow:    rgba(255, 176, 0, 0.28);
+  --accent-subtle:  rgba(255, 176, 0, 0.06);
+
+  /* ── Phosphor secondary palette ── */
+  --cyan:           #33FF66;   /* phosphor green stands in for cyan */
+  --violet:         #FFE066;   /* pale gold stands in for violet milestones */
+
+  /* ── Text ── */
+  --text-primary:   #FFB000;
+  --text-secondary: #B89060;
+  --text-muted:     #5A4A2A;
+
+  /* ── Severity ── */
+  --critical:       #FF3030;
+  --high:           #FF8800;
+  --medium:         #FFC83D;
+  --amber:          #FFB000;
+  --low:            #33FF66;
+  --supernova:      #FF3030;
+
+  --critical-bg:    rgba(255, 48, 48, 0.10);
+  --critical-bd:    rgba(255, 48, 48, 0.55);
+  --high-bg:        rgba(255, 136,  0, 0.10);
+  --high-bd:        rgba(255, 136,  0, 0.55);
+  --medium-bg:      rgba(255, 200, 61, 0.10);
+  --medium-bd:      rgba(255, 200, 61, 0.55);
+  --low-bg:         rgba( 51, 255,102, 0.10);
+  --low-bd:         rgba( 51, 255,102, 0.55);
+
+  /* ── Typography ── */
+  --font-ui:        'IBM Plex Mono', 'Consolas', monospace;
+  --font-display:   'IBM Plex Mono', 'Consolas', monospace;
+  --font-mono:      'IBM Plex Mono', 'Consolas', monospace;
+
+  /* ── Geometry ── */
+  --radius:         0;
+  --radius-md:      0;
+  --radius-lg:      0;
+  --radius-xl:      2px;
+
+  /* ── Shadows — phosphor glow ── */
+  --shadow-sm:      0 0 0 1px rgba(255, 176, 0, 0.05);
+  --shadow-md:      0 0 8px rgba(255, 176, 0, 0.08);
+  --shadow-lg:      0 0 24px rgba(255, 176, 0, 0.18);
+}
+
+/* ── Body — CRT scanlines + grid + faint amber glow ── */
+[data-skin="apollo"] body {
+  background:
+    linear-gradient(rgba(255, 176, 0, 0.012) 50%, transparent 50%) 0 0 / 100% 3px,
+    radial-gradient(ellipse 80% 60% at 50% 0%, rgba(255, 176, 0, 0.04), transparent 60%),
+    linear-gradient(0deg, transparent 95%, rgba(255, 176, 0, 0.018) 100%) 0 0 / 100% 28px,
+    #0A0A0A;
+  background-attachment: fixed;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  letter-spacing: 0.3px;
+}
+
+/* ── Top bar — schematic frame with bus IDs ── */
+[data-skin="apollo"] .header,
+[data-skin="apollo"] header {
+  background: #0A0A0A;
+  border-bottom: 1px solid var(--accent);
+  box-shadow:
+    inset 0 -1px 0 rgba(255, 176, 0, 0.15),
+    0 1px 0 rgba(255, 176, 0, 0.08);
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 1.5px;
+}
+[data-skin="apollo"] .header *,
+[data-skin="apollo"] header *  {
+  font-family: var(--font-mono);
+}
+
+/* ── ARGUS wordmark — phosphor flicker ── */
+[data-skin="apollo"] .header h1,
+[data-skin="apollo"] header h1,
+[data-skin="apollo"] .brand,
+[data-skin="apollo"] .splash-title {
+  font-family: var(--font-mono);
+  font-weight: 700;
+  color: var(--accent);
+  text-shadow: 0 0 6px rgba(255, 176, 0, 0.55), 0 0 14px rgba(255, 176, 0, 0.20);
+  animation: apollo-phosphor-flicker 4s linear infinite;
+  letter-spacing: 6px;
+}
+@keyframes apollo-phosphor-flicker {
+  0%, 18%, 22%, 25%, 53%, 57%, 100% { opacity: 1.0; }
+  20%, 24%, 55% { opacity: 0.86; }
+}
+
+/* ── Panels — ASCII single-line frame ── */
+[data-skin="apollo"] .panel,
+[data-skin="apollo"] .card,
+[data-skin="apollo"] .mc-panel,
+[data-skin="apollo"] .agent-card,
+[data-skin="apollo"] .finding-card {
+  background: #0E0E0E;
+  border: 1px solid var(--accent);
+  border-radius: 0;
+  box-shadow: inset 0 0 0 1px rgba(255, 176, 0, 0.10);
+  position: relative;
+}
+
+/* Corner ticks on every panel — like an engineering schematic */
+[data-skin="apollo"] .panel::before,
+[data-skin="apollo"] .panel::after,
+[data-skin="apollo"] .card::before,
+[data-skin="apollo"] .card::after {
+  content: '';
+  position: absolute;
+  width: 8px; height: 8px;
+  border-color: var(--accent);
+  pointer-events: none;
+}
+[data-skin="apollo"] .panel::before,
+[data-skin="apollo"] .card::before {
+  top: -1px; left: -1px;
+  border-top: 1px solid; border-left: 1px solid;
+  box-shadow: 1px 1px 0 -0.5px var(--accent);
+}
+[data-skin="apollo"] .panel::after,
+[data-skin="apollo"] .card::after {
+  bottom: -1px; right: -1px;
+  border-bottom: 1px solid; border-right: 1px solid;
+}
+
+/* Panel headers — schematic bus-ID strip */
+[data-skin="apollo"] .panel-title,
+[data-skin="apollo"] .card-title,
+[data-skin="apollo"] h2,
+[data-skin="apollo"] h3 {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 2.5px;
+  font-size: 11px;
+  border-bottom: 1px dashed rgba(255, 176, 0, 0.25);
+  padding-bottom: 4px;
+  margin-bottom: 8px;
+}
+
+/* ── Buttons — phosphor pill, hover glow ── */
+[data-skin="apollo"] button,
+[data-skin="apollo"] .btn {
+  background: transparent;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 0;
+  font-family: var(--font-mono);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 1.5px;
+  transition: background 0.15s, box-shadow 0.15s, color 0.15s;
+}
+[data-skin="apollo"] button:hover,
+[data-skin="apollo"] .btn:hover {
+  background: var(--accent);
+  color: #0A0A0A;
+  box-shadow: 0 0 14px rgba(255, 176, 0, 0.55), inset 0 0 0 1px #FFE2A0;
+}
+[data-skin="apollo"] button:focus,
+[data-skin="apollo"] .btn:focus { outline: 1px dashed var(--accent); outline-offset: 2px; }
+
+/* ── Inputs ── */
+[data-skin="apollo"] input,
+[data-skin="apollo"] textarea,
+[data-skin="apollo"] select {
+  background: #0A0A0A;
+  border: 1px solid var(--border);
+  border-radius: 0;
+  color: var(--accent);
+  font-family: var(--font-mono);
+  caret-color: var(--accent);
+}
+[data-skin="apollo"] input:focus,
+[data-skin="apollo"] textarea:focus,
+[data-skin="apollo"] select:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent), 0 0 12px rgba(255, 176, 0, 0.3);
+}
+
+/* ── Sidebar — schematic nav with status LEDs ── */
+[data-skin="apollo"] aside,
+[data-skin="apollo"] .sidebar {
+  background: #080808;
+  border-right: 1px solid var(--accent);
+}
+[data-skin="apollo"] .nav-item,
+[data-skin="apollo"] aside a {
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 1.3px;
+  border-left: 2px solid transparent;
+  transition: border-color 0.12s, background 0.12s;
+}
+[data-skin="apollo"] .nav-item[data-active="true"],
+[data-skin="apollo"] aside a.active {
+  background: rgba(255, 176, 0, 0.08);
+  border-left-color: var(--accent);
+  color: var(--accent);
+  text-shadow: 0 0 8px rgba(255, 176, 0, 0.5);
+}
+
+/* ── Tables ── */
+[data-skin="apollo"] table {
+  border: 1px solid var(--border);
+  border-collapse: collapse;
+  font-family: var(--font-mono);
+}
+[data-skin="apollo"] th {
+  background: #1A1A1A;
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 1.5px;
+  font-weight: 600;
+  border-bottom: 1px solid var(--accent);
+  padding: 6px 10px;
+}
+[data-skin="apollo"] td {
+  border-bottom: 1px dashed rgba(255, 176, 0, 0.12);
+  padding: 6px 10px;
+}
+[data-skin="apollo"] tr:hover td { background: rgba(255, 176, 0, 0.04); }
+
+/* ── Severity badges — bright phosphor ── */
+[data-skin="apollo"] .badge,
+[data-skin="apollo"] .severity-badge,
+[data-skin="apollo"] .pill {
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 1.5px;
+  border-radius: 0;
+  font-weight: 700;
+  padding: 2px 8px;
+  border: 1px solid currentColor;
+  background: transparent;
+}
+
+/* ── Severity tints (use rgb fill on darker bg) ── */
+[data-skin="apollo"] [data-severity="CRITICAL"],
+[data-skin="apollo"] .sev-critical,
+[data-skin="apollo"] .critical {
+  color: var(--critical);
+  text-shadow: 0 0 8px rgba(255, 48, 48, 0.45);
+  animation: apollo-fault-blink 1.2s ease-in-out infinite;
+}
+@keyframes apollo-fault-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+
+/* ── Console / terminal text ── */
+[data-skin="apollo"] pre,
+[data-skin="apollo"] code,
+[data-skin="apollo"] .terminal {
+  font-family: var(--font-mono);
+  background: #050505;
+  border: 1px solid var(--border);
+  color: var(--accent);
+  text-shadow: 0 0 4px rgba(255, 176, 0, 0.35);
+}
+
+/* ── Phase timeline — pneumatic gauge ladder ── */
+[data-skin="apollo"] .phase-pill,
+[data-skin="apollo"] .phase-timeline > * {
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 1.2px;
+  border: 1px solid var(--border);
+  background: #0A0A0A;
+}
+[data-skin="apollo"] .phase-pill[data-active="true"],
+[data-skin="apollo"] .phase-timeline > .active {
+  background: var(--accent);
+  color: #0A0A0A;
+  box-shadow: 0 0 14px var(--accent-glow);
+}
+
+/* ── HUD telemetry — chunky CRT bars ── */
+[data-skin="apollo"] .hud-telemetry .bar {
+  background: var(--accent);
+  border-radius: 0;
+  box-shadow: 0 0 6px rgba(255, 176, 0, 0.55);
+}
+[data-skin="apollo"] .hud-clock {
+  font-family: var(--font-mono);
+  color: var(--accent);
+  text-shadow: 0 0 6px rgba(255, 176, 0, 0.5);
+  letter-spacing: 2px;
+}
+
+/* ── Splash — full mission-control vibe ── */
+[data-skin="apollo"] .splash {
+  background:
+    linear-gradient(rgba(255, 176, 0, 0.015) 50%, transparent 50%) 0 0 / 100% 3px,
+    radial-gradient(circle at 50% 35%, rgba(255, 176, 0, 0.08), transparent 60%),
+    #050505;
+}
+[data-skin="apollo"] .splash-title {
+  font-family: var(--font-mono);
+  letter-spacing: 8px;
+  font-weight: 700;
+  color: var(--accent);
+}
+[data-skin="apollo"] .splash-subtitle {
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  color: var(--accent);
+  opacity: 0.7;
+  letter-spacing: 4px;
+}
+[data-skin="apollo"] .splash-status {
+  font-family: var(--font-mono);
+  color: var(--low);
+  text-shadow: 0 0 6px rgba(51, 255, 102, 0.4);
+  letter-spacing: 1.5px;
+}
+
+/* ── Mode-picker / chooser triggers ── */
+[data-skin="apollo"] .mode-picker-trigger {
+  font-family: var(--font-mono);
+  background: #0A0A0A;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  border-radius: 0;
+  letter-spacing: 2px;
+  text-shadow: 0 0 4px rgba(255, 176, 0, 0.4);
+}
+
+/* ── Scrollbars (WebKit) ── */
+[data-skin="apollo"] ::-webkit-scrollbar { width: 8px; height: 8px; }
+[data-skin="apollo"] ::-webkit-scrollbar-track { background: #0A0A0A; }
+[data-skin="apollo"] ::-webkit-scrollbar-thumb {
+  background: var(--accent-dim);
+  border: 1px solid var(--accent);
+}
+[data-skin="apollo"] ::-webkit-scrollbar-thumb:hover { background: var(--accent); }
+
+/* ── Mission-control bus-bar overlay along bottom edge ── */
+[data-skin="apollo"] body::before {
+  content: 'DSN-14 · MOC-A · BUS-7 · TX 8.42 GHz · STATUS NOMINAL';
+  position: fixed;
+  bottom: 2px; left: 50%; transform: translateX(-50%);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: rgba(255, 176, 0, 0.30);
+  letter-spacing: 3px;
+  pointer-events: none;
+  z-index: 1;
+  text-transform: uppercase;
+}

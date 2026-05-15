@@ -1,0 +1,389 @@
+/* ══════════════════════════════════════════════════════════════
+   ARGUS · SKIN — BLOOMBERG  (Trading Floor / Terminal)
+   ──────────────────────────────────────────────────────────────
+   Visual language:
+   - Pure black background (#000000) — the unmistakable Terminal feel
+   - Amber data colour (#FFB000) — Bloomberg's signature
+   - Ladder colours: positive green (#00B050), warning orange (#FF6600),
+     critical red (#FF3030), neutral white (#E0E0E0)
+   - JetBrains Mono everywhere — every glyph monospace
+   - Dense grid layout: minimum 4px line-height padding, info-dense
+   - Scrolling ticker tape along top of viewport
+   - Function-key labels in headers (F1-F12 muscle memory)
+   - Hard right-aligned numerics, tabular figures
+   - No rounded corners anywhere
+   ══════════════════════════════════════════════════════════════ */
+
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700;800&display=swap');
+
+:root[data-skin="bloomberg"] {
+  /* ── Surface — pure black ── */
+  --bg-base:        #000000;
+  --bg-void:        #000000;
+  --bg-surface:     #0A0A0A;
+  --bg-panel:       #0A0A0A;
+  --bg-elevated:    #141414;
+  --bg-glass:       rgba(10, 10, 10, 0.95);
+  --bg-sidebar:     #000000;
+
+  /* ── Borders — thin amber/grey ── */
+  --border-dim:     #1F1F1F;
+  --border:         #333333;
+  --border-light:   #333333;
+  --border-bright:  #FFB000;
+
+  /* ── Amber accent ── */
+  --accent:         #FFB000;
+  --accent-dim:     #B07700;
+  --accent-glow:    rgba(255, 176, 0, 0.30);
+  --accent-subtle:  rgba(255, 176, 0, 0.05);
+
+  /* ── Ladder secondaries ── */
+  --cyan:           #00B050;       /* "up tick" green */
+  --violet:         #FF6600;       /* "alert" orange */
+
+  /* ── Text — straight white + amber ── */
+  --text-primary:   #E0E0E0;
+  --text-secondary: #BFBFBF;
+  --text-muted:     #6E6E6E;
+
+  /* ── Severity ── */
+  --critical:       #FF3030;
+  --high:           #FF6600;
+  --medium:         #FFB000;
+  --amber:          #FFB000;
+  --low:            #00B050;
+  --supernova:      #FF3030;
+
+  --critical-bg:    rgba(255,  48, 48, 0.12);
+  --critical-bd:    rgba(255,  48, 48, 0.55);
+  --high-bg:        rgba(255, 102,  0, 0.12);
+  --high-bd:        rgba(255, 102,  0, 0.55);
+  --medium-bg:      rgba(255, 176,  0, 0.12);
+  --medium-bd:      rgba(255, 176,  0, 0.55);
+  --low-bg:         rgba(  0, 176, 80, 0.12);
+  --low-bd:         rgba(  0, 176, 80, 0.55);
+
+  /* ── Typography — mono everywhere ── */
+  --font-ui:        'JetBrains Mono', 'Consolas', monospace;
+  --font-display:   'JetBrains Mono', 'Consolas', monospace;
+  --font-mono:      'JetBrains Mono', 'Consolas', monospace;
+
+  /* ── Geometry — zero rounding ── */
+  --radius:         0;
+  --radius-md:      0;
+  --radius-lg:      0;
+  --radius-xl:      0;
+
+  --shadow-sm:      none;
+  --shadow-md:      none;
+  --shadow-lg:      0 0 0 1px rgba(255, 176, 0, 0.2);
+}
+
+/* ── Body ── */
+[data-skin="bloomberg"] body {
+  background: #000000;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-feature-settings: 'tnum' 1, 'kern' 0;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+}
+
+/* ── Ticker tape strip — top of viewport ── */
+[data-skin="bloomberg"] body::before {
+  content: 'SCAN: 192.168.1.10 +0.42% ↑  ●  FINDINGS: 14 ↑ 3  ●  CRIT: 2 ↑ 1  ●  AGENT: NMAP NOMINAL  ●  LLM/M: 8.2  ●  TOOL CALLS: 142  ●  EXPL CHAINS: 3  ●  C2 CALLBACK: ESTABLISHED  ●  POSTURE: AMBER  ●  REPORT: PENDING';
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  background: var(--accent);
+  color: #000000;
+  font-family: var(--font-mono);
+  font-weight: 700;
+  font-size: 10px;
+  letter-spacing: 1px;
+  padding: 2px 0;
+  z-index: 9999;
+  white-space: nowrap;
+  overflow: hidden;
+  text-transform: uppercase;
+  pointer-events: none;
+  animation: bloomberg-tickertape 60s linear infinite;
+  text-indent: 100vw;
+}
+@keyframes bloomberg-tickertape {
+  from { text-indent: 100vw; }
+  to   { text-indent: -100vw; }
+}
+[data-skin="bloomberg"] #root { padding-top: 18px; }
+
+/* ── Function-key label strip — bottom of viewport ── */
+[data-skin="bloomberg"] body::after {
+  content: 'F1=HELP   F2=HUB   F3=FIND   F4=AGNT   F5=GRAPH   F6=TERM   F7=PAYL   F8=POST   F9=REPT   F10=METR   F11=AI   F12=EXIT';
+  position: fixed;
+  bottom: 0; left: 0; right: 0;
+  background: var(--accent);
+  color: #000000;
+  font-family: var(--font-mono);
+  font-weight: 700;
+  font-size: 10px;
+  letter-spacing: 2px;
+  padding: 3px 12px;
+  z-index: 9999;
+  text-align: center;
+  pointer-events: none;
+}
+
+/* ── Header — Bloomberg blue stripe ── */
+[data-skin="bloomberg"] .header,
+[data-skin="bloomberg"] header {
+  background: #000000;
+  border-bottom: 1px solid var(--accent);
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 1.5px;
+}
+
+/* ── Wordmark ── */
+[data-skin="bloomberg"] .header h1,
+[data-skin="bloomberg"] header h1,
+[data-skin="bloomberg"] .brand,
+[data-skin="bloomberg"] .splash-title {
+  font-family: var(--font-mono);
+  font-weight: 800;
+  color: var(--accent);
+  letter-spacing: 4px;
+}
+
+/* ── Panels — hard rectangular cells ── */
+[data-skin="bloomberg"] .panel,
+[data-skin="bloomberg"] .card,
+[data-skin="bloomberg"] .mc-panel,
+[data-skin="bloomberg"] .agent-card,
+[data-skin="bloomberg"] .finding-card {
+  background: #0A0A0A;
+  border: 1px solid #1F1F1F;
+  border-top: 1px solid var(--accent);
+  border-radius: 0;
+  box-shadow: none;
+}
+
+/* Panel headers — info-dense strip */
+[data-skin="bloomberg"] .panel-title,
+[data-skin="bloomberg"] .card-title,
+[data-skin="bloomberg"] h2,
+[data-skin="bloomberg"] h3 {
+  font-family: var(--font-mono);
+  font-weight: 700;
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 2px;
+  font-size: 11px;
+  background: #000000;
+  padding: 4px 8px;
+  margin: -1px -1px 4px;
+  border-bottom: 1px solid var(--accent);
+}
+
+/* ── Buttons — terminal-style amber chip ── */
+[data-skin="bloomberg"] button,
+[data-skin="bloomberg"] .btn {
+  background: #000000;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 0;
+  font-family: var(--font-mono);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 1.5px;
+  padding: 4px 12px;
+  transition: background 0.08s, color 0.08s;
+}
+[data-skin="bloomberg"] button:hover,
+[data-skin="bloomberg"] .btn:hover {
+  background: var(--accent);
+  color: #000000;
+}
+
+/* ── Inputs — terminal command bar ── */
+[data-skin="bloomberg"] input,
+[data-skin="bloomberg"] textarea,
+[data-skin="bloomberg"] select {
+  background: #000000;
+  border: 1px solid var(--border);
+  border-radius: 0;
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-weight: 500;
+  caret-color: var(--accent);
+}
+[data-skin="bloomberg"] input:focus,
+[data-skin="bloomberg"] textarea:focus {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+/* ── Sidebar — terminal navigation column ── */
+[data-skin="bloomberg"] aside,
+[data-skin="bloomberg"] .sidebar {
+  background: #000000;
+  border-right: 1px solid var(--accent);
+}
+[data-skin="bloomberg"] .nav-item {
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 1.5px;
+  font-weight: 500;
+  border-left: 2px solid transparent;
+  padding: 4px 8px;
+}
+[data-skin="bloomberg"] .nav-item[data-active="true"] {
+  background: rgba(255, 176, 0, 0.08);
+  border-left-color: var(--accent);
+  color: var(--accent);
+}
+[data-skin="bloomberg"] .nav-item::before {
+  content: '> ';
+  color: var(--accent);
+  opacity: 0.6;
+}
+
+/* ── Tables — dense info grid (the heart of a terminal) ── */
+[data-skin="bloomberg"] table {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+}
+[data-skin="bloomberg"] th {
+  background: var(--accent);
+  color: #000000;
+  text-transform: uppercase;
+  letter-spacing: 1.5px;
+  font-weight: 700;
+  padding: 4px 8px;
+  text-align: left;
+  border-bottom: 1px solid #000000;
+}
+[data-skin="bloomberg"] td {
+  padding: 3px 8px;
+  border-bottom: 1px solid #1A1A1A;
+}
+[data-skin="bloomberg"] tr:nth-child(even) td { background: #060606; }
+[data-skin="bloomberg"] tr:hover td { background: rgba(255, 176, 0, 0.06); }
+
+/* ── Numbers right-aligned ── */
+[data-skin="bloomberg"] td[data-numeric="true"],
+[data-skin="bloomberg"] .num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Severity — straight ANSI colours ── */
+[data-skin="bloomberg"] .badge,
+[data-skin="bloomberg"] .severity-badge,
+[data-skin="bloomberg"] .pill {
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 1.5px;
+  font-weight: 700;
+  border-radius: 0;
+  padding: 1px 6px;
+  border: 1px solid currentColor;
+  background: #000000;
+}
+[data-skin="bloomberg"] [data-severity="CRITICAL"],
+[data-skin="bloomberg"] .sev-critical,
+[data-skin="bloomberg"] .critical {
+  background: var(--critical);
+  color: #000000;
+  border-color: var(--critical);
+  animation: bloomberg-blink 1s steps(2) infinite;
+}
+@keyframes bloomberg-blink { 50% { opacity: 0.45; } }
+
+/* ── Severity arrows for delta indicators ── */
+[data-skin="bloomberg"] .delta-up::before { content: '▲ '; color: var(--low); }
+[data-skin="bloomberg"] .delta-down::before { content: '▼ '; color: var(--critical); }
+
+/* ── Splash ── */
+[data-skin="bloomberg"] .splash {
+  background:
+    repeating-linear-gradient(0deg, rgba(255, 176, 0, 0.02) 0 1px, transparent 1px 4px),
+    #000000;
+}
+[data-skin="bloomberg"] .splash-title {
+  font-family: var(--font-mono);
+  letter-spacing: 8px;
+  font-weight: 800;
+  color: var(--accent);
+}
+[data-skin="bloomberg"] .splash-subtitle {
+  font-family: var(--font-mono);
+  color: var(--accent);
+  letter-spacing: 4px;
+  text-transform: uppercase;
+}
+[data-skin="bloomberg"] .splash-status {
+  font-family: var(--font-mono);
+  color: var(--low);
+  letter-spacing: 2px;
+}
+
+/* ── HUD ── */
+[data-skin="bloomberg"] .hud-clock {
+  font-family: var(--font-mono);
+  color: var(--accent);
+  letter-spacing: 2px;
+  font-weight: 600;
+}
+[data-skin="bloomberg"] .hud-telemetry .bar {
+  background: var(--accent);
+  border-radius: 0;
+}
+
+/* ── Code blocks ── */
+[data-skin="bloomberg"] pre,
+[data-skin="bloomberg"] code,
+[data-skin="bloomberg"] .terminal {
+  font-family: var(--font-mono);
+  background: #000000;
+  border: 1px solid #1A1A1A;
+  color: var(--accent);
+  border-radius: 0;
+}
+
+/* ── Scrollbars ── */
+[data-skin="bloomberg"] ::-webkit-scrollbar { width: 12px; height: 12px; }
+[data-skin="bloomberg"] ::-webkit-scrollbar-track { background: #000000; border-left: 1px solid #1A1A1A; }
+[data-skin="bloomberg"] ::-webkit-scrollbar-thumb {
+  background: var(--accent);
+  border: 2px solid #000000;
+  border-radius: 0;
+}
+
+/* ── Phase pills ── */
+[data-skin="bloomberg"] .phase-pill,
+[data-skin="bloomberg"] .phase-timeline > * {
+  font-family: var(--font-mono);
+  border-radius: 0;
+  background: #000000;
+  border: 1px solid var(--border);
+  text-transform: uppercase;
+  letter-spacing: 1.5px;
+}
+[data-skin="bloomberg"] .phase-pill[data-active="true"] {
+  background: var(--accent);
+  color: #000000;
+  border-color: var(--accent);
+}
+
+/* ── Mode picker ── */
+[data-skin="bloomberg"] .mode-picker-trigger {
+  font-family: var(--font-mono);
+  background: #000000;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  border-radius: 0;
+  letter-spacing: 2px;
+}

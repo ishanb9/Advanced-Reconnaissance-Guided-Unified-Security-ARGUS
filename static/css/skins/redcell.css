@@ -1,0 +1,278 @@
+/* ══════════════════════════════════════════════════════════════
+   ARGUS · SKIN — REDCELL  (Adversary / Offensive Red-Team)
+   ──────────────────────────────────────────────────────────────
+   For pure red-cell engagements. Blood-red on matte black, military
+   stencil typography, op-sec terminology ("TARGET ACQUIRED", "PAYLOAD
+   STAGED", "BREACH SUCCESS"). Crosshair watermark. Heavy weight.
+   ══════════════════════════════════════════════════════════════ */
+
+@import url('https://fonts.googleapis.com/css2?family=Oswald:wght@400;500;600;700&family=Russo+One&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+:root[data-skin="redcell"] {
+  --bg-base:        #0E0606;
+  --bg-void:        #060202;
+  --bg-surface:     #160808;
+  --bg-panel:       #160808;
+  --bg-elevated:    #1F0C0C;
+  --bg-glass:       rgba(22, 8, 8, 0.94);
+  --bg-sidebar:     #0A0404;
+
+  --border-dim:     #2E1212;
+  --border:         #4D1F1F;
+  --border-light:   #4D1F1F;
+  --border-bright:  #C92020;
+
+  --accent:         #C92020;
+  --accent-dim:     #8E1515;
+  --accent-glow:    rgba(201, 32, 32, 0.40);
+  --accent-subtle:  rgba(201, 32, 32, 0.08);
+
+  --cyan:           #D8D8C8;
+  --violet:         #C2884A;
+
+  --text-primary:   #F5E8E0;
+  --text-secondary: #C8A8A0;
+  --text-muted:     #806060;
+
+  --critical:       #FF2A2A;
+  --high:           #E55A20;
+  --medium:         #C2884A;
+  --amber:          #C2884A;
+  --low:            #6B8E5B;
+  --supernova:      #FF2A2A;
+
+  --critical-bg:    rgba(255,  42,  42, 0.16);
+  --critical-bd:    rgba(255,  42,  42, 0.55);
+  --high-bg:        rgba(229,  90,  32, 0.14);
+  --high-bd:        rgba(229,  90,  32, 0.55);
+  --medium-bg:      rgba(194, 136,  74, 0.14);
+  --medium-bd:      rgba(194, 136,  74, 0.55);
+  --low-bg:         rgba(107, 142,  91, 0.14);
+  --low-bd:         rgba(107, 142,  91, 0.55);
+
+  --font-ui:        'Oswald', 'Inter', sans-serif;
+  --font-display:   'Russo One', 'Oswald', sans-serif;
+  --font-mono:      'JetBrains Mono', monospace;
+
+  --radius:         2px;
+  --radius-md:      3px;
+  --radius-lg:      4px;
+  --radius-xl:      6px;
+
+  --shadow-sm:      0 1px 0 rgba(0, 0, 0, 0.7);
+  --shadow-md:      0 4px 14px rgba(0, 0, 0, 0.7), 0 0 20px rgba(201, 32, 32, 0.10);
+  --shadow-lg:      0 12px 32px rgba(0, 0, 0, 0.8), 0 0 40px rgba(201, 32, 32, 0.20);
+}
+
+[data-skin="redcell"] body {
+  background:
+    /* faint crosshair watermark */
+    url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 200 200'><g fill='none' stroke='%23C92020' stroke-opacity='0.05' stroke-width='1'><circle cx='100' cy='100' r='40'/><circle cx='100' cy='100' r='70'/><circle cx='100' cy='100' r='95'/><line x1='100' y1='5' x2='100' y2='195'/><line x1='5' y1='100' x2='195' y2='100'/></g></svg>") center center / 200px 200px no-repeat fixed,
+    radial-gradient(ellipse 80% 60% at 50% 50%, rgba(201, 32, 32, 0.06), transparent 60%),
+    var(--bg-base);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  letter-spacing: 0.5px;
+}
+
+[data-skin="redcell"] .header,
+[data-skin="redcell"] header {
+  background: #0A0404;
+  border-bottom: 2px solid var(--accent);
+  box-shadow: 0 1px 0 rgba(201, 32, 32, 0.20), 0 0 32px rgba(201, 32, 32, 0.10);
+  font-family: var(--font-display);
+  text-transform: uppercase;
+  letter-spacing: 3px;
+}
+
+[data-skin="redcell"] .header h1,
+[data-skin="redcell"] header h1,
+[data-skin="redcell"] .brand,
+[data-skin="redcell"] .splash-title {
+  font-family: var(--font-display);
+  font-weight: 400;
+  letter-spacing: 6px;
+  color: var(--accent);
+  text-shadow: 0 0 12px rgba(201, 32, 32, 0.6), 0 0 32px rgba(201, 32, 32, 0.30);
+  text-transform: uppercase;
+}
+
+[data-skin="redcell"] .panel,
+[data-skin="redcell"] .card,
+[data-skin="redcell"] .mc-panel,
+[data-skin="redcell"] .agent-card,
+[data-skin="redcell"] .finding-card {
+  background:
+    linear-gradient(180deg, transparent, rgba(201, 32, 32, 0.03)),
+    #160808;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-md);
+}
+
+[data-skin="redcell"] .panel-title,
+[data-skin="redcell"] .card-title,
+[data-skin="redcell"] h2,
+[data-skin="redcell"] h3 {
+  font-family: var(--font-display);
+  font-weight: 400;
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 4px;
+  font-size: 12px;
+  text-shadow: 0 0 8px rgba(201, 32, 32, 0.50);
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 6px;
+  margin-bottom: 10px;
+}
+[data-skin="redcell"] .panel-title::before,
+[data-skin="redcell"] .card-title::before { content: '▌ '; color: var(--accent); }
+
+[data-skin="redcell"] button,
+[data-skin="redcell"] .btn {
+  background: linear-gradient(180deg, var(--accent), var(--accent-dim));
+  color: #FFFFFF;
+  border: 1px solid var(--accent-dim);
+  border-radius: var(--radius);
+  font-family: var(--font-display);
+  font-weight: 400;
+  text-transform: uppercase;
+  letter-spacing: 2.5px;
+  font-size: 12px;
+  padding: 6px 14px;
+  box-shadow: 0 2px 0 rgba(0, 0, 0, 0.6), inset 0 1px 0 rgba(255, 255, 255, 0.18);
+}
+[data-skin="redcell"] button:hover,
+[data-skin="redcell"] .btn:hover {
+  background: linear-gradient(180deg, #E33030, var(--accent));
+  box-shadow: 0 3px 14px var(--accent-glow), inset 0 1px 0 rgba(255, 255, 255, 0.25);
+}
+
+[data-skin="redcell"] input,
+[data-skin="redcell"] textarea,
+[data-skin="redcell"] select {
+  background: #060202;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+}
+[data-skin="redcell"] input:focus,
+[data-skin="redcell"] textarea:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(201, 32, 32, 0.25), 0 0 16px var(--accent-glow);
+}
+
+[data-skin="redcell"] aside,
+[data-skin="redcell"] .sidebar {
+  background:
+    linear-gradient(180deg, rgba(201, 32, 32, 0.04), transparent 30%),
+    var(--bg-sidebar);
+  border-right: 2px solid var(--accent);
+}
+[data-skin="redcell"] .nav-item {
+  font-family: var(--font-display);
+  text-transform: uppercase;
+  letter-spacing: 2px;
+  font-weight: 400;
+  border-left: 3px solid transparent;
+  padding: 6px 10px;
+}
+[data-skin="redcell"] .nav-item[data-active="true"] {
+  background: linear-gradient(90deg, var(--accent-subtle), transparent);
+  border-left-color: var(--accent);
+  color: var(--accent);
+  text-shadow: 0 0 6px var(--accent-glow);
+}
+
+[data-skin="redcell"] table { font-family: var(--font-mono); }
+[data-skin="redcell"] th {
+  background: var(--bg-elevated);
+  color: var(--accent);
+  font-family: var(--font-display);
+  font-weight: 400;
+  text-transform: uppercase;
+  letter-spacing: 2px;
+  font-size: 10px;
+  border-bottom: 1px solid var(--accent);
+  padding: 6px 10px;
+}
+[data-skin="redcell"] td { padding: 5px 10px; border-bottom: 1px solid var(--border-dim); }
+[data-skin="redcell"] tr:hover td { background: rgba(201, 32, 32, 0.05); }
+
+[data-skin="redcell"] .badge,
+[data-skin="redcell"] .severity-badge,
+[data-skin="redcell"] .pill {
+  font-family: var(--font-display);
+  text-transform: uppercase;
+  letter-spacing: 2px;
+  font-weight: 400;
+  font-size: 10px;
+  border-radius: var(--radius);
+  padding: 1px 8px;
+  border: 1px solid currentColor;
+}
+
+/* Op-sec terminology overlay on phase pills */
+[data-skin="redcell"] .phase-pill,
+[data-skin="redcell"] .phase-timeline > * {
+  font-family: var(--font-display);
+  text-transform: uppercase;
+  letter-spacing: 2px;
+  border-radius: var(--radius);
+  background: #0A0404;
+  border: 1px solid var(--border);
+  padding: 3px 10px;
+}
+[data-skin="redcell"] .phase-pill[data-active="true"] {
+  background: linear-gradient(180deg, var(--accent), var(--accent-dim));
+  color: #FFFFFF;
+  border-color: var(--accent);
+  box-shadow: 0 0 20px var(--accent-glow);
+}
+
+[data-skin="redcell"] pre,
+[data-skin="redcell"] code {
+  background: #060202;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-family: var(--font-mono);
+  color: var(--accent);
+}
+
+[data-skin="redcell"] .hud-clock {
+  font-family: var(--font-mono);
+  color: var(--accent);
+  letter-spacing: 2px;
+  text-shadow: 0 0 6px var(--accent-glow);
+}
+
+[data-skin="redcell"] ::-webkit-scrollbar { width: 8px; height: 8px; }
+[data-skin="redcell"] ::-webkit-scrollbar-track { background: #060202; }
+[data-skin="redcell"] ::-webkit-scrollbar-thumb { background: var(--accent-dim); border-radius: 0; }
+
+[data-skin="redcell"] .mode-picker-trigger {
+  font-family: var(--font-display);
+  background: #0A0404;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  border-radius: var(--radius);
+  letter-spacing: 2px;
+  text-shadow: 0 0 6px var(--accent-glow);
+}
+
+/* OP-SEC strip footer */
+[data-skin="redcell"] body::before {
+  content: 'OP-SEC ▮ HANDLE WITH CARE ▮ FINDINGS ARE EVIDENCE ▮ ENGAGEMENT CONFIDENTIAL';
+  position: fixed;
+  bottom: 4px; left: 50%;
+  transform: translateX(-50%);
+  font-family: var(--font-display);
+  font-size: 9px;
+  color: rgba(201, 32, 32, 0.42);
+  letter-spacing: 4px;
+  pointer-events: none;
+  z-index: 2;
+  text-transform: uppercase;
+}
