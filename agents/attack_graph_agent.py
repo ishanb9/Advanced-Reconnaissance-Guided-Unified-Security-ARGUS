@@ -453,7 +453,12 @@ class AttackGraphAgent:
 
     @staticmethod
     def _parse_json(raw: str) -> dict:
-        """Extract and parse JSON from LLM response."""
+        """Extract and parse JSON from LLM response.
+
+        Falls back to the tolerant parser in utils.json_tolerant for
+        common LLM-emitted JSON dialects (// comments, .join() chains,
+        trailing commas, markdown fences, smart quotes, etc.).
+        """
         # Direct parse
         try:
             return json.loads(raw)
@@ -473,6 +478,14 @@ class AttackGraphAgent:
                 return json.loads(m.group())
             except json.JSONDecodeError:
                 pass
+        # Tolerant repair pass
+        try:
+            from utils.json_tolerant import parse_lossy
+            parsed, _ = parse_lossy(raw)
+            if parsed is not None and isinstance(parsed, dict):
+                return parsed
+        except Exception:
+            pass
         return {"raw_response": raw[:500], "parse_error": True}
 
     # ── Emit ──────────────────────────────────────────────────────────────────

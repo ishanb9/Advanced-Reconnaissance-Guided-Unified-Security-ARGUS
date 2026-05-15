@@ -265,10 +265,12 @@ function ObjectivesPanel({ objectives, answers, engagementType }) {
   );
 }
 
-function FindingsBoard() {
+function FindingsBoard(props) {
   const { state } = window.useStore();
   const { sessionId, findingsSummary, discoveredHosts, hostFilter, dispatch,
           ctfObjectives, ctfAnswers, engagementContext } = state;
+  const vm = (props && props.viewMode) || 'OPERATOR';
+  const fontScale = vm === 'BRIEFING' ? 16 : 14;
   const engType = (engagementContext?.engagement_type) || 'pentest';
 
   // All findings loaded from DB + appended from WS
@@ -348,6 +350,11 @@ function FindingsBoard() {
   };
 
   return React.createElement('div', {
+    'data-view-mode': vm,
+    className: vm === 'CLIENT' ? 'client-mode' : undefined,
+    style: { fontSize: fontScale, height: '100%' },
+  },
+   React.createElement('div', {
     style: { display: 'flex', flexDirection: 'column', height: '100%', padding: 16, gap: 14, background: 'var(--bg-base)' }
   },
 
@@ -591,6 +598,7 @@ function FindingsBoard() {
                 );
               })
     )
+   )
   );
 }
 

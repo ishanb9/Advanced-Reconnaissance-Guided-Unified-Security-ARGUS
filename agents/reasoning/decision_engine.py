@@ -1971,11 +1971,11 @@ class DecisionEngine:
             import os as _os
             existing = ""
             if _os.path.exists(path):
-                with open(path) as f:
+                with open(path, encoding="utf-8") as f:
                     existing = f.read()
             payload = "\n".join(words) + "\n"
             if existing != payload:
-                with open(path, "w") as f:
+                with open(path, "w", encoding="utf-8") as f:
                     f.write(payload)
         except Exception:
             pass
@@ -2230,7 +2230,7 @@ class DecisionEngine:
             import os as _os
             fp = f"/tmp/argus.users.{target}.txt"
             if _os.path.exists(fp):
-                with open(fp) as _f:
+                with open(fp, encoding="utf-8") as _f:
                     for line in _f:
                         line = line.strip()
                         if line and line not in users:

@@ -53,11 +53,11 @@ def _get_driver():
             auth=(NEO4J_USER, NEO4J_PASSWORD),
         )
         _available = True
-        logger.info(f"Neo4j driver ready: {NEO4J_URI}")
+        logger.info("Neo4j driver ready: %s", NEO4J_URI)
         return _driver
     except Exception as exc:
         _available = False
-        logger.warning(f"Neo4j not available ({exc}) — graph features disabled")
+        logger.warning("Neo4j not available (%s) — graph features disabled", exc)
         return None
 
 
@@ -73,7 +73,7 @@ async def _run(cypher: str, params: Dict = None):
             result = await session.run(cypher, parameters=params or {})
             return [dict(r) async for r in result]
     except Exception as exc:
-        logger.debug(f"Neo4j query error: {exc}")
+        logger.debug("Neo4j query error: %s", exc)
         return []
 
 

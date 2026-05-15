@@ -488,7 +488,7 @@ class ExfilPipeline:
                 # cleartext was redacted in-log, but the file on disk has it
                 try:
                     if e.file_path and os.path.exists(e.file_path):
-                        with open(e.file_path) as f:
+                        with open(e.file_path, encoding="utf-8") as f:
                             line = f.read().strip()
                         # NT line format: user:rid:lm:nt:::
                         parts = line.split(":")

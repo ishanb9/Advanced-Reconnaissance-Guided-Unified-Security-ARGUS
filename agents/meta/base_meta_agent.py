@@ -96,11 +96,21 @@ class BaseMetaAgent(BaseAgent):
         """
         Send *prompt* to the LLM as the next turn in the persistent thread.
 
-        - Appends user message to _history before calling Ollama.
-        - Streams tokens; emits meta_agent_thinking per chunk.
-        - Appends assistant response to _history after.
-        - Enforces MAX_HISTORY_TURNS sliding window (drops oldest pairs).
-        - Returns the full response string, or "" on error/LLM offline.
+        Now provider-aware: routes through utils.llm_providers.get_provider()
+        so the same retry / circuit-breaker / model-selection logic that
+        applies to MasterAgent.think() applies to meta-agents too.  Before
+        this rewrite, meta-agents hard-coded Ollama at OLLAMA_URL and could
+        not see Anthropic / OpenAI-compat / Gemini / Claude Code backends —
+        meaning a transient blip on Ollama silently disabled every meta-
+        agent for the rest of the scan.
+
+        Behavior:
+          - Appends user message to _history before calling the LLM.
+          - Streams tokens via provider.stream(); emits meta_agent_thinking.
+          - Up to 2 retries with exponential back-off on transient errors.
+          - Appends assistant response to _history after.
+          - Enforces MAX_HISTORY_TURNS sliding window (drops oldest pairs).
+          - Returns the full response string, or "" on persistent failure.
         """
         if not self._enabled:
             return ""
@@ -129,84 +139,97 @@ class BaseMetaAgent(BaseAgent):
             "phase":  self._current_phase,
         })
 
-        tokens: List[str] = []
-        try:
-            async with httpx.AsyncClient(
-                timeout=httpx.Timeout(
-                    connect=15, read=LLM_THINK_TIMEOUT, write=30, pool=10
-                )
-            ) as client:
-                async with client.stream(
-                    "POST",
-                    f"{OLLAMA_URL}/api/chat",
-                    json={"model": MODEL_NAME, "messages": messages, "stream": True},
-                ) as resp:
-                    resp.raise_for_status()
-                    async for raw_line in resp.aiter_lines():
-                        if self._stop_requested:
-                            break
-                        if not raw_line.strip():
-                            continue
-                        try:
-                            chunk   = json.loads(raw_line)
-                            tok     = chunk.get("message", {}).get("content", "")
-                            if tok:
-                                tokens.append(tok)
-                                await self._emit("meta_agent_thinking", {
-                                    "agent":      self._agent_name_str,
-                                    "phase":      self._current_phase,
-                                    "chunk":      tok,
-                                    "thought_id": thought_id,
-                                })
-                            if chunk.get("done"):
-                                break
-                        except (json.JSONDecodeError, KeyError):
-                            pass
+        # ── Provider-aware streaming with retry ─────────────────────
+        # Routes through utils.llm_providers so the meta-agent picks up
+        # whichever backend the operator configured (Ollama by default;
+        # Anthropic / OpenAI-compat / Gemini / Claude Code if env vars
+        # are set).  Two retries with exponential back-off so a single
+        # transient connect error doesn't silently disable the entire
+        # meta-agent layer.
+        from utils.llm_providers import get_provider
 
-        except httpx.HTTPStatusError as exc:
-            status_code = exc.response.status_code
-            if status_code == 404:
-                msg = (
-                    f"Model '{MODEL_NAME}' not found on Ollama (HTTP 404). "
-                    f"Run: ollama pull {MODEL_NAME}"
+        MAX_RETRIES = 2
+        content     = ""
+        last_exc:   Optional[BaseException] = None
+        status_code_msg = ""
+
+        for attempt in range(1, MAX_RETRIES + 1):
+            provider = get_provider()
+            tokens: List[str] = []
+            try:
+                async for tok in provider.stream(messages, timeout=LLM_THINK_TIMEOUT):
+                    if self._stop_requested:
+                        break
+                    if tok:
+                        tokens.append(tok)
+                        await self._emit("meta_agent_thinking", {
+                            "agent":      self._agent_name_str,
+                            "phase":      self._current_phase,
+                            "chunk":      tok,
+                            "thought_id": thought_id,
+                        })
+                content = "".join(tokens)
+                if content:
+                    last_exc = None
+                    break
+                # Empty content from provider — treat as failure and retry
+                last_exc = RuntimeError("provider returned empty response")
+            except httpx.HTTPStatusError as exc:
+                last_exc = exc
+                status_code = exc.response.status_code
+                if status_code == 404:
+                    status_code_msg = (
+                        f"Model '{provider.model}' not found on {provider.name}"
+                    )
+                else:
+                    try:
+                        body = exc.response.text[:200]
+                    except Exception:
+                        body = ""
+                    status_code_msg = f"{provider.name} HTTP {status_code}: {body}"
+                logger.error(
+                    "[%s] LLM HTTP error (attempt %d/%d): %s",
+                    self._agent_name_str, attempt, MAX_RETRIES, status_code_msg,
                 )
-            else:
-                msg = (
-                    f"Ollama HTTP {status_code} for model '{MODEL_NAME}': "
-                    f"{exc.response.text[:200]}"
+                # 4xx errors won't fix on retry; bail immediately
+                if 400 <= status_code < 500 and status_code != 429:
+                    break
+            except (httpx.ConnectError, httpx.RemoteProtocolError, httpx.ReadTimeout) as exc:
+                last_exc = exc
+                logger.warning(
+                    "[%s] LLM transient error (attempt %d/%d): %s",
+                    self._agent_name_str, attempt, MAX_RETRIES, exc,
                 )
-            logger.error("[%s] LLM HTTP error: %s", self._agent_name_str, msg)
-            # Remove the dangling user turn so history stays consistent
+            except Exception as exc:
+                last_exc = exc
+                logger.warning(
+                    "[%s] LLM call failed (attempt %d/%d): %s",
+                    self._agent_name_str, attempt, MAX_RETRIES, exc,
+                )
+
+            # Back-off before the next attempt
+            if attempt < MAX_RETRIES:
+                await asyncio.sleep(2 ** attempt)
+
+        if not content:
+            # All attempts failed.  Pop the dangling user turn so history
+            # stays consistent, emit status, return empty.
             if self._history and self._history[-1]["role"] == "user":
                 self._history.pop()
-            await self._emit("llm_status", {
-                "available": False,
-                "url":       OLLAMA_URL,
-                "model":     MODEL_NAME,
-                "message":   msg,
-                "error":     f"http_{status_code}",
-            })
+            if status_code_msg:
+                await self._emit("llm_status", {
+                    "available": False,
+                    "model":     provider.model,
+                    "provider":  provider.name,
+                    "message":   status_code_msg,
+                    "error":     "meta_agent_llm_failed",
+                })
             await self._emit("meta_agent_status", {
                 "agent":  self._agent_name_str,
                 "status": "idle",
                 "phase":  self._current_phase,
             })
             return ""
-
-        except Exception as exc:
-            logger.warning("[%s] LLM call failed: %s", self._agent_name_str, exc)
-            # Remove the dangling user turn so history stays consistent
-            if self._history and self._history[-1]["role"] == "user":
-                self._history.pop()
-            # Always return to idle so the frontend status dot doesn't get stuck
-            await self._emit("meta_agent_status", {
-                "agent":  self._agent_name_str,
-                "status": "idle",
-                "phase":  self._current_phase,
-            })
-            return ""
-
-        content = "".join(tokens)
 
         # Append assistant turn
         self._history.append({"role": "assistant", "content": content})

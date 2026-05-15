@@ -7900,9 +7900,7 @@ Return JSON with enumeration goals: {{
         except Exception as _merge_err:
             # Never let a single bad result kill the whole phase
             import logging
-            logging.getLogger("master_agent").warning(
-                f"_merge_result error for {instr.tool}: {_merge_err}"
-            )
+            logging.getLogger('master_agent').warning("_merge_result error for %s: %s", instr.tool, _merge_err)
 
     # ─── Phase helpers ────────────────────────────────────────
 

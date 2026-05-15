@@ -42,26 +42,78 @@ def _resolve_chroma_path() -> str:
 CHROMA_PATH   = os.environ.get("KB_DB_PATH") or _resolve_chroma_path()
 COLLECTION    = "pentest_knowledge"
 
-# Primary embedding model — choose one:
-#   "BAAI/bge-m3"             → ~570 MB, 1024-dim, 8192 token ctx, best quality  ← ACTIVE
-#   "all-MiniLM-L6-v2"        → ~80 MB,  384-dim, fast CPU, good quality
-#   "all-mpnet-base-v2"       → ~420 MB, 768-dim, slower, better quality
-#   "BAAI/bge-small-en-v1.5"  → ~130 MB, 384-dim, good quality, instruction-tuned
-#   "BAAI/bge-large-en-v1.5"  → ~1.3 GB, 1024-dim, best English-only quality
-# NOTE: changing model requires --reset (dimensions must match entire collection)
-EMBED_MODEL   = os.environ.get("KB_EMBED_MODEL", "BAAI/bge-m3")
+# Primary embedding model — RAM-budget guidance:
+#
+#   "BAAI/bge-small-en-v1.5"  → ~130 MB on disk, ~300 MB RAM loaded,  384-dim,  ← DEFAULT
+#                              512 token ctx, fast on CPU, BGE-family quality.
+#                              Best fit for 4-8 GB hosts.
+#   "BAAI/bge-base-en-v1.5"   → ~440 MB on disk, ~1.0 GB RAM,         768-dim,
+#                              512 token ctx.  Middle ground for 8-12 GB hosts.
+#   "BAAI/bge-m3"             → ~570 MB on disk, ~1.5 GB RAM,        1024-dim,
+#                              8192 token ctx, best multilingual recall.  Use
+#                              only on hosts with >= 12 GB RAM + browser space.
+#   "all-MiniLM-L6-v2"        → ~90 MB on disk,  ~150 MB RAM,         384-dim,
+#                              256 token ctx, fastest CPU encode.  Quality is
+#                              ~80% of BGE.  Last resort for < 4 GB hosts.
+#   "all-mpnet-base-v2"       → ~420 MB on disk, ~900 MB RAM,         768-dim.
+#   "BAAI/bge-large-en-v1.5"  → ~1.3 GB on disk, ~2.8 GB RAM,        1024-dim.
+#
+# NOTE: changing model requires --reset (dimensions must match entire collection).
+# Run:   python knowledge/build_kb.py --reset --path knowledge/data
+EMBED_MODEL   = os.environ.get("KB_EMBED_MODEL", "BAAI/bge-small-en-v1.5")
 
-# Optional cross-encoder reranking model (set KB_RERANK_MODEL="" to disable)
-#   "cross-encoder/ms-marco-MiniLM-L-6-v2" → ~70 MB, BERT-based, 512-token limit
-#   "cross-encoder/ms-marco-MiniLM-L-12-v2" → ~120 MB, higher quality, same 512-token limit
+# Cross-encoder reranking model (set KB_RERANK_MODEL="" to disable).
+# Disabling saves ~250 MB RAM + ~40% on query latency at the cost of
+# 10-15% precision-at-1.  Recommended on hosts with < 8 GB total RAM.
+#
+#   ""                                       → DISABLED  (saves ~250 MB)
+#   "cross-encoder/ms-marco-TinyBERT-L-2-v2" → ~17 MB / ~50 MB RAM  — minimal
+#   "cross-encoder/ms-marco-MiniLM-L-4-v2"   → ~50 MB / ~180 MB RAM — balanced
+#   "cross-encoder/ms-marco-MiniLM-L-6-v2"   → ~70 MB / ~250 MB RAM — default quality
+#   "cross-encoder/ms-marco-MiniLM-L-12-v2"  → ~120 MB/ ~400 MB RAM — higher quality
 RERANK_MODEL  = os.environ.get("KB_RERANK_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2")
 
 MAX_RESULTS   = 6           # results returned to agent per query
 MIN_RELEVANCE = 0.28        # cosine similarity threshold
 RERANK_FETCH  = 25          # candidates fetched from ChromaDB before reranking to top MAX_RESULTS
 
-# bge-m3 supports up to 8192 tokens; set here so _get_embedder() can use it
-EMBED_MAX_LENGTH = 8192 if "bge-m3" in EMBED_MODEL else 512
+# bge-m3 supports up to 8192 tokens; bge-small / BERT family / MiniLM are 512;
+# all-MiniLM-L6-v2 is actually 256 but the tokenizer pads to 512 silently.
+def _resolve_max_length(model: str) -> int:
+    if "bge-m3" in model:
+        return 8192
+    if "MiniLM-L6" in model or "all-MiniLM" in model:
+        return 256
+    return 512
+EMBED_MAX_LENGTH = _resolve_max_length(EMBED_MODEL)
+
+
+# ── Memory-budget startup warning ──────────────────────────────────────────
+# Emit a clear nudge if the active embedder is too heavy for this host.
+# Avoids the classic "scan dies silently mid-recon" footgun we hit in v3.
+def _emit_memory_warning() -> None:
+    try:
+        import psutil  # type: ignore
+        total_gb = psutil.virtual_memory().total / (1024 ** 3)
+    except Exception:
+        return
+    heavy = {
+        "BAAI/bge-m3":            (3.5, "bge-m3 needs ~1.5 GB RAM (model) + ~3 GB ChromaDB hot index"),
+        "BAAI/bge-large-en-v1.5": (3.0, "bge-large needs ~2.8 GB RAM loaded"),
+        "all-mpnet-base-v2":      (1.5, "mpnet needs ~0.9 GB RAM loaded"),
+    }
+    for key, (min_gb_above_kali_baseline, note) in heavy.items():
+        if key in EMBED_MODEL and total_gb < (2.0 + min_gb_above_kali_baseline + 1.5):
+            logger.warning(
+                "[kb] Host has only %.1f GB total RAM but KB_EMBED_MODEL=%s. %s. "
+                "Recommended: KB_EMBED_MODEL=BAAI/bge-small-en-v1.5 and "
+                "KB_RERANK_MODEL='' to fit safely. Re-ingest required after change "
+                "(python knowledge/build_kb.py --reset).",
+                total_gb, EMBED_MODEL, note,
+            )
+            break
+
+_emit_memory_warning()
 
 # Chunk type icons for formatted output
 CHUNK_TYPE_ICONS = {
@@ -79,65 +131,188 @@ CHUNK_TYPE_ICONS = {
 }
 
 # ── Lazy singletons ─────────────────────────────────────────────────────────────
-_client     = None
-_collection = None
-_embedder   = None
-_reranker   = None
-_reranker_available = None   # None = untested, True/False = tested
+#
+# Singletons are stored on the *Python interpreter* (sys.modules['builtins'])
+# so they survive even if this module is imported under two different names
+# (e.g. ``knowledge_base`` AND ``knowledge.knowledge_base``).  Without this
+# guard, a stray ``from knowledge import knowledge_base`` somewhere in the
+# codebase causes Python to instantiate a SECOND module object with its own
+# _embedder global — bge-m3 (1.5 GB) and the cross-encoder (250 MB) end up
+# loaded twice, OOM-killing the agent on 7-8 GB hosts.  The shared-on-builtins
+# pattern is robust to that: whichever module-instance hits _get_embedder()
+# first stores the model on builtins; the second one finds it and reuses it.
+import builtins as _builtins
+
+_SINGLETON_KEY_EMBEDDER  = "_argus_kb_embedder"
+_SINGLETON_KEY_COLLECTION = "_argus_kb_collection"
+_SINGLETON_KEY_CLIENT     = "_argus_kb_client"
+_SINGLETON_KEY_RERANKER   = "_argus_kb_reranker"
+_SINGLETON_KEY_RERANK_OK  = "_argus_kb_reranker_available"
+
+# Module-level mirrors (kept for backward compat with any external code
+# that pokes at them by name).  Reads go through getattr / builtins.
+_client     = getattr(_builtins, _SINGLETON_KEY_CLIENT,     None)
+_collection = getattr(_builtins, _SINGLETON_KEY_COLLECTION, None)
+_embedder   = getattr(_builtins, _SINGLETON_KEY_EMBEDDER,   None)
+_reranker   = getattr(_builtins, _SINGLETON_KEY_RERANKER,   None)
+_reranker_available = getattr(_builtins, _SINGLETON_KEY_RERANK_OK, None)
 
 
 def _get_embedder():
     global _embedder
-    if _embedder is None:
-        from sentence_transformers import SentenceTransformer
-        logger.info(f"Loading embedding model: {EMBED_MODEL} (max_length={EMBED_MAX_LENGTH})")
-        _embedder = SentenceTransformer(EMBED_MODEL)
-        # Override tokenizer max_length to use the model's full context window.
-        # bge-m3 supports 8192 tokens; BERT-based models are capped at 512.
-        _embedder.max_seq_length = EMBED_MAX_LENGTH
-        logger.info(f"Embedding model ready — dim={_embedder.get_sentence_embedding_dimension()}")
+    cached = getattr(_builtins, _SINGLETON_KEY_EMBEDDER, None)
+    if cached is not None:
+        _embedder = cached
+        return cached
+    if _embedder is not None:
+        setattr(_builtins, _SINGLETON_KEY_EMBEDDER, _embedder)
+        return _embedder
+    from sentence_transformers import SentenceTransformer
+    logger.info("Loading embedding model: %s (max_length=%s)", EMBED_MODEL, EMBED_MAX_LENGTH)
+    _embedder = SentenceTransformer(EMBED_MODEL)
+    # Override tokenizer max_length to use the model's full context window.
+    # bge-m3 supports 8192 tokens; BERT-based models are capped at 512.
+    _embedder.max_seq_length = EMBED_MAX_LENGTH
+    logger.info("Embedding model ready — dim=%s", _embedder.get_sentence_embedding_dimension())
+    setattr(_builtins, _SINGLETON_KEY_EMBEDDER, _embedder)
     return _embedder
 
 
 def _get_collection():
     global _client, _collection
-    if _collection is None:
-        import chromadb
-        from chromadb.config import Settings
-        os.makedirs(CHROMA_PATH, exist_ok=True)
-        _client = chromadb.PersistentClient(
-            path=CHROMA_PATH,
-            settings=Settings(anonymized_telemetry=False)
-        )
-        _collection = _client.get_or_create_collection(
-            name=COLLECTION,
-            metadata={"hnsw:space": "cosine"}
-        )
-        logger.info(f"ChromaDB collection ready: {_collection.count()} chunks indexed")
+    cached_coll   = getattr(_builtins, _SINGLETON_KEY_COLLECTION, None)
+    cached_client = getattr(_builtins, _SINGLETON_KEY_CLIENT,     None)
+    if cached_coll is not None:
+        _collection = cached_coll
+        _client     = cached_client
+        return cached_coll
+    if _collection is not None:
+        setattr(_builtins, _SINGLETON_KEY_COLLECTION, _collection)
+        setattr(_builtins, _SINGLETON_KEY_CLIENT,     _client)
+        return _collection
+    import chromadb
+    from chromadb.config import Settings
+    os.makedirs(CHROMA_PATH, exist_ok=True)
+    _client = chromadb.PersistentClient(
+        path=CHROMA_PATH,
+        settings=Settings(anonymized_telemetry=False)
+    )
+    _collection = _client.get_or_create_collection(
+        name=COLLECTION,
+        metadata={"hnsw:space": "cosine"}
+    )
+    logger.info("ChromaDB collection ready: %s chunks indexed", _collection.count())
+    setattr(_builtins, _SINGLETON_KEY_COLLECTION, _collection)
+    setattr(_builtins, _SINGLETON_KEY_CLIENT,     _client)
     return _collection
 
 
 def _get_reranker():
     """Lazy-load cross-encoder reranker. Returns None if unavailable."""
     global _reranker, _reranker_available
-    if _reranker_available is False:
+    cached = getattr(_builtins, _SINGLETON_KEY_RERANKER, None)
+    if cached is not None:
+        _reranker = cached
+        _reranker_available = True
+        return cached
+    cached_flag = getattr(_builtins, _SINGLETON_KEY_RERANK_OK, None)
+    if cached_flag is False:
+        _reranker_available = False
         return None
     if _reranker is not None:
+        setattr(_builtins, _SINGLETON_KEY_RERANKER, _reranker)
         return _reranker
+    if _reranker_available is False:
+        return None
     if not RERANK_MODEL:
         _reranker_available = False
+        setattr(_builtins, _SINGLETON_KEY_RERANK_OK, False)
         return None
     try:
         from sentence_transformers import CrossEncoder
-        logger.info(f"Loading reranker: {RERANK_MODEL}")
+        logger.info("Loading reranker: %s", RERANK_MODEL)
         _reranker = CrossEncoder(RERANK_MODEL, max_length=512)   # BERT hard limit is 512 tokens
         _reranker_available = True
         logger.info("Reranker ready")
+        setattr(_builtins, _SINGLETON_KEY_RERANKER, _reranker)
+        setattr(_builtins, _SINGLETON_KEY_RERANK_OK, True)
         return _reranker
     except Exception as e:
-        logger.warning(f"Reranker unavailable ({e}) — using cosine similarity only")
+        logger.warning("Reranker unavailable (%s) — using cosine similarity only", e)
         _reranker_available = False
+        setattr(_builtins, _SINGLETON_KEY_RERANK_OK, False)
         return None
+
+
+# ── Metadata merge for content-hash dedup ──────────────────────────────────────
+# Used by ingest() when an incoming chunk hashes to an ID already present in
+# the collection (i.e. identical content from a different source file).  We
+# don't want to lose the new source's tags — instead, union the list-valued
+# fields and keep the more-specific scalar values.
+_MERGE_UNION_FIELDS = {
+    "cves", "mitre_ttps", "tools", "attack_types", "services", "ports",
+    "alt_sources", "alt_source_files",
+}
+_MERGE_KEEP_BETTER  = {
+    # If existing value is empty / "unknown" / None, prefer the new value.
+    "outcome", "phase", "os", "box_name", "difficulty",
+}
+
+
+def _merge_dup_metadata(col, doc_id: str, existing: Dict[str, Any],
+                        incoming: Dict[str, Any], source_file: str) -> None:
+    """Merge `incoming` into `existing` and write back via col.update().
+
+    No-op if the merge wouldn't change anything (saves a write).
+    """
+    merged = dict(existing)
+    changed = False
+
+    # Track alternative source files that contributed identical chunks so the
+    # operator can see provenance breadth in the metadata.
+    alt = merged.get("alt_source_files")
+    try:
+        alt_list = json.loads(alt) if isinstance(alt, str) else (alt or [])
+    except (ValueError, TypeError):
+        alt_list = []
+    src_name = os.path.basename(source_file)
+    if src_name and src_name != merged.get("source_file") and src_name not in alt_list:
+        alt_list.append(src_name)
+        merged["alt_source_files"] = json.dumps(alt_list)
+        changed = True
+
+    # Union list-valued tag fields
+    for field in _MERGE_UNION_FIELDS:
+        new_val = incoming.get(field)
+        if not new_val:
+            continue
+        try:
+            new_list = json.loads(new_val) if isinstance(new_val, str) else list(new_val)
+        except (ValueError, TypeError):
+            new_list = [new_val]
+        cur = merged.get(field)
+        try:
+            cur_list = json.loads(cur) if isinstance(cur, str) else list(cur or [])
+        except (ValueError, TypeError):
+            cur_list = []
+        union = list(dict.fromkeys(cur_list + new_list))   # order-preserving
+        if union != cur_list:
+            merged[field] = json.dumps(union)
+            changed = True
+
+    # Promote scalar fields if the existing value is empty/unknown
+    for field in _MERGE_KEEP_BETTER:
+        new_val = incoming.get(field)
+        cur_val = merged.get(field)
+        if new_val and (not cur_val or str(cur_val).lower() in ("unknown", "none", "")):
+            merged[field] = str(new_val)
+            changed = True
+
+    if changed:
+        try:
+            col.update(ids=[doc_id], metadatas=[merged])
+        except Exception as exc:
+            logger.debug("col.update failed for %s: %s", doc_id, exc)
 
 
 # ── Query expansion ─────────────────────────────────────────────────────────────
@@ -199,16 +374,30 @@ def ingest(
     if not text or len(text.strip()) < 40:
         return False
 
-    # Stable ID: hash of source + index + first 80 chars
-    doc_id = hashlib.sha256(
-        f"{source_file}:{chunk_index}:{text[:80]}".encode()
-    ).hexdigest()[:24]
+    # ── CONTENT-BASED CHUNK ID (dedup-by-design) ─────────────────────────────
+    # Previous formula hashed (source_file:chunk_index:text[:80]).  That made
+    # the ID *file-scoped* — two files with identical text (e.g. MITRE ATT&CK
+    # v15 vs v19) produced different IDs, so both got embedded.  Result: a
+    # 96% duplicate corpus on real-world data.
+    #
+    # New formula hashes a normalised view of the chunk text alone.  Same
+    # text from any file → same ID → ChromaDB upsert is idempotent, and we
+    # merge metadata from the duplicate occurrence so its tags aren't lost.
+    normalized = " ".join(text.strip().lower().split())
+    doc_id = hashlib.sha256(normalized.encode("utf-8", errors="replace")).hexdigest()[:24]
 
     col = _get_collection()
 
-    # Skip duplicates
-    existing = col.get(ids=[doc_id])
+    # Already present → MERGE metadata instead of dropping the duplicate's tags
+    existing = col.get(ids=[doc_id], include=["metadatas"])
     if existing["ids"]:
+        if metadata:
+            try:
+                _merge_dup_metadata(col, doc_id,
+                                    (existing.get("metadatas") or [{}])[0] or {},
+                                    metadata, source_file)
+            except Exception as _merge_exc:
+                logger.debug("metadata merge failed for %s: %s", doc_id, _merge_exc)
         return False
 
     embedder  = _get_embedder()
@@ -347,7 +536,7 @@ def search_raw(
         try:
             results = col.query(**kwargs)
         except Exception as e:
-            logger.warning(f"ChromaDB query error: {e}")
+            logger.warning("ChromaDB query error: %s", e)
             continue
 
         docs      = results["documents"][0]
@@ -393,7 +582,7 @@ def search_raw(
             for c, s in zip(candidates, scores):
                 c["relevance"] = float(s)
         except Exception as e:
-            logger.warning(f"Reranker failed: {e} — using cosine scores")
+            logger.warning("Reranker failed: %s — using cosine scores", e)
 
     # Sort by relevance, take top_k
     candidates.sort(key=lambda x: x["relevance"], reverse=True)

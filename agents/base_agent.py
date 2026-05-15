@@ -122,8 +122,9 @@ except ImportError:
     _KB_AVAILABLE = False
 
 try:
-    # New retriever lives at ``knowledge/retriever/`` — see PROGRESS.md.
-    from knowledge.retriever import retrieve as _retrieve_v3
+    # The 4-tier retriever lives in knowledge/build_kb.py alongside the
+    # ingest engine — single file in knowledge/ keeps the user surface clean.
+    from knowledge.build_kb import retrieve as _retrieve_v3
     _RETRIEVER_V3 = True
 except Exception:   # pragma: no cover — silent best-effort
     _RETRIEVER_V3 = False
@@ -424,66 +425,76 @@ class BaseAgent(ABC):
 
     async def check_llm_available(self) -> bool:
         """
-        Test if Ollama is reachable AND the configured model exists.
-        Result is cached for the session. Emits clear status to frontend.
+        Test if the configured LLM backend (Ollama / OpenAI-compat / Anthropic
+        / Gemini, selected via LLM_PROVIDER) is reachable AND the configured
+        model is usable.  Result is cached for the session.
+
         MASTER AGENT must call this before any planning.
-        If this returns False, testing should NOT proceed.
         """
         try:
-            async with httpx.AsyncClient(timeout=LLM_CHECK_TIMEOUT) as client:
-                resp = await client.get(f"{OLLAMA_URL}/api/tags")
-                if resp.status_code == 200:
-                    # Also verify the specific model is present so we get a
-                    # clear "model not found" error rather than a cryptic
-                    # HTTPStatusError on every think() call.
-                    try:
-                        body = resp.json()
-                        available = [m.get("name", "") for m in body.get("models", [])]
-                        model_base = MODEL_NAME.split(":")[0]
-                        model_found = (
-                            MODEL_NAME in available or
-                            any(m == MODEL_NAME or m.split(":")[0] == model_base
-                                for m in available)
-                        )
-                    except Exception:
-                        model_found = True   # can't parse — assume ok, fail later if wrong
+            from utils.llm_providers import get_provider, set_provider_auto, PROVIDER
+            prov = get_provider()
+            # If user selected auto, re-detect on first availability check so
+            # we land on a working backend (e.g. switch from Ollama-down to
+            # OpenAI-compat-up automatically).
+            if PROVIDER == "auto" and prov.name == "ollama":
+                ok, _, _ = await prov.check_available()
+                if not ok:
+                    prov = await set_provider_auto()
 
-                    if not model_found:
-                        self._llm_available = False
-                        avail_str = ", ".join(available[:10]) or "(none pulled)"
-                        msg = (
-                            f"Model '{MODEL_NAME}' not found on Ollama at {OLLAMA_URL}. "
-                            f"Available: {avail_str}. "
-                            f"Run: ollama pull {MODEL_NAME}"
-                        )
-                        await self._emit("llm_status", {
-                            "available":       False,
-                            "url":             OLLAMA_URL,
-                            "model":           MODEL_NAME,
-                            "available_models": available,
-                            "message":         msg,
-                            "error":           "model_not_found",
-                        })
-                        await self.set_status(AgentStatus.ERROR, msg)
-                        return False
+            ok, msg, available = await prov.check_available()
+            url = getattr(prov, "base_url", "")
+            if ok:
+                self._llm_available = True
+                await self._emit("llm_status", {
+                    "available": True,
+                    "url":       url,
+                    "model":     prov.model,
+                    "provider":  prov.name,
+                    "message":   msg,
+                })
+                return True
 
-                    self._llm_available = True
-                    await self._emit("llm_status", {
-                        "available": True,
-                        "url":       OLLAMA_URL,
-                        "model":     MODEL_NAME,
-                        "message":   f"LLM online — {MODEL_NAME} at {OLLAMA_URL}"
-                    })
-                    return True
+            # Not ok — emit a clear status with available models if we have them
+            self._llm_available = False
+            payload = {
+                "available":        False,
+                "url":              url,
+                "model":            prov.model,
+                "provider":         prov.name,
+                "available_models": available,
+                "message":          msg,
+            }
+            if "not found" in msg.lower() or "not pulled" in msg.lower():
+                payload["error"] = "model_not_found"
+            await self._emit("llm_status", payload)
+            await self.set_status(AgentStatus.ERROR, msg)
+            return False
         except Exception:
             pass
 
         self._llm_available = False
-        msg = f"LLM OFFLINE — Cannot reach Ollama at {OLLAMA_URL}. Pentest HALTED. Start Ollama and retry."
+        # Fall-through path: the provider lookup itself failed (import error,
+        # bad config, etc.).  Report the configured backend so the operator
+        # can see what's being attempted.
+        try:
+            from utils.llm_providers import get_provider, PROVIDER
+            _prov = get_provider()
+            _url  = getattr(_prov, "base_url", "")
+            _name = _prov.name
+            _model = _prov.model
+        except Exception:
+            _url, _name, _model = OLLAMA_URL, "ollama", MODEL_NAME
+        msg = (
+            f"LLM OFFLINE — Cannot reach {_name} at {_url} (model {_model}). "
+            f"Pentest HALTED.  Set LLM_PROVIDER + creds for an alternate backend, "
+            f"or start the local server."
+        )
         await self._emit("llm_status", {
             "available": False,
-            "url":       OLLAMA_URL,
-            "model":     MODEL_NAME,
+            "url":       _url,
+            "model":     _model,
+            "provider":  _name,
             "message":   msg,
             "error":     "connection_refused",
         })
@@ -495,8 +506,14 @@ class BaseAgent(ABC):
         if self._llm_available is None:
             await self.check_llm_available()
         if not self._llm_available:
+            try:
+                from utils.llm_providers import get_provider
+                _prov = get_provider()
+                where = f"{_prov.name} ({getattr(_prov, 'base_url', '')})"
+            except Exception:
+                where = f"Ollama at {OLLAMA_URL}"
             raise RuntimeError(
-                f"LLM unavailable at {OLLAMA_URL}. Testing cannot proceed without LLM guidance."
+                f"LLM unavailable at {where}. Testing cannot proceed without LLM guidance."
             )
 
     # ─── Status ───────────────────────────────────────────────
@@ -1499,28 +1516,44 @@ Return JSON:
                     timeout=httpx.Timeout(connect=15, read=timeout, write=30, pool=10)
                 ) as client:
                     tokens: list[str] = []
-                    # stream=True: Ollama sends one JSON obj per line per token
-                    async with client.stream(
-                        "POST",
-                        f"{OLLAMA_URL}/api/chat",
-                        json={"model": MODEL_NAME, "messages": messages, "stream": True},
-                    ) as resp:
-                        resp.raise_for_status()
-                        async for raw_line in resp.aiter_lines():
-                            # Respect a scan-stop request even mid-generation
-                            if self._stop_requested:
-                                break
-                            if not raw_line.strip():
-                                continue
+                    # Heartbeat so a slow model (xploiter / 671b on CPU) doesn't
+                    # look hung from the UI's perspective.  Emits llm_progress
+                    # every 30 s with token count + elapsed time so the operator
+                    # can see streaming is actually happening.
+                    _hb_t0 = time.monotonic()
+                    _hb_last_emit = _hb_t0
+                    _hb_interval = float(os.environ.get("LLM_PROGRESS_INTERVAL_SEC", "30"))
+                    # ── Provider-aware streaming ────────────────────────────
+                    # Routes through utils.llm_providers so the same think()
+                    # path works against Ollama, OpenAI-compatible servers
+                    # (LM Studio, vLLM, llama.cpp, Groq, OpenRouter, Together,
+                    # HuggingFace TGI, OpenAI proper), Anthropic, and Gemini.
+                    # Pick the active provider per-call so a hot-reload via
+                    # set_provider_auto() takes effect on the next call.
+                    from utils.llm_providers import get_provider
+                    _provider = get_provider()
+                    _model_for_log = _provider.model or MODEL_NAME
+                    async for tok in _provider.stream(messages, timeout=timeout):
+                        # Respect a scan-stop request even mid-generation
+                        if self._stop_requested:
+                            break
+                        # Heartbeat — emit progress every _hb_interval seconds.
+                        _now = time.monotonic()
+                        if (_now - _hb_last_emit) >= _hb_interval:
                             try:
-                                chunk = json.loads(raw_line)
-                                tok = chunk.get("message", {}).get("content", "")
-                                if tok:
-                                    tokens.append(tok)
-                                if chunk.get("done"):
-                                    break
-                            except (json.JSONDecodeError, KeyError):
+                                await self._emit("llm_progress", {
+                                    "agent":     str(self.name),
+                                    "tokens":    len(tokens),
+                                    "elapsed":   round(_now - _hb_t0, 1),
+                                    "model":     _model_for_log,
+                                    "provider":  _provider.name,
+                                    "step":      (prompt.strip().splitlines() or [""])[0][:60],
+                                })
+                            except Exception:
                                 pass
+                            _hb_last_emit = _now
+                        if tok:
+                            tokens.append(tok)
 
                 content = "".join(tokens)
                 self._llm_available = True   # confirmed responsive
@@ -1799,6 +1832,29 @@ Return JSON:
                 return _log(json.loads(m.group()), False)
             except json.JSONDecodeError:
                 pass
+        # ── Tolerant parser (LLM-friendly: strips // comments, /* blocks */,
+        # trailing commas, .join() expressions, smart quotes, markdown
+        # fences, prose surrounding the JSON, etc.).  Many smaller models —
+        # including the xploiter family — emit JSON with comments, which
+        # the strict json.loads rejects.  Without this layer every planning
+        # call falls back to a generic skeleton plan and the LLM's actual
+        # reasoning is thrown away.
+        try:
+            from utils.json_tolerant import parse_lossy
+            parsed, repairs = parse_lossy(raw)
+            if parsed is not None and isinstance(parsed, dict):
+                if repairs:
+                    import logging as _l
+                    _l.getLogger(__name__).info(
+                        "[json_tolerant] recovered %s response via repairs: %s",
+                        _step_label or "llm", ", ".join(repairs[-3:]),
+                    )
+                return _log(parsed, False)
+        except Exception as _tol_exc:                                # noqa: BLE001
+            import logging as _l
+            _l.getLogger(__name__).debug(
+                "[json_tolerant] unavailable or errored: %s", _tol_exc
+            )
         return _log({"raw_response": raw, "parse_error": True}, True)
 
     # ─── Finding Storage ──────────────────────────────────────
@@ -2159,8 +2215,26 @@ Return JSON:
         pass
 
     async def check_tool_available(self, tool_name: str) -> Dict:
-        """Check if a tool binary exists on the system."""
-        result = subprocess.run(["which", tool_name], capture_output=True, text=True)
-        if result.returncode == 0:
-            return {"available": True, "path": result.stdout.strip()}
+        """Check if a tool binary exists on the system.
+
+        Uses asyncio so the event loop never blocks on a stuck filesystem.
+        Hard timeout prevents NFS / process-table weirdness from freezing
+        the agent for minutes.  Args list passed positionally — no shell
+        interpolation, ``tool_name`` cannot inject commands.
+        """
+        try:
+            proc = await asyncio.wait_for(
+                asyncio.create_subprocess_exec(
+                    "which", tool_name,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                ),
+                timeout=3,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=3)
+            if proc.returncode == 0:
+                return {"available": True, "path": stdout.decode(errors="ignore").strip()}
+        except (asyncio.TimeoutError, FileNotFoundError, OSError):
+            # `which` missing or filesystem hung — treat as tool-not-found.
+            pass
         return {"available": False, "path": "", "install_cmd": f"apt install {tool_name} -y"}

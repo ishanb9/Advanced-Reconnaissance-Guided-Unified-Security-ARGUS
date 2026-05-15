@@ -17,91 +17,87 @@
 
 /* ─── Design Tokens (default = MIDNIGHT) ─────────────────── */
 :root {
-  /* ── Background layers (4-level depth model) ── */
-  --bg-base:      #0D0E14;   /* page canvas */
-  --bg-surface:   #13151E;   /* card surface */
-  --bg-panel:     #1A1D28;   /* elevated panels */
-  --bg-elevated:  #212538;   /* modals / dropdowns */
-  --bg-sidebar:   #0F1018;   /* sidebar */
+  /* SURFACE LAYERS */
+  --bg-base:          #04050E;
+  --bg-void:          #04050E;     /* alias for --bg-base, prefer --bg-void in new code */
+  --bg-surface:       #0A1023;
+  --bg-panel:         #0A1023;     /* alias for --bg-surface, kept for legacy */
+  --bg-elevated:      #0F1832;
+  --bg-glass:         rgba(15, 24, 50, 0.78);
 
-  /* ── Accent colors ── */
-  --accent:       #00E5A0;   /* teal-green — primary CTA */
-  --accent-dim:   #00A372;   /* dimmed/hover */
-  --accent-glow:  rgba(0, 229, 160, 0.18);
-  --accent-subtle:rgba(0, 229, 160, 0.06);
-  --violet:       #7B6CF6;   /* purple — secondary accent */
-  --violet-dim:   #5B4EC4;
-  --violet-glow:  rgba(123, 108, 246, 0.18);
-  --cyan:         #38BDF8;   /* information / links */
-  --cyan-dim:     #0EA5E9;
-  --cyan-glow:    rgba(56, 189, 248, 0.15);
+  /* BORDERS */
+  --border-dim:       #1B2750;
+  --border:           #2D3F75;
+  --border-light:     #2D3F75;     /* alias */
+  --border-bright:    #4F5DA8;
+  --border-focus:     var(--accent);
 
-  /* ── Status / severity ── */
-  --critical:     #FF4560;
-  --critical-bg:  rgba(255, 69, 96, 0.10);
-  --critical-bd:  rgba(255, 69, 96, 0.30);
-  --high:         #FF8C42;
-  --high-bg:      rgba(255, 140, 66, 0.10);
-  --high-bd:      rgba(255, 140, 66, 0.30);
-  --medium:       #F5C842;
-  --medium-bg:    rgba(245, 200, 66, 0.08);
-  --medium-bd:    rgba(245, 200, 66, 0.28);
-  --low:          #4ADE80;
-  --low-bg:       rgba(74, 222, 128, 0.08);
-  --low-bd:       rgba(74, 222, 128, 0.25);
-  --info:         #38BDF8;
-  --info-bg:      rgba(56, 189, 248, 0.08);
-  --info-bd:      rgba(56, 189, 248, 0.22);
+  /* PRIMARY */
+  --accent:           #4FA8FF;
+  --accent-dim:       #2E72C7;
+  --accent-glow:      rgba(79, 168, 255, 0.22);
+  --accent-subtle:    rgba(79, 168, 255, 0.07);
 
-  /* ── Aliases for backward compat ── */
-  --bg-card:      var(--bg-surface);
-  --bg-input:     var(--bg-panel);
-  --green:        var(--low);
-  --green-dim:    #22C55E;
-  --amber:        var(--medium);
-  --amber-dim:    #D97706;
-  --red:          var(--critical);
-  --red-dim:      #B91C1C;
-  --purple:       var(--violet);
+  /* SECONDARY */
+  --cyan:             #38E5FF;
+  --violet:           #7B6CF6;
 
-  /* ── Text ── */
-  --text-primary:   #E2E8F4;
-  --text-secondary: #8892AA;
-  --text-muted:     #4A5168;
+  /* TEXT */
+  --text-primary:     #E5EAF6;
+  --text-secondary:   #94A0C5;
+  --text-muted:       #4F5876;
 
-  /* ── Borders ── */
-  --border:       #1E2236;
-  --border-light: #262B40;
-  --border-bright:#343B56;
-  --border-focus: var(--accent);
+  /* SEVERITY */
+  --critical:         #FF4560;
+  --high:             #FF8C42;
+  --medium:           #FFC83D;
+  --amber:            #FFC83D;     /* alias for legacy --amber callers */
+  --low:              #4ADE80;
+  --info:             var(--accent);
 
-  /* ── Typography ── */
-  --font-ui:   'Inter', system-ui, -apple-system, sans-serif;
-  --font-mono: 'JetBrains Mono', 'Fira Code', 'Courier New', monospace;
+  /* SUPERNOVA */
+  --supernova:        #FF4D8F;
 
-  /* ── Spacing ── */
-  --space-1: 4px;
-  --space-2: 8px;
-  --space-3: 12px;
-  --space-4: 16px;
-  --space-5: 20px;
-  --space-6: 24px;
+  /* TYPOGRAPHY */
+  --font-ui:          'Inter', system-ui, sans-serif;
+  --font-display:     'Inter', system-ui, sans-serif;
+  --font-mono:        'JetBrains Mono', 'Courier New', monospace;
 
-  /* ── Radii ── */
-  --radius:    6px;
-  --radius-md: 8px;
-  --radius-lg: 12px;
-  --radius-xl: 16px;
+  /* ── Legacy aliases (downstream rules in this file reference them) ── */
 
-  /* ── Shadows ── */
-  --shadow-sm:  0 1px 3px rgba(0,0,0,0.35);
-  --shadow-md:  0 4px 12px rgba(0,0,0,0.45);
-  --shadow-lg:  0 8px 32px rgba(0,0,0,0.55);
-  --shadow-accent: 0 0 20px rgba(0, 229, 160, 0.25);
+  /* Sidebar surface — slightly darker than --bg-surface */
+  --bg-sidebar:       #060A1A;
 
-  /* ── Transitions ── */
-  --trans: 0.15s ease;
-  --trans-slow: 0.25s ease;
+  /* Severity badge backgrounds + borders, at low alpha so backgrounds
+     read as tinted panels rather than solid color blocks */
+  --critical-bg:      rgba(255,  69,  96, 0.12);
+  --critical-bd:      rgba(255,  69,  96, 0.45);
+  --high-bg:          rgba(255, 140,  66, 0.12);
+  --high-bd:          rgba(255, 140,  66, 0.45);
+  --medium-bg:        rgba(255, 200,  61, 0.12);
+  --medium-bd:        rgba(255, 200,  61, 0.45);
+  --low-bg:           rgba( 74, 222, 128, 0.12);
+  --low-bd:           rgba( 74, 222, 128, 0.45);
+  --info-bg:          rgba( 79, 168, 255, 0.12);
+  --info-bd:          rgba( 79, 168, 255, 0.45);
+
+  /* Border radii */
+  --radius:           6px;
+  --radius-md:        8px;
+  --radius-lg:        10px;
+  --radius-xl:        14px;
+
+  /* Box shadows — cool blue-tinted to match the cosmic palette */
+  --shadow-sm:        0 1px 2px  rgba(  0,  0,  0, 0.40);
+  --shadow-md:        0 4px 12px rgba(  0,  0,  0, 0.50);
+  --shadow-lg:        0 12px 32px rgba(  0,  0,  0, 0.60);
+
+  /* Transition timings */
+  --trans:            150ms ease;
+  --trans-slow:       300ms ease;
+
+  /* Violet glow for milestone elements */
+  --violet-glow:      rgba(123, 108, 246, 0.30);
 }
 
 /* ═══════════════════════════════════════════════════════════
@@ -109,130 +105,208 @@
    Apply at runtime via:
      document.documentElement.dataset.theme = '<name>'
    Available themes:
-     (default — no attribute)  Midnight (deep blue-black, teal accent)
+     (default — no attribute)  Stellar Ops (default — black/blue cosmos)
      graphite                  Charcoal (neutral grey, cyan accent)
      amber                     Hacker amber (CRT-style, orange/yellow)
      sapphire                  Saturated blue (corporate-friendly)
      contrast                  High-contrast (a11y, white/black/yellow)
-     daylight                  Light theme (white surfaces, dark text)
    ═══════════════════════════════════════════════════════════ */
 
 /* ── Graphite — neutral charcoal with cyan accents ───────── */
 [data-theme="graphite"] {
-  --bg-base:      #15171C;
-  --bg-surface:   #1C1F26;
-  --bg-panel:     #252932;
-  --bg-elevated:  #303540;
-  --bg-sidebar:   #131418;
-  --accent:       #38BDF8;    /* cyan as primary */
-  --accent-dim:   #0EA5E9;
-  --accent-glow:  rgba(56, 189, 248, 0.18);
-  --accent-subtle:rgba(56, 189, 248, 0.06);
-  --violet:       #A78BFA;
-  --border:       #2A2F3B;
-  --border-light: #353B49;
-  --border-bright:#454B5C;
-  --text-primary:   #ECF0F8;
-  --text-secondary: #A0A7B8;
-  --text-muted:     #5C6378;
+  /* SURFACE */
+  --bg-base:          #15171C;
+  --bg-void:          #15171C;
+  --bg-surface:       #1F232C;
+  --bg-panel:         #1F232C;
+  --bg-elevated:      #2A2F3C;
+  --bg-glass:         rgba(31, 35, 44, 0.78);
+  --bg-sidebar:       #101218;
+
+  /* BORDERS */
+  --border-dim:       #2A2F3C;
+  --border:           #3A4156;
+  --border-light:     #3A4156;
+  --border-bright:    #4D5670;
+  --border-focus:     var(--accent);
+
+  /* PRIMARY */
+  --accent:           #38BDF8;
+  --accent-dim:       #0EA5E9;
+  --accent-glow:      rgba(56, 189, 248, 0.18);
+  --accent-subtle:    rgba(56, 189, 248, 0.06);
+
+  /* SECONDARY */
+  --cyan:             #38BDF8;
+  --violet:           #8B5CF6;
+  --violet-glow:      rgba(139, 92, 246, 0.30);
+
+  /* TEXT */
+  --text-primary:     #E5E7EB;
+  --text-secondary:   #9CA3AF;
+  --text-muted:       #6B7280;
+
+  /* SEVERITY */
+  --critical:         #EF4444;
+  --high:             #F97316;
+  --medium:           #F59E0B;
+  --amber:            #F59E0B;
+  --low:              #10B981;
+  --info:             var(--accent);
+  --supernova:        #FF4D8F;
+  --critical-bg:      rgba(239,  68,  68, 0.12);
+  --critical-bd:      rgba(239,  68,  68, 0.45);
+  --high-bg:          rgba(249, 115,  22, 0.12);
+  --high-bd:          rgba(249, 115,  22, 0.45);
+  --medium-bg:        rgba(245, 158,  11, 0.12);
+  --medium-bd:        rgba(245, 158,  11, 0.45);
+  --low-bg:           rgba( 16, 185, 129, 0.12);
+  --low-bd:           rgba( 16, 185, 129, 0.45);
+  --info-bg:          rgba( 56, 189, 248, 0.12);
+  --info-bd:          rgba( 56, 189, 248, 0.45);
+
+  /* TYPOGRAPHY (unchanged across themes) */
+  --font-ui:          'Inter', system-ui, sans-serif;
+  --font-display:     'Inter', system-ui, sans-serif;
+  --font-mono:        'JetBrains Mono', 'Courier New', monospace;
 }
 
 /* ── Amber — hacker CRT vibe ─────────────────────────────── */
 [data-theme="amber"] {
-  --bg-base:      #0E0B05;
-  --bg-surface:   #15110A;
-  --bg-panel:     #1F1810;
-  --bg-elevated:  #2A2014;
-  --bg-sidebar:   #0A0703;
-  --accent:       #FFB22A;    /* warm amber */
-  --accent-dim:   #C68A18;
-  --accent-glow:  rgba(255, 178, 42, 0.22);
-  --accent-subtle:rgba(255, 178, 42, 0.06);
-  --violet:       #FF8C42;
-  --cyan:         #FFD68A;
-  --border:       #2B2415;
-  --border-light: #3A3120;
-  --border-bright:#5A4830;
-  --text-primary:   #F5E8C8;
-  --text-secondary: #C9B690;
-  --text-muted:     #6E5F3F;
+  --bg-base:          #0E0B05;
+  --bg-void:          #0E0B05;
+  --bg-surface:       #1A1409;
+  --bg-panel:         #1A1409;
+  --bg-elevated:      #261B0E;
+  --bg-glass:         rgba(26, 20, 9, 0.78);
+  --bg-sidebar:       #080501;
+  --border-dim:       #2A1F0F;
+  --border:           #3D2D14;
+  --border-light:     #3D2D14;
+  --border-bright:    #5C4220;
+  --border-focus:     var(--accent);
+  --accent:           #FFB22A;
+  --accent-dim:       #C68A18;
+  --accent-glow:      rgba(255, 178, 42, 0.22);
+  --accent-subtle:    rgba(255, 178, 42, 0.07);
+  --cyan:             #FFD27A;
+  --violet:           #FF9D52;
+  --violet-glow:      rgba(255, 157, 82, 0.30);
+  --text-primary:     #FFE7B5;
+  --text-secondary:   #B8966A;
+  --text-muted:       #74583A;
+  --critical:         #FF4560;
+  --high:             #FF8C42;
+  --medium:           #FFC83D;
+  --amber:            #FFC83D;
+  --low:              #80E66E;
+  --info:             var(--accent);
+  --supernova:        #FF4D8F;
+  --critical-bg:      rgba(255,  69,  96, 0.12);
+  --critical-bd:      rgba(255,  69,  96, 0.45);
+  --high-bg:          rgba(255, 140,  66, 0.12);
+  --high-bd:          rgba(255, 140,  66, 0.45);
+  --medium-bg:        rgba(255, 200,  61, 0.12);
+  --medium-bd:        rgba(255, 200,  61, 0.45);
+  --low-bg:           rgba(128, 230, 110, 0.12);
+  --low-bd:           rgba(128, 230, 110, 0.45);
+  --info-bg:          rgba(255, 178,  42, 0.12);
+  --info-bd:          rgba(255, 178,  42, 0.45);
+  --font-ui:          'Inter', system-ui, sans-serif;
+  --font-display:     'Inter', system-ui, sans-serif;
+  --font-mono:        'JetBrains Mono', 'Courier New', monospace;
 }
 
 /* ── Sapphire — saturated corporate blue ─────────────────── */
 [data-theme="sapphire"] {
-  --bg-base:      #0A0F1F;
-  --bg-surface:   #11182C;
-  --bg-panel:     #182240;
-  --bg-elevated:  #202D54;
-  --bg-sidebar:   #070C1A;
-  --accent:       #4F8DFD;    /* royal blue */
-  --accent-dim:   #2E66D9;
-  --accent-glow:  rgba(79, 141, 253, 0.22);
-  --accent-subtle:rgba(79, 141, 253, 0.06);
-  --violet:       #9F7CFF;
-  --cyan:         #5BC0EB;
-  --border:       #1F2B4D;
-  --border-light: #2B3A60;
-  --border-bright:#3D4F7B;
-  --text-primary:   #E5EBF8;
-  --text-secondary: #95A1BD;
-  --text-muted:     #4F5A78;
+  --bg-base:          #0A0F1F;
+  --bg-void:          #0A0F1F;
+  --bg-surface:       #131B33;
+  --bg-panel:         #131B33;
+  --bg-elevated:      #1F2949;
+  --bg-glass:         rgba(19, 27, 51, 0.78);
+  --bg-sidebar:       #060A18;
+  --border-dim:       #1F2949;
+  --border:           #344172;
+  --border-light:     #344172;
+  --border-bright:    #4D5BA0;
+  --border-focus:     var(--accent);
+  --accent:           #4F8DFD;
+  --accent-dim:       #2E66D9;
+  --accent-glow:      rgba(79, 141, 253, 0.22);
+  --accent-subtle:    rgba(79, 141, 253, 0.07);
+  --cyan:             #5BA8FF;
+  --violet:           #8B7FFF;
+  --violet-glow:      rgba(139, 127, 255, 0.30);
+  --text-primary:     #E1E8F8;
+  --text-secondary:   #8FA0C8;
+  --text-muted:       #4D5C7E;
+  --critical:         #FF4560;
+  --high:             #FF8C42;
+  --medium:           #FFC83D;
+  --amber:            #FFC83D;
+  --low:              #4ADE80;
+  --info:             var(--accent);
+  --supernova:        #FF4D8F;
+  --critical-bg:      rgba(255,  69,  96, 0.12);
+  --critical-bd:      rgba(255,  69,  96, 0.45);
+  --high-bg:          rgba(255, 140,  66, 0.12);
+  --high-bd:          rgba(255, 140,  66, 0.45);
+  --medium-bg:        rgba(255, 200,  61, 0.12);
+  --medium-bd:        rgba(255, 200,  61, 0.45);
+  --low-bg:           rgba( 74, 222, 128, 0.12);
+  --low-bd:           rgba( 74, 222, 128, 0.45);
+  --info-bg:          rgba( 79, 141, 253, 0.12);
+  --info-bd:          rgba( 79, 141, 253, 0.45);
+  --font-ui:          'Inter', system-ui, sans-serif;
+  --font-display:     'Inter', system-ui, sans-serif;
+  --font-mono:        'JetBrains Mono', 'Courier New', monospace;
 }
 
 /* ── Contrast — accessibility ────────────────────────────── */
 [data-theme="contrast"] {
-  --bg-base:      #000000;
-  --bg-surface:   #0A0A0A;
-  --bg-panel:     #161616;
-  --bg-elevated:  #222222;
-  --bg-sidebar:   #000000;
-  --accent:       #FFE600;    /* high-vis yellow */
-  --accent-dim:   #CCB800;
-  --accent-glow:  rgba(255, 230, 0, 0.30);
-  --accent-subtle:rgba(255, 230, 0, 0.10);
-  --violet:       #FF66CC;
-  --cyan:         #00E5FF;
-  --critical:     #FF3333;
-  --border:       #444444;
-  --border-light: #666666;
-  --border-bright:#888888;
-  --text-primary:   #FFFFFF;
-  --text-secondary: #DDDDDD;
-  --text-muted:     #999999;
-}
-
-/* ── Daylight — light theme ──────────────────────────────── */
-[data-theme="daylight"] {
-  --bg-base:      #F4F6FB;
-  --bg-surface:   #FFFFFF;
-  --bg-panel:     #F0F3F9;
-  --bg-elevated:  #E5EAF2;
-  --bg-sidebar:   #ECEFF5;
-  --accent:       #00A372;    /* darker for white background */
-  --accent-dim:   #007D58;
-  --accent-glow:  rgba(0, 163, 114, 0.18);
-  --accent-subtle:rgba(0, 163, 114, 0.06);
-  --violet:       #5B4EC4;
-  --cyan:         #0EA5E9;
-  --critical:     #DC2626;
-  --high:         #EA580C;
-  --medium:       #CA8A04;
-  --low:          #16A34A;
-  --info:         #0EA5E9;
-  --border:       #D7DDE7;
-  --border-light: #C5CCD8;
-  --border-bright:#A8B0C0;
-  --text-primary:   #0F1422;
-  --text-secondary: #4D556B;
-  --text-muted:     #828B9D;
-  --shadow-sm:     0 1px 3px rgba(15,20,34,0.08);
-  --shadow-md:     0 4px 12px rgba(15,20,34,0.12);
-  --shadow-lg:     0 8px 32px rgba(15,20,34,0.18);
-}
-[data-theme="daylight"] body,
-[data-theme="daylight"] html {
-  background: var(--bg-base);
-  color: var(--text-primary);
+  --bg-base:          #000000;
+  --bg-void:          #000000;
+  --bg-surface:       #0A0A0A;
+  --bg-panel:         #0A0A0A;
+  --bg-elevated:      #161616;
+  --bg-glass:         rgba(10, 10, 10, 0.85);
+  --bg-sidebar:       #000000;
+  --border-dim:       #303030;
+  --border:           #505050;
+  --border-light:     #505050;
+  --border-bright:    #707070;
+  --border-focus:     var(--accent);
+  --accent:           #FFE600;
+  --accent-dim:       #C7B400;
+  --accent-glow:      rgba(255, 230, 0, 0.25);
+  --accent-subtle:    rgba(255, 230, 0, 0.08);
+  --cyan:             #00FFFF;
+  --violet:           #FF00FF;
+  --violet-glow:      rgba(255, 0, 255, 0.30);
+  --text-primary:     #FFFFFF;
+  --text-secondary:   #C0C0C0;
+  --text-muted:       #808080;
+  --critical:         #FF0033;
+  --high:             #FF8000;
+  --medium:           #FFCC00;
+  --amber:            #FFCC00;
+  --low:              #00FF80;
+  --info:             var(--accent);
+  --supernova:        #FF00AA;
+  --critical-bg:      rgba(255,   0,  51, 0.18);
+  --critical-bd:      rgba(255,   0,  51, 0.55);
+  --high-bg:          rgba(255, 128,   0, 0.18);
+  --high-bd:          rgba(255, 128,   0, 0.55);
+  --medium-bg:        rgba(255, 204,   0, 0.18);
+  --medium-bd:        rgba(255, 204,   0, 0.55);
+  --low-bg:           rgba(  0, 255, 128, 0.18);
+  --low-bd:           rgba(  0, 255, 128, 0.55);
+  --info-bg:          rgba(255, 230,   0, 0.18);
+  --info-bd:          rgba(255, 230,   0, 0.55);
+  --font-ui:          'Inter', system-ui, sans-serif;
+  --font-display:     'Inter', system-ui, sans-serif;
+  --font-mono:        'JetBrains Mono', 'Courier New', monospace;
 }
 
 /* All themes share these base smoothing rules */
@@ -1328,4 +1402,575 @@ pre {
 @media (max-width: 1100px) {
   .stat-grid { grid-template-columns: repeat(2, 1fr); }
   .app-content { padding: 12px; }
+}
+
+/* ════════════════════════════════════════════════════════════════════════════
+ *  STELLAR OPS COSMOS LAYERS  (T2 — cockpit chrome)
+ *  --------------------------------------------------------------------------
+ *  Three fixed-position layers that sit BEHIND the entire UI:
+ *    .stellar-starfield  — slowly-drifting tiny white dots
+ *    .stellar-nebula     — distant blue/violet gradient blobs, pulse slowly
+ *    .stellar-beam       — narrow azure light cone descending from top-center
+ *  All pointer-events:none; z-index 0; main UI sits at z-index ≥ 100.
+ * ════════════════════════════════════════════════════════════════════════════
+ */
+
+/* Layer 0 — Stellar Beam (vertical theatrical light from top of viewport) */
+.stellar-beam {
+  position: fixed;
+  top: -10vh;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 800px;
+  height: 110vh;
+  background: linear-gradient(
+    180deg,
+    var(--accent-glow) 0%,
+    transparent 60%
+  );
+  clip-path: polygon(40% 0%, 60% 0%, 100% 100%, 0% 100%);
+  opacity: 0.25;
+  pointer-events: none;
+  z-index: 0;
+  filter: blur(40px);
+}
+
+/* Layer 1 — Starfield via repeating radial gradient */
+.stellar-starfield {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background-image:
+    radial-gradient(1px 1px at 20% 30%, rgba(229,234,246,0.4) 50%, transparent 60%),
+    radial-gradient(1px 1px at 70% 80%, rgba(229,234,246,0.3) 50%, transparent 60%),
+    radial-gradient(1px 1px at 40% 70%, rgba(229,234,246,0.5) 50%, transparent 60%),
+    radial-gradient(1px 1px at 90% 20%, rgba(229,234,246,0.3) 50%, transparent 60%),
+    radial-gradient(1px 1px at 15% 85%, rgba(229,234,246,0.4) 50%, transparent 60%);
+  background-size: 600px 600px, 800px 800px, 500px 500px, 700px 700px, 550px 550px;
+  animation: stellar-drift 240s linear infinite;
+}
+
+/* Layer 2 — Distant nebula gradient blobs */
+.stellar-nebula {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background:
+    radial-gradient(900px 700px at 20% 30%, rgba(79,168,255,0.06) 0%, transparent 50%),
+    radial-gradient(800px 600px at 80% 70%, rgba(123,108,246,0.05) 0%, transparent 50%),
+    radial-gradient(1200px 800px at 50% 50%, rgba(56,229,255,0.04) 0%, transparent 60%);
+  animation: stellar-nebula-drift 60s ease-in-out infinite alternate;
+}
+
+@keyframes stellar-drift {
+  0%   { background-position: 0% 0%, 0% 0%, 0% 0%, 0% 0%, 0% 0%; }
+  100% { background-position: 600px 600px, -800px 800px, 500px -500px, -700px 700px, 550px -550px; }
+}
+
+@keyframes stellar-nebula-drift {
+  0%   { transform: translate(0, 0)   scale(1);    opacity: 1; }
+  100% { transform: translate(2%, -1%) scale(1.05); opacity: 0.85; }
+}
+
+/* Reduced-motion: keep gradients, kill animation */
+@media (prefers-reduced-motion: reduce) {
+  .stellar-starfield,
+  .stellar-nebula { animation: none !important; }
+}
+
+/* ── Ambient panel illumination — utility class ────────────────────────────
+ * Apply to any card/panel container.  Default state: hairline border on
+ * --bg-surface.  On :hover or [data-active="true"], the panel gains an
+ * inset highlight + soft outer glow — like a cockpit panel "powered on".
+ *
+ * Variant .panel-hud adds Mil-spec corner-bracket marks at top-left + bottom-right.
+ */
+
+.panel-ambient {
+  border: 1px solid var(--border-dim);
+  background: var(--bg-surface);
+  border-radius: 6px;
+  transition: border-color 150ms ease-out, box-shadow 150ms ease-out;
+}
+
+.panel-ambient:hover,
+.panel-ambient[data-active="true"] {
+  border-color: var(--border-bright);
+  box-shadow:
+    inset 0 0 0 1px var(--border-bright),
+    0 0 18px var(--accent-glow);
+}
+
+.panel-ambient.panel-hud {
+  position: relative;
+}
+.panel-ambient.panel-hud::before,
+.panel-ambient.panel-hud::after {
+  content: "";
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  border: 1px solid var(--border-bright);
+  pointer-events: none;
+}
+.panel-ambient.panel-hud::before {
+  top: -1px;
+  left: -1px;
+  border-right: none;
+  border-bottom: none;
+}
+.panel-ambient.panel-hud::after {
+  bottom: -1px;
+  right: -1px;
+  border-left: none;
+  border-top: none;
+}
+
+/* ─────────────────── HUD telemetry strip + mission clock ──────────── */
+.hud-telemetry {
+  display: inline-flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 16px;
+  margin: 0 8px;
+}
+.hud-telemetry .bar {
+  width: 3px;
+  background: var(--accent-dim);
+  border-radius: 1px;
+  transition: height 1s ease-out, background 200ms;
+  min-height: 4px;
+}
+.hud-telemetry .bar[data-level="active"] { background: var(--accent); }
+.hud-telemetry .bar[data-level="hot"]    { background: var(--cyan); }
+
+.hud-clock {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-secondary);
+  letter-spacing: 0.5px;
+  margin: 0 12px;
+  white-space: nowrap;
+}
+
+/* ─────────────────── Engagement consumables strip ─────────────────── */
+.hud-consumables {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 28px;
+  background: var(--bg-glass);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border-top: 1px solid var(--border-dim);
+  display: flex;
+  align-items: center;
+  gap: 32px;
+  padding: 0 24px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-secondary);
+  letter-spacing: 0.5px;
+  z-index: 90;
+  cursor: pointer;
+  transition: height 150ms ease-out;
+  user-select: none;
+}
+.hud-consumables[data-collapsed="true"] {
+  height: 8px;
+  overflow: hidden;
+}
+.hud-consumables .gauge {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+}
+.hud-consumables .gauge-bar {
+  width: 100px;
+  height: 4px;
+  background: var(--bg-elevated);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.hud-consumables .gauge-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent), var(--cyan));
+  transition: width 600ms ease-out;
+}
+.hud-consumables .gauge-fill[data-warn="true"] { background: var(--medium); }
+.hud-consumables .gauge-fill[data-crit="true"] { background: var(--critical); }
+@media (max-width: 1024px) {
+  .hud-consumables { gap: 16px; padding: 0 12px; }
+  .hud-consumables .gauge-bar { width: 60px; }
+}
+
+/* ─────────────────── Hub tab-bar ─────────────────── */
+.hub-tabbar {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  border-bottom: 1px solid var(--border-dim);
+  background: transparent;
+  padding: 0 4px;
+  margin-bottom: 14px;
+}
+.hub-tab {
+  padding: 10px 16px;
+  cursor: pointer;
+  color: var(--text-secondary);
+  font-family: var(--font-ui);
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  border-bottom: 2px solid transparent;
+  transition: color 150ms, border-color 150ms;
+  user-select: none;
+}
+.hub-tab:hover { color: var(--text-primary); }
+.hub-tab[data-active="true"] {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+.hub-tabbar[data-single="true"] { display: none; }
+
+/* ════════════════════════════════════════════════════════════════════════════
+ *  STELLAR OPS — MYSTICAL MOTION VOCABULARY  (T3)
+ *  Each class triggers a subtle, deliberate animation that signals an
+ *  agent-engine event without demanding focus.  All wrapped in
+ *  prefers-reduced-motion opt-out at the bottom.
+ * ════════════════════════════════════════════════════════════════════════════
+ */
+
+/* Phase node breathing — used on the currently-active kill-chain phase */
+.motion-breathe {
+  animation: motion-breathe 4s ease-in-out infinite;
+}
+@keyframes motion-breathe {
+  0%, 100% { box-shadow: 0 0 6px var(--accent-subtle); }
+  50%      { box-shadow: 0 0 18px var(--accent-glow); }
+}
+
+/* Subagent / item materialise — 200ms one-shot on mount */
+.motion-materialise {
+  animation: motion-materialise 200ms ease-out;
+}
+@keyframes motion-materialise {
+  0%   { opacity: 0; transform: scale(0.95); }
+  100% { opacity: 1; transform: scale(1.0); }
+}
+
+/* LLM-thinking ring — slow rotating azure outline.  Apply to a
+ * positioned (relative/absolute) parent to anchor the ::after pseudo. */
+.motion-llm-ring {
+  position: relative;
+}
+.motion-llm-ring::after {
+  content: "";
+  position: absolute;
+  inset: -3px;
+  border: 1px solid transparent;
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: motion-rotate-12s 12s linear infinite;
+  pointer-events: none;
+}
+@keyframes motion-rotate-12s {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+
+/* Finding mote — drifts from spawn point to header tally.  Spawn-time
+ * caller sets the --mote-target CSS custom property to translate(...). */
+.motion-mote {
+  position: fixed;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 8px var(--accent-glow);
+  pointer-events: none;
+  z-index: 200;
+  animation: motion-mote-drift 1.6s ease-out forwards;
+}
+.motion-mote[data-sev="critical"] { background: var(--critical); box-shadow: 0 0 8px var(--critical); }
+.motion-mote[data-sev="high"]     { background: var(--high);     box-shadow: 0 0 8px var(--high); }
+.motion-mote[data-sev="medium"]   { background: var(--medium);   box-shadow: 0 0 8px var(--medium); }
+.motion-mote[data-sev="low"]      { background: var(--low);      box-shadow: 0 0 8px var(--low); }
+@keyframes motion-mote-drift {
+  0%   { opacity: 1; transform: translate(0, 0) scale(1); }
+  80%  { opacity: 0.8; }
+  100% { opacity: 0; transform: var(--mote-target, translate(50vw, -40vh)) scale(0.4); }
+}
+
+/* Supernova on critical-finding source.  One 2s flash, never loops. */
+.motion-supernova {
+  animation: motion-supernova 2s ease-out;
+}
+@keyframes motion-supernova {
+  0%   { box-shadow: 0 0 0 0 var(--supernova); }
+  50%  { box-shadow: 0 0 30px 8px var(--supernova); }
+  100% { box-shadow: 0 0 0 0 transparent; }
+}
+
+/* Phase-advance light-trail — apply to the new active phase node briefly. */
+.motion-phase-advance {
+  animation: motion-phase-advance 1.2s ease-out;
+}
+@keyframes motion-phase-advance {
+  0%   { background: var(--bg-surface); }
+  50%  { background: var(--accent-glow); }
+  100% { background: var(--bg-surface); }
+}
+
+/* Operator-Terminal scanline overlay.  Apply to LiveTerminal container. */
+.motion-scanline {
+  position: relative;
+}
+.motion-scanline::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: repeating-linear-gradient(
+    0deg,
+    transparent 0px,
+    transparent 3px,
+    rgba(79,168,255,0.03) 3px,
+    rgba(79,168,255,0.03) 4px
+  );
+  pointer-events: none;
+}
+
+/* Reduced-motion: disable all decorative motion */
+@media (prefers-reduced-motion: reduce) {
+  .motion-breathe,
+  .motion-materialise,
+  .motion-llm-ring::after,
+  .motion-mote,
+  .motion-supernova,
+  .motion-phase-advance {
+    animation: none !important;
+  }
+}
+
+/* ─────────────────── Risk halo + tilted hero (T4) ─────────────────── */
+.halo-wrap {
+  position: relative;
+  display: inline-block;
+  padding: 60px;
+}
+.halo-ring {
+  position: absolute;
+  inset: 0;
+  border: 1px solid var(--border-bright);
+  border-radius: 50%;
+  animation: halo-rotate 60s linear infinite;
+  opacity: 0.5;
+  pointer-events: none;
+}
+.halo-ring.inner { inset: 30px; opacity: 0.7; animation-duration: 45s; animation-direction: reverse; }
+.halo-ring.outer { inset: -10px; opacity: 0.3; animation-duration: 90s; }
+@keyframes halo-rotate {
+  from { transform: rotate(0deg); }
+  to   { transform: rotate(360deg); }
+}
+
+.hero-tilt {
+  perspective: 1200px;
+}
+.hero-tilt > .hero-card {
+  transform: rotateX(8deg);
+  transform-origin: 50% 100%;
+  transition: transform 600ms ease-out;
+}
+@media (max-width: 1024px) {
+  .hero-tilt > .hero-card { transform: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .halo-ring { animation: none !important; }
+}
+
+/* Crosshair section divider */
+.crosshair {
+  position: relative;
+  height: 1px;
+  background: var(--border-dim);
+  margin: 32px 0;
+}
+.crosshair::before {
+  content: "";
+  position: absolute;
+  left: 50%; top: -8px;
+  width: 1px; height: 17px;
+  background: var(--border);
+  transform: translateX(-50%);
+}
+.crosshair::after {
+  content: "";
+  position: absolute;
+  left: 50%; top: 50%;
+  width: 12px; height: 12px;
+  border-radius: 50%;
+  background: var(--bg-base);
+  border: 1px solid var(--border-bright);
+  transform: translate(-50%, -50%);
+}
+
+/* ─────────────────── Mode picker (T5) ─────────────────── */
+.mode-picker-trigger {
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background: var(--bg-panel);
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 1.2px;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: border-color 150ms;
+  margin-right: 6px;
+}
+.mode-picker-trigger:hover { border-color: var(--border-bright); }
+
+.mode-picker-popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  min-width: 280px;
+  padding: 6px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-bright);
+  border-radius: 10px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.6);
+  z-index: 1200;
+}
+.mode-picker-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 10px; border-radius: 7px;
+  cursor: pointer;
+  transition: background 100ms;
+  font-family: var(--font-ui);
+  font-size: 12px;
+}
+.mode-picker-row:hover  { background: var(--accent-subtle); }
+.mode-picker-row.active { background: var(--accent-subtle); color: var(--accent); }
+.mode-picker-shortcut {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-muted);
+}
+.mode-picker-input {
+  width: 100%;
+  padding: 6px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-dim);
+  color: var(--text-primary);
+  font-size: 11px;
+  font-family: var(--font-ui);
+  border-radius: 4px;
+  margin-bottom: 6px;
+}
+
+/* ─────────────────── PRESENT mode adjustments ─────────────────── */
+.argus-root.present-mode .stellar-beam      { opacity: 0.12; }
+.argus-root.present-mode .stellar-nebula    { opacity: 0.5; }
+.argus-root.present-mode .stellar-starfield { opacity: 0.6; }
+.argus-root.present-mode * { animation-duration: 200% !important; }
+
+/* ─────────────────── Boot splash (T6) ─────────────────── */
+.splash {
+  position: fixed;
+  inset: 0;
+  background: var(--bg-base);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  transition: opacity 600ms ease-out;
+}
+.splash[data-hidden="true"] {
+  opacity: 0;
+  pointer-events: none;
+}
+.splash-orbital {
+  position: relative;
+  width: 120px;
+  height: 120px;
+  margin-bottom: 32px;
+}
+.splash-orbital::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border: 1px solid transparent;
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: motion-rotate-12s 4s linear infinite;
+}
+.splash-title {
+  font-size: 24px;
+  letter-spacing: 6px;
+  color: var(--accent);
+  margin-bottom: 4px;
+}
+.splash-subtitle {
+  font-size: 11px;
+  letter-spacing: 4px;
+  color: var(--text-muted);
+  margin-bottom: 32px;
+}
+.splash-status {
+  font-size: 11px;
+  color: var(--text-secondary);
+  min-height: 16px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .splash-orbital::after { animation: none !important; }
+}
+
+/* ─────────────────── Mode transition cross-fade (T6) ─────────────────── */
+.argus-root.mode-transitioning {
+  opacity: 0.4;
+  transition: opacity 300ms ease-in-out;
+}
+.argus-root {
+  transition: opacity 300ms ease-in-out;
+}
+
+/* ─────────────────── Mobile breakpoints (T6) ─────────────────── */
+@media (max-width: 1024px) {
+  .hero-tilt > .hero-card { transform: none; }
+  .hud-consumables { gap: 16px; padding: 0 12px; }
+  .hud-consumables .gauge-bar { width: 60px; }
+}
+@media (max-width: 768px) {
+  .stellar-beam { width: 400px; }
+  .halo-ring.outer { display: none; }
+  .hud-telemetry { display: none; }
+}
+@media (max-width: 480px) {
+  .hud-consumables { display: none; }
+  .halo-ring { display: none; }
+  .hud-clock { display: none; }
+}
+
+/* Universal reduced-motion fallback (final audit) */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

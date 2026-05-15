@@ -252,9 +252,25 @@ def _resolve_agent_or_subagent(identifier: str):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await db.setup(MONGO_URI)
+    # ── LLM provider bootstrap ─────────────────────────────────────────────
+    # Resolve LLM_PROVIDER (ollama | openai-compat | anthropic | gemini | auto)
+    # at startup so the rest of the platform sees a consistent backend.
+    try:
+        from utils.llm_providers import get_provider, set_provider_auto, PROVIDER
+        _prov = get_provider()
+        if PROVIDER == "auto":
+            _prov = await set_provider_auto()
+        _ok, _msg, _ = await _prov.check_available()
+        _provider_line = f"  LLM    : {_prov.name} / {_prov.model} — {'OK' if _ok else 'OFFLINE'}"
+        _provider_detail = f"           {_msg}"
+    except Exception as _exc:
+        _provider_line = f"  LLM    : provider bootstrap failed: {_exc}"
+        _provider_detail = ""
     print("=" * 65)
     print("  ARGUS — Advanced Reconnaissance & Guided Unified Security")
-    print(f"  Ollama : {OLLAMA_URL}")
+    print(_provider_line)
+    if _provider_detail:
+        print(_provider_detail)
     print(f"  MCP    : {MCP_URL}")
     print(f"  Mongo  : {MONGO_URI}")
     print("=" * 65)
@@ -333,6 +349,37 @@ async def create_session(body: StartPentestRequest):
         mission_brief      = mission_brief.dict() if hasattr(mission_brief, "dict") else mission_brief,
     )
 
+    # ── Crash-logger for fire-and-forget scan tasks ─────────────────────────
+    # Without this, any unhandled exception inside master.run() or
+    # orchestrator.run() is silently swallowed (asyncio logs a "Task
+    # exception was never retrieved" warning to stderr and the scan dies
+    # invisibly — looks like "the server stopped").  This callback logs
+    # the full traceback AND broadcasts a scan_crashed event so the UI
+    # can show the operator what went wrong.
+    def _on_scan_task_done(sid: str):
+        def _cb(t: "asyncio.Task"):
+            if t.cancelled():
+                return
+            exc = t.exception()
+            if exc is None:
+                return
+            import logging as _l, traceback as _tb
+            tb_str = "".join(_tb.format_exception(type(exc), exc, exc.__traceback__))
+            _l.getLogger("agent_server").error(
+                "Scan task for session %s crashed: %s\n%s", sid, exc, tb_str
+            )
+            # Best-effort broadcast so the UI surfaces the crash instead
+            # of just freezing on "early stages" with no explanation.
+            try:
+                asyncio.create_task(ws_manager.broadcast_raw(
+                    sid, "scan_crashed",
+                    {"error": str(exc), "type": type(exc).__name__,
+                     "traceback": tb_str[-2000:]},
+                ))
+            except Exception:
+                pass
+        return _cb
+
     if session_mode == SessionMode.SINGLE:
         # ── Original single-host path — zero behaviour change ──────────────
         master = MasterAgent(broadcast=broadcast)
@@ -354,6 +401,7 @@ async def create_session(body: StartPentestRequest):
         active_agents[session_id] = orchestrator
         task = asyncio.create_task(orchestrator.run())
 
+    task.add_done_callback(_on_scan_task_done(session_id))
     active_tasks[session_id] = task
 
     # Pre-create ShellAgent for this session

@@ -19,9 +19,43 @@ Key design decisions
 from __future__ import annotations
 
 import asyncio
+import os
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable, Coroutine, Dict, List, Optional, TYPE_CHECKING
+
+
+# ── Meta-agent review timeouts ──────────────────────────────────────────────
+# The Expert (RedTeamExpertAgent) and MasterChecker pre/post-phase reviews
+# each fire one LLM call.  On slow local models (xploiter/the-xploiter,
+# deepseek-v3.1:671b-cloud on CPU) these can take 5-8 minutes each and would
+# BLOCK every phase transition.  These ceilings let the actual scan continue
+# if a meta-review stalls — the review is advisory, the scan is essential.
+#
+# Override with env vars when running on a fast model (e.g. GPU).  Setting
+# them to a very large number (e.g. 99999) effectively disables the cap.
+_META_PRE_TIMEOUT  = int(os.environ.get("EXPERT_PREREVIEW_TIMEOUT_SEC",  "120"))
+_META_POST_TIMEOUT = int(os.environ.get("EXPERT_POSTREVIEW_TIMEOUT_SEC", "120"))
+
+
+async def _meta_review_with_timeout(coro, *, label: str, timeout: int,
+                                    emit_reasoning):
+    """Run a meta-agent review with a hard ceiling.
+
+    On TimeoutError, cancel the coroutine, emit a clear reasoning line,
+    and return None so the caller proceeds with the actual scan instead
+    of blocking on a slow model.  All other exceptions are re-raised so
+    the existing try/except handlers around each call site keep working.
+    """
+    try:
+        return await asyncio.wait_for(coro, timeout=timeout)
+    except asyncio.TimeoutError:
+        await emit_reasoning(
+            f"[meta] {label} timed out after {timeout}s — proceeding without it. "
+            f"Set {('EXPERT_PREREVIEW_TIMEOUT_SEC' if 'pre' in label else 'EXPERT_POSTREVIEW_TIMEOUT_SEC')}=N "
+            f"to allow a slower model."
+        )
+        return None
 
 if TYPE_CHECKING:
     from agents.master_agent import MasterAgent
@@ -438,7 +472,6 @@ class ReasoningLoop:
 
                 await self._emit_status("No more actions available — loop complete", "DONE")
                 break
-                continue
 
             # ── CONFIRMATION GATE ────────────────────────────────────────
             if action.requires_confirmation:
@@ -1991,11 +2024,18 @@ class ReasoningLoop:
         pre_peer_corrections = []
 
         # ── EXPERT: pre-phase directive (runs FIRST, sets mission context) ─
+        # Wrapped in a hard timeout so a slow LLM (xploiter, deepseek 671b on
+        # CPU, etc.) can't block the actual scan.  The directive is advisory.
         if ex_enabled:
             try:
-                await ex.pre_phase_directive(
-                    phase          = phase_slug,
-                    intel_snapshot = dict(self._intel),
+                await _meta_review_with_timeout(
+                    ex.pre_phase_directive(
+                        phase          = phase_slug,
+                        intel_snapshot = dict(self._intel),
+                    ),
+                    label          = f"expert.pre_phase_directive({phase_slug})",
+                    timeout        = _META_PRE_TIMEOUT,
+                    emit_reasoning = self._emit_reasoning,
                 )
             except Exception as e:
                 await self._emit_reasoning(f"[expert] pre_phase_directive({phase_slug}) error: {e}")
@@ -2003,10 +2043,15 @@ class ReasoningLoop:
         # ── META: pre-phase review (Master Checker) ───────────────
         if mc_enabled:
             try:
-                _pre_c = await mc.pre_phase_review(
-                    phase          = phase_slug,
-                    instructions   = [],
-                    intel_snapshot = dict(self._intel),
+                _pre_c = await _meta_review_with_timeout(
+                    mc.pre_phase_review(
+                        phase          = phase_slug,
+                        instructions   = [],
+                        intel_snapshot = dict(self._intel),
+                    ),
+                    label          = f"master_checker.pre_phase_review({phase_slug})",
+                    timeout        = _META_PRE_TIMEOUT,
+                    emit_reasoning = self._emit_reasoning,
                 )
                 pre_peer_corrections = _pre_c or []
                 if _pre_c and hasattr(self._master, "_handle_corrections"):
@@ -2037,18 +2082,28 @@ class ReasoningLoop:
                 except Exception:
                     pass
 
-                _post_c = await mc.post_phase_review(
-                    phase          = phase_slug,
-                    executed_tools = list(self._intel.get("raw_outputs", {}).keys()),
-                    findings       = phase_findings,
-                    intel_delta    = {},
+                _post_c = await _meta_review_with_timeout(
+                    mc.post_phase_review(
+                        phase          = phase_slug,
+                        executed_tools = list(self._intel.get("raw_outputs", {}).keys()),
+                        findings       = phase_findings,
+                        intel_delta    = {},
+                    ),
+                    label          = f"master_checker.post_phase_review({phase_slug})",
+                    timeout        = _META_POST_TIMEOUT,
+                    emit_reasoning = self._emit_reasoning,
                 )
                 if iv:
                     try:
-                        _val_c = await iv.validate_phase_findings(
-                            phase           = phase_slug,
-                            all_findings    = phase_findings,
-                            scan_objectives = self._intel.get("ctf_objectives", []),
+                        _val_c = await _meta_review_with_timeout(
+                            iv.validate_phase_findings(
+                                phase           = phase_slug,
+                                all_findings    = phase_findings,
+                                scan_objectives = self._intel.get("ctf_objectives", []),
+                            ),
+                            label          = f"validator.validate_phase_findings({phase_slug})",
+                            timeout        = _META_POST_TIMEOUT,
+                            emit_reasoning = self._emit_reasoning,
                         )
                         _post_c = (_post_c or []) + (_val_c or [])
                     except Exception as e:
@@ -2083,11 +2138,16 @@ class ReasoningLoop:
                 except Exception:
                     pass
 
-                expert_corrs = await ex.post_phase_directive(
-                    phase            = phase_slug,
-                    intel_snapshot   = dict(self._intel),
-                    findings         = phase_findings_ex,
-                    peer_corrections = peer_all,
+                expert_corrs = await _meta_review_with_timeout(
+                    ex.post_phase_directive(
+                        phase            = phase_slug,
+                        intel_snapshot   = dict(self._intel),
+                        findings         = phase_findings_ex,
+                        peer_corrections = peer_all,
+                    ),
+                    label          = f"expert.post_phase_directive({phase_slug})",
+                    timeout        = _META_POST_TIMEOUT,
+                    emit_reasoning = self._emit_reasoning,
                 )
                 # Expert's own peer-review corrections flow through _handle_corrections
                 # as advisory guidance too (never blocking by default).

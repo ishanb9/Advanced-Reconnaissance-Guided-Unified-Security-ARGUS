@@ -18,6 +18,24 @@ function PhaseTimeline(props) {
   var completed = props.phasesCompleted || props.completed  || [];
   var compact   = props.compact || false;
 
+  // Track most-recent active-phase change to drive 1.2s phase-advance flash.
+  var _useState  = (typeof React !== 'undefined' && React.useState)  ? React.useState  : null;
+  var _useEffect = (typeof React !== 'undefined' && React.useEffect) ? React.useEffect : null;
+  var recentlyAdvanced = null;
+  var setRecentlyAdvanced = function() {};
+  if (_useState && _useEffect) {
+    var _ra = _useState(null);
+    recentlyAdvanced = _ra[0];
+    setRecentlyAdvanced = _ra[1];
+    _useEffect(function() {
+      if (active) {
+        setRecentlyAdvanced(active);
+        var id = setTimeout(function() { setRecentlyAdvanced(null); }, 1200);
+        return function() { clearTimeout(id); };
+      }
+    }, [active]);
+  }
+
   function getState(key) {
     if (!key) return 'pending';
     if (completed && completed.includes(key)) return 'done';
@@ -41,8 +59,12 @@ function PhaseTimeline(props) {
       _PT_PHASES.map(function(phase) {
         var state = getState(phase.key);
         var c = COLORS[state] || COLORS.pending;
+        var _cls = 'phase-node' +
+          (state === 'active' ? ' motion-breathe' : '') +
+          (recentlyAdvanced === phase.key && state === 'active' ? ' motion-phase-advance' : '');
         return React.createElement('div', {
           key: phase.key,
+          className: _cls,
           style: {
             display: 'flex', alignItems: 'center', gap: 4,
             padding: '3px 8px', fontSize: 10, whiteSpace: 'nowrap',
@@ -77,8 +99,12 @@ function PhaseTimeline(props) {
       var dotColor = isDone ? 'var(--cyan)' : isAct ? 'var(--low)' : 'var(--border)';
       var txtColor = isDone ? 'var(--cyan)' : isAct ? 'var(--low)' : 'var(--text-muted)';
 
+      var _cls = 'phase-node' +
+        (isAct ? ' motion-breathe' : '') +
+        (recentlyAdvanced === phase.key && isAct ? ' motion-phase-advance' : '');
       return React.createElement('div', {
         key: phase.key,
+        className: _cls,
         style: { display: 'flex', alignItems: 'flex-start', gap: 10 }
       },
         // Dot + line

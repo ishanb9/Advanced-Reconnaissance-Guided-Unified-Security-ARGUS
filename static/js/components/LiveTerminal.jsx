@@ -13,6 +13,7 @@ function LiveTerminal({ lines = [], height = 280, agentColor = 'var(--green)', t
   }, [lines.length]);
 
   return React.createElement('div', {
+    className: 'motion-scanline',
     style: {
       height,
       overflowY:   'auto',

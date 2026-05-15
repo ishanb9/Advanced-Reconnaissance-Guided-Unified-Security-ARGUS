@@ -30,6 +30,39 @@ function fmtHHMM(ts) {
   return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
 }
 
+// ── Safe stringification helper ──────────────────────────────────────────────
+// Renders ANY backend payload to a human-readable string for use as a React
+// child.  Backend events occasionally ship objects (e.g. attack-path or
+// chain objects with {path, confidence, …}) where the UI expects a string;
+// without this helper that triggers React error #31 ("Objects are not valid
+// as a React child") and the entire page bombs out.
+function safeText(v, maxLen = 240) {
+  if (v == null) return '';
+  if (typeof v === 'string') return v;
+  if (typeof v === 'number' || typeof v === 'boolean') return String(v);
+  // Pull a sensible human label out of common object shapes
+  if (Array.isArray(v)) return v.map(x => safeText(x, 60)).filter(Boolean).join(' → ');
+  if (typeof v === 'object') {
+    const cand =
+      v.text || v.description || v.label || v.title || v.action ||
+      v.technique || v.step || v.message || v.summary;
+    if (typeof cand === 'string') return cand;
+    // path is often an array of node ids
+    if (Array.isArray(v.path)) {
+      const conf = typeof v.confidence === 'number'
+        ? ` (${Math.round(v.confidence * 100)}%)` : '';
+      return v.path.map(x => safeText(x, 60)).join(' → ') + conf;
+    }
+    try {
+      const s = JSON.stringify(v);
+      return s.length > maxLen ? s.slice(0, maxLen) + '…' : s;
+    } catch {
+      return '[object]';
+    }
+  }
+  return String(v);
+}
+
 const PHASES = [
   { key: 'recon',        label: 'Recon',        icon: '🔍' },
   { key: 'vuln_id',      label: 'Vuln ID',      icon: '🔬' },
@@ -323,7 +356,14 @@ function PlanStepCard({ step, index, isOptimal }) {
 function AttackPhasePanel({ planSteps, currentPhase, attackTree, phasesCompleted, hypothesis, assessmentType }) {
   const [tab, setTab] = useState('steps'); // 'steps' | 'tree' | 'gantt'
   const optimal = attackTree?.optimal_path || [];
-  const optimalSet = new Set(optimal);
+  // Backend can ship optimal_path as strings OR objects.  optimalSet is
+  // used downstream with `optimalSet.has(step.id)` (a string), so normalise
+  // each entry to its node-id string before building the lookup set.
+  const optimalSet = new Set(optimal.map(e =>
+    (e && typeof e === 'object')
+      ? (e.id || e.node_id || (Array.isArray(e.path) ? e.path[e.path.length - 1] : null))
+      : e
+  ).filter(Boolean));
 
   // ── Step timing tracking ─────────────────────────────────────────────────
   // Records wall-clock start/end for each step as status changes arrive.
@@ -405,7 +445,10 @@ function AttackPhasePanel({ planSteps, currentPhase, attackTree, phasesCompleted
       )
     ),
 
-    // Hypothesis banner (shown when plan is ready but tree not yet)
+    // Hypothesis banner (shown when plan is ready but tree not yet).
+    // hypothesis is sometimes a string and sometimes an object like
+    // {path, confidence, statement, ...}; safeText() handles both shapes
+    // so we never trip React error #31 here.
     hypothesis && React.createElement('div', {
       style: {
         marginBottom: 10, padding: '8px 12px', borderRadius: 6,
@@ -417,7 +460,7 @@ function AttackPhasePanel({ planSteps, currentPhase, attackTree, phasesCompleted
       React.createElement('span', { style: { flexShrink: 0 } }, '💡'),
       React.createElement('div', null,
         React.createElement('span', { style: { fontWeight: 700, marginRight: 6 } }, 'Master hypothesis:'),
-        hypothesis
+        safeText(hypothesis)
       )
     ),
 
@@ -508,19 +551,29 @@ function AttackPhasePanel({ planSteps, currentPhase, attackTree, phasesCompleted
     tab === 'tree' && React.createElement('div', null,
       attackTree?.assessment_summary && React.createElement('div', {
         style: { fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.6, marginBottom: 12, padding: '8px 12px', borderRadius: 6, background: 'var(--bg-base)', border: '1px solid var(--border)' }
-      }, attackTree.assessment_summary),
+      }, safeText(attackTree.assessment_summary)),
 
       // Optimal chain
       optimal.length > 0 && React.createElement('div', { style: { marginBottom: 12 } },
         React.createElement('div', { style: { fontSize: 9, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: 1, marginBottom: 8 } }, '⭐ Optimal Attack Chain'),
         React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' } },
-          ...optimal.map((nid, i) => {
+          ...optimal.map((entry, i) => {
+            // Backend may ship either a string node-id OR an object like
+            // {path:[...], confidence:0.7}.  Normalise to a string id used
+            // for graph lookup + a fallback label for display.
+            const nid = (entry && typeof entry === 'object')
+              ? (entry.id || entry.node_id || (Array.isArray(entry.path) ? entry.path[entry.path.length - 1] : null) || `step_${i}`)
+              : entry;
             const node = (attackTree.attack_nodes || []).find(n => n.id === nid) || {};
             const status = planSteps.find(s => s.id === nid)?.status || 'pending';
             const stCol  = STEP_STATUS[status]?.color || 'var(--border-bright)';
+            const labelText = safeText(
+              node.technique || node.step || (entry && typeof entry === 'object' ? entry : nid),
+              24
+            ).slice(0, 24);
             return [
               React.createElement('div', {
-                key: nid,
+                key: typeof nid === 'string' ? nid : `step_${i}`,
                 style: {
                   padding: '6px 12px', borderRadius: 6,
                   border: `1px solid ${stCol}60`,
@@ -531,7 +584,7 @@ function AttackPhasePanel({ planSteps, currentPhase, attackTree, phasesCompleted
                 React.createElement('div', { style: { fontSize: 8, color: stCol, fontFamily: 'var(--font-mono)', marginBottom: 3 } },
                   node.mitre_id || `${i+1}`),
                 React.createElement('div', { style: { fontSize: 10, color: 'var(--text-primary)', fontWeight: 600 } },
-                  (node.technique || node.step || nid).slice(0, 24)),
+                  labelText),
                 React.createElement('div', { style: { fontSize: 9, color: 'var(--text-muted)', marginTop: 2 } },
                   STEP_STATUS[status]?.icon + ' ' + (STEP_STATUS[status]?.label || ''))
               ),
@@ -553,12 +606,12 @@ function AttackPhasePanel({ planSteps, currentPhase, attackTree, phasesCompleted
               style: { padding: '8px 12px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--bg-base)' }
             },
               React.createElement('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 } },
-                React.createElement('span', { style: { fontSize: 11, fontWeight: 600, color: 'var(--text-secondary)' } }, ch.description || `Chain ${i+1}`),
+                React.createElement('span', { style: { fontSize: 11, fontWeight: 600, color: 'var(--text-secondary)' } }, safeText(ch.description) || `Chain ${i+1}`),
                 React.createElement('span', { style: { fontSize: 10, color: ch.combined_probability >= 0.6 ? 'var(--green)' : 'var(--amber)', fontFamily: 'var(--font-mono)' } },
                   `${Math.round((ch.combined_probability || 0) * 100)}%`)
               ),
               React.createElement('div', { style: { fontSize: 10, color: 'var(--text-muted)' } },
-                `Entry: ${ch.entry_point || '?'} → Objective: ${ch.objective || '?'}`)
+                `Entry: ${safeText(ch.entry_point) || '?'} → Objective: ${safeText(ch.objective) || '?'}`)
             )
           )
         )
@@ -571,7 +624,7 @@ function AttackPhasePanel({ planSteps, currentPhase, attackTree, phasesCompleted
           (attackTree.immediate_actions || []).map((action, i) =>
             React.createElement('div', { key: i, style: { fontSize: 11, color: 'var(--text-secondary)', display: 'flex', gap: 8 } },
               React.createElement('span', { style: { color: 'var(--cyan)', fontFamily: 'var(--font-mono)', flexShrink: 0 } }, `${i+1}.`),
-              action
+              safeText(action)
             )
           )
         )
@@ -716,6 +769,7 @@ function AgentCard({ name, status = 'idle', phase, message, onClick }) {
   const dotColor = statusColors[status] || 'var(--border-bright)';
 
   return React.createElement('div', {
+    className: 'motion-materialise',
     onClick,
     onMouseEnter: () => setHov(true),
     onMouseLeave: () => setHov(false),
@@ -1318,7 +1372,7 @@ function OperatorQABanner({ questions, sessionId, dispatch }) {
 }
 
 // ── Main MissionControl ──────────────────────────────────────────────────────
-function MissionControl() {
+function MissionControl(props) {
   const { state, dispatch } = window.useStore();
   const {
     activeSession, agents, currentPhase, phasesCompleted,
@@ -1329,7 +1383,10 @@ function MissionControl() {
     webConfirmPending, phaseTimeExtension,
     reasoningEngineActive, reasoningIteration, hypotheses, actionScore,
     operatorQuestions, engagementContext,
+    agentComms,
   } = state;
+  const vm = (props && props.viewMode) || 'OPERATOR';
+  const fontScale = vm === 'BRIEFING' ? 16 : 14;
 
   const [confirmVisible, setConfirmVisible] = useState(false);
   const [focusedAgent,   setFocusedAgent]   = useState('master');
@@ -1428,7 +1485,67 @@ function MissionControl() {
   const s = (v, d = 0) => v || d;
   const agentColor = (name) => (AGENT_META[name] || {}).color || 'var(--text-muted)';
 
+  // ── Synthesized output stream ────────────────────────────────────────────
+  // When the focused agent hasn't run any tools yet, fall back to its LLM /
+  // RAG comm history + feed-entry trail so the operator sees what the agent
+  // is actually doing (e.g. "Consulting LLM…" for 8 minutes during the
+  // initial xploiter planning call).  Before this, the output panel just
+  // said "— no output —" until a tool fired, which made the scan look dead.
+  const focusedComms = (agentComms && agentComms[focusedAgent]) || [];
+  const focusedFeed  = (feedEntries || [])
+    .filter(e => (e.agent || 'master') === focusedAgent)
+    .slice(-50);
+
+  function _commToLine(c) {
+    if (!c) return null;
+    const ts = c.ts ? new Date(c.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }) : '';
+    if (c.type === 'llm') {
+      const resp = (typeof c.response === 'string' ? c.response : safeText(c.response)) || '';
+      const preview = resp.replace(/\s+/g, ' ').slice(0, 180);
+      const phase = c.phase ? ` ${c.phase}` : '';
+      return { line: `${ts} [LLM${phase}] ${preview || '(thinking…)'}`, type: 'llm' };
+    }
+    if (c.type === 'rag') {
+      const hits = c.found ? '✓' : '∅';
+      const q = (typeof c.query === 'string' ? c.query : safeText(c.query)).slice(0, 120);
+      return { line: `${ts} [RAG ${hits}] ${q}`, type: 'rag' };
+    }
+    return null;
+  }
+
+  function _feedToLine(e) {
+    if (!e) return null;
+    const ts = e.ts ? (typeof e.ts === 'string' ? e.ts : new Date(e.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })) : '';
+    const msg = (typeof e.message === 'string' ? e.message : safeText(e.message)) || '';
+    if (!msg) return null;
+    return { line: `${ts} ${msg}`, type: 'event' };
+  }
+
+  // Compose the visible stream — prefer real tool output when it exists,
+  // otherwise stitch LLM/RAG comms + feed activity in chronological order.
+  let visibleLines;
+  if (focusedLines.length > 0) {
+    visibleLines = focusedLines;
+  } else {
+    const stitched = [];
+    // agentComms is newest-first; reverse for chronological top-to-bottom
+    for (let i = focusedComms.length - 1; i >= 0; i--) {
+      const item = _commToLine(focusedComms[i]);
+      if (item) stitched.push(item);
+    }
+    focusedFeed.forEach(e => {
+      const item = _feedToLine(e);
+      if (item) stitched.push(item);
+    });
+    visibleLines = stitched;
+  }
+
   return React.createElement('div', {
+    'data-view-mode': vm,
+    className: vm === 'CLIENT' ? 'client-mode' : undefined,
+    style: { fontSize: fontScale, height: '100%' },
+  },
+   React.createElement('div', {
     style: { padding: 16, height: '100%', overflowY: 'auto', background: 'var(--bg-base,#0a0a0a)' }
   },
 
@@ -1656,11 +1773,11 @@ function MissionControl() {
           const barColor = conf >= 70 ? 'var(--green)' : conf >= 40 ? 'var(--amber)' : 'var(--red)';
           return React.createElement(React.Fragment, null,
             React.createElement('div', { style: { fontSize: 12, fontWeight: 600, color: 'var(--text-primary)', marginBottom: 6, lineHeight: 1.4 } },
-              topH.description || topH.title || 'Unnamed hypothesis'
+              safeText(topH.description || topH.title) || 'Unnamed hypothesis'
             ),
             topH.mitre_technique && React.createElement('div', {
               style: { display: 'inline-block', padding: '2px 6px', borderRadius: 4, background: 'rgba(0,229,160,0.1)', color: 'var(--accent)', fontSize: 9, fontWeight: 700, letterSpacing: 0.5, marginBottom: 8 }
-            }, topH.mitre_technique),
+            }, safeText(topH.mitre_technique)),
             React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6 } },
               React.createElement('div', { style: { flex: 1, height: 5, background: 'var(--bg-card)', borderRadius: 3, overflow: 'hidden' } },
                 React.createElement('div', { style: { width: `${conf}%`, height: '100%', background: barColor, borderRadius: 3, transition: 'width 0.4s ease' } })
@@ -1768,6 +1885,9 @@ function MissionControl() {
       assessmentType:  planAssessment,
     }),
 
+    // ── Crosshair section divider ─────────────────────────────────────────
+    React.createElement('div', { className: 'crosshair' }),
+
     // Agent Communications → see Analysis › 🔬 AI Observability
 
     // ── Agent grid + terminal ─────────────────────────────────────────────
@@ -1826,13 +1946,23 @@ function MissionControl() {
         React.createElement('div', {
           style: { flex: 1, overflowY: 'auto', fontFamily: 'var(--font-mono)', fontSize: 10.5, lineHeight: 1.65, maxHeight: 280, padding: '10px 14px' }
         },
-          focusedLines.length === 0
-            ? React.createElement('span', { style: { color: 'var(--text-muted)', opacity: 0.4 } }, '— no output —')
-            : focusedLines.slice(-300).map((l, i) =>
+          visibleLines.length === 0
+            ? React.createElement('span', { style: { color: 'var(--text-muted)', opacity: 0.4 } },
+                focusedLines.length === 0 && focusedComms.length === 0
+                  ? '— no output yet (waiting for tool / LLM activity) —'
+                  : '— no output —')
+            : visibleLines.slice(-300).map((l, i) =>
                 React.createElement('div', {
                   key: i,
-                  style: { color: l.type === 'stderr' ? 'var(--critical)' : l.line?.startsWith('[') ? 'var(--medium)' : '#8FC6A8', wordBreak: 'break-all' }
-                }, l.line)
+                  style: {
+                    color: l.type === 'stderr'  ? 'var(--critical)'
+                         : l.type === 'llm'     ? 'var(--cyan)'
+                         : l.type === 'rag'     ? 'var(--amber)'
+                         : l.type === 'event'   ? 'var(--text-muted)'
+                         : l.line?.startsWith('[') ? 'var(--medium)' : '#8FC6A8',
+                    wordBreak: 'break-all',
+                  }
+                }, safeText(l.line))
               )
         )
       )
@@ -2027,6 +2157,7 @@ function MissionControl() {
 
     // ── Ask Bar (bottom-left, always available during active session) ─────
     React.createElement(AskBar, { sessionId: activeSession && activeSession.id })
+   )
   );
 }
 

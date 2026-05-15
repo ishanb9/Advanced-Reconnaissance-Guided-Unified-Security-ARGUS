@@ -1,5 +1,5 @@
 // StatusBadge — system/agent status indicator
-function StatusBadge({ status, label, size = 'sm' }) {
+function StatusBadge({ status, label, size = 'sm', pulseSupernova }) {
   const colors = {
     online:   'var(--green)',
     running:  'var(--green)',
@@ -14,8 +14,10 @@ function StatusBadge({ status, label, size = 'sm' }) {
   };
   const color = colors[status] || colors.unknown;
   const text  = label || status || 'unknown';
+  const cls   = 'status-badge' + (pulseSupernova ? ' motion-supernova' : '');
 
   return React.createElement('span', {
+    className: cls,
     style: {
       display:     'inline-flex',
       alignItems:  'center',
@@ -23,6 +25,7 @@ function StatusBadge({ status, label, size = 'sm' }) {
       fontSize:    size === 'sm' ? 10 : 12,
       color,
       fontFamily:  'var(--font-mono)',
+      borderRadius: 4,
     }
   },
     React.createElement('span', {

@@ -62,11 +62,23 @@ def _parse_corrections(
             raw = raw[4:]
     raw = raw.strip()
 
+    items = None
     try:
         items = json.loads(raw)
-        if not isinstance(items, list):
-            return []
     except json.JSONDecodeError:
+        try:
+            from utils.json_tolerant import parse_lossy
+            parsed, repairs = parse_lossy(raw)
+            if parsed is not None:
+                items = parsed
+                if repairs:
+                    logger.info(
+                        "[issue_validator] recovered JSON via repairs: %s",
+                        ", ".join(repairs[-3:]),
+                    )
+        except Exception:
+            pass
+    if not isinstance(items, list):
         logger.warning("[issue_validator] Failed to parse LLM response: %s", raw[:200])
         return []
 

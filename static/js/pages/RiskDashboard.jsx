@@ -21,30 +21,6 @@
 
 const { useMemo, useState, useEffect } = React;
 
-// ─── Tokens (subset of app.jsx) ──────────────────────────────
-const T = {
-  bgBase:       '#0D0E14',
-  bgSurface:    '#13151E',
-  bgPanel:      '#1A1D28',
-  bgElevated:   '#222638',
-  accent:       '#00E5A0',
-  violet:       '#7B6CF6',
-  cyan:         '#38BDF8',
-  amber:        '#F5C842',
-  critical:     '#FF4560',
-  high:         '#FF8C42',
-  medium:       '#F5C842',
-  low:          '#4ADE80',
-  info:         '#38BDF8',
-  border:       '#1E2236',
-  borderLight:  '#262B40',
-  textPrimary:  '#E2E8F4',
-  textSecondary:'#8892AA',
-  textMuted:    '#4A5168',
-  fontUI:       "'Inter', system-ui, sans-serif",
-  fontMono:     "'JetBrains Mono', 'Courier New', monospace",
-};
-
 // Severity → numeric weight for risk score
 const SEV_WEIGHT = { critical: 25, high: 12, medium: 5, low: 2, info: 0 };
 
@@ -89,11 +65,11 @@ function calcRiskScore(summary) {
 }
 
 function riskBand(score) {
-  if (score >= 70) return { label: 'CRITICAL', color: T.critical };
-  if (score >= 40) return { label: 'HIGH',     color: T.high };
-  if (score >= 15) return { label: 'MEDIUM',   color: T.medium };
-  if (score > 0)   return { label: 'LOW',      color: T.low };
-  return            { label: 'BASELINE', color: T.textMuted };
+  if (score >= 70) return { label: 'CRITICAL', color: 'var(--critical)' };
+  if (score >= 40) return { label: 'HIGH',     color: 'var(--high)' };
+  if (score >= 15) return { label: 'MEDIUM',   color: 'var(--medium)' };
+  if (score > 0)   return { label: 'LOW',      color: 'var(--low)' };
+  return            { label: 'BASELINE', color: 'var(--text-muted)' };
 }
 
 // ─── Risk gauge (semi-circle SVG) ─────────────────────────────
@@ -105,45 +81,52 @@ function RiskGauge({ score, summary }) {
   const dash = pct * circ;
 
   return React.createElement('div', {
+    className: 'hero-card panel-ambient panel-hud',
     style: {
-      background: T.bgSurface,
-      border: `1px solid ${T.borderLight}`,
+      background: 'var(--bg-surface)',
+      border: `1px solid ${'var(--border)'}`,
       borderRadius: 14, padding: 22,
       display: 'flex', flexDirection: 'column', alignItems: 'center',
     }
   },
     React.createElement('div', {
-      style: { fontSize: 11, letterSpacing: 1.5, color: T.textMuted,
+      style: { fontSize: 11, letterSpacing: 1.5, color: 'var(--text-muted)',
                textTransform: 'uppercase', fontWeight: 700, marginBottom: 14 }
     }, 'Aggregate Risk Score'),
 
-    // SVG semicircle gauge
-    React.createElement('svg', {
-      width: 240, height: 130, viewBox: '0 0 240 130',
-    },
-      // Background arc
-      React.createElement('path', {
-        d: 'M 20 120 A 100 100 0 0 1 220 120',
-        stroke: T.borderLight, strokeWidth: 14, fill: 'none', strokeLinecap: 'round',
-      }),
-      // Foreground arc — colored by band
-      React.createElement('path', {
-        d: 'M 20 120 A 100 100 0 0 1 220 120',
-        stroke: band.color, strokeWidth: 14, fill: 'none', strokeLinecap: 'round',
-        strokeDasharray: `${dash} ${circ}`,
-        style: { transition: 'stroke-dasharray 0.6s ease, stroke 0.3s ease',
-                 filter: `drop-shadow(0 0 8px ${band.color}66)` },
-      }),
-      // Score number
-      React.createElement('text', {
-        x: 120, y: 100, textAnchor: 'middle',
-        fontFamily: T.fontMono, fontSize: 36, fontWeight: 700, fill: band.color,
-      }, Math.round(score)),
-      // /100 suffix
-      React.createElement('text', {
-        x: 120, y: 122, textAnchor: 'middle',
-        fontFamily: T.fontMono, fontSize: 12, fill: T.textMuted,
-      }, '/ 100'),
+    // SVG semicircle gauge wrapped in halo (3 concentric rotating rings)
+    React.createElement('div', { className: 'halo-wrap' },
+      React.createElement('div', { className: 'halo-ring outer' }),
+      React.createElement('div', { className: 'halo-ring' }),
+      React.createElement('div', { className: 'halo-ring inner' }),
+      React.createElement('svg', {
+        width: 240, height: 130, viewBox: '0 0 240 130',
+        style: { display: 'block', position: 'relative', zIndex: 1 },
+      },
+        // Background arc
+        React.createElement('path', {
+          d: 'M 20 120 A 100 100 0 0 1 220 120',
+          stroke: 'var(--border)', strokeWidth: 14, fill: 'none', strokeLinecap: 'round',
+        }),
+        // Foreground arc — colored by band
+        React.createElement('path', {
+          d: 'M 20 120 A 100 100 0 0 1 220 120',
+          stroke: band.color, strokeWidth: 14, fill: 'none', strokeLinecap: 'round',
+          strokeDasharray: `${dash} ${circ}`,
+          style: { transition: 'stroke-dasharray 0.6s ease, stroke 0.3s ease',
+                   filter: `drop-shadow(0 0 8px ${band.color}66)` },
+        }),
+        // Score number
+        React.createElement('text', {
+          x: 120, y: 100, textAnchor: 'middle',
+          fontFamily: 'var(--font-mono)', fontSize: 36, fontWeight: 700, fill: band.color,
+        }, Math.round(score)),
+        // /100 suffix
+        React.createElement('text', {
+          x: 120, y: 122, textAnchor: 'middle',
+          fontFamily: 'var(--font-mono)', fontSize: 12, fill: 'var(--text-muted)',
+        }, '/ 100'),
+      )
     ),
 
     // Band label
@@ -152,16 +135,16 @@ function RiskGauge({ score, summary }) {
         marginTop: 10, padding: '4px 14px', borderRadius: 20,
         background: `${band.color}15`, border: `1px solid ${band.color}40`,
         color: band.color, fontSize: 11, fontWeight: 700, letterSpacing: 1.2,
-        fontFamily: T.fontMono,
+        fontFamily: 'var(--font-mono)',
       }
     }, band.label),
 
     // Severity row underneath
     React.createElement('div', {
-      style: { display: 'flex', gap: 14, marginTop: 16, fontSize: 10, fontFamily: T.fontMono }
+      style: { display: 'flex', gap: 14, marginTop: 16, fontSize: 10, fontFamily: 'var(--font-mono)' }
     },
       ['critical', 'high', 'medium', 'low', 'info'].map(s => {
-        const cMap = { critical: T.critical, high: T.high, medium: T.medium, low: T.low, info: T.info };
+        const cMap = { critical: 'var(--critical)', high: 'var(--high)', medium: 'var(--medium)', low: 'var(--low)', info: 'var(--info)' };
         return React.createElement('div', {
           key: s,
           style: { display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }
@@ -170,7 +153,7 @@ function RiskGauge({ score, summary }) {
             style: { color: cMap[s], fontSize: 14, fontWeight: 700 }
           }, summary[s] || 0),
           React.createElement('span', {
-            style: { color: T.textMuted, textTransform: 'uppercase', letterSpacing: 0.6 }
+            style: { color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: 0.6 }
           }, s.slice(0, 3)),
         );
       })
@@ -185,8 +168,8 @@ function KillChainStrip({ state }) {
 
   return React.createElement('div', {
     style: {
-      background: T.bgSurface,
-      border: `1px solid ${T.borderLight}`,
+      background: 'var(--bg-surface)',
+      border: `1px solid ${'var(--border)'}`,
       borderRadius: 14, padding: 22,
     }
   },
@@ -194,11 +177,11 @@ function KillChainStrip({ state }) {
       style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 18 }
     },
       React.createElement('div', {
-        style: { fontSize: 11, letterSpacing: 1.5, color: T.textMuted,
+        style: { fontSize: 11, letterSpacing: 1.5, color: 'var(--text-muted)',
                  textTransform: 'uppercase', fontWeight: 700 }
       }, 'Kill-Chain Progress'),
       React.createElement('div', {
-        style: { fontSize: 12, color: T.textPrimary, fontFamily: T.fontMono, fontWeight: 600 }
+        style: { fontSize: 12, color: 'var(--text-primary)', fontFamily: 'var(--font-mono)', fontWeight: 600 }
       }, `${reachedCount} / ${stages.length}`)
     ),
     React.createElement('div', {
@@ -215,18 +198,18 @@ function KillChainStrip({ state }) {
             React.createElement('div', {
               style: {
                 width: 32, height: 32, borderRadius: '50%',
-                background: stg.reached ? `${T.accent}1A` : T.bgPanel,
-                border: `2px solid ${stg.reached ? T.accent : T.borderLight}`,
+                background: stg.reached ? 'var(--accent-subtle)' : 'var(--bg-panel)',
+                border: `2px solid ${stg.reached ? 'var(--accent)' : 'var(--border)'}`,
                 display: 'flex', alignItems: 'center', justifyContent: 'center',
-                color: stg.reached ? T.accent : T.textMuted,
-                fontFamily: T.fontMono, fontSize: 12, fontWeight: 700,
-                boxShadow: stg.reached ? `0 0 12px ${T.accent}44` : 'none',
+                color: stg.reached ? 'var(--accent)' : 'var(--text-muted)',
+                fontFamily: 'var(--font-mono)', fontSize: 12, fontWeight: 700,
+                boxShadow: stg.reached ? '0 0 12px var(--accent-glow)' : 'none',
                 transition: 'all 0.3s ease',
               }
             }, stg.reached ? '✓' : i + 1),
             React.createElement('div', {
               style: {
-                fontSize: 10, color: stg.reached ? T.textPrimary : T.textMuted,
+                fontSize: 10, color: stg.reached ? 'var(--text-primary)' : 'var(--text-muted)',
                 fontWeight: stg.reached ? 600 : 400, letterSpacing: 0.4,
               }
             }, stg.label),
@@ -235,8 +218,8 @@ function KillChainStrip({ state }) {
             style: {
               flex: 1, height: 2, marginTop: -22,
               background: stages[i + 1].reached
-                ? `linear-gradient(90deg, ${T.accent}, ${T.accent}66)`
-                : T.borderLight,
+                ? `linear-gradient(90deg, var(--accent), var(--accent-glow))`
+                : 'var(--border)',
               transition: 'background 0.4s ease',
             }
           })
@@ -250,8 +233,8 @@ function KillChainStrip({ state }) {
 function StatTile({ label, value, sub, color, accent }) {
   return React.createElement('div', {
     style: {
-      background: T.bgSurface,
-      border: `1px solid ${T.borderLight}`,
+      background: 'var(--bg-surface)',
+      border: `1px solid ${'var(--border)'}`,
       borderRadius: 12, padding: '16px 18px',
       display: 'flex', flexDirection: 'column', gap: 4,
       position: 'relative', overflow: 'hidden',
@@ -264,15 +247,15 @@ function StatTile({ label, value, sub, color, accent }) {
       }
     }),
     React.createElement('span', {
-      style: { fontSize: 10, color: T.textMuted, textTransform: 'uppercase',
+      style: { fontSize: 10, color: 'var(--text-muted)', textTransform: 'uppercase',
                letterSpacing: 1.2, fontWeight: 700 }
     }, label),
     React.createElement('span', {
-      style: { fontFamily: T.fontMono, fontSize: 24, fontWeight: 700,
-               color: color || T.textPrimary, lineHeight: 1.1 }
+      style: { fontFamily: 'var(--font-mono)', fontSize: 24, fontWeight: 700,
+               color: color || 'var(--text-primary)', lineHeight: 1.1 }
     }, value),
     sub && React.createElement('span', {
-      style: { fontSize: 10, color: T.textSecondary, fontFamily: T.fontMono }
+      style: { fontSize: 10, color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)' }
     }, sub),
   );
 }
@@ -281,17 +264,17 @@ function StatTile({ label, value, sub, color, accent }) {
 function SeverityTreemap({ summary }) {
   const total = summary?.total || 0;
   const rows = [
-    { sev: 'critical', count: summary?.critical || 0, color: T.critical },
-    { sev: 'high',     count: summary?.high     || 0, color: T.high },
-    { sev: 'medium',   count: summary?.medium   || 0, color: T.medium },
-    { sev: 'low',      count: summary?.low      || 0, color: T.low },
-    { sev: 'info',     count: summary?.info     || 0, color: T.info },
+    { sev: 'critical', count: summary?.critical || 0, color: 'var(--critical)' },
+    { sev: 'high',     count: summary?.high     || 0, color: 'var(--high)' },
+    { sev: 'medium',   count: summary?.medium   || 0, color: 'var(--medium)' },
+    { sev: 'low',      count: summary?.low      || 0, color: 'var(--low)' },
+    { sev: 'info',     count: summary?.info     || 0, color: 'var(--info)' },
   ];
 
   return React.createElement('div', {
     style: {
-      background: T.bgSurface,
-      border: `1px solid ${T.borderLight}`,
+      background: 'var(--bg-surface)',
+      border: `1px solid ${'var(--border)'}`,
       borderRadius: 14, padding: 22,
     }
   },
@@ -300,11 +283,11 @@ function SeverityTreemap({ summary }) {
                alignItems: 'center', marginBottom: 14 }
     },
       React.createElement('div', {
-        style: { fontSize: 11, letterSpacing: 1.5, color: T.textMuted,
+        style: { fontSize: 11, letterSpacing: 1.5, color: 'var(--text-muted)',
                  textTransform: 'uppercase', fontWeight: 700 }
       }, 'Severity Distribution'),
       React.createElement('div', {
-        style: { fontSize: 12, fontFamily: T.fontMono, color: T.textPrimary, fontWeight: 600 }
+        style: { fontSize: 12, fontFamily: 'var(--font-mono)', color: 'var(--text-primary)', fontWeight: 600 }
       }, total ? `${total} findings` : 'no findings yet')
     ),
     total > 0 ? React.createElement('div', { style: { display: 'flex', flexDirection: 'column', gap: 10 } },
@@ -317,11 +300,11 @@ function SeverityTreemap({ summary }) {
           React.createElement('div', {
             style: {
               width: 70, fontSize: 10, color: r.color, fontWeight: 700,
-              textTransform: 'uppercase', letterSpacing: 1, fontFamily: T.fontUI,
+              textTransform: 'uppercase', letterSpacing: 1, fontFamily: 'var(--font-ui)',
             }
           }, r.sev),
           React.createElement('div', {
-            style: { flex: 1, height: 22, background: T.bgPanel, borderRadius: 5, overflow: 'hidden' }
+            style: { flex: 1, height: 22, background: 'var(--bg-panel)', borderRadius: 5, overflow: 'hidden' }
           },
             React.createElement('div', {
               style: {
@@ -332,13 +315,13 @@ function SeverityTreemap({ summary }) {
             })
           ),
           React.createElement('div', {
-            style: { width: 50, textAlign: 'right', fontFamily: T.fontMono,
+            style: { width: 50, textAlign: 'right', fontFamily: 'var(--font-mono)',
                      fontSize: 13, fontWeight: 700, color: r.color }
           }, r.count),
         );
       })
     ) : React.createElement('div', {
-      style: { padding: '30px 0', textAlign: 'center', color: T.textMuted,
+      style: { padding: '30px 0', textAlign: 'center', color: 'var(--text-muted)',
                fontSize: 12, fontStyle: 'italic' }
     }, 'Findings will appear here as the engagement progresses.')
   );
@@ -368,8 +351,8 @@ function LootCard({ state }) {
 
   return React.createElement('div', {
     style: {
-      background: T.bgSurface,
-      border: `1px solid ${T.borderLight}`,
+      background: 'var(--bg-surface)',
+      border: `1px solid ${'var(--border)'}`,
       borderRadius: 14, padding: 22,
     }
   },
@@ -378,44 +361,44 @@ function LootCard({ state }) {
                alignItems: 'center', marginBottom: 14 }
     },
       React.createElement('div', {
-        style: { fontSize: 11, letterSpacing: 1.5, color: T.textMuted,
+        style: { fontSize: 11, letterSpacing: 1.5, color: 'var(--text-muted)',
                  textTransform: 'uppercase', fontWeight: 700 }
       }, 'Harvested Loot'),
       React.createElement('div', {
         style: {
           padding: '2px 10px', borderRadius: 10, fontSize: 10, fontWeight: 700,
-          background: totalLoot ? `${T.violet}18` : T.bgPanel,
-          color:      totalLoot ? T.violet      : T.textMuted,
-          border: `1px solid ${totalLoot ? T.violet + '40' : T.borderLight}`,
-          fontFamily: T.fontMono, letterSpacing: 0.5,
+          background: totalLoot ? 'color-mix(in srgb, var(--violet) 9%, transparent)' : 'var(--bg-panel)',
+          color:      totalLoot ? 'var(--violet)'      : 'var(--text-muted)',
+          border: `1px solid ${totalLoot ? 'var(--violet-glow)' : 'var(--border)'}`,
+          fontFamily: 'var(--font-mono)', letterSpacing: 0.5,
         }
       }, `${totalLoot} ITEM${totalLoot !== 1 ? 'S' : ''}`)
     ),
     totalLoot > 0
       ? React.createElement('div', { style: { display: 'grid', gap: 8 } },
           ['critical', 'high', 'medium', 'low', 'info'].map(sev => {
-            const cMap = { critical: T.critical, high: T.high, medium: T.medium, low: T.low, info: T.info };
+            const cMap = { critical: 'var(--critical)', high: 'var(--high)', medium: 'var(--medium)', low: 'var(--low)', info: 'var(--info)' };
             const n = bySev[sev] || 0;
             if (n === 0) return null;
             return React.createElement('div', {
               key: sev,
               style: {
                 display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                padding: '8px 12px', background: T.bgPanel, borderRadius: 8,
+                padding: '8px 12px', background: 'var(--bg-panel)', borderRadius: 8,
                 borderLeft: `3px solid ${cMap[sev]}`,
               }
             },
               React.createElement('span', {
-                style: { fontSize: 11, color: T.textPrimary, textTransform: 'uppercase', letterSpacing: 0.8 }
+                style: { fontSize: 11, color: 'var(--text-primary)', textTransform: 'uppercase', letterSpacing: 0.8 }
               }, sev),
               React.createElement('span', {
-                style: { fontFamily: T.fontMono, fontSize: 13, fontWeight: 700, color: cMap[sev] }
+                style: { fontFamily: 'var(--font-mono)', fontSize: 13, fontWeight: 700, color: cMap[sev] }
               }, n)
             );
           })
         )
       : React.createElement('div', {
-          style: { padding: '20px 0', textAlign: 'center', color: T.textMuted,
+          style: { padding: '20px 0', textAlign: 'center', color: 'var(--text-muted)',
                    fontSize: 11, fontStyle: 'italic' }
         }, 'NTLM hashes, SSH keys, secrets and PII captured during post-exploitation will appear here.')
   );
@@ -438,12 +421,12 @@ function PrimerCoverageCard({ state }) {
 
   const overallCov = total ? present / total : 0;
   const overallPct = Math.round(overallCov * 100);
-  const ringColor = overallCov >= 0.85 ? T.low : overallCov >= 0.6 ? T.medium : T.high;
+  const ringColor = overallCov >= 0.85 ? 'var(--low)' : overallCov >= 0.6 ? 'var(--medium)' : 'var(--high)';
 
   return React.createElement('div', {
     style: {
-      background: T.bgSurface,
-      border: `1px solid ${T.borderLight}`,
+      background: 'var(--bg-surface)',
+      border: `1px solid ${'var(--border)'}`,
       borderRadius: 14, padding: 22,
     }
   },
@@ -452,7 +435,7 @@ function PrimerCoverageCard({ state }) {
                alignItems: 'center', marginBottom: 14 }
     },
       React.createElement('div', {
-        style: { fontSize: 11, letterSpacing: 1.5, color: T.textMuted,
+        style: { fontSize: 11, letterSpacing: 1.5, color: 'var(--text-muted)',
                  textTransform: 'uppercase', fontWeight: 700 }
       }, 'Primer Tool Coverage'),
       total > 0 && React.createElement('div', {
@@ -460,12 +443,12 @@ function PrimerCoverageCard({ state }) {
           padding: '2px 10px', borderRadius: 10, fontSize: 10, fontWeight: 700,
           background: `${ringColor}18`, color: ringColor,
           border: `1px solid ${ringColor}40`,
-          fontFamily: T.fontMono, letterSpacing: 0.5,
+          fontFamily: 'var(--font-mono)', letterSpacing: 0.5,
         }
       }, `${overallPct}%`)
     ),
     chainsArr.length === 0 ? React.createElement('div', {
-      style: { padding: '20px 0', textAlign: 'center', color: T.textMuted,
+      style: { padding: '20px 0', textAlign: 'center', color: 'var(--text-muted)',
                fontSize: 11, fontStyle: 'italic' }
     }, 'Probe runs at engagement start.')
     : React.createElement('div', { style: { display: 'flex', flexDirection: 'column', gap: 6 } },
@@ -475,21 +458,21 @@ function PrimerCoverageCard({ state }) {
           return React.createElement('div', {
             key: c.name,
             style: { display: 'flex', alignItems: 'center', gap: 10,
-                     padding: '6px 10px', background: T.bgPanel, borderRadius: 6 }
+                     padding: '6px 10px', background: 'var(--bg-panel)', borderRadius: 6 }
           },
             React.createElement('span', {
               style: {
                 width: 10, height: 10, borderRadius: '50%', flexShrink: 0,
-                background: ok ? T.low : T.high,
-                boxShadow: ok ? `0 0 5px ${T.low}80` : 'none',
+                background: ok ? 'var(--low)' : 'var(--high)',
+                boxShadow: ok ? '0 0 5px var(--low-bd)' : 'none',
               }
             }),
             React.createElement('span', {
-              style: { fontSize: 11, fontFamily: T.fontMono,
-                       color: T.textPrimary, flex: 1 }
+              style: { fontSize: 11, fontFamily: 'var(--font-mono)',
+                       color: 'var(--text-primary)', flex: 1 }
             }, c.name),
             React.createElement('span', {
-              style: { fontSize: 10, color: T.textSecondary, fontFamily: T.fontMono }
+              style: { fontSize: 10, color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)' }
             }, `${c.present}/${c.total}`)
           );
         })
@@ -507,8 +490,8 @@ function TopHypothesesCard({ state }) {
 
   return React.createElement('div', {
     style: {
-      background: T.bgSurface,
-      border: `1px solid ${T.borderLight}`,
+      background: 'var(--bg-surface)',
+      border: `1px solid ${'var(--border)'}`,
       borderRadius: 14, padding: 22, gridColumn: 'span 2',
     }
   },
@@ -517,52 +500,52 @@ function TopHypothesesCard({ state }) {
                alignItems: 'center', marginBottom: 14 }
     },
       React.createElement('div', {
-        style: { fontSize: 11, letterSpacing: 1.5, color: T.textMuted,
+        style: { fontSize: 11, letterSpacing: 1.5, color: 'var(--text-muted)',
                  textTransform: 'uppercase', fontWeight: 700 }
       }, 'Top Attack Hypotheses'),
       React.createElement('button', {
         onClick: () => window.dispatchEvent(new CustomEvent('navigate', { detail: 'reasoning' })),
         style: {
           background: 'transparent', border: 'none', cursor: 'pointer',
-          color: T.cyan, fontSize: 10, fontFamily: T.fontMono,
+          color: 'var(--cyan)', fontSize: 10, fontFamily: 'var(--font-mono)',
           textTransform: 'uppercase', letterSpacing: 1, fontWeight: 600,
         }
       }, 'View all →')
     ),
     candidates.length === 0
       ? React.createElement('div', {
-          style: { padding: '20px 0', textAlign: 'center', color: T.textMuted,
+          style: { padding: '20px 0', textAlign: 'center', color: 'var(--text-muted)',
                    fontSize: 11, fontStyle: 'italic' }
         }, 'Hypotheses will appear once recon produces actionable evidence.')
       : React.createElement('div', { style: { display: 'flex', flexDirection: 'column', gap: 8 } },
           candidates.map((h, i) => {
             const conf = h.confidence || 0;
-            const confColor = conf >= 0.75 ? T.low : conf >= 0.5 ? T.medium : T.high;
+            const confColor = conf >= 0.75 ? 'var(--low)' : conf >= 0.5 ? 'var(--medium)' : 'var(--high)';
             return React.createElement('div', {
               key: h.hypothesis_id || i,
               style: {
-                padding: '10px 14px', background: T.bgPanel,
-                border: `1px solid ${T.borderLight}`, borderRadius: 8,
+                padding: '10px 14px', background: 'var(--bg-panel)',
+                border: `1px solid ${'var(--border)'}`, borderRadius: 8,
                 display: 'flex', alignItems: 'center', gap: 12,
                 borderLeft: `3px solid ${confColor}`,
               }
             },
               React.createElement('div', {
                 style: {
-                  width: 42, fontFamily: T.fontMono, fontSize: 14, fontWeight: 700,
+                  width: 42, fontFamily: 'var(--font-mono)', fontSize: 14, fontWeight: 700,
                   color: confColor, flexShrink: 0,
                 }
               }, `${Math.round(conf * 100)}%`),
               React.createElement('div', { style: { flex: 1, minWidth: 0 } },
                 React.createElement('div', {
                   style: {
-                    fontSize: 12, color: T.textPrimary, fontWeight: 500,
+                    fontSize: 12, color: 'var(--text-primary)', fontWeight: 500,
                     overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
                   }
                 }, h.statement || '(unnamed hypothesis)'),
                 (h.recommended_next_actions || []).length > 0 && React.createElement('div', {
                   style: {
-                    fontSize: 10, fontFamily: T.fontMono, color: T.textSecondary,
+                    fontSize: 10, fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)',
                     overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
                     marginTop: 2,
                   }
@@ -587,17 +570,17 @@ function DeviceTaxonomyCard({ state }) {
 
   // Color-code by os_family / kind
   const osColor = (osf) => {
-    if (osf === 'linux')    return T.low;
-    if (osf === 'windows')  return T.cyan;
-    if (osf === 'macos')    return T.violet;
-    if (osf === 'embedded') return T.high;
-    return T.textMuted;
+    if (osf === 'linux')    return 'var(--low)';
+    if (osf === 'windows')  return 'var(--cyan)';
+    if (osf === 'macos')    return 'var(--violet)';
+    if (osf === 'embedded') return 'var(--high)';
+    return 'var(--text-muted)';
   };
 
   return React.createElement('div', {
     style: {
-      background: T.bgSurface,
-      border: `1px solid ${T.borderLight}`,
+      background: 'var(--bg-surface)',
+      border: `1px solid ${'var(--border)'}`,
       borderRadius: 14, padding: 22,
     }
   },
@@ -605,43 +588,43 @@ function DeviceTaxonomyCard({ state }) {
       style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }
     },
       React.createElement('div', {
-        style: { fontSize: 11, letterSpacing: 1.5, color: T.textMuted,
+        style: { fontSize: 11, letterSpacing: 1.5, color: 'var(--text-muted)',
                  textTransform: 'uppercase', fontWeight: 700 }
       }, 'Device Taxonomy'),
       hostList.length > 0 && React.createElement('div', {
         style: {
           padding: '2px 10px', borderRadius: 10, fontSize: 10, fontWeight: 700,
-          background: `${T.cyan}18`, color: T.cyan,
-          border: `1px solid ${T.cyan}40`,
-          fontFamily: T.fontMono, letterSpacing: 0.5,
+          background: 'color-mix(in srgb, var(--cyan) 9%, transparent)', color: 'var(--cyan)',
+          border: '1px solid color-mix(in srgb, var(--cyan) 25%, transparent)',
+          fontFamily: 'var(--font-mono)', letterSpacing: 0.5,
         }
       }, `${hostList.length} HOST${hostList.length !== 1 ? 'S' : ''}`)
     ),
 
     // Single-host verdict
     !single && hostList.length === 0 && React.createElement('div', {
-      style: { padding: '20px 0', textAlign: 'center', color: T.textMuted,
+      style: { padding: '20px 0', textAlign: 'center', color: 'var(--text-muted)',
                fontSize: 11, fontStyle: 'italic' }
     }, 'Classifier runs after recon completes.'),
 
     single && hostList.length === 0 && React.createElement('div', null,
       React.createElement('div', {
         style: {
-          padding: '12px 14px', background: T.bgPanel, borderRadius: 8,
+          padding: '12px 14px', background: 'var(--bg-panel)', borderRadius: 8,
           borderLeft: `3px solid ${osColor(single.os_family)}`,
           marginBottom: 10,
         }
       },
         React.createElement('div', { style: { display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: 4 } },
           React.createElement('span', {
-            style: { fontFamily: T.fontMono, fontSize: 14, fontWeight: 700, color: osColor(single.os_family) }
+            style: { fontFamily: 'var(--font-mono)', fontSize: 14, fontWeight: 700, color: osColor(single.os_family) }
           }, (single.kind || 'unknown').replace(/_/g, ' ')),
           React.createElement('span', {
-            style: { fontSize: 10, color: T.textMuted, fontFamily: T.fontMono }
+            style: { fontSize: 10, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }
           }, `conf=${(single.confidence || 0).toFixed(2)}  prio=${single.priority || 0}`)
         ),
         React.createElement('div', {
-          style: { fontSize: 11, color: T.textSecondary, marginTop: 2 }
+          style: { fontSize: 11, color: 'var(--text-secondary)', marginTop: 2 }
         }, single.notes || ''),
         (single.labels || []).length > 0 && React.createElement('div', {
           style: { display: 'flex', gap: 5, marginTop: 8, flexWrap: 'wrap' }
@@ -654,7 +637,7 @@ function DeviceTaxonomyCard({ state }) {
                 background: `${osColor(single.os_family)}15`,
                 border: `1px solid ${osColor(single.os_family)}30`,
                 color: osColor(single.os_family),
-                fontSize: 9, fontFamily: T.fontMono, fontWeight: 600,
+                fontSize: 9, fontFamily: 'var(--font-mono)', fontWeight: 600,
               }
             }, l)
           )
@@ -663,7 +646,7 @@ function DeviceTaxonomyCard({ state }) {
       // Playbook chain preview
       (single.playbooks || []).length > 0 && React.createElement('div', null,
         React.createElement('div', {
-          style: { fontSize: 9, color: T.textMuted, letterSpacing: 1, fontWeight: 700, marginBottom: 6 }
+          style: { fontSize: 9, color: 'var(--text-muted)', letterSpacing: 1, fontWeight: 700, marginBottom: 6 }
         }, 'PLAYBOOK CHAIN'),
         React.createElement('div', { style: { display: 'flex', gap: 4, flexWrap: 'wrap' } },
           (single.playbooks || []).slice(0, 6).map((pb, i) =>
@@ -671,13 +654,13 @@ function DeviceTaxonomyCard({ state }) {
               React.createElement('span', {
                 style: {
                   padding: '3px 8px', borderRadius: 5,
-                  background: T.bgPanel, color: T.textPrimary,
-                  fontSize: 10, fontFamily: T.fontMono, fontWeight: 600,
-                  border: `1px solid ${T.border}`,
+                  background: 'var(--bg-panel)', color: 'var(--text-primary)',
+                  fontSize: 10, fontFamily: 'var(--font-mono)', fontWeight: 600,
+                  border: `1px solid ${'var(--border-dim)'}`,
                 }
               }, pb),
               i < Math.min(5, (single.playbooks || []).length - 1) &&
-                React.createElement('span', { style: { color: T.textMuted, fontSize: 10, alignSelf: 'center' } }, '→')
+                React.createElement('span', { style: { color: 'var(--text-muted)', fontSize: 10, alignSelf: 'center' } }, '→')
             )
           )
         )
@@ -691,28 +674,28 @@ function DeviceTaxonomyCard({ state }) {
           key: host,
           style: {
             display: 'flex', alignItems: 'center', gap: 10,
-            padding: '6px 10px', background: T.bgPanel, borderRadius: 6,
+            padding: '6px 10px', background: 'var(--bg-panel)', borderRadius: 6,
             borderLeft: `3px solid ${osColor(c?.os_family)}`,
           }
         },
           React.createElement('span', {
-            style: { fontSize: 11, fontFamily: T.fontMono, color: T.textPrimary, flex: 1 }
+            style: { fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--text-primary)', flex: 1 }
           }, host),
           React.createElement('span', {
             style: {
               padding: '1px 7px', borderRadius: 10, fontSize: 9, fontWeight: 700,
               background: `${osColor(c?.os_family)}15`,
               color: osColor(c?.os_family),
-              fontFamily: T.fontMono, letterSpacing: 0.4,
+              fontFamily: 'var(--font-mono)', letterSpacing: 0.4,
             }
           }, (c?.kind || 'unknown').replace(/_/g, ' ')),
           React.createElement('span', {
-            style: { fontSize: 10, color: T.textMuted, fontFamily: T.fontMono }
+            style: { fontSize: 10, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }
           }, `p${c?.priority || 0}`)
         )
       ),
       hostList.length > 8 && React.createElement('div', {
-        style: { fontSize: 10, color: T.textMuted, fontStyle: 'italic', textAlign: 'center', marginTop: 4 }
+        style: { fontSize: 10, color: 'var(--text-muted)', fontStyle: 'italic', textAlign: 'center', marginTop: 4 }
       }, `+ ${hostList.length - 8} more — see Mission Control for full host list`)
     )
   );
@@ -724,20 +707,20 @@ function SessionInfoCard({ state, sessionDuration }) {
   if (!sess) {
     return React.createElement('div', {
       style: {
-        background: T.bgSurface,
-        border: `1px dashed ${T.borderLight}`,
+        background: 'var(--bg-surface)',
+        border: `1px dashed ${'var(--border)'}`,
         borderRadius: 14, padding: 26, textAlign: 'center',
       }
     },
-      React.createElement('div', { style: { fontSize: 28, color: T.textMuted, marginBottom: 8 } }, '○'),
+      React.createElement('div', { style: { fontSize: 28, color: 'var(--text-muted)', marginBottom: 8 } }, '○'),
       React.createElement('div', {
-        style: { fontSize: 12, color: T.textMuted, marginBottom: 12, letterSpacing: 0.5 }
+        style: { fontSize: 12, color: 'var(--text-muted)', marginBottom: 12, letterSpacing: 0.5 }
       }, 'No active engagement'),
       React.createElement('button', {
         onClick: () => window.dispatchEvent(new CustomEvent('navigate', { detail: 'target' })),
         style: {
-          background: `${T.accent}15`, border: `1px solid ${T.accent}40`,
-          color: T.accent, padding: '6px 16px', borderRadius: 6, cursor: 'pointer',
+          background: 'var(--accent-subtle)', border: '1px solid var(--accent-glow)',
+          color: 'var(--accent)', padding: '6px 16px', borderRadius: 6, cursor: 'pointer',
           fontSize: 11, fontWeight: 600, letterSpacing: 1,
         }
       }, '+ NEW SESSION')
@@ -746,34 +729,34 @@ function SessionInfoCard({ state, sessionDuration }) {
 
   return React.createElement('div', {
     style: {
-      background: T.bgSurface,
-      border: `1px solid ${T.borderLight}`,
+      background: 'var(--bg-surface)',
+      border: `1px solid ${'var(--border)'}`,
       borderRadius: 14, padding: 22,
     }
   },
     React.createElement('div', {
-      style: { fontSize: 11, letterSpacing: 1.5, color: T.textMuted,
+      style: { fontSize: 11, letterSpacing: 1.5, color: 'var(--text-muted)',
                textTransform: 'uppercase', fontWeight: 700, marginBottom: 12 }
     }, 'Active Engagement'),
     React.createElement('div', {
       style: {
-        fontFamily: T.fontMono, fontSize: 18, fontWeight: 700,
-        color: T.accent, marginBottom: 4,
+        fontFamily: 'var(--font-mono)', fontSize: 18, fontWeight: 700,
+        color: 'var(--accent)', marginBottom: 4,
       }
     }, sess.target_ip || sess.target_hostname || 'unknown'),
     React.createElement('div', {
-      style: { fontSize: 11, color: T.textSecondary, marginBottom: 16 }
+      style: { fontSize: 11, color: 'var(--text-secondary)', marginBottom: 16 }
     }, sess.target_type || 'pentest'),
 
     React.createElement('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 } },
       React.createElement('div', null,
-        React.createElement('div', { style: { fontSize: 9, color: T.textMuted, letterSpacing: 1, fontWeight: 700 } }, 'PHASE'),
-        React.createElement('div', { style: { fontSize: 12, color: T.textPrimary, fontFamily: T.fontMono, marginTop: 2 } },
+        React.createElement('div', { style: { fontSize: 9, color: 'var(--text-muted)', letterSpacing: 1, fontWeight: 700 } }, 'PHASE'),
+        React.createElement('div', { style: { fontSize: 12, color: 'var(--text-primary)', fontFamily: 'var(--font-mono)', marginTop: 2 } },
           state.currentPhase || 'idle'),
       ),
       React.createElement('div', null,
-        React.createElement('div', { style: { fontSize: 9, color: T.textMuted, letterSpacing: 1, fontWeight: 700 } }, 'DURATION'),
-        React.createElement('div', { style: { fontSize: 12, color: T.textPrimary, fontFamily: T.fontMono, marginTop: 2 } },
+        React.createElement('div', { style: { fontSize: 9, color: 'var(--text-muted)', letterSpacing: 1, fontWeight: 700 } }, 'DURATION'),
+        React.createElement('div', { style: { fontSize: 12, color: 'var(--text-primary)', fontFamily: 'var(--font-mono)', marginTop: 2 } },
           fmtDuration(sessionDuration)),
       ),
     )
@@ -781,9 +764,11 @@ function SessionInfoCard({ state, sessionDuration }) {
 }
 
 // ─── Main page ────────────────────────────────────────────────
-function RiskDashboard({ sessionId, activeSession }) {
+function RiskDashboard({ sessionId, activeSession, viewMode, client }) {
   const { state } = window.useStore();
   const [now, setNow] = useState(Date.now());
+  const vm = viewMode || 'OPERATOR';
+  const fontScale = vm === 'BRIEFING' ? 16 : 14;
 
   // Tick once per second to keep duration live
   useEffect(() => {
@@ -837,9 +822,14 @@ function RiskDashboard({ sessionId, activeSession }) {
   const services = (state.subagentStates && Object.keys(state.subagentStates).length) || 0;
 
   return React.createElement('div', {
+    'data-view-mode': vm,
+    className: vm === 'CLIENT' ? 'client-mode' : undefined,
+    style: { fontSize: fontScale },
+  },
+   React.createElement('div', {
     style: {
       maxWidth: 1400, margin: '0 auto', padding: '4px 0',
-      fontFamily: T.fontUI, color: T.textPrimary,
+      fontFamily: 'var(--font-ui)', color: 'var(--text-primary)',
     }
   },
 
@@ -850,30 +840,30 @@ function RiskDashboard({ sessionId, activeSession }) {
     },
       React.createElement('div', null,
         React.createElement('div', {
-          style: { fontSize: 11, letterSpacing: 2, color: T.accent,
+          style: { fontSize: 11, letterSpacing: 2, color: 'var(--accent)',
                    textTransform: 'uppercase', fontWeight: 700, marginBottom: 4 }
         }, '◈ RISK COMMAND DASHBOARD'),
         React.createElement('div', {
-          style: { fontSize: 24, fontWeight: 700, color: T.textPrimary }
+          style: { fontSize: 24, fontWeight: 700, color: 'var(--text-primary)' }
         }, 'Cyber Risk View'),
         React.createElement('div', {
-          style: { fontSize: 12, color: T.textSecondary, marginTop: 4 }
+          style: { fontSize: 12, color: 'var(--text-secondary)', marginTop: 4 }
         }, 'Real-time engagement posture, kill-chain progress and exploitation telemetry.')
       ),
       React.createElement('div', { style: { display: 'flex', gap: 8 } },
         React.createElement('button', {
           onClick: () => window.dispatchEvent(new CustomEvent('navigate', { detail: 'mission' })),
           style: {
-            background: T.bgPanel, border: `1px solid ${T.borderLight}`,
-            color: T.textSecondary, padding: '8px 14px', borderRadius: 8,
+            background: 'var(--bg-panel)', border: `1px solid ${'var(--border)'}`,
+            color: 'var(--text-secondary)', padding: '8px 14px', borderRadius: 8,
             cursor: 'pointer', fontSize: 11, fontWeight: 600, letterSpacing: 0.5,
           }
         }, 'Mission Control'),
         React.createElement('button', {
           onClick: () => window.dispatchEvent(new CustomEvent('navigate', { detail: 'findings' })),
           style: {
-            background: `${T.accent}15`, border: `1px solid ${T.accent}40`,
-            color: T.accent, padding: '8px 14px', borderRadius: 8,
+            background: 'var(--accent-subtle)', border: '1px solid var(--accent-glow)',
+            color: 'var(--accent)', padding: '8px 14px', borderRadius: 8,
             cursor: 'pointer', fontSize: 11, fontWeight: 700, letterSpacing: 0.5,
           }
         }, 'View All Findings →'),
@@ -891,34 +881,35 @@ function RiskDashboard({ sessionId, activeSession }) {
       React.createElement(StatTile, {
         label: hosts ? 'Discovered Hosts' : 'Phases Completed',
         value: openPorts,
-        color: T.cyan, accent: T.cyan,
+        color: 'var(--cyan)', accent: 'var(--cyan)',
         sub: services ? `${services} active subagent${services !== 1 ? 's' : ''}` : 'awaiting first finding',
       }),
       React.createElement(StatTile, {
-        label: 'Total Findings', value: summary.total || 0, color: T.textPrimary, accent: T.accent,
+        label: 'Total Findings', value: summary.total || 0, color: 'var(--text-primary)', accent: 'var(--accent)',
         sub: `${summary.critical || 0} critical · ${summary.high || 0} high`,
       }),
       React.createElement(StatTile, {
-        label: 'Confirmed Shells', value: confirmedShells, color: confirmedShells > 0 ? T.low : T.textMuted, accent: confirmedShells > 0 ? T.low : T.borderLight,
+        label: 'Confirmed Shells', value: confirmedShells, color: confirmedShells > 0 ? 'var(--low)' : 'var(--text-muted)', accent: confirmedShells > 0 ? 'var(--low)' : 'var(--border)',
         sub: `${shells.length - confirmedShells} pending`,
       }),
       React.createElement(StatTile, {
         label: 'Time to Foothold',
         value: timeToFoothold !== null ? fmtDuration(timeToFoothold) : '—',
-        color: timeToFoothold !== null ? T.low : T.textMuted,
-        accent: timeToFoothold !== null ? T.low : T.borderLight,
+        color: timeToFoothold !== null ? 'var(--low)' : 'var(--text-muted)',
+        accent: timeToFoothold !== null ? 'var(--low)' : 'var(--border)',
         sub: timeToFoothold !== null ? 'first shell registered' : 'not yet achieved',
       }),
       React.createElement(StatTile, {
         label: 'Engagement Time',
         value: state.activeSession ? fmtDuration(duration) : '—',
-        color: T.textPrimary,
+        color: 'var(--text-primary)',
         sub: state.currentPhase ? `phase: ${state.currentPhase}` : 'no active session',
       }),
     ),
 
     // ── Risk gauge + Kill-chain row ──────────────────────────
     React.createElement('div', {
+      className: 'hero-tilt',
       style: { display: 'grid', gridTemplateColumns: '380px 1fr', gap: 14, marginBottom: 18 }
     },
       React.createElement(RiskGauge, { score, summary }),
@@ -944,6 +935,7 @@ function RiskDashboard({ sessionId, activeSession }) {
       React.createElement(PrimerCoverageCard, { state }),
       React.createElement(TopHypothesesCard, { state }),
     ),
+   )
   );
 }
 

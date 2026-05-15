@@ -15,6 +15,7 @@ const AGENT_META_GLOBAL = {
 function AgentCardGlobal({ name, status = 'idle', phase, message, onClick }) {
   const meta     = AGENT_META_GLOBAL[name] || { icon: '◆', color: 'var(--cyan)', label: name };
   const isActive = status === 'running' || status === 'thinking';
+  const isThinking = status === 'thinking';
   const statusColors = {
     running:  'var(--green)',
     thinking: 'var(--cyan)',
@@ -47,7 +48,14 @@ function AgentCardGlobal({ name, status = 'idle', phase, message, onClick }) {
     React.createElement('div', {
       style: { display: 'flex', alignItems: 'center', gap: 7, marginBottom: 3 }
     },
-      React.createElement('span', { style: { fontSize: 14 } }, meta.icon),
+      React.createElement('span', {
+        className: 'agent-avatar' + (isThinking ? ' motion-llm-ring' : ''),
+        style: {
+          fontSize: 14,
+          display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+          width: 18, height: 18, lineHeight: 1,
+        }
+      }, meta.icon),
       React.createElement('span', {
         style: { fontSize: 10, fontWeight: 700, color: meta.color, letterSpacing: 0.5 }
       }, meta.label.toUpperCase()),

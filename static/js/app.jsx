@@ -13,39 +13,12 @@
 //   • Toast container hooks for transient notifications fired by the
 //     reducer (TOAST_PUSH).
 //
-// EVERY existing page is still registered in PAGE_COMPONENT.  Every
-// dispatch action and WS handler from store.js is untouched.  This is
+// EVERY existing page is still registered (now via HUBS → tabs → COMP_FOR).
+// Every dispatch action and WS handler from store.js is untouched.  This is
 // a presentation layer refresh only.
 // ═══════════════════════════════════════════════════════════
 
 const { useState, useEffect, useCallback, useMemo, useRef } = React;
-
-// ─── Design tokens ────────────────────────────────────────────
-const T = {
-  bgBase:       '#0B0C12',      // slightly deeper canvas
-  bgSidebar:    '#0A0B11',
-  bgSurface:    '#13151E',
-  bgPanel:      '#1A1D28',
-  bgElevated:   '#222638',
-  bgGlass:      'rgba(19,21,30,0.78)',
-  accent:       '#00E5A0',
-  accentDim:    '#00A372',
-  violet:       '#7B6CF6',
-  cyan:         '#38BDF8',
-  amber:        '#F5C842',
-  critical:     '#FF4560',
-  high:         '#FF8C42',
-  medium:       '#F5C842',
-  low:          '#4ADE80',
-  border:       '#1D2135',
-  borderLight:  '#262B40',
-  borderBright: '#343B56',
-  textPrimary:  '#E5EAF6',
-  textSecondary:'#9098B0',
-  textMuted:    '#525B76',
-  fontUI:       "'Inter', system-ui, sans-serif",
-  fontMono:     "'JetBrains Mono', 'Courier New', monospace",
-};
 
 // ─── Error boundary (unchanged behaviour) ─────────────────────
 class PageErrorBoundary extends React.Component {
@@ -54,22 +27,22 @@ class PageErrorBoundary extends React.Component {
   render() {
     if (this.state.error) {
       return React.createElement('div', {
-        style: { padding: 40, color: T.critical, fontFamily: T.fontMono, fontSize: 12 }
+        style: { padding: 40, color: 'var(--critical)', fontFamily: 'var(--font-mono)', fontSize: 12 }
       },
         React.createElement('div', { style: { fontSize: 15, marginBottom: 12, fontWeight: 700 } }, '⚠ Page Error'),
         React.createElement('pre', {
           style: {
-            background: T.bgPanel, padding: 14, borderRadius: 8,
-            border: `1px solid ${T.critical}44`, whiteSpace: 'pre-wrap',
-            wordBreak: 'break-word', fontSize: 11, color: T.textSecondary, margin: 0
+            background: 'var(--bg-panel)', padding: 14, borderRadius: 8,
+            border: '1px solid var(--critical-bd)', whiteSpace: 'pre-wrap',
+            wordBreak: 'break-word', fontSize: 11, color: 'var(--text-secondary)', margin: 0
           }
         }, this.state.error?.message || String(this.state.error)),
         React.createElement('button', {
           onClick: () => this.setState({ error: null }),
           style: {
             marginTop: 12, padding: '6px 14px', borderRadius: 6, cursor: 'pointer',
-            border: `1px solid ${T.critical}55`, background: `${T.critical}15`,
-            color: T.critical, fontSize: 11, fontFamily: T.fontUI
+            border: '1px solid var(--critical-bd)', background: 'var(--critical-bg)',
+            color: 'var(--critical)', fontSize: 11, fontFamily: 'var(--font-ui)'
           }
         }, '↺ Retry')
       );
@@ -78,64 +51,163 @@ class PageErrorBoundary extends React.Component {
   }
 }
 
-// ─── Page registry ────────────────────────────────────────────
-// `risk` is the new default landing page.  Mission Control is kept
-// for operators who prefer the dense plan-step view.
-const PAGES = [
-  { key: 'risk',      icon: '◇', label: 'Risk Dashboard',         group: 'Overview',    desc: 'Aggregate risk score, kill-chain, severity treemap' },
-  { key: 'mission',   icon: '⚡', label: 'Mission Control',         group: 'Overview',    desc: 'Phase plan, agent status, live feed' },
-  { key: 'target',    icon: '⊕', label: 'Target Config',           group: 'Overview',    desc: 'Configure scope, credentials, mode' },
-  { key: 'sessions',  icon: '◈', label: 'Session History',         group: 'Overview',    desc: 'Past engagements and resume points' },
+// ─── Hub structure (Spec §10.5) ──────────────────────────────────
+// 9 hubs collapse the previous 19 pages.  Each tab.key preserves the
+// ORIGINAL page key so legacy navigate() events keep working.  Every
+// existing page component continues to render as a tab-panel — no
+// content lost.
+const HUBS = [
+  { key: 'risk',       icon: '◇', label: 'Risk Dashboard', group: 'Overview',
+    tabs: [{ key: 'risk',       label: 'Risk Score',       comp: 'RiskDashboard' }] },
 
-  { key: 'agents',    icon: '◉', label: 'Agent Console',           group: 'Analysis',    desc: 'Live status of every running agent' },
-  { key: 'reasoning', icon: '◐', label: 'Reasoning Engine',        group: 'Analysis',    desc: 'Hypothesis tree, decisions, attack paths' },
-  { key: 'ai_obs',    icon: '◎', label: 'AI Observability',        group: 'Analysis',    desc: 'LLM calls, prompt traces, RAG queries' },
-  { key: 'findings',  icon: '◆', label: 'Findings Board',          group: 'Analysis',    desc: 'All discovered findings, filterable' },
-  { key: 'graph',     icon: '⬡', label: 'Attack Graph',            group: 'Analysis',    desc: 'Node-link graph of attack paths' },
-  { key: 'web_test',  icon: '🕸', label: 'Web Testing',             group: 'Analysis',    desc: 'WSTG-aligned web app testing matrix' },
-  { key: 'osint',     icon: '◍', label: 'OSINT Intel',             group: 'Analysis',    desc: 'External intelligence, dorks, breaches' },
+  { key: 'operations', icon: '⚡', label: 'Operations',     group: 'Overview',
+    tabs: [
+      { key: 'mission', label: 'Mission Control', comp: 'MissionControl' },
+      { key: 'agents',  label: 'Agent Roster',    comp: 'AgentConsole' },
+    ] },
 
-  { key: 'lateral',   icon: '⇢', label: 'Lateral & Post-Ex',       group: 'Exploitation', desc: 'Pivot, lateral movement, persistence' },
-  { key: 'creds',     icon: '⊛', label: 'Credentials Vault',       group: 'Exploitation', desc: 'Captured / cracked credentials' },
-  { key: 'shells',    icon: '⊜', label: 'Shell Manager',           group: 'Exploitation', desc: 'Active reverse / SSH shells' },
-  { key: 'payloads',  icon: '◧', label: 'Payload Builder',         group: 'Exploitation', desc: 'Generate msfvenom payloads' },
-  { key: 'tools',     icon: '⊞', label: 'Tool Workshop',           group: 'Exploitation', desc: 'Run any tool from the MCP catalog' },
+  { key: 'findings',   icon: '◆', label: 'Findings',        group: 'Analysis',
+    tabs: [
+      { key: 'findings', label: 'All Findings', comp: 'FindingsBoard' },
+      { key: 'web_test', label: 'WSTG Matrix',  comp: 'WebTesting' },
+      { key: 'osint',    label: 'OSINT Intel',  comp: 'OsintIntel' },
+    ] },
 
-  { key: 'report',    icon: '◧', label: 'Report',                  group: 'Reporting',   desc: 'Generated HTML / PDF report' },
-  { key: 'metrics',   icon: '◫', label: 'Metrics',                 group: 'Reporting',   desc: 'Engagement metrics & throughput' },
-  { key: 'knowledge', icon: '⊕', label: 'Knowledge Base',          group: 'Knowledge',   desc: 'Curated playbooks and references' },
+  { key: 'graph',      icon: '⬡', label: 'Attack Graph',    group: 'Analysis',
+    tabs: [{ key: 'graph', label: 'Attack Graph', comp: 'AttackGraph' }] },
+
+  { key: 'reasoning',  icon: '◐', label: 'Reasoning',       group: 'Execution',
+    tabs: [
+      { key: 'reasoning', label: 'Hypothesis Tree', comp: 'ReasoningEnginePage' },
+      { key: 'ai_obs',    label: 'LLM Trace',       comp: 'AIObservability' },
+    ] },
+
+  { key: 'foothold',   icon: '⊛', label: 'Foothold',        group: 'Execution',
+    tabs: [
+      { key: 'creds',    label: 'Credentials',         comp: 'CredentialsPage' },
+      { key: 'shells',   label: 'Active Shells',       comp: 'ShellManager' },
+      { key: 'lateral',  label: 'Lateral & Post-Ex',   comp: 'LateralPostPage' },
+      { key: 'payloads', label: 'Payload Builder',     comp: 'PayloadBuilder' },
+    ] },
+
+  { key: 'workshop',   icon: '⊞', label: 'Workshop',        group: 'Execution',
+    tabs: [
+      { key: 'target', label: 'Target Config', comp: 'TargetConfig' },
+      { key: 'tools',  label: 'Tool Workshop', comp: 'ToolWorkshop' },
+    ] },
+
+  { key: 'reports',    icon: '◧', label: 'Reports',         group: 'Reporting',
+    tabs: [{ key: 'report', label: 'Reports', comp: 'ReportPage' }] },
+
+  { key: 'system',     icon: '⊙', label: 'System',          group: 'Reporting',
+    tabs: [
+      { key: 'sessions',  label: 'Sessions',       comp: 'SessionHistory' },
+      { key: 'knowledge', label: 'Knowledge Base', comp: 'KnowledgePage' },
+      { key: 'metrics',   label: 'Metrics',        comp: 'MetricsDash' },
+    ] },
 ];
 
-const PAGE_COMPONENT = {
-  risk:      () => window.RiskDashboard,
-  mission:   () => window.MissionControl,
-  target:    () => window.TargetConfig,
-  sessions:  () => window.SessionHistory,
-  agents:    () => window.AgentConsole,
-  ai_obs:    () => window.AIObservability,
-  findings:  () => window.FindingsBoard,
-  graph:     () => window.AttackGraph,
-  web_test:  () => window.WebTesting,
-  osint:     () => window.OsintIntel,
-  lateral:   () => window.LateralPostPage,
-  creds:     () => window.CredentialsPage,
-  shells:    () => window.ShellManager,
-  payloads:  () => window.PayloadBuilder,
-  tools:     () => window.ToolWorkshop,
-  report:    () => window.ReportPage,
-  metrics:   () => window.MetricsDash,
-  knowledge: () => window.KnowledgePage,
-  reasoning: () => window.ReasoningEnginePage,
+// Per-mode hub visibility (Spec §10.3)
+const HUB_MODE_VISIBILITY = {
+  risk:       { OPERATOR: true,  BRIEFING: true,  PRESENT: true,  CLIENT: true  },
+  operations: { OPERATOR: true,  BRIEFING: true,  PRESENT: true,  CLIENT: false },
+  findings:   { OPERATOR: true,  BRIEFING: true,  PRESENT: true,  CLIENT: true  },
+  graph:      { OPERATOR: true,  BRIEFING: true,  PRESENT: true,  CLIENT: true  },
+  reasoning:  { OPERATOR: true,  BRIEFING: false, PRESENT: false, CLIENT: false },
+  foothold:   { OPERATOR: true,  BRIEFING: false, PRESENT: false, CLIENT: false },
+  workshop:   { OPERATOR: true,  BRIEFING: false, PRESENT: false, CLIENT: false },
+  reports:    { OPERATOR: true,  BRIEFING: true,  PRESENT: true,  CLIENT: true  },
+  system:     { OPERATOR: true,  BRIEFING: false, PRESENT: false, CLIENT: false },
 };
 
-const GROUP_ORDER = ['Overview', 'Analysis', 'Exploitation', 'Reporting', 'Knowledge'];
+function isHubVisible(hubKey, mode) {
+  return HUB_MODE_VISIBILITY[hubKey]?.[mode] ?? true;
+}
+
+// CLIENT-mode tool-name defang: tool jargon → outcome phrasing (Spec §10.6)
+const CLIENT_TOOL_DEFANG = {
+  'nmap':         'Service enumeration scan',
+  'rustscan':     'Service enumeration scan',
+  'masscan':      'Service enumeration scan',
+  'hydra':        'Authentication assessment',
+  'patator':      'Authentication assessment',
+  'crackmapexec': 'AD authentication assessment',
+  'sqlmap':       'SQL injection assessment',
+  'nuclei':       'Vulnerability fingerprinting',
+  'metasploit':   'Exploitation framework',
+  'msfconsole':   'Exploitation framework',
+  'mimikatz':     'Credential extraction',
+  'bloodhound':   'AD topology analysis',
+  'impacket':     'AD service interaction',
+  'wpscan':       'CMS-specific assessment',
+  'enum4linux':   'SMB enumeration',
+  'smbclient':    'SMB share enumeration',
+  'gobuster':     'Web content discovery',
+  'ffuf':         'Web content discovery',
+  'feroxbuster':  'Web content discovery',
+  'whatweb':      'Web fingerprinting',
+};
+
+window.defangToolName = function(name) {
+  if (!name) return name;
+  const k = String(name).toLowerCase();
+  return CLIENT_TOOL_DEFANG[k] || name;
+};
+
+// PRESENT mode: 9 slides walking the engagement story (Spec §10.4)
+const PRESENT_SLIDES = [
+  { id: 'title',   title: 'Engagement Overview' },
+  { id: 'scope',   title: 'Scope' },
+  { id: 'risk',    title: 'Risk Score' },
+  { id: 'crit',    title: 'Critical Findings' },
+  { id: 'high',    title: 'High-severity Findings' },
+  { id: 'kchain',  title: 'Kill Chain' },
+  { id: 'graph',   title: 'Attack Graph' },
+  { id: 'recs',    title: 'Recommendations' },
+  { id: 'closing', title: 'Closing' },
+];
+
+// Map component-name strings to lazy window.<Name> getters.
+const COMP_FOR = {
+  RiskDashboard:       () => window.RiskDashboard,
+  MissionControl:      () => window.MissionControl,
+  AgentConsole:        () => window.AgentConsole,
+  FindingsBoard:       () => window.FindingsBoard,
+  WebTesting:          () => window.WebTesting,
+  OsintIntel:          () => window.OsintIntel,
+  AttackGraph:         () => window.AttackGraph,
+  ReasoningEnginePage: () => window.ReasoningEnginePage,
+  AIObservability:     () => window.AIObservability,
+  CredentialsPage:     () => window.CredentialsPage,
+  ShellManager:        () => window.ShellManager,
+  LateralPostPage:     () => window.LateralPostPage,
+  PayloadBuilder:      () => window.PayloadBuilder,
+  TargetConfig:        () => window.TargetConfig,
+  ToolWorkshop:        () => window.ToolWorkshop,
+  ReportPage:          () => window.ReportPage,
+  SessionHistory:      () => window.SessionHistory,
+  KnowledgePage:       () => window.KnowledgePage,
+  MetricsDash:         () => window.MetricsDash,
+};
+
+// Legacy alias resolver — old navigate('agents') still resolves.
+// Returns {hub, tab} or null.
+function resolveLegacyKey(legacyKey) {
+  for (const h of HUBS) {
+    for (const t of h.tabs) {
+      if (t.key === legacyKey) return { hub: h.key, tab: t.key };
+    }
+  }
+  return null;
+}
+
+const GROUP_ORDER = ['Overview', 'Analysis', 'Execution', 'Reporting'];
 
 const GROUP_COLORS = {
-  Overview:     T.accent,
-  Analysis:     T.cyan,
-  Exploitation: T.critical,
-  Reporting:    T.medium,
-  Knowledge:    T.violet,
+  Overview:  'var(--accent)',
+  Analysis:  'var(--cyan)',
+  Execution: 'var(--violet)',
+  Reporting: 'var(--medium)',
 };
 
 // ─── Persistent UI prefs ─────────────────────────────────────
@@ -153,12 +225,11 @@ function savePrefs(p) {
 // `midnight` is the default (no data-attribute).  Users pick from a
 // dropdown in the header; the choice is persisted in localStorage.
 const THEMES = [
-  { id: 'midnight', label: 'Midnight',  swatch: '#00E5A0', desc: 'Default — deep blue-black, teal accent' },
-  { id: 'graphite', label: 'Graphite',  swatch: '#38BDF8', desc: 'Neutral charcoal, cyan accent' },
-  { id: 'sapphire', label: 'Sapphire',  swatch: '#4F8DFD', desc: 'Saturated corporate blue' },
-  { id: 'amber',    label: 'Amber',     swatch: '#FFB22A', desc: 'Hacker CRT vibe' },
-  { id: 'contrast', label: 'Contrast',  swatch: '#FFE600', desc: 'High-contrast for accessibility' },
-  { id: 'daylight', label: 'Daylight',  swatch: '#00A372', desc: 'Light theme for bright environments' },
+  { id: 'midnight', label: 'Stellar Ops', swatch: '#4FA8FF', desc: 'Default — black/blue cosmos, the core ARGUS aesthetic' },
+  { id: 'graphite', label: 'Graphite',    swatch: '#38BDF8', desc: 'Neutral charcoal, cyan accent' },
+  { id: 'sapphire', label: 'Sapphire',    swatch: '#4F8DFD', desc: 'Brighter blue, projector-friendly' },
+  { id: 'amber',    label: 'Amber',       swatch: '#FFB22A', desc: 'Operator-terminal mono purists' },
+  { id: 'contrast', label: 'Contrast',    swatch: '#FFE600', desc: 'High-contrast accessibility' },
 ];
 function applyTheme(id) {
   if (!id || id === 'midnight') {
@@ -184,12 +255,12 @@ function ThemeSwitcher({ current, onPick }) {
       style: {
         display: 'flex', alignItems: 'center', gap: 7,
         padding: '4px 10px', borderRadius: 18, cursor: 'pointer',
-        background: T.bgPanel, border: `1px solid ${T.border}`,
-        color: T.textSecondary, fontSize: 11, fontFamily: T.fontUI,
+        background: 'var(--bg-panel)', border: `1px solid ${'var(--border-dim)'}`,
+        color: 'var(--text-secondary)', fontSize: 11, fontFamily: 'var(--font-ui)',
         transition: 'border-color 0.15s, color 0.15s',
       },
-      onMouseEnter: e => { e.currentTarget.style.borderColor = T.borderLight; e.currentTarget.style.color = T.textPrimary; },
-      onMouseLeave: e => { e.currentTarget.style.borderColor = T.border; e.currentTarget.style.color = T.textSecondary; },
+      onMouseEnter: e => { e.currentTarget.style.borderColor = 'var(--border)'; e.currentTarget.style.color = 'var(--text-primary)'; },
+      onMouseLeave: e => { e.currentTarget.style.borderColor = 'var(--border-dim)'; e.currentTarget.style.color = 'var(--text-secondary)'; },
     },
       React.createElement('span', {
         style: {
@@ -205,12 +276,12 @@ function ThemeSwitcher({ current, onPick }) {
       style: {
         position: 'absolute', top: 'calc(100% + 6px)', right: 0, zIndex: 1200,
         minWidth: 220, padding: 6, borderRadius: 10,
-        background: T.bgSurface, border: `1px solid ${T.borderBright}`,
+        background: 'var(--bg-surface)', border: `1px solid ${'var(--border-bright)'}`,
         boxShadow: '0 12px 32px rgba(0,0,0,0.6)',
       }
     },
       React.createElement('div', {
-        style: { fontSize: 9, color: T.textMuted, padding: '6px 10px 8px',
+        style: { fontSize: 9, color: 'var(--text-muted)', padding: '6px 10px 8px',
                  letterSpacing: 1.5, textTransform: 'uppercase', fontWeight: 700 }
       }, 'Color Theme'),
       THEMES.map(t => {
@@ -224,7 +295,7 @@ function ThemeSwitcher({ current, onPick }) {
             background: active ? `${t.swatch}15` : 'transparent',
             transition: 'background 0.1s',
           },
-          onMouseEnter: e => { if (!active) e.currentTarget.style.background = `${T.textPrimary}07`; },
+          onMouseEnter: e => { if (!active) e.currentTarget.style.background = 'color-mix(in srgb, var(--text-primary) 3%, transparent)'; },
           onMouseLeave: e => { if (!active) e.currentTarget.style.background = 'transparent'; },
         },
           React.createElement('span', {
@@ -237,10 +308,10 @@ function ThemeSwitcher({ current, onPick }) {
           }),
           React.createElement('div', { style: { flex: 1, minWidth: 0 } },
             React.createElement('div', {
-              style: { fontSize: 12, fontWeight: 600, color: active ? t.swatch : T.textPrimary }
+              style: { fontSize: 12, fontWeight: 600, color: active ? t.swatch : 'var(--text-primary)' }
             }, t.label),
             React.createElement('div', {
-              style: { fontSize: 10, color: T.textMuted,
+              style: { fontSize: 10, color: 'var(--text-muted)',
                        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }
             }, t.desc)
           ),
@@ -253,11 +324,181 @@ function ThemeSwitcher({ current, onPick }) {
   );
 }
 
+// ─── Audience-mode picker (T5) ──────────────────────────────────
+function ModePicker() {
+  const { state, dispatch } = window.useStore();
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+
+  useEffect(() => {
+    function close(e) { if (ref.current && !ref.current.contains(e.target)) setOpen(false); }
+    if (open) document.addEventListener('mousedown', close);
+    return () => document.removeEventListener('mousedown', close);
+  }, [open]);
+
+  const modes = [
+    { id: 'OPERATOR', label: 'Operator', desc: 'Full cockpit',          shortcut: 'F1' },
+    { id: 'BRIEFING', label: 'Briefing', desc: 'Project lead',          shortcut: 'F2' },
+    { id: 'PRESENT',  label: 'Present',  desc: 'Boardroom / projector', shortcut: 'F3' },
+    { id: 'CLIENT',   label: 'Client',   desc: 'External / branded',    shortcut: 'F4' },
+  ];
+
+  return React.createElement('div', { ref, style: { position: 'relative' } },
+    React.createElement('button', {
+      className: 'mode-picker-trigger',
+      onClick: () => setOpen(o => !o),
+    }, `[ ${state.viewMode || 'OPERATOR'} ]`),
+
+    open && React.createElement('div', { className: 'mode-picker-popover' },
+      modes.map(m =>
+        React.createElement('div', {
+          key: m.id,
+          className: `mode-picker-row${state.viewMode === m.id ? ' active' : ''}`,
+          onClick: () => {
+            dispatch({ type: 'SET_VIEW_MODE', payload: m.id });
+            if (m.id !== 'CLIENT') setOpen(false);
+          },
+        },
+          React.createElement('span', null, state.viewMode === m.id ? '◐' : '○'),
+          React.createElement('div', { style: { flex: 1 } },
+            React.createElement('div', { style: { fontWeight: 600 } }, m.label),
+            React.createElement('div', { style: { fontSize: 10, color: 'var(--text-muted)' } }, m.desc),
+          ),
+          React.createElement('span', { className: 'mode-picker-shortcut' }, m.shortcut),
+        )
+      ),
+
+      // CLIENT settings panel — only shown when CLIENT is the current mode
+      state.viewMode === 'CLIENT' && React.createElement('div', {
+        style: { borderTop: '1px solid var(--border-dim)', padding: 10, marginTop: 6 }
+      },
+        React.createElement('div', {
+          style: { fontSize: 10, color: 'var(--text-muted)', marginBottom: 6, letterSpacing: 1 }
+        }, 'CLIENT MODE SETTINGS'),
+        React.createElement('input', {
+          type: 'text',
+          className: 'mode-picker-input',
+          placeholder: 'Customer name',
+          value: state.client?.name || '',
+          onChange: e => dispatch({ type: 'SET_CLIENT_BRAND', payload: { name: e.target.value } }),
+        }),
+        React.createElement('input', {
+          type: 'color',
+          value: state.client?.brand || '#1F4D8B',
+          onChange: e => dispatch({ type: 'SET_CLIENT_BRAND', payload: { brand: e.target.value } }),
+          style: { width: '100%', height: 28, padding: 0, border: 'none', cursor: 'pointer' },
+        })
+      )
+    )
+  );
+}
+
+// ─── HUD telemetry strip ────────────────────────────────────────
+// 3 vertical bars: LLM call rate (per-min), active subagent count,
+// WS event rate.  Heights animate at 1Hz using transition.  Reads
+// defensively from state.metrics — works even when metrics absent.
+function HudTelemetry() {
+  const { state } = window.useStore();
+  const llmRate    = state.metrics?.llm_calls_per_min || 0;
+  const toolsCount = (state.activeSubagents || []).length;
+  const wsRate     = state.metrics?.ws_events_per_sec || 0;
+
+  const bars = [
+    { value: llmRate,    max: 20, label: 'LLM/min' },
+    { value: toolsCount, max: 8,  label: 'tools'   },
+    { value: wsRate,     max: 30, label: 'evts/s'  },
+  ];
+
+  return React.createElement('div', {
+    className: 'hud-telemetry',
+    title: `LLM ${llmRate}/min · ${toolsCount} active tools · ${wsRate} evt/s`,
+  },
+    bars.map((b, i) => {
+      const pct = Math.min(1, (b.value || 0) / b.max);
+      const h = 4 + Math.round(pct * 12);
+      const level = pct > 0.7 ? 'hot' : pct > 0.2 ? 'active' : 'idle';
+      return React.createElement('div', {
+        key: i,
+        className: 'bar',
+        'data-level': level,
+        style: { height: `${h}px` },
+      });
+    })
+  );
+}
+
+// ─── Mission clock ──────────────────────────────────────────────
+// Pure client-side derived from state.activeSession.started_at.
+// Ticks once per second.  Shows "--:--:--" when no session active.
+function HudClock() {
+  const { state } = window.useStore();
+  const startedAt = state.activeSession?.started_at;
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+  if (!startedAt) {
+    return React.createElement('span', { className: 'hud-clock' }, '⏱ --:--:--');
+  }
+  const elapsed = Math.max(0, Math.floor((now - new Date(startedAt).getTime()) / 1000));
+  const h = String(Math.floor(elapsed / 3600)).padStart(2, '0');
+  const m = String(Math.floor((elapsed % 3600) / 60)).padStart(2, '0');
+  const s = String(elapsed % 60).padStart(2, '0');
+  return React.createElement('span', { className: 'hud-clock' }, `⏱ ${h}:${m}:${s}`);
+}
+
+// ─── Engagement consumables strip ────────────────────────────────
+// 4 cockpit-style gauges at the bottom of the viewport.  Reads from
+// state.metrics defensively.  Click to collapse/expand.
+function HudConsumables() {
+  const { state } = window.useStore();
+  const [collapsed, setCollapsed] = useState(false);
+
+  const m = state.metrics || {};
+  const llmTokensUsed   = m.llm_tokens_used   || 0;
+  const llmTokensBudget = m.llm_tokens_budget || 100000;
+  const timeElapsedSec  = m.elapsed_sec       || 0;
+  const timeWindowSec   = m.scope_window_sec  || 28800; // 8h default
+  const agentsActive    = (state.activeSubagents || []).length;
+  const agentsMax       = m.max_concurrency   || 8;
+  const findingsRate    = m.findings_per_hour || 0;
+
+  const gauges = [
+    { label: 'LLM TOKENS',  pct: Math.min(1, llmTokensUsed / Math.max(1, llmTokensBudget)) },
+    { label: 'TIME REMAIN', pct: Math.max(0, 1 - timeElapsedSec / Math.max(1, timeWindowSec)) },
+    { label: 'AGENTS',      pct: Math.min(1, agentsActive / Math.max(1, agentsMax)) },
+    { label: 'FINDINGS Δ',  pct: Math.min(1, findingsRate / 50) },
+  ];
+
+  return React.createElement('div', {
+    className: 'hud-consumables',
+    'data-collapsed': collapsed,
+    onClick: () => setCollapsed(c => !c),
+    title: 'Click to collapse/expand engagement consumables',
+  },
+    gauges.map((g, i) =>
+      React.createElement('div', { key: i, className: 'gauge' },
+        React.createElement('span', null, g.label),
+        React.createElement('div', { className: 'gauge-bar' },
+          React.createElement('div', {
+            className: 'gauge-fill',
+            'data-warn': g.pct > 0.7,
+            'data-crit': g.pct > 0.9,
+            style: { width: `${Math.round(g.pct * 100)}%` },
+          })
+        ),
+        React.createElement('span', null, `${Math.round(g.pct * 100)}%`)
+      )
+    )
+  );
+}
+
 // ─── Service status dot ──────────────────────────────────────
 function SvcDot({ label, status, mini = false }) {
-  const color = status === 'online' ? T.low
-    : status === 'offline'          ? T.critical
-    : T.medium;
+  const color = status === 'online' ? 'var(--low)'
+    : status === 'offline'          ? 'var(--critical)'
+    : 'var(--medium)';
   const isOnline = status === 'online';
   const title = `${label}: ${status || 'unknown'}`;
   if (mini) {
@@ -277,7 +518,7 @@ function SvcDot({ label, status, mini = false }) {
       background: `${color}10`,
       border: `1px solid ${color}33`,
       fontSize: 10, fontWeight: 600, color,
-      fontFamily: T.fontUI, letterSpacing: 0.4,
+      fontFamily: 'var(--font-ui)', letterSpacing: 0.4,
       cursor: 'default',
     }
   },
@@ -294,13 +535,13 @@ function SvcDot({ label, status, mini = false }) {
 // ─── Nav item ────────────────────────────────────────────────
 function NavItem({ item, isActive, isCollapsed, onClick }) {
   const [hovered, setHovered] = useState(false);
-  const accent = GROUP_COLORS[item.group] || T.accent;
+  const accent = GROUP_COLORS[item.group] || 'var(--accent)';
 
   return React.createElement('div', {
     onClick,
     onMouseEnter: () => setHovered(true),
     onMouseLeave: () => setHovered(false),
-    title: isCollapsed ? `${item.label} — ${item.desc}` : item.desc,
+    title: isCollapsed ? `${item.label}${item.desc ? ' — ' + item.desc : ''}` : (item.desc || item.label),
     style: {
       display: 'flex', alignItems: 'center',
       gap: isCollapsed ? 0 : 10,
@@ -308,12 +549,12 @@ function NavItem({ item, isActive, isCollapsed, onClick }) {
       padding: isCollapsed ? '8px 0' : '8px 11px',
       justifyContent: isCollapsed ? 'center' : 'flex-start',
       borderRadius: 8, cursor: 'pointer',
-      fontFamily: T.fontUI, fontSize: 12, fontWeight: isActive ? 600 : 450,
+      fontFamily: 'var(--font-ui)', fontSize: 12, fontWeight: isActive ? 600 : 450,
       letterSpacing: 0.1,
-      color: isActive ? accent : hovered ? T.textPrimary : T.textSecondary,
+      color: isActive ? accent : hovered ? 'var(--text-primary)' : 'var(--text-secondary)',
       background: isActive
         ? `${accent}14`
-        : hovered ? `${T.textPrimary}08` : 'transparent',
+        : hovered ? 'color-mix(in srgb, var(--text-primary) 3%, transparent)' : 'transparent',
       borderLeft: isCollapsed
         ? 'none'
         : `2px solid ${isActive ? accent : 'transparent'}`,
@@ -346,7 +587,7 @@ function GroupHeader({ group, color, collapsed, isOpen, onToggle }) {
   if (collapsed) {
     return React.createElement('div', {
       style: {
-        height: 1, background: T.border, margin: '6px 14px',
+        height: 1, background: 'var(--border-dim)', margin: '6px 14px',
       }
     });
   }
@@ -356,8 +597,8 @@ function GroupHeader({ group, color, collapsed, isOpen, onToggle }) {
       display: 'flex', alignItems: 'center', gap: 8,
       padding: '10px 14px 5px',
       fontSize: 9, letterSpacing: 1.6,
-      color: T.textMuted, textTransform: 'uppercase', fontWeight: 700,
-      fontFamily: T.fontUI, cursor: 'pointer', userSelect: 'none',
+      color: 'var(--text-muted)', textTransform: 'uppercase', fontWeight: 700,
+      fontFamily: 'var(--font-ui)', cursor: 'pointer', userSelect: 'none',
     }
   },
     React.createElement('span', {
@@ -370,7 +611,7 @@ function GroupHeader({ group, color, collapsed, isOpen, onToggle }) {
     React.createElement('span', { style: { flex: 1 } }, group),
     React.createElement('span', {
       style: {
-        fontSize: 10, color: T.textMuted,
+        fontSize: 10, color: 'var(--text-muted)',
         transform: isOpen ? 'rotate(0deg)' : 'rotate(-90deg)',
         transition: 'transform 0.15s ease',
       }
@@ -412,10 +653,10 @@ function ToolTimeoutModal() {
   },
     React.createElement('div', {
       style: {
-        background: T.bgSurface, border: `1px solid ${T.critical}`,
+        background: 'var(--bg-surface)', border: `1px solid ${'var(--critical)'}`,
         borderRadius: 14, padding: '26px 30px', minWidth: 430, maxWidth: 530,
-        boxShadow: `0 0 60px ${T.critical}30, 0 12px 40px rgba(0,0,0,0.65)`,
-        fontFamily: T.fontUI,
+        boxShadow: '0 0 60px color-mix(in srgb, var(--critical) 19%, transparent), 0 12px 40px rgba(0,0,0,0.65)',
+        fontFamily: 'var(--font-ui)',
       }
     },
       React.createElement('div', {
@@ -424,51 +665,51 @@ function ToolTimeoutModal() {
         React.createElement('div', {
           style: {
             width: 36, height: 36, borderRadius: 8, flexShrink: 0,
-            background: `${T.critical}1F`, border: `1px solid ${T.critical}50`,
+            background: 'var(--critical-bg)', border: '1px solid color-mix(in srgb, var(--critical) 31%, transparent)',
             display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18,
           }
         }, '⏱'),
         React.createElement('div', null,
           React.createElement('div', {
-            style: { fontSize: 15, fontWeight: 700, color: T.critical, letterSpacing: 0.2, marginBottom: 3 }
+            style: { fontSize: 15, fontWeight: 700, color: 'var(--critical)', letterSpacing: 0.2, marginBottom: 3 }
           }, 'Tool Running Too Long'),
           React.createElement('div', {
-            style: { fontSize: 11, color: T.textSecondary, lineHeight: 1.5 }
+            style: { fontSize: 11, color: 'var(--text-secondary)', lineHeight: 1.5 }
           }, 'This tool has exceeded its time limit. Choose to extend or stop it.')
         )
       ),
 
       React.createElement('div', {
         style: {
-          background: T.bgPanel, borderRadius: 8, padding: '10px 14px',
-          border: `1px solid ${T.border}`, marginBottom: 20,
+          background: 'var(--bg-panel)', borderRadius: 8, padding: '10px 14px',
+          border: `1px solid ${'var(--border-dim)'}`, marginBottom: 20,
         }
       },
         ['Tool', 'Subagent', 'Running for'].map((lbl, i) => {
           const val = i === 0 ? (warn.tool || 'unknown')
                     : i === 1 ? (warn.subagent || 'unknown')
                               : fmtElapsed(warn.elapsed_sec || 0);
-          const color = i === 0 ? T.cyan : i === 1 ? T.textPrimary : T.medium;
+          const color = i === 0 ? 'var(--cyan)' : i === 1 ? 'var(--text-primary)' : 'var(--medium)';
           return React.createElement('div', {
             key: lbl,
             style: {
               display: 'flex', justifyContent: 'space-between', padding: '5px 0',
-              borderBottom: i < 2 ? `1px solid ${T.border}55` : 'none',
+              borderBottom: i < 2 ? '1px solid color-mix(in srgb, var(--border-dim) 33%, transparent)' : 'none',
             }
           },
             React.createElement('span', {
-              style: { fontSize: 9, color: T.textMuted, textTransform: 'uppercase',
-                       letterSpacing: 1, fontFamily: T.fontMono }
+              style: { fontSize: 9, color: 'var(--text-muted)', textTransform: 'uppercase',
+                       letterSpacing: 1, fontFamily: 'var(--font-mono)' }
             }, lbl),
             React.createElement('span', {
-              style: { fontSize: 11, fontFamily: T.fontMono, color, fontWeight: i === 0 || i === 2 ? 700 : 500 }
+              style: { fontSize: 11, fontFamily: 'var(--font-mono)', color, fontWeight: i === 0 || i === 2 ? 700 : 500 }
             }, val)
           );
         })
       ),
 
       React.createElement('div', {
-        style: { fontSize: 10, color: T.textSecondary, marginBottom: 10, letterSpacing: 0.3 }
+        style: { fontSize: 10, color: 'var(--text-secondary)', marginBottom: 10, letterSpacing: 0.3 }
       }, 'Extend the time limit or stop this tool:'),
 
       React.createElement('div', {
@@ -480,8 +721,8 @@ function ToolTimeoutModal() {
             onClick: () => extend(sec),
             style: {
               padding: '9px 0', borderRadius: 7, cursor: 'pointer',
-              border: `1px solid ${T.accent}50`, background: `${T.accent}10`,
-              color: T.accent, fontSize: 11, fontWeight: 700, fontFamily: T.fontMono,
+              border: '1px solid color-mix(in srgb, var(--accent) 31%, transparent)', background: 'var(--accent-subtle)',
+              color: 'var(--accent)', fontSize: 11, fontWeight: 700, fontFamily: 'var(--font-mono)',
             }
           }, label)
         )
@@ -491,9 +732,9 @@ function ToolTimeoutModal() {
         onClick: stopTool,
         style: {
           width: '100%', padding: '10px 0', borderRadius: 7, cursor: 'pointer',
-          border: `1px solid ${T.critical}55`, background: `${T.critical}12`,
-          color: T.critical, fontSize: 12, fontWeight: 700,
-          fontFamily: T.fontMono, letterSpacing: 0.5,
+          border: '1px solid var(--critical-bd)', background: 'var(--critical-bg)',
+          color: 'var(--critical)', fontSize: 12, fontWeight: 700,
+          fontFamily: 'var(--font-mono)', letterSpacing: 0.5,
         }
       }, '■  Stop This Tool')
     )
@@ -514,16 +755,28 @@ function CommandPalette({ open, onClose, onNavigate }) {
     }
   }, [open]);
 
+  // Flatten HUBS into a searchable tab list for the palette.
+  // Each entry preserves the legacy `tab.key` so onNavigate(tab.key) still works.
+  const ALL_TABS = useMemo(() =>
+    HUBS.flatMap(h => h.tabs.map(t => ({
+      key:   t.key,
+      label: t.label,
+      icon:  h.icon,
+      group: h.group,
+      desc:  h.label,
+    })))
+  , []);
+
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
-    if (!q) return PAGES;
-    return PAGES.filter(p =>
+    if (!q) return ALL_TABS;
+    return ALL_TABS.filter(p =>
       p.label.toLowerCase().includes(q) ||
       p.group.toLowerCase().includes(q) ||
-      p.desc.toLowerCase().includes(q) ||
+      (p.desc || '').toLowerCase().includes(q) ||
       p.key.includes(q)
     );
-  }, [query]);
+  }, [query, ALL_TABS]);
 
   useEffect(() => {
     if (!open) return;
@@ -560,7 +813,7 @@ function CommandPalette({ open, onClose, onNavigate }) {
       onClick: e => e.stopPropagation(),
       style: {
         width: 560, maxWidth: '90vw', maxHeight: '60vh',
-        background: T.bgSurface, border: `1px solid ${T.borderBright}`,
+        background: 'var(--bg-surface)', border: `1px solid ${'var(--border-bright)'}`,
         borderRadius: 14, boxShadow: '0 20px 60px rgba(0,0,0,0.7)',
         display: 'flex', flexDirection: 'column', overflow: 'hidden',
       }
@@ -568,12 +821,12 @@ function CommandPalette({ open, onClose, onNavigate }) {
       // Search input
       React.createElement('div', {
         style: {
-          padding: '14px 16px', borderBottom: `1px solid ${T.border}`,
+          padding: '14px 16px', borderBottom: `1px solid ${'var(--border-dim)'}`,
           display: 'flex', alignItems: 'center', gap: 10,
         }
       },
         React.createElement('span', {
-          style: { color: T.textMuted, fontSize: 14 }
+          style: { color: 'var(--text-muted)', fontSize: 14 }
         }, '⌕'),
         React.createElement('input', {
           ref: inputRef,
@@ -582,14 +835,14 @@ function CommandPalette({ open, onClose, onNavigate }) {
           placeholder: 'Type to search pages…',
           style: {
             flex: 1, background: 'transparent', border: 'none', outline: 'none',
-            color: T.textPrimary, fontSize: 14, fontFamily: T.fontUI,
+            color: 'var(--text-primary)', fontSize: 14, fontFamily: 'var(--font-ui)',
           }
         }),
         React.createElement('span', {
           style: {
-            fontSize: 9, color: T.textMuted, padding: '2px 6px',
-            borderRadius: 4, border: `1px solid ${T.borderLight}`,
-            fontFamily: T.fontMono, letterSpacing: 0.5,
+            fontSize: 9, color: 'var(--text-muted)', padding: '2px 6px',
+            borderRadius: 4, border: `1px solid ${'var(--border)'}`,
+            fontFamily: 'var(--font-mono)', letterSpacing: 0.5,
           }
         }, 'ESC')
       ),
@@ -599,10 +852,10 @@ function CommandPalette({ open, onClose, onNavigate }) {
       },
         filtered.length === 0
           ? React.createElement('div', {
-              style: { padding: 30, textAlign: 'center', color: T.textMuted, fontSize: 12 }
+              style: { padding: 30, textAlign: 'center', color: 'var(--text-muted)', fontSize: 12 }
             }, 'No matches')
           : filtered.map((p, i) => {
-              const accent = GROUP_COLORS[p.group] || T.accent;
+              const accent = GROUP_COLORS[p.group] || 'var(--accent)';
               const isActive = i === activeIdx;
               return React.createElement('div', {
                 key: p.key,
@@ -622,13 +875,13 @@ function CommandPalette({ open, onClose, onNavigate }) {
                 React.createElement('div', { style: { flex: 1, minWidth: 0 } },
                   React.createElement('div', {
                     style: {
-                      fontSize: 13, color: isActive ? T.textPrimary : T.textPrimary,
+                      fontSize: 13, color: isActive ? 'var(--text-primary)' : 'var(--text-primary)',
                       fontWeight: 600, marginBottom: 2,
                     }
                   }, p.label),
                   React.createElement('div', {
                     style: {
-                      fontSize: 10, color: T.textMuted,
+                      fontSize: 10, color: 'var(--text-muted)',
                       overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
                     }
                   }, p.desc)
@@ -638,7 +891,7 @@ function CommandPalette({ open, onClose, onNavigate }) {
                     fontSize: 9, color: accent, padding: '2px 8px',
                     borderRadius: 10, background: `${accent}15`,
                     border: `1px solid ${accent}30`,
-                    fontFamily: T.fontMono, letterSpacing: 0.6, fontWeight: 700,
+                    fontFamily: 'var(--font-mono)', letterSpacing: 0.6, fontWeight: 700,
                   }
                 }, p.group),
               );
@@ -646,47 +899,355 @@ function CommandPalette({ open, onClose, onNavigate }) {
       ),
       React.createElement('div', {
         style: {
-          padding: '8px 14px', borderTop: `1px solid ${T.border}`,
-          display: 'flex', gap: 14, fontSize: 9, color: T.textMuted,
-          fontFamily: T.fontMono, letterSpacing: 0.5,
+          padding: '8px 14px', borderTop: `1px solid ${'var(--border-dim)'}`,
+          display: 'flex', gap: 14, fontSize: 9, color: 'var(--text-muted)',
+          fontFamily: 'var(--font-mono)', letterSpacing: 0.5,
         }
       },
         React.createElement('span', null, '↑↓  navigate'),
         React.createElement('span', null, '↵  select'),
         React.createElement('span', null, 'esc  close'),
-        React.createElement('span', { style: { marginLeft: 'auto', color: T.textSecondary } }, `${filtered.length} of ${PAGES.length}`)
+        React.createElement('span', { style: { marginLeft: 'auto', color: 'var(--text-secondary)' } }, `${filtered.length} of ${ALL_TABS.length}`)
       )
     )
+  );
+}
+
+// ─── PRESENT mode slide shell (T5B) ────────────────────────────
+function PresentSlideShell() {
+  const { state, dispatch } = window.useStore();
+  const slide = PRESENT_SLIDES[state.present?.slide || 0] || PRESENT_SLIDES[0];
+
+  useEffect(() => {
+    function onKey(e) {
+      if (state.viewMode !== 'PRESENT') return;
+      const tag = (document.activeElement?.tagName || '').toLowerCase();
+      if (tag === 'input' || tag === 'textarea') return;
+      const cur = state.present?.slide || 0;
+      if (e.key === 'ArrowRight' || e.key === ' ') {
+        e.preventDefault();
+        dispatch({ type: 'SET_PRESENT_SLIDE', payload: Math.min(cur + 1, PRESENT_SLIDES.length - 1) });
+      } else if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        dispatch({ type: 'SET_PRESENT_SLIDE', payload: Math.max(cur - 1, 0) });
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        dispatch({ type: 'SET_VIEW_MODE', payload: 'OPERATOR' });
+      } else if (e.key === 'a' || e.key === 'A') {
+        dispatch({ type: 'TOGGLE_PRESENT_AUTO' });
+      } else if (e.key === 'f' || e.key === 'F') {
+        if (!document.fullscreenElement) {
+          document.documentElement.requestFullscreen?.();
+        } else {
+          document.exitFullscreen?.();
+        }
+      }
+    }
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [state.viewMode, state.present?.slide, dispatch]);
+
+  // Auto-advance
+  useEffect(() => {
+    if (state.viewMode !== 'PRESENT' || !state.present?.autoAdvance) return;
+    const id = setInterval(() => {
+      const cur = state.present?.slide || 0;
+      dispatch({ type: 'SET_PRESENT_SLIDE', payload: (cur + 1) % PRESENT_SLIDES.length });
+    }, 12000);
+    return () => clearInterval(id);
+  }, [state.viewMode, state.present?.autoAdvance, state.present?.slide, dispatch]);
+
+  const slideBody = renderPresentSlide(slide.id, state);
+
+  return React.createElement('div', { className: 'present-shell' },
+    slideBody,
+    React.createElement('div', {
+      style: {
+        position: 'fixed', bottom: 24, left: '50%', transform: 'translateX(-50%)',
+        fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-muted)',
+        letterSpacing: 1.5, textAlign: 'center',
+      }
+    }, `${(state.present?.slide || 0) + 1} / ${PRESENT_SLIDES.length}    ←→ paginate · F fullscreen · A auto · ESC exit`)
+  );
+}
+
+function renderPresentSlide(id, state) {
+  const center = {
+    height: '100vh', display: 'flex', flexDirection: 'column',
+    alignItems: 'center', justifyContent: 'center', textAlign: 'center',
+    color: 'var(--text-primary)',
+  };
+  const titleStyle = { fontSize: 64, fontWeight: 700, marginBottom: 16, letterSpacing: -1 };
+  const subStyle = { fontSize: 20, color: 'var(--text-secondary)', letterSpacing: 1 };
+  const fs = state.findingsSummary || { critical: 0, high: 0, medium: 0, low: 0 };
+  const target = state.activeSession?.target_ip || state.activeSession?.target || '—';
+
+  switch (id) {
+    case 'title':
+      return React.createElement('div', { style: center },
+        React.createElement('div', { style: titleStyle }, 'A R G U S'),
+        React.createElement('div', { style: subStyle }, `engagement · ${target}`),
+      );
+    case 'scope':
+      return React.createElement('div', { style: center },
+        React.createElement('div', { style: { ...titleStyle, fontSize: 48 } }, 'Scope'),
+        React.createElement('div', { style: { ...subStyle, marginTop: 16 } }, `Target: ${target}`),
+      );
+    case 'risk': {
+      const score = (fs.critical * 25) + (fs.high * 12) + (fs.medium * 5) + (fs.low * 2);
+      return React.createElement('div', { style: center },
+        React.createElement('div', { style: { fontSize: 200, fontWeight: 700, fontVariantNumeric: 'tabular-nums', color: score >= 70 ? 'var(--critical)' : 'var(--accent)' } }, Math.min(100, score)),
+        React.createElement('div', { style: { ...subStyle, marginTop: 16 } }, score >= 70 ? 'CRITICAL' : score >= 40 ? 'HIGH' : score >= 15 ? 'MEDIUM' : 'BASELINE'),
+      );
+    }
+    case 'crit':
+      return React.createElement('div', { style: center },
+        React.createElement('div', { style: titleStyle }, fs.critical),
+        React.createElement('div', { style: subStyle }, 'critical findings'),
+      );
+    case 'high':
+      return React.createElement('div', { style: center },
+        React.createElement('div', { style: titleStyle }, fs.high),
+        React.createElement('div', { style: subStyle }, 'high-severity findings'),
+      );
+    case 'kchain':
+      return React.createElement('div', { style: center },
+        React.createElement('div', { style: { ...titleStyle, fontSize: 36 } }, 'Kill Chain'),
+        React.createElement('div', { style: { ...subStyle, marginTop: 16 } }, `current phase: ${state.currentPhase || 'idle'}`),
+      );
+    case 'graph':
+      return React.createElement('div', { style: center },
+        React.createElement('div', { style: { ...titleStyle, fontSize: 36 } }, 'Attack Graph'),
+        React.createElement('div', { style: subStyle }, `${(state.attackGraph?.nodes || state.graphNodes || []).length} nodes`),
+      );
+    case 'recs':
+      return React.createElement('div', { style: center },
+        React.createElement('div', { style: { ...titleStyle, fontSize: 36 } }, 'Recommendations'),
+        React.createElement('div', { style: { ...subStyle, marginTop: 16, maxWidth: 800 } }, 'Detailed remediation guidance is available in the full report.'),
+      );
+    case 'closing':
+      return React.createElement('div', { style: center },
+        React.createElement('div', { style: titleStyle }, 'Thank you.'),
+        React.createElement('div', { style: subStyle }, `${fs.critical + fs.high + fs.medium + fs.low} total findings · ${(state.activeSubagents || []).length} agents engaged`),
+      );
+    default:
+      return React.createElement('div', { style: center },
+        React.createElement('div', { style: titleStyle }, '—'),
+      );
+  }
+}
+
+// ─── Boot splash (T6) ───────────────────────────────────────
+function Splash() {
+  const { state } = window.useStore();
+  const [hidden, setHidden] = useState(false);
+  const skipped = (() => {
+    try { return localStorage.getItem('argus.skipSplash') === '1'; } catch { return false; }
+  })();
+  const [tickIdx, setTickIdx] = useState(0);
+
+  useEffect(() => {
+    if (skipped) { setHidden(true); return; }
+    const id = setInterval(() => setTickIdx(i => i + 1), 800);
+    return () => clearInterval(id);
+  }, [skipped]);
+
+  useEffect(() => {
+    if (skipped) return;
+    if (state.bootComplete) {
+      const id = setTimeout(() => setHidden(true), 400);
+      return () => clearTimeout(id);
+    }
+  }, [state.bootComplete, skipped]);
+
+  // Defensive escape hatch — never let the splash trap the user.
+  // If bootComplete hasn't fired within 5s (backend unreachable, status
+  // poll hanging, etc.), force-hide so the app shell becomes interactive.
+  useEffect(() => {
+    if (skipped) return;
+    const id = setTimeout(() => setHidden(true), 5000);
+    return () => clearTimeout(id);
+  }, [skipped]);
+
+  if (hidden) return null;
+
+  const messages = [
+    'connecting to MCP …',
+    'loading reasoning engine …',
+    'pulling playbooks …',
+    'warming reranker …',
+  ];
+  const msg = messages[tickIdx % messages.length];
+
+  return React.createElement('div', { className: 'splash', 'data-hidden': hidden },
+    React.createElement('div', { className: 'splash-orbital' }),
+    React.createElement('div', { className: 'splash-title' }, 'A R G U S'),
+    React.createElement('div', { className: 'splash-subtitle' }, 'pentest platform'),
+    React.createElement('div', { className: 'splash-status' }, msg),
   );
 }
 
 // ─── App ─────────────────────────────────────────────────────
 function App() {
   const initial = loadPrefs();
-  const [page, setPage] = useState(initial.page || 'risk');
   const [sidebarCollapsed, setSidebarCollapsed] = useState(!!initial.sidebarCollapsed);
   const [groupOpen, setGroupOpen] = useState(initial.groupOpen || {
-    Overview: true, Analysis: true, Exploitation: true, Reporting: true, Knowledge: true,
+    Overview: true, Analysis: true, Execution: true, Reporting: true,
   });
   const [theme, setTheme] = useState(initial.theme || 'midnight');
   const [paletteOpen, setPaletteOpen] = useState(false);
-  const { state } = window.useStore();
+  const { state, dispatch } = window.useStore();
   const { sysStatus, activeSession, findingsSummary, wsConnected, currentPhase } = state;
+  const currentHub = state.currentHub || 'risk';
+  const currentTab = state.currentTab || 'risk';
+  const inPresent  = state.viewMode === 'PRESENT';
+
+  // Boot-complete dispatch (T6) — fires once the first system-status poll
+  // returns (success or failure both flip sysStatus.mcp off 'unknown').
+  // Decoupled from wsConnected because the WebSocket only opens after a
+  // session starts — gating the splash on it would freeze the shell on
+  // fresh loads with no active session.
+  useEffect(() => {
+    const mcp = state.sysStatus?.mcp;
+    if (!state.bootComplete && mcp && mcp !== 'unknown') {
+      dispatch({ type: 'SET_BOOT_COMPLETE' });
+    }
+  }, [state.sysStatus?.mcp, state.bootComplete]);
+
+  // Mode transition cross-fade (T6) — briefly fades the root on viewMode change.
+  const [transitioning, setTransitioning] = useState(false);
+  useEffect(() => {
+    setTransitioning(true);
+    const id = setTimeout(() => setTransitioning(false), 600);
+    return () => clearTimeout(id);
+  }, [state.viewMode]);
+
+  // Supernova flash on header CRIT-tally when critical-finding count increments.
+  // Visual-only — drives the .motion-supernova class for one 2s flash.
+  const [critPulse, setCritPulse] = useState(false);
+  const lastCrit = useRef(state.findingsSummary?.critical || 0);
+  useEffect(() => {
+    const cur = state.findingsSummary?.critical || 0;
+    if (cur > lastCrit.current) {
+      setCritPulse(true);
+      const id = setTimeout(() => setCritPulse(false), 2000);
+      lastCrit.current = cur;
+      return () => clearTimeout(id);
+    }
+    lastCrit.current = cur;
+  }, [state.findingsSummary?.critical]);
+
+  // Mote drift on finding_added — Spec §9.1 event 4.
+  // Spawns a transient DOM node that drifts toward the header tally.
+  // De-dupes via window.__moteSeen so a re-render with the same recentFindings
+  // tail doesn't double-fire.
+  useEffect(() => {
+    const list = state.recentFindings || [];
+    if (list.length === 0) return;
+    const last = list[list.length - 1];
+    if (!last) return;
+    if (!window.__moteSeen) window.__moteSeen = new Set();
+    if (window.__moteSeen.has(last.id)) return;
+    window.__moteSeen.add(last.id);
+
+    // Header tally is roughly top-right; estimate target coords.
+    const targetX = window.innerWidth - 200;
+    const targetY = 26;
+    // Spawn at center of viewport (proxy for "source" — refined when
+    // source-element refs become available).
+    const startX = window.innerWidth / 2;
+    const startY = window.innerHeight / 2;
+
+    const node = document.createElement('div');
+    node.className = 'motion-mote';
+    node.dataset.sev = (last.severity || 'info').toLowerCase();
+    node.style.left = `${startX}px`;
+    node.style.top  = `${startY}px`;
+    node.style.setProperty(
+      '--mote-target',
+      `translate(${targetX - startX}px, ${targetY - startY}px)`
+    );
+    document.body.appendChild(node);
+    const id = setTimeout(() => { try { node.remove(); } catch (_) {} }, 1700);
+    return () => clearTimeout(id);
+  }, [state.recentFindings]);
 
   // Apply persisted theme on mount + whenever it changes
   useEffect(() => { applyTheme(theme); }, [theme]);
 
   // Persist UI prefs
   useEffect(() => {
-    savePrefs({ page, sidebarCollapsed, groupOpen, theme });
-  }, [page, sidebarCollapsed, groupOpen, theme]);
+    savePrefs({
+      currentHub, currentTab,
+      hubTabMemory: state.hubTabMemory,
+      sidebarCollapsed, groupOpen, theme,
+      viewMode: state.viewMode, client: state.client, present: state.present,
+    });
+  }, [currentHub, currentTab, state.hubTabMemory, sidebarCollapsed, groupOpen, theme,
+      state.viewMode, state.client, state.present]);
+
+  // Restore audience-mode + client branding from prefs on cold boot (T5)
+  useEffect(() => {
+    const prefs = loadPrefs();
+    if (prefs.viewMode && prefs.viewMode !== state.viewMode) {
+      dispatch({ type: 'SET_VIEW_MODE', payload: prefs.viewMode });
+    }
+    if (prefs.client) {
+      dispatch({ type: 'SET_CLIENT_BRAND', payload: prefs.client });
+    }
+  }, []);
+
+  // One-time migration: old saved {page: '<key>'} → new {currentHub, currentTab}
+  useEffect(() => {
+    const prefs = loadPrefs();
+    if (prefs.page && !prefs.currentHub) {
+      const r = resolveLegacyKey(prefs.page);
+      if (r) {
+        dispatch({ type: 'SET_HUB_TAB', payload: { hub: r.hub, tab: r.tab } });
+      }
+      const { page: _p, ...rest } = prefs;
+      savePrefs(rest);
+    }
+  }, []);
+
+  // Restore hub/tab from prefs on warm reload
+  useEffect(() => {
+    const prefs = loadPrefs();
+    if (prefs.currentHub && prefs.currentTab && (state.currentHub !== prefs.currentHub || state.currentTab !== prefs.currentTab)) {
+      dispatch({ type: 'SET_HUB_TAB', payload: { hub: prefs.currentHub, tab: prefs.currentTab } });
+    }
+  }, []);
+
+  function navigateHubTab(hubKey, tabKey) {
+    const hub = HUBS.find(h => h.key === hubKey);
+    if (!hub) return;
+    const remembered = state.hubTabMemory?.[hubKey];
+    const resolvedTab = tabKey
+      || (remembered && hub.tabs.find(t => t.key === remembered) && remembered)
+      || hub.tabs[0].key;
+    dispatch({ type: 'SET_HUB_TAB', payload: { hub: hubKey, tab: resolvedTab } });
+  }
+  // Backwards-compat alias (some inline JSX uses navigateTo()).
+  const navigateTo = (key) => {
+    const r = resolveLegacyKey(key);
+    if (r) navigateHubTab(r.hub, r.tab);
+    else navigateHubTab(key);
+  };
 
   // Custom navigate event (from RiskDashboard buttons + other pages)
   useEffect(() => {
-    const handler = (e) => setPage(e.detail);
+    const handler = (e) => {
+      const target = e.detail;
+      const r = resolveLegacyKey(target);
+      if (r) navigateHubTab(r.hub, r.tab);
+      else {
+        const hub = HUBS.find(h => h.key === target);
+        if (hub) navigateHubTab(target);
+      }
+    };
     window.addEventListener('navigate', handler);
     return () => window.removeEventListener('navigate', handler);
-  }, []);
+  }, [state.hubTabMemory]);
 
   // Cmd-K / Ctrl-K to open palette
   useEffect(() => {
@@ -700,28 +1261,81 @@ function App() {
     return () => window.removeEventListener('keydown', onKey);
   }, []);
 
-  const current  = PAGES.find(p => p.key === page) || PAGES[0];
-  const PageComp = PAGE_COMPONENT[page]?.();
+  // F1-F4 audience-mode shortcuts (T5)
+  useEffect(() => {
+    function onKey(e) {
+      // Skip if focus is in a text input / contenteditable
+      const tag = (document.activeElement?.tagName || '').toLowerCase();
+      if (tag === 'input' || tag === 'textarea' || document.activeElement?.isContentEditable) return;
+      const map = { F1: 'OPERATOR', F2: 'BRIEFING', F3: 'PRESENT', F4: 'CLIENT' };
+      if (map[e.key]) {
+        e.preventDefault();
+        dispatch({ type: 'SET_VIEW_MODE', payload: map[e.key] });
+      }
+    }
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [dispatch]);
 
-  function navigateTo(key) { setPage(key); }
+  // CLIENT mode: blend accent color with the customer's brand color (T5B)
+  useEffect(() => {
+    if (state.viewMode === 'CLIENT' && state.client?.brand) {
+      document.documentElement.style.setProperty(
+        '--accent',
+        `color-mix(in srgb, ${state.client.brand} 25%, #4FA8FF)`
+      );
+    } else {
+      document.documentElement.style.removeProperty('--accent');
+    }
+  }, [state.viewMode, state.client?.brand]);
+
   function toggleGroup(g)  { setGroupOpen(o => ({ ...o, [g]: !o[g] })); }
 
-  function renderPage() {
-    if (!PageComp) {
-      return React.createElement('div', {
-        style: {
-          display: 'flex', flexDirection: 'column', alignItems: 'center',
-          justifyContent: 'center', height: '60vh',
-          color: T.textMuted, fontFamily: T.fontMono, fontSize: 12
-        }
-      },
-        React.createElement('div', { style: { fontSize: 32, marginBottom: 14, opacity: 0.2 } }, '○'),
-        `Loading ${current.label}…`
-      );
+  function renderHub() {
+    const hub = HUBS.find(h => h.key === currentHub) || HUBS[0];
+    // If the current hub becomes invisible after a mode switch, fall back
+    // gracefully to the first visible hub.  Schedule the dispatch out-of-frame
+    // to avoid a render-loop (we return null this frame).
+    if (!isHubVisible(hub.key, state.viewMode)) {
+      const fallback = HUBS.find(h => isHubVisible(h.key, state.viewMode)) || HUBS[0];
+      setTimeout(() => dispatch({ type: 'SET_HUB_TAB', payload: { hub: fallback.key, tab: fallback.tabs[0].key } }), 0);
+      return null;
     }
-    return React.createElement(PageErrorBoundary, { key: page },
-      React.createElement(PageComp, { sessionId: state.sessionId, activeSession })
+    const tab = hub.tabs.find(t => t.key === currentTab) || hub.tabs[0];
+    const Comp = COMP_FOR[tab.comp]?.();
+
+    const tabbar = React.createElement('div', {
+      className: 'hub-tabbar',
+      'data-single': hub.tabs.length === 1,
+    },
+      hub.tabs.map(t =>
+        React.createElement('div', {
+          key: t.key,
+          className: 'hub-tab',
+          'data-active': currentTab === t.key,
+          onClick: () => navigateHubTab(hub.key, t.key),
+        }, t.label)
+      )
     );
+
+    const body = !Comp
+      ? React.createElement('div', {
+          style: {
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            height: '60vh', color: 'var(--text-muted)',
+            fontFamily: 'var(--font-mono)', fontSize: 12,
+          }
+        }, `Loading ${tab.label}…`)
+      : React.createElement(PageErrorBoundary, { key: `${hub.key}-${tab.key}` },
+          React.createElement(Comp, {
+            sessionId:     state.sessionId,
+            activeSession: state.activeSession,
+            viewMode:      state.viewMode,
+            client:        state.client,
+          })
+        );
+
+    return React.createElement(React.Fragment, null, tabbar, body);
   }
 
   // ── Risk pill (header) ──────────────────────────────────────
@@ -732,17 +1346,26 @@ function App() {
     (summary.medium   || 0) * 5 +
     (summary.low      || 0) * 2;
   const riskScore = Math.min(100, severityScore);
-  const riskColor = riskScore >= 70 ? T.critical : riskScore >= 40 ? T.high : riskScore >= 15 ? T.medium : T.low;
+  const riskColor = riskScore >= 70 ? 'var(--critical)' : riskScore >= 40 ? 'var(--high)' : riskScore >= 15 ? 'var(--medium)' : 'var(--low)';
   const riskLabel = riskScore >= 70 ? 'CRITICAL' : riskScore >= 40 ? 'HIGH' : riskScore >= 15 ? 'MEDIUM' : riskScore > 0 ? 'LOW' : 'BASELINE';
 
   // ── Render ──────────────────────────────────────────────────
   return React.createElement('div', {
+    className: `argus-root${inPresent ? ' present-mode' : ''}${transitioning ? ' mode-transitioning' : ''}`,
     style: {
       height: '100vh', display: 'flex', flexDirection: 'column',
-      overflow: 'hidden', background: T.bgBase,
-      fontFamily: T.fontUI, color: T.textPrimary,
+      overflow: 'hidden', background: 'transparent',
+      fontFamily: 'var(--font-ui)', color: 'var(--text-primary)',
     }
   },
+
+    // ════════════════════════════════ BOOT SPLASH (T6) ════════════
+    React.createElement(Splash),
+
+    // ════════════════════════════════ COSMOS BACKDROP (T2) ═══════
+    React.createElement('div', { className: 'stellar-starfield' }),
+    React.createElement('div', { className: 'stellar-nebula' }),
+    React.createElement('div', { className: 'stellar-beam' }),
 
     React.createElement(ToolTimeoutModal),
     React.createElement(CommandPalette, {
@@ -752,11 +1375,11 @@ function App() {
     }),
 
     // ════════════════════════════════ HEADER ════════════════════
-    React.createElement('div', {
+    !inPresent && React.createElement('div', {
       style: {
         height: 52, flexShrink: 0,
-        background: T.bgGlass, backdropFilter: 'blur(8px)',
-        borderBottom: `1px solid ${T.border}`,
+        background: 'var(--bg-glass)', backdropFilter: 'blur(8px)',
+        borderBottom: `1px solid ${'var(--border-dim)'}`,
         display: 'flex', alignItems: 'center',
         padding: '0 16px', gap: 14, zIndex: 100,
         position: 'relative',
@@ -766,7 +1389,7 @@ function App() {
       React.createElement('div', {
         style: {
           position: 'absolute', bottom: 0, left: 0, right: 0, height: 1,
-          background: `linear-gradient(90deg, transparent 0%, ${T.accent}50 30%, ${T.violet}50 70%, transparent 100%)`,
+          background: 'linear-gradient(90deg, transparent 0%, color-mix(in srgb, var(--accent) 31%, transparent) 30%, color-mix(in srgb, var(--violet) 31%, transparent) 70%, transparent 100%)',
         }
       }),
 
@@ -777,24 +1400,24 @@ function App() {
         React.createElement('div', {
           style: {
             width: 32, height: 32, borderRadius: 9, flexShrink: 0,
-            background: `linear-gradient(135deg, ${T.accent}, ${T.violet})`,
+            background: `linear-gradient(135deg, ${'var(--accent)'}, ${'var(--violet)'})`,
             display: 'flex', alignItems: 'center', justifyContent: 'center',
             fontSize: 16, color: '#0B0C12',
             fontWeight: 800,
-            boxShadow: `0 0 20px ${T.accent}55`,
+            boxShadow: '0 0 20px var(--accent-glow)',
           }
         }, '◈'),
         React.createElement('div', { style: { display: 'flex', flexDirection: 'column', lineHeight: 1 } },
           React.createElement('span', {
-            style: { fontFamily: T.fontMono, fontSize: 13, fontWeight: 700, color: T.accent, letterSpacing: 2.4 }
+            style: { fontFamily: 'var(--font-mono)', fontSize: 13, fontWeight: 700, color: 'var(--accent)', letterSpacing: 2.4 }
           }, 'ARGUS'),
           React.createElement('span', {
-            style: { fontFamily: T.fontUI, fontSize: 9, color: T.textMuted, letterSpacing: 1.6, marginTop: 2 }
+            style: { fontFamily: 'var(--font-ui)', fontSize: 9, color: 'var(--text-muted)', letterSpacing: 1.6, marginTop: 2 }
           }, 'PENTEST PLATFORM')
         )
       ),
 
-      React.createElement('div', { style: { width: 1, height: 22, background: T.border, flexShrink: 0, marginLeft: 4 } }),
+      React.createElement('div', { style: { width: 1, height: 22, background: 'var(--border-dim)', flexShrink: 0, marginLeft: 4 } }),
 
       // Service status
       React.createElement('div', { style: { display: 'flex', gap: 6, alignItems: 'center' } },
@@ -803,6 +1426,10 @@ function App() {
         React.createElement(SvcDot, { label: 'LLM',   status: sysStatus.ollama })
       ),
 
+      // HUD telemetry strip + mission clock (T2.3)
+      React.createElement(HudTelemetry),
+      React.createElement(HudClock),
+
       // Command palette trigger (centered-ish)
       React.createElement('button', {
         onClick: () => setPaletteOpen(true),
@@ -810,22 +1437,22 @@ function App() {
           marginLeft: 24, marginRight: 'auto',
           display: 'flex', alignItems: 'center', gap: 10,
           padding: '5px 12px 5px 14px', borderRadius: 8,
-          background: T.bgPanel, border: `1px solid ${T.border}`,
-          color: T.textMuted, cursor: 'pointer',
-          fontSize: 11, fontFamily: T.fontUI,
+          background: 'var(--bg-panel)', border: `1px solid ${'var(--border-dim)'}`,
+          color: 'var(--text-muted)', cursor: 'pointer',
+          fontSize: 11, fontFamily: 'var(--font-ui)',
           minWidth: 240, justifyContent: 'flex-start',
           transition: 'border-color 0.15s, color 0.15s',
         },
-        onMouseEnter: e => { e.currentTarget.style.borderColor = T.borderLight; e.currentTarget.style.color = T.textSecondary; },
-        onMouseLeave: e => { e.currentTarget.style.borderColor = T.border; e.currentTarget.style.color = T.textMuted; },
+        onMouseEnter: e => { e.currentTarget.style.borderColor = 'var(--border)'; e.currentTarget.style.color = 'var(--text-secondary)'; },
+        onMouseLeave: e => { e.currentTarget.style.borderColor = 'var(--border-dim)'; e.currentTarget.style.color = 'var(--text-muted)'; },
       },
         React.createElement('span', null, '⌕'),
         React.createElement('span', null, 'Quick navigate…'),
         React.createElement('span', {
           style: {
             marginLeft: 'auto', padding: '1px 6px', borderRadius: 4,
-            fontSize: 9, fontFamily: T.fontMono, color: T.textMuted,
-            border: `1px solid ${T.borderLight}`, letterSpacing: 0.5,
+            fontSize: 9, fontFamily: 'var(--font-mono)', color: 'var(--text-muted)',
+            border: `1px solid ${'var(--border)'}`, letterSpacing: 0.5,
           }
         }, 'Ctrl K')
       ),
@@ -842,10 +1469,10 @@ function App() {
         }
       },
         React.createElement('span', {
-          style: { fontSize: 9, color: riskColor, fontWeight: 700, letterSpacing: 1, fontFamily: T.fontMono }
+          style: { fontSize: 9, color: riskColor, fontWeight: 700, letterSpacing: 1, fontFamily: 'var(--font-mono)' }
         }, 'RISK'),
         React.createElement('span', {
-          style: { color: riskColor, fontFamily: T.fontMono, fontSize: 13, fontWeight: 700 }
+          style: { color: riskColor, fontFamily: 'var(--font-mono)', fontSize: 13, fontWeight: 700 }
         }, riskScore),
         React.createElement('span', {
           style: { fontSize: 9, color: riskColor, fontWeight: 700, letterSpacing: 0.5, opacity: 0.8 }
@@ -858,25 +1485,25 @@ function App() {
         style: {
           display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer',
           padding: '4px 12px', borderRadius: 20,
-          background: `${T.accent}0D`,
-          border: `1px solid ${T.accent}30`,
+          background: 'var(--accent-subtle)',
+          border: '1px solid color-mix(in srgb, var(--accent) 19%, transparent)',
           transition: 'all 0.15s',
         }
       },
         React.createElement('span', {
           style: {
             width: 6, height: 6, borderRadius: '50%', flexShrink: 0,
-            background: wsConnected ? T.low : T.textMuted,
-            boxShadow: wsConnected ? `0 0 8px ${T.low}` : 'none',
+            background: wsConnected ? 'var(--low)' : 'var(--text-muted)',
+            boxShadow: wsConnected ? `0 0 8px ${'var(--low)'}` : 'none',
           }
         }),
         React.createElement('span', {
-          style: { color: T.accent, fontFamily: T.fontMono, fontSize: 12, fontWeight: 700 }
+          style: { color: 'var(--accent)', fontFamily: 'var(--font-mono)', fontSize: 12, fontWeight: 700 }
         }, activeSession.target_ip),
         React.createElement('span', {
           style: {
-            fontSize: 9, letterSpacing: 1, color: T.textMuted,
-            background: T.bgPanel, border: `1px solid ${T.border}`,
+            fontSize: 9, letterSpacing: 1, color: 'var(--text-muted)',
+            background: 'var(--bg-panel)', border: `1px solid ${'var(--border-dim)'}`,
             padding: '1px 6px', borderRadius: 4,
             textTransform: 'uppercase', fontWeight: 600
           }
@@ -886,32 +1513,57 @@ function App() {
       // Critical findings badge (only when > 0)
       findingsSummary.critical > 0 && React.createElement('div', {
         onClick: () => navigateTo('findings'),
+        className: 'header-crit-tally' + (critPulse ? ' motion-supernova' : ''),
         style: {
           display: 'flex', alignItems: 'center', gap: 6,
           padding: '4px 12px', borderRadius: 20, cursor: 'pointer',
-          background: `${T.critical}12`,
-          border: `1px solid ${T.critical}40`,
-          color: T.critical, fontSize: 11, fontWeight: 700,
-          fontFamily: T.fontMono, letterSpacing: 0.5,
+          background: 'var(--critical-bg)',
+          border: '1px solid var(--critical-bd)',
+          color: 'var(--critical)', fontSize: 11, fontWeight: 700,
+          fontFamily: 'var(--font-mono)', letterSpacing: 0.5,
           animation: 'argus-pulse 2.4s ease-in-out infinite',
         }
       }, `⚠ ${findingsSummary.critical} CRIT`),
+
+      // Audience-mode picker (T5) — sits left of theme switcher
+      React.createElement(ModePicker),
 
       // Theme switcher (always visible, right-most before logout-style icons)
       React.createElement(ThemeSwitcher, { current: theme, onPick: setTheme })
     ),
 
+    // ════════════════════════════════ CLIENT-MODE RIBBON (T5B) ══
+    state.viewMode === 'CLIENT' && React.createElement('div', {
+      style: {
+        position: 'fixed', top: 0, left: 0, right: 0,
+        height: 4,
+        background: state.client?.brand || 'var(--accent)',
+        zIndex: 1100,
+      }
+    }),
+    state.viewMode === 'CLIENT' && state.client?.name && React.createElement('div', {
+      style: {
+        position: 'fixed', top: 6, right: 16,
+        fontSize: 10, color: 'var(--text-muted)',
+        fontFamily: 'var(--font-mono)',
+        letterSpacing: 1.5,
+        zIndex: 1101,
+      }
+    }, `[CLIENT — ${state.client.name}]`),
+
     // ════════════════════════════════ BODY ══════════════════════
-    React.createElement('div', { style: { flex: 1, display: 'flex', overflow: 'hidden' } },
+    inPresent
+      ? React.createElement(PresentSlideShell)
+      : React.createElement('div', { style: { flex: 1, display: 'flex', overflow: 'hidden' } },
 
       // ══════════════════════ SIDEBAR ═══════════════════════════
-      React.createElement('div', {
+      !inPresent && React.createElement('div', {
         style: {
           width: sidebarCollapsed ? 56 : 220,
           minWidth: sidebarCollapsed ? 56 : 220,
           flexShrink: 0,
-          background: T.bgSidebar,
-          borderRight: `1px solid ${T.border}`,
+          background: 'var(--bg-sidebar)',
+          borderRight: `1px solid ${'var(--border-dim)'}`,
           display: 'flex', flexDirection: 'column',
           overflow: 'hidden',
           transition: 'width 0.18s ease, min-width 0.18s ease',
@@ -923,12 +1575,12 @@ function App() {
             height: 36, padding: sidebarCollapsed ? '0 16px' : '0 14px',
             display: 'flex', alignItems: 'center',
             justifyContent: sidebarCollapsed ? 'center' : 'space-between',
-            borderBottom: `1px solid ${T.border}`,
+            borderBottom: `1px solid ${'var(--border-dim)'}`,
           }
         },
           !sidebarCollapsed && React.createElement('span', {
             style: {
-              fontSize: 9, color: T.textMuted, letterSpacing: 1.5,
+              fontSize: 9, color: 'var(--text-muted)', letterSpacing: 1.5,
               textTransform: 'uppercase', fontWeight: 700,
             }
           }, 'NAVIGATION'),
@@ -937,11 +1589,11 @@ function App() {
             title: sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar',
             style: {
               background: 'transparent', border: 'none', cursor: 'pointer',
-              color: T.textMuted, fontSize: 13, padding: 0,
+              color: 'var(--text-muted)', fontSize: 13, padding: 0,
               transition: 'color 0.12s',
             },
-            onMouseEnter: e => { e.currentTarget.style.color = T.accent; },
-            onMouseLeave: e => { e.currentTarget.style.color = T.textMuted; },
+            onMouseEnter: e => { e.currentTarget.style.color = 'var(--accent)'; },
+            onMouseLeave: e => { e.currentTarget.style.color = 'var(--text-muted)'; },
           }, sidebarCollapsed ? '›' : '‹')
         ),
 
@@ -950,7 +1602,9 @@ function App() {
           style: { flex: 1, overflowY: 'auto', padding: '6px 0' }
         },
           GROUP_ORDER.map(group => {
-            const items = PAGES.filter(p => p.group === group);
+            const items = HUBS
+              .filter(h => h.group === group)
+              .filter(h => isHubVisible(h.key, state.viewMode));
             if (items.length === 0) return null;
             const groupColor = GROUP_COLORS[group];
             const isOpen = sidebarCollapsed ? true : (groupOpen[group] !== false);
@@ -961,13 +1615,13 @@ function App() {
                 isOpen,
                 onToggle: () => toggleGroup(group),
               }),
-              isOpen && items.map(item =>
+              isOpen && items.map(hub =>
                 React.createElement(NavItem, {
-                  key: item.key,
-                  item,
-                  isActive: page === item.key,
+                  key: hub.key,
+                  item: hub,
+                  isActive: currentHub === hub.key,
                   isCollapsed: sidebarCollapsed,
-                  onClick: () => navigateTo(item.key),
+                  onClick: () => navigateHubTab(hub.key),
                 })
               )
             );
@@ -979,7 +1633,7 @@ function App() {
           ? React.createElement('div', {
               style: {
                 padding: sidebarCollapsed ? '8px 6px' : '10px 12px',
-                borderTop: `1px solid ${T.border}`, flexShrink: 0,
+                borderTop: `1px solid ${'var(--border-dim)'}`, flexShrink: 0,
               }
             },
               sidebarCollapsed
@@ -988,7 +1642,7 @@ function App() {
                     title: `${activeSession.target_ip} · ${currentPhase || 'idle'}`,
                     style: {
                       width: 38, height: 38, borderRadius: 8, margin: '0 auto',
-                      background: `${T.accent}15`, border: `1px solid ${T.accent}40`,
+                      background: 'var(--accent-subtle)', border: '1px solid var(--accent-glow)',
                       display: 'flex', alignItems: 'center', justifyContent: 'center',
                       cursor: 'pointer', position: 'relative',
                     }
@@ -996,28 +1650,28 @@ function App() {
                     React.createElement('span', {
                       style: {
                         position: 'absolute', top: 4, right: 4, width: 6, height: 6,
-                        borderRadius: '50%', background: wsConnected ? T.low : T.textMuted,
-                        boxShadow: wsConnected ? `0 0 5px ${T.low}` : 'none',
+                        borderRadius: '50%', background: wsConnected ? 'var(--low)' : 'var(--text-muted)',
+                        boxShadow: wsConnected ? `0 0 5px ${'var(--low)'}` : 'none',
                       }
                     }),
-                    React.createElement('span', { style: { color: T.accent, fontSize: 14 } }, '◉')
+                    React.createElement('span', { style: { color: 'var(--accent)', fontSize: 14 } }, '◉')
                   )
                 : React.createElement('div', {
                     onClick: () => navigateTo('mission'),
                     style: {
-                      background: T.bgPanel,
-                      border: `1px solid ${T.borderLight}`,
+                      background: 'var(--bg-panel)',
+                      border: `1px solid ${'var(--border)'}`,
                       borderRadius: 8, padding: '8px 10px', cursor: 'pointer',
                       transition: 'border-color 0.15s',
                     }
                   },
                     React.createElement('div', {
-                      style: { fontSize: 9, letterSpacing: 1.2, color: T.textMuted,
+                      style: { fontSize: 9, letterSpacing: 1.2, color: 'var(--text-muted)',
                                textTransform: 'uppercase', fontWeight: 700, marginBottom: 4 }
                     }, '● Active Session'),
                     React.createElement('div', {
                       style: {
-                        fontFamily: T.fontMono, fontSize: 13, color: T.accent,
+                        fontFamily: 'var(--font-mono)', fontSize: 13, color: 'var(--accent)',
                         fontWeight: 700, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap'
                       }
                     }, activeSession.target_ip),
@@ -1025,32 +1679,32 @@ function App() {
                       style: { display: 'flex', justifyContent: 'space-between', marginTop: 5, fontSize: 10 }
                     },
                       React.createElement('span', {
-                        style: { color: T.textMuted, textTransform: 'uppercase', letterSpacing: 0.8 }
+                        style: { color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: 0.8 }
                       }, currentPhase || 'IDLE'),
                       React.createElement('span', {
-                        style: { color: wsConnected ? T.low : T.textMuted, fontFamily: T.fontMono, fontWeight: 600 }
+                        style: { color: wsConnected ? 'var(--low)' : 'var(--text-muted)', fontFamily: 'var(--font-mono)', fontWeight: 600 }
                       }, wsConnected ? '● LIVE' : '○ OFF')
                     )
                   )
             )
           : !sidebarCollapsed && React.createElement('div', {
-              style: { padding: '12px', borderTop: `1px solid ${T.border}`, flexShrink: 0 }
+              style: { padding: '12px', borderTop: `1px solid ${'var(--border-dim)'}`, flexShrink: 0 }
             },
               React.createElement('div', {
                 onClick: () => navigateTo('target'),
                 style: {
-                  background: `${T.accent}0E`,
-                  border: `1px dashed ${T.accent}40`,
+                  background: 'var(--accent-subtle)',
+                  border: '1px dashed var(--accent-glow)',
                   borderRadius: 8, padding: '8px 10px', cursor: 'pointer',
                   textAlign: 'center', transition: 'all 0.15s',
                 }
               },
                 React.createElement('div', {
-                  style: { fontSize: 9, letterSpacing: 1, color: T.accent,
+                  style: { fontSize: 9, letterSpacing: 1, color: 'var(--accent)',
                            textTransform: 'uppercase', fontWeight: 700, marginBottom: 3 }
                 }, '+ New Session'),
                 React.createElement('div', {
-                  style: { fontSize: 10, color: T.textMuted }
+                  style: { fontSize: 10, color: 'var(--text-muted)' }
                 }, 'Configure target')
               )
             )
@@ -1060,13 +1714,16 @@ function App() {
       React.createElement('div', {
         style: {
           flex: 1, overflowY: 'auto',
-          background: T.bgBase,
+          background: 'var(--bg-base)',
           padding: 22,
         }
       },
-        renderPage()
+        renderHub()
       )
-    )
+    ),
+
+    // ════════════════════════════════ HUD CONSUMABLES (T2.4) ═════
+    state.viewMode === 'OPERATOR' && React.createElement(HudConsumables)
   );
 }
 

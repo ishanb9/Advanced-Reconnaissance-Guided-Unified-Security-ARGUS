@@ -112,8 +112,14 @@ const INIT = {
 
   shellBuffers: {},
   wsConnected:  false,
+  bootComplete: false,
   llmThinking:  false,
   lastLlmResponse: '',
+
+  // Hub navigation (Spec §10.5)
+  currentHub:    'risk',
+  currentTab:    'risk',
+  hubTabMemory:  {},   // {hubKey: lastSelectedTabKey}
 
   // Attack plan tracking — each step in the master strategy with live status
   planSteps:      [],   // [{id, label, technique, tool, mitre_id, probability, status, result, detail, found, ts}]
@@ -240,6 +246,14 @@ const INIT = {
     top:            [],          // [{tool, args, target_service, voi_score, voi_factors, voi_reasons, voi_dropped, confidence}]
     last_update_ts: 0,
   },
+
+  // ── Transient motion slice (Spec §9.1 event 4) ─────────────────────────────
+  recentFindings: [],   // transient: last 10 findings for motion-mote spawn
+
+  // Audience-mode system (Spec §10)
+  viewMode: 'OPERATOR',                                       // OPERATOR | BRIEFING | PRESENT | CLIENT
+  client:   { name: '', logo: '', brand: '' },                // CLIENT-mode branding
+  present:  { slide: 0, autoAdvance: false },                 // PRESENT-mode internal state
 };
 
 // ─── Selectors / derived state helpers ─────────────────────
@@ -544,6 +558,19 @@ function reducer(state, action) {
       return { ...state, findingsSummary: s };
     }
 
+    case 'FINDING_ADDED_PULSE':
+      return {
+        ...state,
+        recentFindings: [
+          ...((state.recentFindings || []).slice(-9)),
+          {
+            id: action.payload.id,
+            severity: (action.payload.severity || 'info').toLowerCase(),
+            ts: Date.now(),
+          },
+        ],
+      };
+
     case 'SET_FINDINGS_SUMMARY':
       return { ...state, findingsSummary: action.payload };
 
@@ -708,6 +735,9 @@ function reducer(state, action) {
 
     case 'WS_STATUS':
       return { ...state, wsConnected: action.payload };
+
+    case 'SET_BOOT_COMPLETE':
+      return { ...state, bootComplete: true };
 
     case 'SET_PLAN_STEPS':
       return { ...state, planSteps: action.payload || [] };
@@ -1310,6 +1340,26 @@ function reducer(state, action) {
       };
     }
 
+    case 'SET_HUB_TAB':
+      return {
+        ...state,
+        currentHub:   action.payload.hub,
+        currentTab:   action.payload.tab,
+        hubTabMemory: {
+          ...(state.hubTabMemory || {}),
+          [action.payload.hub]: action.payload.tab,
+        },
+      };
+
+    case 'SET_VIEW_MODE':
+      return { ...state, viewMode: action.payload };
+    case 'SET_CLIENT_BRAND':
+      return { ...state, client: { ...state.client, ...action.payload } };
+    case 'SET_PRESENT_SLIDE':
+      return { ...state, present: { ...(state.present || {}), slide: action.payload } };
+    case 'TOGGLE_PRESENT_AUTO':
+      return { ...state, present: { ...(state.present || {}), autoAdvance: !(state.present?.autoAdvance) } };
+
     default:
       return state;
   }
@@ -1739,6 +1789,15 @@ function routeWsEvent(msg, dispatch, shellListeners, sessionId) {
     case 'finding': {
       const f = data.finding || {};
       dispatch({ type: 'FINDING_ADDED', payload: f });
+      // Transient mote pulse for header-tally drift animation (Spec §9.1 event 4).
+      // Additive — does not affect findingsSummary.
+      dispatch({
+        type: 'FINDING_ADDED_PULSE',
+        payload: {
+          id: f.id || f.finding_id || `${Date.now()}-${Math.random()}`,
+          severity: f.severity || 'info',
+        },
+      });
       // Track per-host counts for multi-host sessions
       const findingHost = f.host || msg.host_id;
       if (findingHost) dispatch({ type: 'HOST_FINDING_COUNT', payload: { host: findingHost, severity: f.severity } });

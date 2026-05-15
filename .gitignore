@@ -6,4 +6,5 @@ knowledge/chroma_db
 *.sqlite
 *.db
 *.zip
+*.pyc
 

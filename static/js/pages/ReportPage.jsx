@@ -2,10 +2,12 @@
 const { useState, useEffect, useRef } = React;
 const { Card, Button, Alert, Tag, Space } = window.antd;
 
-function ReportPage() {
+function ReportPage(props) {
   const { state } = window.useStore();
   const sessionId  = state.sessionId;
   const { activeSession, findingsSummary, flags, currentPhase } = state;
+  const vm = (props && props.viewMode) || 'OPERATOR';
+  const fontScale = vm === 'BRIEFING' ? 16 : 14;
 
   const [loading, setLoading]   = useState(false);
   const [previewing, setPreviewing] = useState(false);
@@ -43,7 +45,12 @@ function ReportPage() {
   const sevColor = { critical: 'var(--red)', high: 'var(--amber)',
                      medium: 'var(--amber)', low: 'var(--cyan)', info: 'var(--text-muted)' };
 
-  return React.createElement('div', { style: { display: 'flex', flexDirection: 'column', height: 'calc(100vh - 60px)' } },
+  return React.createElement('div', {
+    'data-view-mode': vm,
+    className: vm === 'CLIENT' ? 'client-mode' : undefined,
+    style: { fontSize: fontScale, height: '100%' },
+  },
+   React.createElement('div', { style: { display: 'flex', flexDirection: 'column', height: 'calc(100vh - 60px)' } },
 
     // Header
     React.createElement('div', { className: 'page-header' },
@@ -137,6 +144,7 @@ function ReportPage() {
           'Start a session and run a pentest to generate a professional report')
       )
     )
+   )
   );
 }
 window.ReportPage = ReportPage;

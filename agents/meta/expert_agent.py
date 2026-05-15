@@ -39,8 +39,22 @@ from db.schemas import AgentName
 logger = logging.getLogger(__name__)
 
 # ── Optional RAG import — graceful degradation ────────────────────────────────
+# CRITICAL: this MUST use the same import path as every other agent
+# (`import knowledge_base`), otherwise Python loads knowledge_base.py TWICE —
+# once as top-level `knowledge_base` (used by base_agent, master_agent, etc.)
+# and once as `knowledge.knowledge_base` here — and each module gets its own
+# _embedder singleton.  Result: bge-m3 (1.5 GB) and the cross-encoder (250 MB)
+# are loaded twice, doubling the RAM footprint and OOM-killing the process on
+# 7-8 GB Kali boxes.
+#
+# This file lives under agents/meta/ but base_agent.py extends sys.path to
+# include knowledge/, so the top-level import works just as well from here.
+import os as _os, sys as _sys
+_kb_dir = _os.path.abspath(_os.path.join(_os.path.dirname(__file__), "..", "..", "knowledge"))
+if _kb_dir not in _sys.path:
+    _sys.path.insert(0, _kb_dir)
 try:
-    from knowledge import knowledge_base as _kb   # type: ignore
+    import knowledge_base as _kb   # type: ignore   (shared singleton)
     _KB_AVAILABLE = True
 except Exception:                                 # noqa: BLE001
     _KB_AVAILABLE = False
@@ -202,7 +216,12 @@ def _strip_fences(raw: str) -> str:
 
 
 def _parse_expert_response(raw: str) -> Dict[str, Any]:
-    """Parse the JSON object the expert returns. Returns empty dict on failure."""
+    """Parse the JSON object the expert returns. Returns empty dict on failure.
+
+    Uses the tolerant parser so LLM dialects with // comments, .join()
+    expressions, trailing commas, smart quotes, etc. don't drop the
+    response.  Strict json.loads runs first as a fast path for clean JSON.
+    """
     raw = _strip_fences(raw)
     if not raw:
         return {}
@@ -211,7 +230,21 @@ def _parse_expert_response(raw: str) -> Dict[str, Any]:
         if isinstance(obj, dict):
             return obj
     except json.JSONDecodeError:
-        logger.warning("[expert] Failed to parse JSON response: %s", raw[:300])
+        pass
+    # Tolerant fallback
+    try:
+        from utils.json_tolerant import parse_lossy
+        parsed, repairs = parse_lossy(raw)
+        if isinstance(parsed, dict):
+            if repairs:
+                logger.info(
+                    "[expert] recovered JSON via repairs: %s",
+                    ", ".join(repairs[-3:]),
+                )
+            return parsed
+    except Exception:
+        pass
+    logger.warning("[expert] Failed to parse JSON response: %s", raw[:300])
     return {}
 
 

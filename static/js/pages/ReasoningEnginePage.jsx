@@ -11,7 +11,7 @@
 // No imports — uses global React and window.useStore.
 // ═══════════════════════════════════════════════════════════
 
-const { useState, useCallback } = React;
+const { useState, useEffect, useCallback } = React;
 
 // ─── Small reusable helpers ────────────────────────────────
 
@@ -93,7 +93,7 @@ function ConfidenceBar({ value, height }) {
 
 // ─── Hypothesis Card ──────────────────────────────────────
 
-function HypothesisCard({ hyp }) {
+function HypothesisCard({ hyp, pulse }) {
   const [open, setOpen] = useState(false);
 
   const conf = hyp.confidence || 0;
@@ -120,6 +120,7 @@ function HypothesisCard({ hyp }) {
     || nextActions.length > 0;
 
   return React.createElement('div', {
+    className: pulse ? 'motion-phase-advance' : undefined,
     style: {
       background: 'var(--bg-surface)',
       border: '1px solid var(--border)',
@@ -700,6 +701,31 @@ function ReasoningEnginePage() {
   const reasoningIteration  = state.reasoningIteration  || 0;
   const reasoningEngineActive = state.reasoningEngineActive || false;
 
+  // ── Hypothesis confirmation pulse (Spec §9.1 phase-advance) ─────────────
+  // Fires .motion-phase-advance for ~1.2s when a hypothesis transitions to
+  // status === 'validated' (the engine's term for "confirmed"). Conservative
+  // adaptation per task brief — the codebase uses 'validated', not 'confirmed'.
+  const [recentlyConfirmed, setRecentlyConfirmed] = useState({});
+  useEffect(() => {
+    const validated = (state.hypotheses || []).filter(h =>
+      (h.status || '').toLowerCase() === 'validated'
+    );
+    validated.forEach(h => {
+      const id = h.hypothesis_id || h.id;
+      if (!id) return;
+      if (!recentlyConfirmed[id]) {
+        setRecentlyConfirmed(prev => ({ ...prev, [id]: Date.now() }));
+        setTimeout(() => {
+          setRecentlyConfirmed(prev => {
+            const n = { ...prev };
+            delete n[id];
+            return n;
+          });
+        }, 1200);
+      }
+    });
+  }, [state.hypotheses]);
+
   // ── Sort hypotheses: validated first → by confidence desc → invalidated last
   const sortedHypotheses = [...hypotheses].sort((a, b) => {
     const statusOrder = s => {
@@ -823,12 +849,14 @@ function ReasoningEnginePage() {
           ? React.createElement(MutedEmpty, {
               text: 'No hypotheses generated yet — start a pentest with reasoning loop enabled'
             })
-          : sortedHypotheses.map((hyp, i) =>
-              React.createElement(HypothesisCard, {
+          : sortedHypotheses.map((hyp, i) => {
+              const hid = hyp.hypothesis_id || hyp.id;
+              return React.createElement(HypothesisCard, {
                 key: hyp.id || hyp.hypothesis_id || i,
                 hyp,
-              })
-            )
+                pulse: hid ? !!recentlyConfirmed[hid] : false,
+              });
+            })
       ),
 
       // ── Right: Ranked Attack Paths ────────────────────────
@@ -852,6 +880,9 @@ function ReasoningEnginePage() {
             )
       )
     ),
+
+    // ── Crosshair section divider ─────────────────────────────
+    React.createElement('div', { className: 'crosshair' }),
 
     // ══ 4. ACTION HISTORY (full width) ════════════════════════
     React.createElement('div', {

@@ -73,7 +73,7 @@ def load_manifest() -> Dict[str, Any]:
     """Load the ingestion manifest (file path → {hash, timestamp, chunks})."""
     if os.path.exists(MANIFEST_FILE):
         try:
-            with open(MANIFEST_FILE, "r") as f:
+            with open(MANIFEST_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
         except Exception:
             pass
@@ -81,10 +81,34 @@ def load_manifest() -> Dict[str, Any]:
 
 
 def save_manifest(manifest: Dict[str, Any]) -> None:
-    """Persist the ingestion manifest."""
+    """Persist the ingestion manifest atomically.
+
+    Writes to a .tmp sibling first, fsyncs, then os.replace()'s it onto the
+    real path.  This makes the call interrupt-safe: a Ctrl+C, OOM kill, or
+    power loss mid-write can leave the .tmp file half-written but never
+    corrupts the canonical manifest file itself.  Callers can now invoke
+    this after every successful file ingest without risking a torn write.
+    """
     os.makedirs(os.path.dirname(MANIFEST_FILE), exist_ok=True)
-    with open(MANIFEST_FILE, "w") as f:
-        json.dump(manifest, f, indent=2)
+    tmp_path = MANIFEST_FILE + ".tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(manifest, f, indent=2)
+            f.flush()
+            # fsync may not be supported on all FS (notably some Windows
+            # NFS mounts); ignore the error rather than fail the write.
+            try:
+                os.fsync(f.fileno())
+            except (OSError, AttributeError):
+                pass
+        os.replace(tmp_path, MANIFEST_FILE)
+    except Exception:
+        # Best-effort cleanup so we don't leave .tmp files behind on failure
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 def file_hash(path: str) -> str:
@@ -106,6 +130,25 @@ def needs_ingest(path: str, manifest: Dict[str, Any], force: bool = False) -> bo
     if not rec:
         return True
     return rec.get("hash") != file_hash(path)
+
+
+def build_content_hash_index(manifest: Dict[str, Any]) -> Dict[str, str]:
+    """Build a {content_hash: first_path} reverse map from the manifest.
+
+    Used by ingest_directory() to detect whole-file duplicates BEFORE
+    chunking + embedding — the single biggest win against the MITRE
+    ATT&CK versioning problem (9 historical releases all containing
+    the same ~80k techniques).
+    """
+    seen: Dict[str, str] = {}
+    for path, rec in (manifest or {}).items():
+        h = (rec or {}).get("hash")
+        if not h:
+            continue
+        # First-write-wins: the path already ingested becomes the canonical
+        # source for that content hash.  Later identical files get skipped.
+        seen.setdefault(h, path)
+    return seen
 
 
 def _is_playbook_yaml(path: str) -> bool:
@@ -457,7 +500,7 @@ def extract_pdf(path: str) -> Generator[Tuple[str, str], None, None]:
             if text.strip():
                 yield (text, "")
     except Exception as e:
-        logger.warning(f"PDF parse error {path}: {e}")
+        logger.warning("PDF parse error %s: %s", path, e)
 
 
 def extract_md(path: str) -> Generator[Tuple[str, str], None, None]:
@@ -487,7 +530,7 @@ def extract_md(path: str) -> Generator[Tuple[str, str], None, None]:
             yield (current_text.strip(), current_title)
 
     except Exception as e:
-        logger.warning(f"MD parse error {path}: {e}")
+        logger.warning("MD parse error %s: %s", path, e)
 
 
 def extract_html(path: str) -> Generator[Tuple[str, str], None, None]:
@@ -528,7 +571,7 @@ def extract_html(path: str) -> Generator[Tuple[str, str], None, None]:
                 yield (text, current_title)
 
     except Exception as e:
-        logger.warning(f"HTML parse error {path}: {e}")
+        logger.warning("HTML parse error %s: %s", path, e)
 
 
 def extract_mhtml(path: str) -> Generator[Tuple[str, str], None, None]:
@@ -588,7 +631,7 @@ def extract_mhtml(path: str) -> Generator[Tuple[str, str], None, None]:
                     yield (text, current_title)
 
     except Exception as e:
-        logger.warning(f"MHTML parse error {path}: {e}")
+        logger.warning("MHTML parse error %s: %s", path, e)
 
 
 def extract_txt(path: str) -> Generator[Tuple[str, str], None, None]:
@@ -596,7 +639,7 @@ def extract_txt(path: str) -> Generator[Tuple[str, str], None, None]:
         with open(path, "r", encoding="utf-8", errors="ignore") as f:
             yield (f.read(), "")
     except Exception as e:
-        logger.warning(f"TXT parse error {path}: {e}")
+        logger.warning("TXT parse error %s: %s", path, e)
 
 
 def extract_json(path: str) -> Generator[Tuple[str, str], None, None]:
@@ -626,7 +669,7 @@ def extract_json(path: str) -> Generator[Tuple[str, str], None, None]:
         yield from _process(data)
 
     except Exception as e:
-        logger.warning(f"JSON parse error {path}: {e}")
+        logger.warning("JSON parse error %s: %s", path, e)
 
 
 def extract_yaml(path: str) -> Generator[Tuple[str, str], None, None]:
@@ -644,7 +687,7 @@ def extract_yaml(path: str) -> Generator[Tuple[str, str], None, None]:
     except ImportError:
         logger.warning("PyYAML not installed — skipping YAML file")
     except Exception as e:
-        logger.warning(f"YAML parse error {path}: {e}")
+        logger.warning("YAML parse error %s: %s", path, e)
 
 
 def _yaml_fallback(data: Any, title: str = "") -> Generator[Tuple[str, str], None, None]:
@@ -988,7 +1031,7 @@ def ingest_file(path: str, kb) -> Dict[str, int]:
     try:
         blocks = list(extractor(path))
     except Exception as e:
-        logger.error(f"Extraction failed for {path}: {e}")
+        logger.error("Extraction failed for %s: %s", path, e)
         return {"errors": 1}
 
     if not blocks:
@@ -1093,18 +1136,83 @@ def ingest_directory(
             paths.append(full)
 
     if playbook_skipped:
-        logger.info(f"Skipped {playbook_skipped} playbook YAML(s) — "
-                    f"loaded directly by Tier-0 retriever, not embedded")
+        logger.info("Skipped %s playbook YAML(s) — loaded directly by Tier-0 retriever, not embedded", playbook_skipped)
 
     # Filter to only files that need ingesting
     to_ingest = [p for p in paths if needs_ingest(p, manifest, force=force)]
     skip_count = len(paths) - len(to_ingest)
 
-    logger.info(f"Found {len(paths)} files | {len(to_ingest)} to ingest | {skip_count} unchanged (skipped)")
+    # ── FILE-CONTENT-HASH DEDUP (the MITRE-versioning fix) ─────────────────
+    # Two files with identical bytes (e.g. enterprise-attack-19.0.json and
+    # enterprise-attack-15.1.json mostly differ only in metadata blocks but
+    # not in the technique payloads we extract) should NOT both be embedded.
+    # Build a reverse map from manifest, then check each candidate file's
+    # content hash against it.  If a duplicate hash is found, skip the
+    # whole file BEFORE chunking / embedding — saves hours of CPU on big
+    # corpora.
+    content_index    = build_content_hash_index(manifest)
+    dup_file_skips:  int = 0
+    deduped_to_ingest: List[str] = []
+    for p in to_ingest:
+        h = file_hash(p)
+        canon = content_index.get(h)
+        if canon and canon != p:
+            logger.info("[dedup-file] %s == %s (identical content); skipping", p, canon)
+            dup_file_skips += 1
+            # Mark in manifest so future runs skip cleanly
+            manifest[p] = {
+                "hash":          h,
+                "timestamp":     time.time(),
+                "chunks":        0,
+                "ext":           Path(p).suffix.lower(),
+                "dedup_of":      canon,
+            }
+            continue
+        deduped_to_ingest.append(p)
+        # Reserve the hash so duplicates *within this batch* also dedup
+        content_index.setdefault(h, p)
 
-    totals = {"added": 0, "skipped": 0, "errors": 0, "files": 0, "files_skipped": skip_count}
+    if dup_file_skips:
+        logger.info(
+            "[dedup-file] Skipped %s file(s) whose content matched an "
+            "already-ingested file (saves embedding cost)",
+            dup_file_skips,
+        )
 
-    for path in tqdm(to_ingest, desc="Ingesting", unit="file"):
+    logger.info(
+        "Found %s files | %s to ingest | %s unchanged | %s content-dup",
+        len(paths), len(deduped_to_ingest), skip_count, dup_file_skips,
+    )
+
+    totals = {
+        "added":          0,
+        "skipped":        0,
+        "errors":         0,
+        "files":          0,
+        "files_skipped":  skip_count,
+        "files_deduped":  dup_file_skips,
+    }
+
+    # Persist the file-content-dedup decisions immediately so a kill BEFORE
+    # any real ingest still leaves a useful manifest behind.
+    if dup_file_skips:
+        try:
+            save_manifest(manifest)
+        except Exception as exc:
+            logger.warning("[manifest] early-save failed: %s", exc)
+
+    # Throttle incremental saves: write at most every _MANIFEST_SAVE_EVERY
+    # files OR every _MANIFEST_SAVE_SECS seconds, whichever comes first.
+    # On a 1M-chunk / 1000-file corpus with 5 MB manifest, naïve per-file
+    # writes would generate ~5 GB of redundant I/O.  Throttling drops that
+    # to ~50 MB while still guaranteeing a kill loses at most a few files'
+    # worth of tracking (not 9 hours of it like before).
+    _MANIFEST_SAVE_EVERY = int(os.environ.get("KB_MANIFEST_SAVE_EVERY", "10"))
+    _MANIFEST_SAVE_SECS  = float(os.environ.get("KB_MANIFEST_SAVE_SECS",  "30"))
+    _last_save_files = 0
+    _last_save_at    = time.time()
+
+    for idx, path in enumerate(tqdm(deduped_to_ingest, desc="Ingesting", unit="file"), 1):
         try:
             result = ingest_file(path, kb)
             totals["files"] += 1
@@ -1118,9 +1226,32 @@ def ingest_directory(
                 "chunks":    result.get("added", 0),
                 "ext":       Path(path).suffix.lower(),
             }
+
+            # ── INCREMENTAL MANIFEST CHECKPOINT ──────────────────────────
+            # Save after every N files OR every S seconds (whichever
+            # fires first) so a kill mid-run never wastes more than a
+            # short window of work.
+            _files_since = idx - _last_save_files
+            _secs_since  = time.time() - _last_save_at
+            if _files_since >= _MANIFEST_SAVE_EVERY or _secs_since >= _MANIFEST_SAVE_SECS:
+                try:
+                    save_manifest(manifest)
+                    _last_save_files = idx
+                    _last_save_at    = time.time()
+                except Exception as exc:
+                    # Saving failed (disk full, perms, etc.) — log and keep
+                    # going.  The in-memory manifest survives and we'll try
+                    # again on the next checkpoint.
+                    logger.warning("[manifest] checkpoint save failed: %s", exc)
         except Exception as e:
-            logger.error(f"Error ingesting {path}: {e}")
+            logger.error("Error ingesting %s: %s", path, e)
             totals["errors"] += 1
+
+    # Final save so the last <_MANIFEST_SAVE_EVERY files are persisted.
+    try:
+        save_manifest(manifest)
+    except Exception as exc:
+        logger.warning("[manifest] final save failed: %s", exc)
 
     return totals, manifest
 
@@ -1181,11 +1312,7 @@ and are loaded directly by the retriever -- they are NOT embedded.
 
     target = os.path.expanduser(args.path)
     if not os.path.exists(target):
-        logger.error(
-            f"Path does not exist: {target}\n"
-            f"Drop your PDFs / markdown / YAMLs / text files into "
-            f"{DEFAULT_DATA}/ and re-run."
-        )
+        logger.error("Path does not exist: %s\nDrop your PDFs / markdown / YAMLs / text files into %s/ and re-run.", target, DEFAULT_DATA)
         sys.exit(1)
 
     logger.info("Loading embedding model (first run downloads ~80 MB)...")
@@ -1264,9 +1391,11 @@ _RAG_DB_DIR      = Path(DEFAULT_DB)
 _RAG_DB_FILE     = _RAG_DB_DIR / "chroma.sqlite3"
 
 _RAG_COLLECTION  = "pentest_knowledge"
-_RAG_EMBED_MODEL = os.environ.get("KB_EMBED_MODEL",  "BAAI/bge-m3")
+# Defaults aligned with knowledge_base.py — bge-small for low-RAM hosts.
+# Override via KB_EMBED_MODEL / KB_RERANK_MODEL env vars.
+_RAG_EMBED_MODEL = os.environ.get("KB_EMBED_MODEL",  "BAAI/bge-small-en-v1.5")
 _RAG_RERANK_MODEL = os.environ.get(
-    "KB_RERANK_MODEL", "BAAI/bge-reranker-v2-m3",
+    "KB_RERANK_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2",
 )
 _RAG_RERANK_FALLBACK = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 _RAG_RRF_K       = 60         # Cormack et al. recommend k=60

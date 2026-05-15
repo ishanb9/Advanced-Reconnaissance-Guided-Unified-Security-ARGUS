@@ -151,7 +151,7 @@ async def _extract_triples(
                     and all(k in t for k in ("subject", "predicate", "object"))]
         return []
     except Exception as exc:
-        logger.debug(f"Triple extraction failed ({tool_name}): {exc}")
+        logger.debug("Triple extraction failed (%s): %s", tool_name, exc)
         return []
 
 
@@ -225,10 +225,10 @@ async def infer_and_write(
             )
             written += 1
         except Exception as exc:
-            logger.debug(f"Neo4j write error: {exc}")
+            logger.debug("Neo4j write error: %s", exc)
 
     if written:
-        logger.info(f"[{session_id}] {tool_name}: wrote {written} semantic triples to Neo4j")
+        logger.info("[%s] %s: wrote %s semantic triples to Neo4j", session_id, tool_name, written)
     return written
 
 

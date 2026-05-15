@@ -1,6 +1,8 @@
-// AttackGraph.jsx — Intelligent Attack Chain Analyzer & Graph Visualizer
-// Primary view: LLM-analyzed attack chains with step-by-step exploitation guides
-// Secondary views: D3 force graph + MITRE ATT&CK heatmap
+// AttackGraph.jsx — Stellar Ops unified attack graph
+// 6 tabs: Stellar (particle canvas) · Chains · Graph (D3) · Relationships · Paths · MITRE
+// Restores all original tabs from baseline 7f9c74f + adds the cinematic
+// particle showpiece (T4) as the new default view, all under the
+// Stellar Ops aesthetic with var(--*) tokens.
 const { useEffect, useRef, useState, useCallback, useMemo } = React;
 
 // ── Color + icon constants ────────────────────────────────────────────────────
@@ -9,21 +11,37 @@ const NODE_COLOR = {
   service:       'var(--low)',
   vulnerability: 'var(--critical)',
   finding:       'var(--medium)',
-  exploit:       '#ff6400',
+  exploit:       'var(--high)',
   access:        'var(--violet)',
-  credential:    '#ff6400',
+  credential:    'var(--high)',
 };
 const NODE_RADIUS = { host:22, service:16, vulnerability:14, finding:13, exploit:15, access:18, credential:14 };
 const NODE_ICON   = { host:'🖥', service:'⚙', vulnerability:'⚠', finding:'🔍', exploit:'💥', access:'🔑', credential:'🔐' };
-const SEV_COLOR   = { CRITICAL:'var(--critical)', HIGH:'#ff6400', MEDIUM:'var(--medium)', LOW:'var(--low)', INFO:'var(--border-bright)' };
-const IMPACT_COLOR = { critical:'var(--critical)', high:'#ff6400', medium:'var(--medium)', low:'var(--low)' };
-const SEV_EDGE_COLOR = { critical:'var(--critical)', high:'#ff6400', medium:'var(--medium)', low:'var(--low)', info:'#4a5568' };
+const SEV_COLOR   = { CRITICAL:'var(--critical)', HIGH:'var(--high)', MEDIUM:'var(--medium)', LOW:'var(--low)', INFO:'var(--border-bright)' };
+const IMPACT_COLOR = { critical:'var(--critical)', high:'var(--high)', medium:'var(--medium)', low:'var(--low)' };
+const SEV_EDGE_COLOR = { critical:'var(--critical)', high:'var(--high)', medium:'var(--medium)', low:'var(--low)', info:'var(--border)' };
 
 const MITRE_TACTICS = [
   'reconnaissance','initial_access','execution','persistence','privilege_escalation',
   'defense_evasion','credential_access','discovery','lateral_movement',
   'collection','exfiltration','command_and_control','impact',
 ];
+
+// ── Relationship type color map (Neo4j) ──────────────────────────────────────
+const REL_COLOR = {
+  EXPOSES:         'var(--cyan)',
+  RUNS:            'var(--low)',
+  VULNERABLE_TO:   'var(--critical)',
+  LEADS_TO:        'var(--high)',
+  REFERENCES:      'var(--text-muted)',
+  EXPLOITABLE_WITH:'var(--amber)',
+  HAS_CREDENTIAL:  'var(--high)',
+  COMPROMISED_VIA: 'var(--critical)',
+  ESCALATES_TO:    'var(--violet)',
+  PIVOTS_TO:       'var(--medium)',
+  AFFECTS:         'var(--medium)',
+  RELATED_TO:      'var(--border-bright)',
+};
 
 // ── Utility ───────────────────────────────────────────────────────────────────
 function probColor(p) {
@@ -38,6 +56,22 @@ function probLabel(p) {
 }
 function copyText(t) {
   try { navigator.clipboard.writeText(t); } catch {}
+}
+
+// Resolve a CSS variable name (e.g. 'var(--high)' or '--high') to a real
+// hex/rgb literal at the moment of call.  Used by canvas/SVG code paths
+// that can't accept var() strings as fill/stroke.
+function resolveCssVar(token, fallback) {
+  if (!token) return fallback;
+  const t = String(token).trim();
+  if (t.startsWith('#') || t.startsWith('rgb')) return t;
+  const m = t.match(/var\(\s*(--[a-z0-9-]+)\s*\)/i);
+  const name = m ? m[1] : (t.startsWith('--') ? t : null);
+  if (!name) return t || fallback;
+  try {
+    const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+    return v || fallback;
+  } catch { return fallback; }
 }
 
 // ── Sub-components ────────────────────────────────────────────────────────────
@@ -186,7 +220,7 @@ function ChainCard({ chain, isRecommended, isExpanded, onToggle }) {
           React.createElement('span', {
             style: {
               fontSize: 9, padding: '1px 6px', borderRadius: 4, flexShrink: 0,
-              background: `${pColor}20`, border: `1px solid ${pColor}60`, color: pColor,
+              background: 'rgba(255,255,255,0.04)', border: `1px solid ${pColor}`, color: pColor,
               fontFamily: 'var(--font-mono)', fontWeight: 700,
             }
           }, chain.impact ? chain.impact.toUpperCase() : 'UNKNOWN'),
@@ -251,23 +285,6 @@ function ChainCard({ chain, isRecommended, isExpanded, onToggle }) {
     )
   );
 }
-
-// ── Main Component ────────────────────────────────────────────────────────────
-// ── Relationship type color map (Neo4j) ──────────────────────────────────────
-const REL_COLOR = {
-  EXPOSES:         'var(--cyan)',
-  RUNS:            'var(--low)',
-  VULNERABLE_TO:   'var(--critical)',
-  LEADS_TO:        '#ff6400',
-  REFERENCES:      'var(--text-muted)',
-  EXPLOITABLE_WITH:'var(--amber)',
-  HAS_CREDENTIAL:  '#ff6400',
-  COMPROMISED_VIA: 'var(--critical)',
-  ESCALATES_TO:    'var(--violet)',
-  PIVOTS_TO:       'var(--medium)',
-  AFFECTS:         'var(--medium)',
-  RELATED_TO:      'var(--border-bright)',
-};
 
 // ── Neo4j Settings Form ───────────────────────────────────────────────────────
 function Neo4jSetup({ onConnected }) {
@@ -364,8 +381,204 @@ function Neo4jSetup({ onConnected }) {
   );
 }
 
-function AttackGraph() {
+// ── Stellar Particle Canvas ──────────────────────────────────────────────────
+// Cinematic showpiece — ported from the T4 canvas-only AttackGraph.
+//   • ~600 background particles drifting (cosmic backdrop)
+//   • Attack-graph nodes laid out on a deterministic circle
+//   • Edges drawn as faint azure light-paths
+//   • Drag-to-pan, wheel-to-zoom, theme-aware via CSS-var resolution
+function StellarParticleCanvas({ nodes, edges }) {
+  const { state } = window.useStore();
+  const canvasRef  = useRef(null);
+  const wrapperRef = useRef(null);
+  const [pan,  setPan]  = useState({ x: 0, y: 0 });
+  const [zoom, setZoom] = useState(1);
+  const dragRef = useRef(null);
+
+  // Persist particles across renders so they keep momentum
+  const particlesRef = useRef(null);
+  if (particlesRef.current === null) {
+    particlesRef.current = Array.from({ length: 600 }, () => ({
+      x: Math.random() * 1920,
+      y: Math.random() * 1080,
+      vx: (Math.random() - 0.5) * 0.05,
+      vy: (Math.random() - 0.5) * 0.05,
+    }));
+  }
+
+  // Canvas accent/violet/text — resolved from CSS at mount and theme-change
+  const colorsRef = useRef({ accent: '#4FA8FF', violet: '#7B6CF6', text: '#E5EAF6' });
+
+  // ── Resolve canvas colours from current CSS variables ───────────────────
+  useEffect(() => {
+    const cs = getComputedStyle(document.documentElement);
+    colorsRef.current = {
+      accent: cs.getPropertyValue('--accent').trim()       || '#4FA8FF',
+      violet: cs.getPropertyValue('--violet').trim()       || '#7B6CF6',
+      text:   cs.getPropertyValue('--text-primary').trim() || '#E5EAF6',
+    };
+  }, [state.theme]);
+
+  // ── Resize canvas to container ─────────────────────────────────────────
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    function fit() {
+      const r = wrapperRef.current?.getBoundingClientRect();
+      if (!r) return;
+      canvas.width  = Math.max(300, Math.floor(r.width));
+      canvas.height = Math.max(300, Math.floor(r.height));
+    }
+    fit();
+    window.addEventListener('resize', fit);
+    return () => window.removeEventListener('resize', fit);
+  }, []);
+
+  // ── Animation loop ─────────────────────────────────────────────────────
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    let raf;
+    function tick() {
+      const W = canvas.width, H = canvas.height;
+      ctx.clearRect(0, 0, W, H);
+
+      // 1. Background particles — drift slowly, wrap toroidally
+      ctx.fillStyle = 'rgba(229, 234, 246, 0.15)';
+      const ps = particlesRef.current;
+      for (const p of ps) {
+        p.x = (p.x + p.vx + W) % W;
+        p.y = (p.y + p.vy + H) % H;
+        ctx.fillRect(p.x, p.y, 1, 1);
+      }
+
+      // 2. Node positions — deterministic circular layout (panable + zoomable)
+      const cx    = W / 2 + pan.x;
+      const cy    = H / 2 + pan.y;
+      const r     = 200 * zoom;
+      const total = nodes.length || 1;
+      function nodePos(i) {
+        const angle = (i / total) * Math.PI * 2 - Math.PI / 2;
+        return { x: cx + Math.cos(angle) * r, y: cy + Math.sin(angle) * r };
+      }
+      const nodeIndex = {};
+      nodes.forEach((n, i) => {
+        const key = n.node_id || n.id || n.host || i;
+        nodeIndex[key] = i;
+      });
+
+      // 3. Edges — faint azure light-paths
+      ctx.strokeStyle = colorsRef.current.accent;
+      ctx.globalAlpha = 0.4;
+      ctx.lineWidth   = 1;
+      for (const e of edges) {
+        const sk = e.source ?? e.from;
+        const tk = e.target ?? e.to;
+        const ai = nodeIndex[sk];
+        const bi = nodeIndex[tk];
+        if (ai == null || bi == null) continue;
+        const a = nodePos(ai), b = nodePos(bi);
+        ctx.beginPath();
+        ctx.moveTo(a.x, a.y);
+        ctx.lineTo(b.x, b.y);
+        ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+
+      // 4. Nodes — circles + labels. HVA / high-priority nodes use violet.
+      nodes.forEach((n, i) => {
+        const { x, y } = nodePos(i);
+        const t = (n.node_type || n.type || '').toLowerCase();
+        const isHVA = !!(n.is_hva || n.is_high_value
+                         || n.priority === 'high' || n.priority === 'critical'
+                         || t === 'access' || t === 'credential' || t === 'exploit');
+        ctx.beginPath();
+        ctx.arc(x, y, isHVA ? 8 : 5, 0, Math.PI * 2);
+        ctx.fillStyle = isHVA ? colorsRef.current.violet : colorsRef.current.accent;
+        ctx.fill();
+
+        // Label below node
+        const lbl = n.label || n.host || n.node_id || n.id;
+        if (lbl) {
+          ctx.fillStyle    = colorsRef.current.text;
+          ctx.globalAlpha  = 0.7;
+          ctx.font         = '11px "JetBrains Mono", monospace';
+          ctx.textAlign    = 'center';
+          ctx.fillText(String(lbl).slice(0, 22), x, y + 18);
+          ctx.globalAlpha  = 1;
+        }
+      });
+
+      raf = requestAnimationFrame(tick);
+    }
+    tick();
+    return () => cancelAnimationFrame(raf);
+  }, [nodes, edges, pan, zoom]);
+
+  // ── Drag-to-pan ────────────────────────────────────────────────────────
+  function onMouseDown(e) {
+    dragRef.current = { x: e.clientX, y: e.clientY, panX: pan.x, panY: pan.y };
+  }
+  function onMouseMove(e) {
+    if (!dragRef.current) return;
+    setPan({
+      x: dragRef.current.panX + (e.clientX - dragRef.current.x),
+      y: dragRef.current.panY + (e.clientY - dragRef.current.y),
+    });
+  }
+  function onMouseUp() { dragRef.current = null; }
+
+  // ── Wheel-to-zoom ──────────────────────────────────────────────────────
+  function onWheel(e) {
+    e.preventDefault();
+    const factor = e.deltaY < 0 ? 1.1 : 0.9;
+    setZoom(z => Math.max(0.3, Math.min(3, z * factor)));
+  }
+
+  // ── Empty state ────────────────────────────────────────────────────────
+  if (!nodes || nodes.length === 0) {
+    return React.createElement('div', {
+      style: {
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        height: '70vh', color: 'var(--text-muted)',
+        fontFamily: 'var(--font-mono)', fontSize: 12,
+        background: 'var(--bg-base)', borderRadius: 10, border: '1px solid var(--border)',
+      }
+    }, 'No attack graph data yet — start a scan to populate.');
+  }
+
+  // ── Render ─────────────────────────────────────────────────────────────
+  return React.createElement('div', {
+    ref: wrapperRef,
+    style: {
+      width: '100%', height: '70vh', position: 'relative', overflow: 'hidden',
+      background: 'var(--bg-base)', borderRadius: 10, border: '1px solid var(--border)',
+      cursor: dragRef.current ? 'grabbing' : 'grab',
+    },
+    onMouseDown, onMouseMove, onMouseUp, onMouseLeave: onMouseUp, onWheel,
+  },
+    React.createElement('canvas', {
+      ref: canvasRef,
+      style: { display: 'block', width: '100%', height: '100%' },
+    }),
+    // Floating help/zoom indicator
+    React.createElement('div', {
+      style: {
+        position: 'absolute', top: 10, right: 12,
+        padding: '4px 10px', borderRadius: 14,
+        background: 'rgba(8,12,30,0.55)', border: '1px solid var(--border)',
+        color: 'var(--text-muted)', fontSize: 10, fontFamily: 'var(--font-mono)',
+        letterSpacing: 0.4, pointerEvents: 'none',
+      }
+    }, `${nodes.length} nodes · ${edges.length} edges · ${zoom.toFixed(2)}×`)
+  );
+}
+
+// ── Main Component ────────────────────────────────────────────────────────────
+function AttackGraph(props) {
   const { state, loadNeo4jGraph, loadNeo4jPaths } = window.useStore();
+  const vm = (props && props.viewMode) || 'OPERATOR';
   const svgRef      = useRef(null);
   const neo4jSvgRef = useRef(null);
   const simRef      = useRef(null);
@@ -375,7 +588,9 @@ function AttackGraph() {
   const [loading,  setLoading]  = useState(false);
   const [selected, setSelected] = useState(null);
   const [filter,   setFilter]   = useState('all');
-  const [view,     setView]     = useState('chains'); // 'chains' | 'graph' | 'rel' | 'paths' | 'mitre'
+  // Default tab: ✨ Stellar — the new cinematic showpiece.
+  // Other valid views: 'chains' | 'graph' | 'rel' | 'paths' | 'mitre'.
+  const [view,     setView]     = useState('stellar');
   const [minimap,  setMinimap]  = useState(true);
   const [expandedChain, setExpandedChain] = useState(null);
   const [relFilter, setRelFilter] = useState('all');
@@ -418,6 +633,23 @@ function AttackGraph() {
     }
   }, [state.graphNodes, state.graphEdges]);
 
+  // Neo4j data + filtered views — defined before effects that depend on them.
+  const neo4jGraph     = state.neo4jGraph     || { nodes: [], edges: [] };
+  const neo4jPaths     = state.neo4jPaths     || [];
+  const neo4jAvailable = state.neo4jAvailable;
+
+  const visibleNeo4jEdges = relFilter === 'all'
+    ? neo4jGraph.edges
+    : neo4jGraph.edges.filter(e => (e.rel_type || '') === relFilter);
+  const visibleNeo4jNodeIds = new Set([
+    ...visibleNeo4jEdges.map(e => e.source),
+    ...visibleNeo4jEdges.map(e => e.target),
+  ]);
+  const visibleNeo4jNodes = relFilter === 'all'
+    ? neo4jGraph.nodes
+    : neo4jGraph.nodes.filter(n => visibleNeo4jNodeIds.has(n.node_id));
+  const neo4jRelTypes = [...new Set(neo4jGraph.edges.map(e => e.rel_type).filter(Boolean))].sort();
+
   // Redraw D3 graph when data or filter changes
   useEffect(() => {
     if (view !== 'graph' || !svgRef.current) return;
@@ -445,33 +677,23 @@ function AttackGraph() {
   const immediates   = chainAnalysis?.immediate_actions || [];
   const assessment   = chainAnalysis?.target_assessment || '';
 
-  // ── Neo4j semantic graph ────────────────────────────────────────────────
-  const neo4jGraph     = state.neo4jGraph     || { nodes: [], edges: [] };
-  const neo4jPaths     = state.neo4jPaths     || [];
-  const neo4jAvailable = state.neo4jAvailable;
-
-  // Filtered Neo4j edges by relationship type
-  const visibleNeo4jEdges = relFilter === 'all'
-    ? neo4jGraph.edges
-    : neo4jGraph.edges.filter(e => (e.rel_type || '') === relFilter);
-  const visibleNeo4jNodeIds = new Set([
-    ...visibleNeo4jEdges.map(e => e.source),
-    ...visibleNeo4jEdges.map(e => e.target),
-  ]);
-  const visibleNeo4jNodes = relFilter === 'all'
-    ? neo4jGraph.nodes
-    : neo4jGraph.nodes.filter(n => visibleNeo4jNodeIds.has(n.node_id));
-  const neo4jRelTypes = [...new Set(neo4jGraph.edges.map(e => e.rel_type).filter(Boolean))].sort();
-
   const typeCounts = nodes.reduce((acc, n) => {
     const t = n.node_type || n.type || 'unknown';
     acc[t] = (acc[t] || 0) + 1;
     return acc;
   }, {});
 
+  // Stellar tab data: prefer live WS feed, fall back to fetched HTTP data.
+  const liveNodes   = Array.isArray(state.graphNodes) ? state.graphNodes : [];
+  const liveEdges   = Array.isArray(state.graphEdges) ? state.graphEdges : [];
+  const stellarNodes = liveNodes.length > 0 ? liveNodes : nodes;
+  const stellarEdges = liveEdges.length > 0 ? liveEdges : edges;
+
   // ── RENDER ─────────────────────────────────────────────────────────────────
   return React.createElement('div', {
-    style: { display:'flex', flexDirection:'column', height:'100%', padding:16, background:'var(--bg-base,#0a0a0a)', gap:12, overflowY:'auto' }
+    'data-view-mode': vm,
+    className: vm === 'CLIENT' ? 'client-mode' : undefined,
+    style: { display:'flex', flexDirection:'column', height:'100%', padding:16, background:'var(--bg-base)', gap:12, overflowY:'auto' }
   },
 
     // ── Header ──────────────────────────────────────────────────────────────
@@ -487,6 +709,7 @@ function AttackGraph() {
         )
       ),
       React.createElement('div', { style: { display:'flex', gap:6, flexWrap:'wrap', alignItems:'center' } },
+        React.createElement(TabBtn, { label:'✨ Stellar',  active: view==='stellar', onClick:()=>setView('stellar') }),
         React.createElement(TabBtn, { label:'⛓ Chains',   active: view==='chains', onClick:()=>setView('chains'), badge: chains.length||undefined }),
         React.createElement(TabBtn, { label:'🗺 Graph',    active: view==='graph',  onClick:()=>{ setView('graph'); setTimeout(loadGraph,50); } }),
         React.createElement(TabBtn, {
@@ -511,8 +734,16 @@ function AttackGraph() {
       )
     ),
 
+    // ══════════════════════════════════════════════════════════════════════════
+    // VIEW: STELLAR (NEW — cinematic particle starburst)
+    // ══════════════════════════════════════════════════════════════════════════
+    view === 'stellar' && React.createElement(StellarParticleCanvas, {
+      nodes: stellarNodes,
+      edges: stellarEdges,
+    }),
+
     // ── No session ───────────────────────────────────────────────────────────
-    !state.sessionId && React.createElement('div', {
+    view !== 'stellar' && !state.sessionId && React.createElement('div', {
       style:{ padding:'40px 24px', borderRadius:10, background:'var(--bg-surface)', border:'1px solid var(--border)',
               textAlign:'center', display:'flex', flexDirection:'column', alignItems:'center', gap:10 }
     },
@@ -626,8 +857,8 @@ function AttackGraph() {
               key:t, onClick:()=>setFilter(active?'all':t),
               style:{
                 padding:'2px 8px', borderRadius:10, cursor:'pointer', fontSize:9,
-                border:`1px solid ${active?col:col+'40'}`,
-                background: active?col+'20':'rgba(0,0,0,0.5)',
+                border:`1px solid ${active?col:'var(--border-light)'}`,
+                background: active?'rgba(255,255,255,0.06)':'rgba(0,0,0,0.5)',
                 color: active?col:'var(--text-muted)',
                 backdropFilter:'blur(4px)',
               }
@@ -715,8 +946,8 @@ function AttackGraph() {
           selected.node_type || selected.type),
         selected.severity && React.createElement('div', {
           style:{ fontSize:10, padding:'2px 8px', borderRadius:4, alignSelf:'flex-start',
-                  background:`${SEV_COLOR[selected.severity?.toUpperCase()]||'var(--border)'}20`,
-                  border:`1px solid ${SEV_COLOR[selected.severity?.toUpperCase()]||'var(--border)'}60`,
+                  background: 'rgba(255,255,255,0.04)',
+                  border:`1px solid ${SEV_COLOR[selected.severity?.toUpperCase()]||'var(--border)'}`,
                   color: SEV_COLOR[selected.severity?.toUpperCase()]||'var(--text-muted)' }
         }, selected.severity?.toUpperCase()),
         selected.host && React.createElement('div', { style:{fontSize:10, color:'var(--text-muted)'} }, `Host: ${selected.host}`),
@@ -807,7 +1038,7 @@ function AttackGraph() {
                     padding:'3px 9px', borderRadius:12, fontSize:9, cursor:'pointer',
                     fontFamily:'var(--font-mono)', fontWeight:600,
                     border: relFilter===rt ? `1px solid ${REL_COLOR[rt]||'var(--cyan)'}` : '1px solid var(--border-light)',
-                    background: relFilter===rt ? `${REL_COLOR[rt]||'var(--cyan)'}22` : 'rgba(255,255,255,0.03)',
+                    background: relFilter===rt ? 'rgba(255,255,255,0.06)' : 'rgba(255,255,255,0.03)',
                     color: relFilter===rt ? (REL_COLOR[rt]||'var(--cyan)') : 'var(--text-muted)',
                   }
                 }, rt)
@@ -893,7 +1124,7 @@ function AttackGraph() {
                         ni < (path.nodes||[]).length-1 && React.createElement('div', {
                           style:{
                             fontSize:9, padding:'2px 6px', borderRadius:10,
-                            background: `${REL_COLOR[(path.rels||[])[ni]] || 'rgba(255,255,255,0.08)'}22`,
+                            background: 'rgba(255,255,255,0.04)',
                             color: REL_COLOR[(path.rels||[])[ni]] || 'var(--text-muted)',
                             border: `1px solid ${REL_COLOR[(path.rels||[])[ni]] || 'var(--border-light)'}`,
                             fontFamily:'var(--font-mono)', whiteSpace:'nowrap',
@@ -909,7 +1140,10 @@ function AttackGraph() {
   );
 }
 
-// ── D3 Graph renderer (unchanged from original — keeps all existing behavior) ─
+// ── D3 Graph renderer (preserves original behaviour) ─────────────────────────
+// Resolves CSS-var fills/strokes to literal rgb at the moment of render so
+// SVG markers and paths (which can't accept var() strings directly) display
+// correctly across the active theme.
 function drawGraph(nodes, edges, svgEl, onSelect, simRef) {
   if (!window.d3 || !svgEl) return;
   const d3 = window.d3;
@@ -926,7 +1160,7 @@ function drawGraph(nodes, edges, svgEl, onSelect, simRef) {
     defs.append('marker').attr('id','arr-'+sev)
       .attr('viewBox','0 -5 10 10').attr('refX',20).attr('refY',0)
       .attr('markerWidth',6).attr('markerHeight',6).attr('orient','auto')
-      .append('path').attr('d','M0,-5L10,0L0,5').attr('fill',col);
+      .append('path').attr('d','M0,-5L10,0L0,5').attr('fill', resolveCssVar(col, '#94A0C5'));
   });
 
   // Glow filter for high-severity nodes
@@ -958,7 +1192,7 @@ function drawGraph(nodes, edges, svgEl, onSelect, simRef) {
   const edgeG = g.append('g');
   const link = edgeG.selectAll('line').data(edges)
     .enter().append('line')
-    .attr('stroke', d => SEV_EDGE_COLOR[d.severity||d.label?.toLowerCase()] || SEV_EDGE_COLOR.info)
+    .attr('stroke', d => resolveCssVar(SEV_EDGE_COLOR[d.severity||d.label?.toLowerCase()] || SEV_EDGE_COLOR.info, '#94A0C5'))
     .attr('stroke-width', 1.5).attr('opacity', 0.65)
     .attr('marker-end', d => 'url(#arr-'+(d.severity||'info')+')');
 
@@ -982,9 +1216,9 @@ function drawGraph(nodes, edges, svgEl, onSelect, simRef) {
 
   node.append('circle')
     .attr('r', d => NODE_RADIUS[d.node_type||d.type] || 13)
-    .attr('fill', d => NODE_COLOR[d.node_type||d.type] || 'var(--text-muted)')
+    .attr('fill', d => resolveCssVar(NODE_COLOR[d.node_type||d.type] || 'var(--text-muted)', '#4F5876'))
     .attr('fill-opacity', 0.18)
-    .attr('stroke', d => NODE_COLOR[d.node_type||d.type] || 'var(--text-muted)')
+    .attr('stroke', d => resolveCssVar(NODE_COLOR[d.node_type||d.type] || 'var(--text-muted)', '#4F5876'))
     .attr('stroke-width', d => isCrit(d) ? 2 : 1.5)
     .attr('filter', d => isCrit(d) ? 'url(#glow)' : null);
 
@@ -1020,8 +1254,11 @@ function drawNeo4jGraph(nodes, edges, svgEl, simRef) {
 
   const svg = d3.select(svgEl).attr('width', W).attr('height', H);
 
+  // Resolve once per draw — markers need literal colours.
+  const fallbackEdge = resolveCssVar('var(--border)', '#2D3F75');
+  const usedColors = [...new Set(edges.map(e => resolveCssVar(REL_COLOR[e.rel_type] || 'var(--border)', fallbackEdge)))];
+
   // Arrow markers — one per rel type colour
-  const usedColors = [...new Set(edges.map(e => REL_COLOR[e.rel_type] || '#4a5568'))];
   const defs = svg.append('defs');
   usedColors.forEach((col, i) => {
     defs.append('marker').attr('id', `neo-arr-${i}`)
@@ -1048,11 +1285,11 @@ function drawNeo4jGraph(nodes, edges, svgEl, simRef) {
   // Edges
   const link = g.append('g').selectAll('line')
     .data(edgeData).join('line')
-    .attr('stroke', d => REL_COLOR[d.rel_type] || '#4a5568')
+    .attr('stroke', d => resolveCssVar(REL_COLOR[d.rel_type] || 'var(--border)', fallbackEdge))
     .attr('stroke-width', 1.5)
     .attr('stroke-opacity', 0.7)
     .attr('marker-end', d => {
-      const col = REL_COLOR[d.rel_type] || '#4a5568';
+      const col = resolveCssVar(REL_COLOR[d.rel_type] || 'var(--border)', fallbackEdge);
       return `url(#neo-arr-${colorIndex(col)})`;
     });
 
@@ -1060,7 +1297,7 @@ function drawNeo4jGraph(nodes, edges, svgEl, simRef) {
   const edgeLabel = g.append('g').selectAll('text')
     .data(edgeData).join('text')
     .attr('font-size', 7).attr('font-family', 'monospace')
-    .attr('fill', d => REL_COLOR[d.rel_type] || '#4a5568')
+    .attr('fill', d => resolveCssVar(REL_COLOR[d.rel_type] || 'var(--border)', fallbackEdge))
     .attr('text-anchor', 'middle').attr('opacity', 0.8)
     .text(d => (d.rel_type || '').replace(/_/g,' '));
 
@@ -1077,8 +1314,9 @@ function drawNeo4jGraph(nodes, edges, svgEl, simRef) {
 
   nodeGroup.append('circle')
     .attr('r', d => NODE_RADIUS[nodeType(d)] || 12)
-    .attr('fill', d => (NODE_COLOR[nodeType(d)] || 'rgba(255,255,255,0.15)') + '33')
-    .attr('stroke', d => NODE_COLOR[nodeType(d)] || 'rgba(255,255,255,0.3)')
+    .attr('fill', d => resolveCssVar(NODE_COLOR[nodeType(d)] || 'var(--text-muted)', '#4F5876'))
+    .attr('fill-opacity', 0.2)
+    .attr('stroke', d => resolveCssVar(NODE_COLOR[nodeType(d)] || 'var(--text-muted)', '#4F5876'))
     .attr('stroke-width', 1.5);
 
   nodeGroup.append('text')
@@ -1088,7 +1326,7 @@ function drawNeo4jGraph(nodes, edges, svgEl, simRef) {
 
   nodeGroup.append('text')
     .attr('text-anchor','middle').attr('dy', d => (NODE_RADIUS[nodeType(d)]||12)+12)
-    .attr('font-size', 8).attr('fill', 'var(--text-muted)').attr('pointer-events','none')
+    .attr('font-size', 8).attr('fill', resolveCssVar('var(--text-muted)', '#4F5876')).attr('pointer-events','none')
     .text(d => (d.label||d.node_id||'').slice(0,22));
 
   nodeGroup.append('title').text(d => `${d.node_type||'node'}: ${d.label||d.node_id}`);
