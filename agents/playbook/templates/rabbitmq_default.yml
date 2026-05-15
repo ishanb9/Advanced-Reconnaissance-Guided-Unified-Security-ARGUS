@@ -1,0 +1,69 @@
+id: rabbitmq_default
+name: "RabbitMQ management UI enumeration"
+description: |
+  RabbitMQ Management plugin runs on 15672 and ships with guest/guest
+  by default (localhost-only since 3.3.0, but operators often bind it
+  externally and forget).  Successful login allows queue inspection,
+  message reading, and shovel/federation manipulation.
+severity_floor: MEDIUM
+tags: [messaging, default-cred, exposed-service, rabbitmq]
+mitre: [T1078, T1592]
+
+trigger:
+  services:
+    - ports: [15672, 15671, 5672]
+    - banner_contains: ["RabbitMQ", "AMQP"]
+    - service_name_contains: ["rabbitmq", "amqp"]
+
+steps:
+  - name: detect_management
+    tool: curl
+    args:
+      - "-s"
+      - "-I"
+      - "--max-time"
+      - "10"
+      - "{url}/api/overview"
+    timeout: 15
+    success:
+      stdout_contains: ["RabbitMQ", "rabbit"]
+    on_success:
+      finding:
+        title: "RabbitMQ Management plugin detected at {url}"
+        severity: INFO
+
+  - name: guest_default_creds
+    tool: curl
+    optional: true
+    args:
+      - "-s"
+      - "--max-time"
+      - "10"
+      - "-u"
+      - "guest:guest"
+      - "{url}/api/overview"
+    timeout: 15
+    success:
+      stdout_contains: ["\"rabbitmq_version\"", "\"erlang_version\""]
+    on_success:
+      finding:
+        title: "RabbitMQ default credentials (guest/guest) on {host}:{port}"
+        severity: HIGH
+        description: "Login as guest succeeded. Read queues + messages: /api/queues + /api/queues/<vhost>/<queue>/get."
+
+  - name: anonymous_overview
+    tool: curl
+    optional: true
+    args:
+      - "-s"
+      - "--max-time"
+      - "10"
+      - "{url}/api/overview"
+    timeout: 15
+    success:
+      stdout_contains: ["rabbitmq_version"]
+    on_success:
+      finding:
+        title: "RabbitMQ Management API accessible without auth on {host}:{port}"
+        severity: CRITICAL
+        description: "Overview readable anonymously - full admin surface is also likely open. Try /api/vhosts and /api/users."

@@ -20,7 +20,9 @@ Each mechanism is verified after creation. Findings are stored with HIGH
 severity to provide an evidence trail for the final audit report.
 
 NOTE: This subagent executes tools on a target that has already been
-compromised (shell access confirmed by PostExploitAgent before invocation).
+compromised (shell access confirmed by MasterAgent._phase_post_exploit
+before invocation; gated on _intel.current_user in ("root", "SYSTEM",
+"Administrator") or root_flag).
 """
 
 from __future__ import annotations

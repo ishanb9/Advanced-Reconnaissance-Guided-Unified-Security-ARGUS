@@ -1,0 +1,76 @@
+id: tomcat_manager
+name: "Apache Tomcat Manager enumeration"
+description: |
+  Apache Tomcat servers frequently expose the /manager/html and /host-manager
+  interfaces.  Default creds: tomcat/tomcat, admin/admin, manager/manager.
+  Successful login -> WAR upload -> RCE.
+severity_floor: MEDIUM
+tags: [java, default-cred, exposed-service, tomcat]
+mitre: [T1078, T1190]
+
+trigger:
+  services:
+    - banner_contains: ["Apache Tomcat", "Coyote"]
+    - ports: [8080, 8443, 8005, 8009]
+      banner_contains: ["tomcat", "coyote"]
+  findings:
+    - title_contains: ["Tomcat"]
+
+steps:
+  - name: detect_tomcat_version
+    tool: curl
+    args:
+      - "-s"
+      - "-I"
+      - "--max-time"
+      - "10"
+      - "{url}/"
+    timeout: 15
+    success:
+      stdout_contains: ["Coyote", "Tomcat"]
+    on_success:
+      finding:
+        title: "Apache Tomcat detected at {url}"
+        severity: INFO
+
+  - name: manager_status_unauth
+    tool: curl
+    optional: true
+    args:
+      - "-s"
+      - "--max-time"
+      - "10"
+      - "-o"
+      - "/dev/null"
+      - "-w"
+      - "%{http_code}"
+      - "{url}/manager/status"
+    timeout: 15
+    success:
+      stdout_contains: ["200"]
+    on_success:
+      finding:
+        title: "Tomcat Manager /status accessible without auth on {host}:{port}"
+        severity: HIGH
+        description: "Manager interface exposes thread/memory info without credentials. Probe /manager/html with default creds next."
+
+  - name: host_manager_unauth
+    tool: curl
+    optional: true
+    args:
+      - "-s"
+      - "--max-time"
+      - "10"
+      - "-o"
+      - "/dev/null"
+      - "-w"
+      - "%{http_code}"
+      - "{url}/host-manager/text/list"
+    timeout: 15
+    success:
+      stdout_contains: ["200"]
+    on_success:
+      finding:
+        title: "Tomcat Host Manager accessible without auth on {host}:{port}"
+        severity: HIGH
+        description: "/host-manager allows virtual-host creation. Common path to WAR upload + RCE."

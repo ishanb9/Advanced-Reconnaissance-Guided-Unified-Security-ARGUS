@@ -1,0 +1,89 @@
+id: wordpress_enum
+name: "WordPress enumeration & version disclosure"
+description: |
+  WordPress sites typically expose user enumeration via /?author=N,
+  REST API /wp-json/wp/v2/users, and /wp-login.php for brute-forcing.
+  Use wpscan for the deep scan once the instance is confirmed.
+severity_floor: LOW
+tags: [cms, wordpress, info-disclosure]
+mitre: [T1592, T1078]
+
+trigger:
+  services:
+    - ports: [80, 443, 8080, 8443]
+      banner_contains: ["WordPress"]
+  findings:
+    - title_contains: ["WordPress"]
+
+steps:
+  - name: wp_login_page
+    tool: curl
+    args:
+      - "-s"
+      - "-I"
+      - "--max-time"
+      - "10"
+      - "{url}/wp-login.php"
+    timeout: 15
+    success:
+      stdout_contains: ["wp-login", "WordPress"]
+    on_success:
+      finding:
+        title: "WordPress detected at {url}"
+        severity: INFO
+        description: "wp-login.php reachable; common path: enumerate users via /?author=N, then brute-force admin."
+
+  - name: rest_users
+    tool: curl
+    optional: true
+    args:
+      - "-s"
+      - "--max-time"
+      - "10"
+      - "{url}/wp-json/wp/v2/users"
+    timeout: 15
+    success:
+      stdout_contains: ["\"slug\"", "\"name\""]
+    on_success:
+      finding:
+        title: "WordPress user enumeration via REST API on {host}:{port}"
+        severity: MEDIUM
+        description: "/wp-json/wp/v2/users returned user list with slugs. Use as username list for /wp-login.php brute-force."
+
+  - name: xmlrpc_check
+    tool: curl
+    optional: true
+    args:
+      - "-s"
+      - "--max-time"
+      - "10"
+      - "-o"
+      - "/dev/null"
+      - "-w"
+      - "%{http_code}"
+      - "{url}/xmlrpc.php"
+    timeout: 15
+    success:
+      stdout_contains: ["200", "405"]
+    on_success:
+      finding:
+        title: "WordPress XML-RPC endpoint reachable on {host}:{port}"
+        severity: MEDIUM
+        description: "/xmlrpc.php enabled. Allows wp.getUsersBlogs login brute-force without rate-limiting. Use system.multicall for 1000-creds-per-request batch attacks."
+
+  - name: readme_version
+    tool: curl
+    optional: true
+    args:
+      - "-s"
+      - "--max-time"
+      - "10"
+      - "{url}/readme.html"
+    timeout: 15
+    success:
+      stdout_regex: "Version\\s+\\d+\\.\\d+"
+    on_success:
+      finding:
+        title: "WordPress version disclosure via /readme.html on {host}:{port}"
+        severity: LOW
+        description: "Version readable. Match against wpvulndb for known core bugs and pin plugin version checks."

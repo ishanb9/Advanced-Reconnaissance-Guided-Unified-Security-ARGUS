@@ -1085,6 +1085,47 @@ Return JSON:
             return {"stdout": "", "stderr": "Stop requested", "exit_code": -1, "output_id": None}
 
         phase_to_use = phase or self.phase
+
+        # ── Tool-failure blacklist consult ────────────────────────────────
+        # Skip the dispatch entirely when this (host, service-class)
+        # surface has accumulated 3+ hard-network failures.  Saves the
+        # planner from re-proposing tools against firewalled / closed
+        # services.  Wrapped so a bookkeeping error never blocks a tool.
+        try:
+            from agents.reasoning.tool_blacklist import get_blacklist
+            _bl = get_blacklist()
+            _bl_host = str(target or getattr(self, "_target", "") or "")
+            if _bl_host and _bl.is_dead(_bl_host, tool_name):
+                msg = (
+                    f"[blacklist] skipping {tool_name} on {_bl_host} — "
+                    f"surface marked dead by prior failures"
+                )
+                try:
+                    await self._emit("tool_skipped_blacklist", {
+                        "tool": tool_name, "host": _bl_host, "reason": "dead_surface",
+                    })
+                except Exception:
+                    pass
+                return {"stdout": "", "stderr": msg,
+                        "exit_code": -1, "output_id": None, "skipped": True}
+        except Exception:
+            pass
+
+        # ── OPSEC profile flag rewriting ──────────────────────────────────
+        # Strip noisy default flags (--min-rate, -T4, -t 40, etc.) and
+        # inject profile-tuned alternatives (--randomize-hosts, slow
+        # timing, UA rotation).  Default profile "fast" preserves the
+        # current argv so this is a no-op unless ARGUS_OPSEC is set.
+        try:
+            from utils.opsec_profiles import get_profile, apply_to_argv
+            _prof = get_profile()
+            if _prof.name != "fast":
+                _argv = (args or "").split()
+                _new  = apply_to_argv(tool_name, _argv, _prof)
+                args = " ".join(_new)
+        except Exception:
+            pass
+
         full_cmd     = f"{tool_name} {args}".strip()
 
         await self.set_status(AgentStatus.RUNNING, f"→ {full_cmd}", tool=tool_name)
@@ -1353,6 +1394,83 @@ Return JSON:
 
         # Persist full output
         await db.finalize_tool_output(output_id, stdout, stderr, exit_code)
+
+        # ── Tool-failure feedback loop ────────────────────────────────────
+        # Every tool run feeds the per-(host, service-class) blacklist so
+        # the planner can ask `is_dead(host, port)` before re-dispatching.
+        # Hard-network failures (connection refused, host unreachable,
+        # NT_STATUS_*, etc.) accumulate; three hits and that surface is
+        # marked dead for the next BLACKLIST_TTL_SEC (default 30 min).
+        try:
+            from agents.reasoning.tool_blacklist import get_blacklist
+            # Try to extract host and port from the args / target
+            _host = getattr(self, "_target", None) or (target or "")
+            _port: Optional[int] = None
+            # Cheap port extraction from common arg patterns
+            for tok in (args or "").split():
+                if tok.lstrip("-").startswith(("p=", "port=")) or tok in ("-p", "-P", "--port"):
+                    continue
+                # bare integer in port-ish range
+                try:
+                    n = int(tok)
+                    if 1 <= n <= 65535:
+                        _port = n
+                        break
+                except ValueError:
+                    continue
+            blacklist_reason = get_blacklist().record_run(
+                host=str(_host), tool=tool_name, port=_port,
+                exit_code=exit_code, stdout=stdout, stderr=stderr,
+            )
+            if blacklist_reason:
+                try:
+                    await self._emit("tool_blacklist", {
+                        "host":   _host,
+                        "tool":   tool_name,
+                        "port":   _port,
+                        "reason": blacklist_reason,
+                    })
+                except Exception:
+                    pass
+        except Exception:
+            # Blacklist is advisory; never let a bookkeeping error fail
+            # the tool run path.
+            pass
+
+        # ── Vhost pivot (E9 wiring) ──────────────────────────────────────
+        # Scan tool stdout for HTTP redirects to internal-looking hostnames
+        # (.htb / .local / .lan / etc.) and either add them to /etc/hosts
+        # (if HOSTS_AUTOWRITE=1) or just emit a vhost_discovered event for
+        # the operator to confirm.  Only fires for HTTP-ish tools so we
+        # don't waste cycles parsing every nmap output.
+        try:
+            _web_tools = {"curl", "wget", "whatweb", "nikto", "gobuster",
+                          "feroxbuster", "dirsearch", "ffuf", "wfuzz",
+                          "wpscan", "nuclei", "httpx", "katana"}
+            if tool_name.lower() in _web_tools and stdout:
+                from agents.recon.vhost_pivot import pivot_from_recon_output
+                _host_for_pivot = str(target or getattr(self, "_target", "") or "")
+                if _host_for_pivot:
+                    _pr = await pivot_from_recon_output(
+                        target_ip=_host_for_pivot,
+                        recon_text=stdout,
+                        tool_runner=None,        # no deep brute-force from here
+                        scope_hostnames=set(),
+                        deep_bruteforce=False,
+                    )
+                    if _pr.extracted_hostnames:
+                        try:
+                            await self._emit("vhost_discovered", {
+                                "host":       _host_for_pivot,
+                                "hostnames":  _pr.extracted_hostnames,
+                                "added":      _pr.added_to_hosts,
+                                "skipped":    _pr.skipped,
+                                "notes":      _pr.notes,
+                            })
+                        except Exception:
+                            pass
+        except Exception:
+            pass
 
         await self._emit("tool_done", {
             "agent":     str(self.name),
@@ -1876,6 +1994,47 @@ Return JSON:
         remediation: Optional[str]  = None
     ) -> Dict:
         """Store a finding to DB and broadcast to frontend."""
+        # ── CVSS auto-scoring (E10 wiring) ──────────────────────────────
+        # Estimate a CVSS v3.1 base score + vector from the finding shape
+        # so the FindingsBoard + report can sort/filter by real impact.
+        # Operator overrides via extra['cvss_vector'] or extra['cvss_base'].
+        _cvss_score:  Optional[float] = None
+        _cvss_vector: Optional[str]   = None
+        try:
+            from utils.cvss_scorer import infer_vector, vector_to_string
+            _f_for_score = {
+                "title":               title,
+                "description":         description,
+                "severity":            str(severity.value) if hasattr(severity, "value") else str(severity),
+                "evidence":            evidence or "",
+                "exploit_suggestion":  None,
+                "cve":                 (cves[0] if cves else None),
+                "tags":                "",
+            }
+            # Honour operator overrides if present in `extra`
+            if isinstance(extra, dict):
+                if "cvss_vector" in extra:
+                    _f_for_score["cvss_vector"] = extra["cvss_vector"]
+                if "cvss_base" in extra:
+                    _f_for_score["cvss_base"] = extra["cvss_base"]
+            _vec, _score, _band = infer_vector(_f_for_score)
+            if _score > 0:
+                _cvss_score  = float(_score)
+                _cvss_vector = vector_to_string(_vec) if _vec else None
+        except Exception:
+            # Scoring is advisory; never block the finding write.
+            pass
+
+        # Merge CVSS fields into the extra payload so they round-trip
+        # through Mongo / scan-log / report without further wiring.
+        _merged_extra = dict(extra or {})
+        _merged_extra["evidence"]    = evidence
+        _merged_extra["remediation"] = remediation
+        if _cvss_score is not None:
+            _merged_extra.setdefault("cvss_base",   _cvss_score)
+            if _cvss_vector:
+                _merged_extra.setdefault("cvss_vector", _cvss_vector)
+
         finding = await db.store_finding(
             session_id  = self._session_id,
             agent       = str(self.name),
@@ -1890,7 +2049,7 @@ Return JSON:
             exploits    = exploits or [],
             tool_used   = tool_used,
             raw_output  = raw_output,
-            extra       = {**(extra or {}), "evidence": evidence, "remediation": remediation}
+            extra       = _merged_extra,
         )
         await self._emit("finding", {"agent": str(self.name), "finding": finding})
 

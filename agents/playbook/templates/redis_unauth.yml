@@ -1,0 +1,73 @@
+id: redis_unauth
+name: "Redis unauthenticated access enumeration"
+description: |
+  Redis on default port (6379) frequently runs without authentication.
+  Once authenticated, MODULE LOAD or CONFIG SET dir/dbfilename can yield
+  RCE via lua sandbox escape or SSH key write.
+severity_floor: HIGH
+tags: [database, no-auth, exposed-service, redis]
+mitre: [T1190, T1078]
+
+trigger:
+  services:
+    - ports: [6379, 16379, 26379]
+    - banner_contains: ["Redis", "+PONG", "-NOAUTH"]
+    - service_name_contains: ["redis"]
+
+steps:
+  - name: redis_info_ping
+    tool: redis-cli
+    args:
+      - "-h"
+      - "{host}"
+      - "-p"
+      - "{port}"
+      - "--no-auth-warning"
+      - "PING"
+    timeout: 10
+    success:
+      stdout_contains: ["PONG"]
+    on_success:
+      finding:
+        title: "Redis without authentication on {host}:{port}"
+        severity: HIGH
+        description: "Redis instance accepts commands without AUTH. Exposes full key store; common path to RCE via MODULE LOAD or CONFIG SET dir/dbfilename + SSH authorized_keys write."
+
+  - name: redis_info_server
+    tool: redis-cli
+    optional: true
+    args:
+      - "-h"
+      - "{host}"
+      - "-p"
+      - "{port}"
+      - "--no-auth-warning"
+      - "INFO"
+      - "server"
+    timeout: 10
+    success:
+      stdout_contains: ["redis_version"]
+    on_success:
+      finding:
+        title: "Redis version disclosure on {host}:{port}"
+        severity: MEDIUM
+        description: "INFO server response leaks redis_version + OS. Match against CVE database for version-specific bugs."
+
+  - name: redis_dbsize
+    tool: redis-cli
+    optional: true
+    args:
+      - "-h"
+      - "{host}"
+      - "-p"
+      - "{port}"
+      - "--no-auth-warning"
+      - "DBSIZE"
+    timeout: 10
+    success:
+      stdout_regex: "^\\d+"
+    on_success:
+      finding:
+        title: "Redis key store readable on {host}:{port}"
+        severity: HIGH
+        description: "DBSIZE returned a key count. KEYS * + GET will dump the entire store."

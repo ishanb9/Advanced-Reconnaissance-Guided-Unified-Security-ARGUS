@@ -1,0 +1,85 @@
+id: gitlab_exposed
+name: "GitLab exposed instance enumeration"
+description: |
+  Self-hosted GitLab often exposes /users/sign_in for brute-forcing and
+  the V4 REST API for unauthenticated project / user enumeration.
+  CVE-2023-7028 (account takeover via password reset email injection)
+  and CVE-2024-0402 (path traversal write) are recent high-impact bugs.
+severity_floor: MEDIUM
+tags: [vcs, ci-cd, exposed-service, gitlab]
+mitre: [T1190, T1592]
+
+trigger:
+  services:
+    - ports: [80, 443, 8080, 8443, 8929]
+      banner_contains: ["GitLab", "gitlab"]
+  findings:
+    - title_contains: ["GitLab"]
+
+steps:
+  - name: detect_gitlab
+    tool: curl
+    args:
+      - "-s"
+      - "-I"
+      - "--max-time"
+      - "10"
+      - "{url}/users/sign_in"
+    timeout: 15
+    success:
+      stdout_contains: ["gitlab", "GitLab"]
+    on_success:
+      finding:
+        title: "GitLab instance detected at {url}"
+        severity: INFO
+
+  - name: api_version
+    tool: curl
+    optional: true
+    args:
+      - "-s"
+      - "--max-time"
+      - "10"
+      - "{url}/api/v4/metadata"
+    timeout: 15
+    success:
+      stdout_contains: ["\"version\"", "\"revision\""]
+    on_success:
+      finding:
+        title: "GitLab version exposed via /api/v4/metadata on {host}:{port}"
+        severity: LOW
+        description: "Anonymous version disclosure. Match against CVE-2023-7028, CVE-2024-0402, etc."
+
+  - name: public_projects
+    tool: curl
+    optional: true
+    args:
+      - "-s"
+      - "--max-time"
+      - "10"
+      - "{url}/api/v4/projects?visibility=public&per_page=100"
+    timeout: 15
+    success:
+      stdout_contains: ["\"id\"", "\"name\""]
+    on_success:
+      finding:
+        title: "GitLab public projects enumerable on {host}:{port}"
+        severity: MEDIUM
+        description: "Public project list readable without auth. Clone all repos; grep for secrets/tokens."
+
+  - name: public_users
+    tool: curl
+    optional: true
+    args:
+      - "-s"
+      - "--max-time"
+      - "10"
+      - "{url}/api/v4/users?per_page=100"
+    timeout: 15
+    success:
+      stdout_contains: ["\"username\"", "\"name\""]
+    on_success:
+      finding:
+        title: "GitLab user enumeration via /api/v4/users on {host}:{port}"
+        severity: MEDIUM
+        description: "User list readable without auth. Compile username list for /users/sign_in brute-force or password spray."

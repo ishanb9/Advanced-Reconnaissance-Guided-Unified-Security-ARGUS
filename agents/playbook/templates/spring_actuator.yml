@@ -1,0 +1,88 @@
+id: spring_actuator
+name: "Spring Boot Actuator endpoint exposure"
+description: |
+  Spring Boot apps with management.endpoints.web.exposure.include=* expose
+  sensitive endpoints: /env, /heapdump, /actuator/env, /actuator/heapdump.
+  Heapdump retrieval can yield secrets, JWT keys, DB creds.
+severity_floor: MEDIUM
+tags: [java, spring, info-disclosure, exposed-service]
+mitre: [T1592, T1190]
+
+trigger:
+  services:
+    - ports: [8080, 8443, 8888, 8090, 9090, 9091]
+    - banner_contains: ["Spring", "X-Application-Context"]
+  findings:
+    - title_contains: ["Spring Boot"]
+
+steps:
+  - name: actuator_root
+    tool: curl
+    args:
+      - "-s"
+      - "--max-time"
+      - "10"
+      - "{url}/actuator"
+    timeout: 15
+    success:
+      stdout_contains: ["_links", "actuator"]
+    on_success:
+      finding:
+        title: "Spring Boot Actuator enabled on {host}:{port}"
+        severity: MEDIUM
+        description: "Actuator root /actuator returned link map. Enumerate sensitive endpoints next."
+
+  - name: env_disclosure
+    tool: curl
+    optional: true
+    args:
+      - "-s"
+      - "--max-time"
+      - "10"
+      - "{url}/actuator/env"
+    timeout: 15
+    success:
+      stdout_contains: ["\"activeProfiles\"", "propertySources"]
+    on_success:
+      finding:
+        title: "Spring Actuator /env exposes environment variables on {host}:{port}"
+        severity: HIGH
+        description: "Environment variables include configured secrets (database URLs, API keys, JWT signing keys). Common path to credential theft."
+
+  - name: heapdump
+    tool: curl
+    optional: true
+    args:
+      - "-s"
+      - "--max-time"
+      - "30"
+      - "-o"
+      - "/tmp/actuator-heap.bin"
+      - "-w"
+      - "%{size_download}"
+      - "{url}/actuator/heapdump"
+    timeout: 45
+    success:
+      stdout_regex: "^[1-9]\\d{5,}"   # at least 100 KB
+    on_success:
+      finding:
+        title: "Spring Actuator /heapdump downloadable on {host}:{port}"
+        severity: CRITICAL
+        description: "Live heap dump downloadable without auth. Extract secrets with strings/grep on /tmp/actuator-heap.bin (passwords, JWT keys, DB connection strings)."
+
+  - name: env_legacy
+    tool: curl
+    optional: true
+    args:
+      - "-s"
+      - "--max-time"
+      - "10"
+      - "{url}/env"
+    timeout: 15
+    success:
+      stdout_contains: ["activeProfiles", "propertySources"]
+    on_success:
+      finding:
+        title: "Spring legacy /env endpoint exposed on {host}:{port}"
+        severity: HIGH
+        description: "Older Spring Boot (1.x) endpoint at root /env. Same info-disclosure as /actuator/env."

@@ -1,0 +1,52 @@
+id: minio_anonymous
+name: "MinIO anonymous access enumeration"
+description: |
+  MinIO often ships with default credentials (minioadmin/minioadmin) and
+  exposes anonymous bucket listing through the S3-compatible API.  Common
+  CVEs: CVE-2023-28432 (info disclosure), CVE-2024-24747 (privilege escalation).
+severity_floor: MEDIUM
+tags: [storage, default-cred, exposed-service, minio]
+mitre: [T1078, T1592]
+
+trigger:
+  services:
+    - banner_contains: ["MinIO"]
+    - ports: [9000, 9001, 54321]
+      banner_contains: ["minio"]
+  findings:
+    - title_contains: ["MinIO"]
+
+steps:
+  - name: anonymous_bucket_listing
+    tool: curl
+    args:
+      - "-s"
+      - "--max-time"
+      - "10"
+      - "{url}/?list-type=2"
+    timeout: 15
+    success:
+      stdout_contains: ["ListBucketResult", "<Buckets>"]
+    on_success:
+      finding:
+        title: "MinIO anonymous bucket listing on {host}:{port}"
+        severity: HIGH
+        description: "S3-compatible bucket listing accessible without authentication. Enumerate with: mc alias set tgt {url} '' '' && mc ls tgt"
+        cve: "CVE-2023-28432"
+
+  - name: server_info_unauth
+    tool: curl
+    optional: true
+    args:
+      - "-s"
+      - "--max-time"
+      - "10"
+      - "{url}/minio/v2/metrics/cluster"
+    timeout: 15
+    success:
+      stdout_contains: ["minio_"]
+    on_success:
+      finding:
+        title: "MinIO metrics endpoint exposed without auth on {host}:{port}"
+        severity: MEDIUM
+        description: "Cluster metrics readable anonymously. Reveals topology + load."

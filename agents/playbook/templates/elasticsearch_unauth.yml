@@ -1,0 +1,66 @@
+id: elasticsearch_unauth
+name: "Elasticsearch unauthenticated access enumeration"
+description: |
+  Elasticsearch < 8 ships with security off by default; cluster info,
+  index list, and search are exposed.  Common CVE chains include
+  CVE-2015-1427 (Groovy script engine RCE), CVE-2014-3120 (MVEL).
+severity_floor: HIGH
+tags: [database, search-engine, no-auth, exposed-service, elasticsearch]
+mitre: [T1190, T1592]
+
+trigger:
+  services:
+    - ports: [9200, 9201, 9300]
+    - banner_contains: ["Elasticsearch", "elasticsearch"]
+    - service_name_contains: ["elastic"]
+
+steps:
+  - name: cluster_root
+    tool: curl
+    args:
+      - "-s"
+      - "--max-time"
+      - "10"
+      - "{url}/"
+    timeout: 15
+    success:
+      stdout_contains: ["\"cluster_name\"", "\"version\""]
+    on_success:
+      finding:
+        title: "Elasticsearch cluster exposed without auth on {host}:{port}"
+        severity: HIGH
+        description: "Root '/' returns cluster_name + version without authentication. List indices: /_cat/indices?v"
+
+  - name: list_indices
+    tool: curl
+    optional: true
+    args:
+      - "-s"
+      - "--max-time"
+      - "10"
+      - "{url}/_cat/indices?format=json"
+    timeout: 15
+    success:
+      stdout_contains: ["\"index\":", "\"health\":"]
+    on_success:
+      finding:
+        title: "Elasticsearch indices enumerable on {host}:{port}"
+        severity: CRITICAL
+        description: "Index list readable. Full search/dump possible via /<index>/_search."
+
+  - name: nodes_info
+    tool: curl
+    optional: true
+    args:
+      - "-s"
+      - "--max-time"
+      - "10"
+      - "{url}/_nodes"
+    timeout: 15
+    success:
+      stdout_contains: ["\"nodes\"", "\"version\""]
+    on_success:
+      finding:
+        title: "Elasticsearch node info exposed on {host}:{port}"
+        severity: MEDIUM
+        description: "_nodes leaks cluster topology, plugin list, OS info. Useful for plugin-specific CVE matching."

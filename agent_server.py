@@ -15,6 +15,7 @@ Runs on: http://0.0.0.0:5001
 
 import asyncio, json, os, re, subprocess, time, traceback, uuid
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 # Load .env file at startup so NEO4J_URI / NEO4J_USER / NEO4J_PASSWORD
@@ -456,6 +457,20 @@ async def stop_session(session_id: str):
     if task and not task.done():
         task.cancel()
     await db.update_session(session_id, {"status": "stopped"})
+
+    # ── Auto-ingest the stopped session into the RAG corpus (E15 wiring) ──
+    # Convert the now-finalized logs into a markdown summary that the next
+    # ingest cycle will embed.  Wrapped in try/except so a missing log dir
+    # or write-permission issue can't fail the stop request.
+    try:
+        sess = await db.get_session(session_id)
+        if sess and sess.get("log_dir") and os.path.isdir(sess["log_dir"]):
+            from knowledge.auto_ingest_scans import ingest_session
+            asyncio.create_task(
+                asyncio.to_thread(ingest_session, Path(sess["log_dir"]), False)
+            )
+    except Exception:
+        pass
     return {"status": "stopped", "session_id": session_id}
 
 
@@ -885,6 +900,90 @@ async def get_report(session_id: str, format: str = "html"):
     return HTMLResponse(content=html)
 
 
+@app.get("/sessions/{session_id}/narrative")
+async def get_narrative_report(session_id: str):
+    """Narrative-style markdown report (timeline + per-phase storytelling +
+    CVSS-ranked findings).  Pairs with the existing HTML report - same data,
+    different deliverable.  See report/narrative_generator.py.
+    """
+    sess = await db.get_session(session_id)
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found")
+    log_dir = sess.get("log_dir")
+    if not log_dir:
+        # Fallback: try to find a matching dir under logs/
+        import glob
+        candidates = sorted(glob.glob(f"logs/*_{session_id}"))
+        if candidates:
+            log_dir = candidates[-1]
+    if not log_dir or not os.path.isdir(log_dir):
+        raise HTTPException(
+            status_code=404,
+            detail=f"session log dir not found for {session_id}",
+        )
+    try:
+        from report.narrative_generator import render_markdown
+        md = render_markdown(Path(log_dir))
+    except Exception as exc:
+        raise HTTPException(status_code=500,
+                            detail=f"narrative render failed: {exc}")
+    return Response(
+        content=md, media_type="text/markdown",
+        headers={"Content-Disposition":
+                 f"attachment; filename=narrative_{session_id[:8]}.md"},
+    )
+
+
+@app.post("/sessions/{session_id}/replay")
+async def replay_scan(session_id: str, speed: float = 1.0,
+                      mode: str = "demo"):
+    """Replay an archived scan's WebSocket events at configurable speed.
+
+    Pulls events from the session's log dir and rebroadcasts them through
+    ws_manager with a `<id>-replay-<ts>` synthetic session id so the UI
+    can render them in a fresh window without overwriting live state.
+
+    Generates ZERO traffic to the target - purely UI-side animation.
+    """
+    sess = await db.get_session(session_id)
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found")
+    log_dir = sess.get("log_dir")
+    if not log_dir or not os.path.isdir(log_dir):
+        import glob
+        candidates = sorted(glob.glob(f"logs/*_{session_id}"))
+        log_dir = candidates[-1] if candidates else None
+    if not log_dir:
+        raise HTTPException(status_code=404,
+                            detail="session log dir not found")
+    try:
+        from utils.replay_mode import ReplayConfig, replay_into_broadcast
+        cfg = ReplayConfig(speed=speed, mode=mode,
+                           skip_gaps=(mode == "demo"))
+        replay_session_id = f"{session_id}-replay-{int(time.time())}"
+        # Fire and forget — caller doesn't wait for the whole replay
+        async def _run_replay():
+            try:
+                count = await replay_into_broadcast(
+                    Path(log_dir), ws_manager, replay_session_id, cfg,
+                )
+                logger = __import__("logging").getLogger("agent_server")
+                logger.info("[replay] %s -> %s events streamed",
+                            replay_session_id, count)
+            except Exception as exc:
+                logger = __import__("logging").getLogger("agent_server")
+                logger.warning("[replay] failed: %s", exc)
+        asyncio.create_task(_run_replay())
+        return {
+            "replay_session_id": replay_session_id,
+            "mode": mode, "speed": speed,
+            "message": "Replay started; events are now streaming on the WS.",
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500,
+                            detail=f"replay setup failed: {exc}")
+
+
 # ══════════════════════════════════════════════════════════════
 #  API — FINDING ANALYSIS
 # ══════════════════════════════════════════════════════════════
@@ -944,6 +1043,154 @@ Be concise but actionable. Use actual tool names and techniques. Format clearly 
         analysis = f"Analysis unavailable: {e}"
 
     return {"analysis": analysis, "finding_id": f.get("id", f.get("_id", ""))}
+
+
+# ══════════════════════════════════════════════════════════════
+#  PER-FINDING EXPLOIT ACTION
+# ══════════════════════════════════════════════════════════════
+
+class FindingExploitRequest(BaseModel):
+    finding:       Dict[str, Any]
+    session_id:    Optional[str] = None
+    playbook_id:   Optional[str] = None     # operator override
+    dry_run:       bool = False
+
+
+@app.post("/api/exploit-finding")
+async def exploit_finding(body: FindingExploitRequest):
+    """Trigger a deterministic exploit chain for a specific finding.
+
+    Looks up the best matching playbook (or operator-supplied playbook_id),
+    runs it via the playbook engine + BaseAgent.run_tool, returns the
+    findings produced.  Honours the scope guard: target host must be in
+    the active session's allowed_hosts.
+
+    Body:
+        finding:     full finding dict (host, port, title, description, ...)
+        session_id:  required for scope-guard lookup
+        playbook_id: optional - operator override.  If omitted, the
+                     engine picks the highest-scoring match.
+        dry_run:     when True, returns the matched playbook + planned
+                     steps without executing.
+    """
+    from agents.playbook.engine import get_engine
+    f = body.finding or {}
+    target = str(f.get("host") or "")
+    if not target:
+        raise HTTPException(status_code=400, detail="finding.host is required")
+
+    # Scope guard
+    if body.session_id:
+        sess = await db.get_session(body.session_id)
+        if sess:
+            allowed = sess.get("allowed_hosts") or [sess.get("target_ip")]
+            if allowed and target not in [str(a) for a in allowed if a]:
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"target {target} not in session scope ({allowed})",
+                )
+
+    # Build intel from the single finding
+    port = f.get("port")
+    intel = {
+        "target":   target,
+        "services": [{"port": int(port), "service": str(f.get("service") or ""),
+                      "banner": str(f.get("description") or "")[:200]}] if port else [],
+        "findings": [f],
+        "cves":     [str(f.get("cve"))] if f.get("cve") else [],
+    }
+
+    engine = get_engine()
+    matches = engine.match(intel)
+
+    # Pick playbook
+    chosen = None
+    chosen_ctx = None
+    if body.playbook_id:
+        for pb, ctx in matches:
+            if pb.id == body.playbook_id:
+                chosen, chosen_ctx = pb, ctx
+                break
+        if chosen is None:
+            # operator wanted a specific one; build minimal ctx for it
+            for pb in engine.playbooks:
+                if pb.id == body.playbook_id:
+                    chosen = pb
+                    chosen_ctx = {
+                        "host":   target,
+                        "target": target,
+                        "port":   str(port) if port else "",
+                        "scheme": "http",
+                        "url":    f"http://{target}" + (f":{port}" if port else ""),
+                        "path":   "/",
+                    }
+                    break
+    elif matches:
+        # Highest "match priority" = first new-schema match.  Fall back to first.
+        chosen, chosen_ctx = matches[0]
+
+    if chosen is None:
+        return {
+            "matched":   False,
+            "playbooks": [pb.id for pb, _ in matches],
+            "note":      "No playbook matched this finding's surface.",
+        }
+
+    if body.dry_run:
+        return {
+            "matched":     True,
+            "playbook":    chosen.id,
+            "name":        chosen.name,
+            "description": chosen.description,
+            "steps":       [{"name": s.name, "tool": s.tool, "args": s.args}
+                            for s in chosen.steps],
+            "context":     chosen_ctx,
+        }
+
+    # Resolve a tool runner for the active master agent's session
+    master = active_agents.get(body.session_id or "") if body.session_id else None
+    if master is None:
+        raise HTTPException(
+            status_code=400,
+            detail="No active session; start a scan first or provide a session_id with active master agent.",
+        )
+
+    async def tool_runner(tool: str, args: List[str], timeout: int):
+        # Map (tool, args) to BaseAgent.run_tool which already handles
+        # MCP/local + scope + blacklist + scan-log.
+        joined = " ".join(args)
+        result = await master.run_tool(tool, joined, target=target,
+                                       phase=AttackPhase.EXPLOIT,
+                                       timeout=timeout)
+        return (result.get("exit_code", -1),
+                result.get("stdout", ""),
+                result.get("stderr", ""))
+
+    async def on_event(et, data):
+        try:
+            await ws_manager.broadcast_raw(body.session_id or "", et, data)
+        except Exception:
+            pass
+
+    findings = await engine.run(chosen, chosen_ctx, tool_runner, on_event)
+    return {
+        "matched":  True,
+        "playbook": chosen.id,
+        "findings": [
+            {
+                "title":       fd.title,
+                "description": fd.description,
+                "severity":    fd.severity,
+                "evidence":    fd.evidence,
+                "cve":         fd.cve,
+                "mitre":       fd.mitre,
+                "host":        fd.host,
+                "port":        fd.port,
+                "playbook_id": fd.playbook_id,
+                "step_name":   fd.step_name,
+            } for fd in findings
+        ],
+    }
 
 
 # ══════════════════════════════════════════════════════════════
@@ -2033,6 +2280,28 @@ async def websocket_endpoint(ws: WebSocket, session_id: str):
                         await ws.send_text(json.dumps({
                             "type": "guidance_queued",
                             "data": {"message": f"Guidance queued: {guidance.get('note') or guidance.get('directive')}"}
+                        }))
+
+                elif mtype == "operator_directive":
+                    # Real-time mid-scan redirect channel.  Operator can
+                    # focus / skip phases, force playbooks, pause/resume,
+                    # inject hints, swap OPSEC profile - without restart.
+                    try:
+                        from agents.operator_interrupts import get_queue
+                        directive = msg.get("directive", "")
+                        payload   = msg.get("payload") or {}
+                        async def _emit_dir(et, d):
+                            await ws.send_text(json.dumps({"type": et, "data": d}))
+                        await get_queue().submit(
+                            directive  = directive,
+                            payload    = payload,
+                            session_id = session_id,
+                            emit       = _emit_dir,
+                        )
+                    except Exception as _ex:
+                        await ws.send_text(json.dumps({
+                            "type": "operator_directive_ack",
+                            "data": {"queued": False, "error": str(_ex)},
                         }))
 
                 elif mtype == "shell_input":

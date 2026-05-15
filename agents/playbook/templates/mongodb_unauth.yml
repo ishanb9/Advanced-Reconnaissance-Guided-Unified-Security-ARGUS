@@ -1,0 +1,73 @@
+id: mongodb_unauth
+name: "MongoDB unauthenticated access enumeration"
+description: |
+  MongoDB on default port (27017) without --auth or authorization=enabled
+  allows full database dump.  Has historically been mass-exploited
+  (Mongo ransomware 2017+).
+severity_floor: HIGH
+tags: [database, no-auth, exposed-service, mongodb]
+mitre: [T1190, T1078]
+
+trigger:
+  services:
+    - ports: [27017, 27018, 27019, 28017]
+    - banner_contains: ["MongoDB", "mongo"]
+    - service_name_contains: ["mongo"]
+
+steps:
+  - name: mongo_ping
+    tool: mongosh
+    optional: true
+    args:
+      - "--host"
+      - "{host}"
+      - "--port"
+      - "{port}"
+      - "--quiet"
+      - "--eval"
+      - "db.adminCommand({ping: 1})"
+    timeout: 15
+    success:
+      stdout_contains: ["ok: 1", "\"ok\" : 1"]
+    on_success:
+      finding:
+        title: "MongoDB without authentication on {host}:{port}"
+        severity: HIGH
+        description: "Admin command 'ping' executes without auth. Try db.adminCommand({listDatabases:1}) to enumerate."
+
+  - name: mongo_listDatabases
+    tool: mongosh
+    optional: true
+    args:
+      - "--host"
+      - "{host}"
+      - "--port"
+      - "{port}"
+      - "--quiet"
+      - "--eval"
+      - "db.adminCommand({listDatabases:1})"
+    timeout: 15
+    success:
+      stdout_contains: ["databases", "\"name\""]
+    on_success:
+      finding:
+        title: "MongoDB databases enumerable on {host}:{port}"
+        severity: CRITICAL
+        description: "listDatabases returned database names. Full DB dump is possible without authentication."
+
+  - name: mongo_http_status
+    tool: curl
+    optional: true
+    args:
+      - "-s"
+      - "--max-time"
+      - "10"
+      - "{url}"
+    timeout: 15
+    success:
+      stdout_contains: ["MongoDB"]
+    on_success:
+      finding:
+        title: "MongoDB HTTP interface enabled on {host}:{port}"
+        severity: MEDIUM
+        description: "Status interface on the same port suggests --httpinterface is enabled — leaks build info."

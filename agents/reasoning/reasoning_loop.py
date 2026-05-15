@@ -267,6 +267,50 @@ class ReasoningLoop:
         for iteration in range(self.MAX_ITERATIONS):
             self._iteration = iteration
 
+            # ── PLAYBOOK DISPATCH (E1 wiring) ──────────────────────────────
+            # Match current intel against the playbook library; dispatch any
+            # never-yet-run playbook whose trigger fires.  Each playbook
+            # runs at most once per scan via the dispatched-set.
+            # Always wrapped in try; engine errors must not break the loop.
+            try:
+                await self._dispatch_matched_playbooks()
+            except Exception:
+                pass
+
+            # ── OPERATOR DIRECTIVE DRAIN (E11 wiring) ──────────────────────
+            # Consume any operator_directive messages the WS handler queued
+            # since the last iteration boundary.  All directives applied
+            # via sticky-state mutators on the queue itself; this drain
+            # is purely for the consumed-ack stream.  Honour pause + skip
+            # via the existing pause/skip mechanisms.
+            try:
+                from agents.operator_interrupts import get_queue
+                _dir_q = get_queue()
+                _sid   = getattr(self._master, "_session_id", "") or ""
+                # Block while operator has the scan paused (independent of
+                # the _check_pause path which checks the master agent flag).
+                if _dir_q.is_paused(_sid):
+                    await self._emit_status(
+                        "Paused by operator directive at iteration boundary",
+                        "WAITING",
+                    )
+                    await _dir_q.wait_while_paused(_sid, poll_sec=1.0)
+                # Drain + emit consumed acks (sticky state already applied)
+                _pending = await _dir_q.drain(_sid)
+                for _d in _pending:
+                    detail = ""
+                    # Push the focus_phase hint to the planner if set
+                    if _d.directive == "inject_hint":
+                        try:
+                            self._intel.setdefault("operator_hints", []).append(
+                                str(_d.payload.get("hint") or ""))
+                        except Exception:
+                            pass
+                    await _dir_q.mark_consumed(_d, "applied", detail)
+            except Exception as _dir_exc:
+                # Operator-directive plumbing must never break the scan
+                pass
+
             # ── PAUSE CHECK ──────────────────────────────────────────────
             # B-1 — On pause, AWAIT the operator's resume instead of breaking
             # out of the loop.  The previous behaviour exited the loop on
@@ -2243,6 +2287,44 @@ class ReasoningLoop:
             for cred in new_creds:
                 if not isinstance(cred, dict):
                     continue
+                # ── Credential vault ingest (E4 wiring) ────────────────
+                # Every newly-discovered credential is dropped into the
+                # process-wide CredentialVault so it can be sprayed
+                # against the rest of the in-scope auth surface.
+                try:
+                    from agents.credential_pipeline import get_vault, Credential
+                    _cred_type = "password"
+                    _secret    = None
+                    if cred.get("hash"):
+                        _cred_type = "ntlm_hash"
+                        _secret    = str(cred.get("hash"))
+                    elif cred.get("key") or cred.get("private_key"):
+                        _cred_type = "ssh_key"
+                        _secret    = str(cred.get("key") or cred.get("private_key"))
+                    elif cred.get("token") or cred.get("api_token"):
+                        _cred_type = "api_token"
+                        _secret    = str(cred.get("token") or cred.get("api_token"))
+                    elif cred.get("dsn"):
+                        _cred_type = "db_dsn"
+                        _secret    = str(cred.get("dsn"))
+                    _vault = get_vault()
+                    await _vault.ingest(
+                        Credential(
+                            cred_type   = _cred_type,
+                            username    = cred.get("user") or cred.get("username") or None,
+                            password    = cred.get("pass") or cred.get("password") or None,
+                            secret      = _secret,
+                            domain      = cred.get("domain") or None,
+                            source_host = cred.get("host") or self._target,
+                            source_path = cred.get("source") or cred.get("path") or None,
+                            notes       = str(cred.get("notes") or "")[:200],
+                        ),
+                        on_event=self._emit_credential_pipeline_event,
+                    )
+                except Exception:
+                    # Vault ingest is advisory; never fail the emit on it.
+                    pass
+
                 await self._emit({
                     "type":       "credential_found",
                     "session_id": self._session_id,
@@ -3352,6 +3434,125 @@ class ReasoningLoop:
                 })
         except Exception:
             pass
+
+    async def _emit_credential_pipeline_event(self, event_type: str, data: dict) -> None:
+        """Bridge from CredentialVault on_event callback to the master WS bus.
+
+        Vault calls this on credential_ingested / credential_spray_hit so
+        the UI can show the operator what's flowing through the pipeline.
+        """
+        try:
+            if callable(self._emit):
+                await self._emit({
+                    "type":       event_type,
+                    "session_id": self._session_id,
+                    "agent":      "master",
+                    "data":       dict(data),
+                })
+        except Exception:
+            pass
+
+    # ── Playbook dispatch (E1 wiring) ────────────────────────────────────
+    # Each iteration, match the current intel against the playbook library
+    # and run any matching playbook that hasn't been dispatched yet.
+    # _playbooks_dispatched is per-instance to dedup across iterations.
+
+    async def _dispatch_matched_playbooks(self) -> None:
+        """Match intel -> playbooks -> dispatch unrun ones once per scan.
+
+        Wrapped in try/except so any error in the engine never breaks the
+        reasoning iteration.  Each playbook id is dispatched at most once
+        per scan via _playbooks_dispatched.
+        """
+        try:
+            from agents.playbook.engine import get_engine
+        except Exception:
+            return
+
+        if not hasattr(self, "_playbooks_dispatched"):
+            self._playbooks_dispatched: set = set()
+
+        # Build intel in the engine's expected shape from self._intel
+        try:
+            services_raw = self._intel.get("services") or {}
+            if isinstance(services_raw, dict):
+                services = [
+                    {"port": int(p) if str(p).isdigit() else p,
+                     "service": v.get("service") if isinstance(v, dict) else str(v),
+                     "banner":  v.get("banner")  if isinstance(v, dict) else "",
+                     "version": v.get("version") if isinstance(v, dict) else "",}
+                    for p, v in services_raw.items()
+                ]
+            else:
+                services = list(services_raw or [])
+        except Exception:
+            services = []
+
+        intel = {
+            "target":   self._intel.get("target") or self._target,
+            "services": services,
+            "findings": self._intel.get("findings", []),
+            "cves":     self._intel.get("cves", []),
+        }
+        try:
+            matches = get_engine().match(intel)
+        except Exception:
+            return
+        if not matches:
+            return
+
+        for pb, ctx in matches:
+            if pb.id in self._playbooks_dispatched:
+                continue
+            # Skip legacy-schema playbooks whose steps lack the new
+            # `args` shape (their `cmd` strings can't safely run via
+            # tool_runner).  These remain reference material until
+            # migrated.
+            if not pb.steps or not pb.steps[0].args:
+                self._playbooks_dispatched.add(pb.id)
+                continue
+            self._playbooks_dispatched.add(pb.id)
+            await self._emit_reasoning(
+                f"[playbook] dispatching {pb.id} on {ctx.get('url')}"
+            )
+            try:
+                async def _tool_runner(tool: str, args: list, timeout: int):
+                    result = await self._master.run_tool(
+                        tool, " ".join(args), timeout=timeout,
+                    )
+                    return (result.get("exit_code", -1),
+                            result.get("stdout", ""),
+                            result.get("stderr", ""))
+
+                pb_findings = await get_engine().run(
+                    pb, ctx, _tool_runner,
+                    on_event=lambda et, data: self._emit({
+                        "type": et, "session_id": self._session_id,
+                        "agent": "master", "data": dict(data),
+                    }) if callable(self._emit) else None,
+                )
+                for pf in pb_findings or []:
+                    try:
+                        await self._master.store_finding(
+                            severity    = getattr(__import__("db.schemas",
+                                                             fromlist=["FindingSeverity"]).FindingSeverity,
+                                                  pf.severity.upper(), None) or
+                                          __import__("db.schemas",
+                                                     fromlist=["FindingSeverity"]).FindingSeverity.INFO,
+                            title       = pf.title,
+                            description = pf.description,
+                            host        = pf.host or self._target,
+                            port        = pf.port,
+                            tool_used   = "playbook:" + pb.id,
+                            evidence    = pf.evidence,
+                            cves        = [pf.cve] if pf.cve else [],
+                            extra       = {"playbook_id": pb.id, "step": pf.step_name},
+                        )
+                    except Exception:
+                        # store_finding failure is per-finding; keep going
+                        continue
+            except Exception as exc:
+                await self._emit_reasoning(f"[playbook] {pb.id} error: {exc}")
 
     async def _emit_confirmation_request(self, action: JustifiedAction) -> None:
         try:
