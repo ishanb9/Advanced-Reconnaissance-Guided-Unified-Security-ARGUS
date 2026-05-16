@@ -59,7 +59,14 @@ class AuthConfig:
     session_max_lifetime_hours: int = _int("AUTH_SESSION_MAX_LIFETIME_HOURS", 168)
     session_cookie_name: str = os.environ.get("AUTH_SESSION_COOKIE", "argus_session")
     refresh_cookie_name: str = os.environ.get("AUTH_REFRESH_COOKIE", "argus_refresh")
-    cookie_secure: bool = _bool("AUTH_COOKIE_SECURE", True)
+    # cookie_secure default depends on AUTH_DEPLOYMENT_ENV:
+    #   • prod → True   (cookies require HTTPS — correct for production)
+    #   • dev  → False  (so http://localhost works without explicit override)
+    # Explicit AUTH_COOKIE_SECURE=true|false always wins.
+    cookie_secure: bool = _bool(
+        "AUTH_COOKIE_SECURE",
+        os.environ.get("AUTH_DEPLOYMENT_ENV", "dev").lower() == "prod",
+    )
     cookie_samesite: str = os.environ.get("AUTH_COOKIE_SAMESITE", "lax")
     cookie_domain: str = os.environ.get("AUTH_COOKIE_DOMAIN", "")
     cookie_path: str = os.environ.get("AUTH_COOKIE_PATH", "/")
@@ -75,11 +82,21 @@ class AuthConfig:
     password_max_length: int = _int("AUTH_PASSWORD_MAX_LENGTH", 256)
 
     # ── MFA ─────────────────────────────────────────────────────
-    # Roles for which MFA enrolment is REQUIRED before any session
-    # can be issued.  Owner + admin by default; can also include
-    # SECURITY_MANAGER for high-security tenants.
+    # MFA is OPT-IN by default.  Any user can voluntarily enrol a TOTP
+    # factor via POST /auth/mfa/enrol/start — once enrolled, they'll
+    # be prompted for the code on every login.
+    #
+    # For production, set AUTH_MFA_REQUIRED_FOR to a comma-separated
+    # list of roles that MUST enrol MFA before any session can be
+    # issued.  Recommended for prod:
+    #     AUTH_MFA_REQUIRED_FOR=OWNER,PLATFORM_ADMIN
+    # Or for high-security deployments:
+    #     AUTH_MFA_REQUIRED_FOR=OWNER,PLATFORM_ADMIN,SECURITY_MANAGER
+    #
+    # Default empty so quickstart users can log in immediately;
+    # enable per role when you're ready to enforce.
     mfa_required_roles: List[str] = field(default_factory=lambda: _list(
-        "AUTH_MFA_REQUIRED_FOR", ["OWNER", "PLATFORM_ADMIN"]
+        "AUTH_MFA_REQUIRED_FOR", []
     ))
     totp_issuer: str = os.environ.get("AUTH_TOTP_ISSUER", "ARGUS")
     totp_digits: int = _int("AUTH_TOTP_DIGITS", 6)

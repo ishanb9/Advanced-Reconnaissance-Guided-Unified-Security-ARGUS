@@ -118,6 +118,10 @@ class MeResponse(BaseModel):
     created_at:   datetime
     last_login_at: Optional[datetime]
     session_state: Dict[str, Any] = Field(default_factory=dict)
+    # True when the user MUST rotate their password before doing anything
+    # else (set by bootstrap.create_owner + admin reset-owner-password +
+    # any future "forced rotation" policy).
+    must_change_password: bool = False
 
 
 class PatchStateRequest(BaseModel):

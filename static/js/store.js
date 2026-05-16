@@ -1451,13 +1451,29 @@ function StoreProvider({ children }) {
     const poll = async () => {
       try {
         const s = await window.API.status();
-        dispatch({ type: 'SET_SYS_STATUS', payload: { mcp: s.mcp, mongo: s.mongo, ollama: s.ollama } });
+        // The backend now reports `s.llm` (provider-agnostic) alongside
+        // `s.ollama` (legacy, retained for compat).  Prefer `s.llm` so
+        // Anthropic / Claude Code CLI / OpenAI / vLLM all light up the
+        // LLM status dot when they're working.
+        const llmOk = (s.llm === 'online') ||
+                      (s.llm === undefined && s.ollama === 'online');
+        dispatch({ type: 'SET_SYS_STATUS', payload: {
+          mcp:    s.mcp,
+          mongo:  s.mongo,
+          ollama: s.ollama,
+          llm:    s.llm || (s.ollama === 'online' ? 'online' : 'offline'),
+        }});
         dispatch({ type: 'SET_LLM_STATUS', payload: {
-          available: s.ollama === 'online',
-          message:   s.ollama === 'online' ? 'LLM online' : 'LLM offline'
+          available: llmOk,
+          provider:  s.llm_provider || '',
+          model:     s.model || '',
+          message:   llmOk ? `LLM online (${s.llm_provider || 'ollama'}/${s.model || '?'})`
+                            : (s.llm_message || 'LLM offline'),
         }});
       } catch {
-        dispatch({ type: 'SET_SYS_STATUS', payload: { mcp: 'offline', mongo: 'offline', ollama: 'offline' } });
+        dispatch({ type: 'SET_SYS_STATUS', payload: {
+          mcp: 'offline', mongo: 'offline', ollama: 'offline', llm: 'offline',
+        }});
       }
     };
     poll();

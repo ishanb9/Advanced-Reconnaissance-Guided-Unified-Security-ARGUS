@@ -178,7 +178,14 @@ def _clear_session_cookies(response: Response) -> None:
 
 
 def _build_token_response(issued, user: User, *,
-                          must_change_password: bool = False) -> TokenResponse:
+                          must_change_password: Optional[bool] = None) -> TokenResponse:
+    # If caller didn't pass the flag explicitly, read it from the user's
+    # credential row.  This surfaces the must-change bit set by either
+    # admin password reset (CLI), forced rotation, or initial bootstrap.
+    if must_change_password is None:
+        must_change_password = bool(
+            user.credential and user.credential.must_change
+        )
     return TokenResponse(
         access_token=issued.access_token,
         refresh_token=issued.refresh_token_plain,
@@ -464,6 +471,9 @@ def me(ctx = Depends(current_auth_context),
         created_at=user.created_at,
         last_login_at=user.last_login_at,
         session_state=get_state(db, ctx.user.id),
+        must_change_password=bool(
+            user.credential and user.credential.must_change
+        ),
     )
 
 

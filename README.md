@@ -98,6 +98,7 @@ SCIM, retention, troubleshooting) see [`DEPLOYMENT.md`](DEPLOYMENT.md).
 | Document | Purpose |
 |----------|---------|
 | **[README.md](README.md)** *(this file)* | Front page · architecture · doc index |
+| **[CHANGELOG.md](CHANGELOG.md)** | User-facing changes · behavior changes · migration notes |
 | **[DEPLOYMENT.md](DEPLOYMENT.md)** | Quickstart · first-login · env vars · Docker · SSO setup · troubleshooting · compliance |
 | **[auth/README.md](auth/README.md)** | Enterprise auth architecture · role matrix · RBAC/ABAC engine · audit log · sessions |
 | **[agents/README.md](agents/README.md)** | Agent fleet · dispatch pattern · adding a new specialist |
@@ -335,6 +336,7 @@ ARGUS is running.
 ```bash
 # ── Bootstrap & secrets (auth module) ──
 python -m auth.bootstrap quickstart            # full first-time setup
+python -m auth.bootstrap reset-owner-password --generate  # break-glass recovery
 python -m auth.bootstrap gen-password          # one strong password
 python -m auth.bootstrap rotate-jwt-key        # new JWT secret
 python -m auth.bootstrap migrate               # create auth tables

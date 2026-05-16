@@ -393,12 +393,16 @@ AUTH_JWT_REFRESH_TTL_DAYS=14
 # Sessions
 AUTH_SESSION_IDLE_TIMEOUT_HOURS=12
 AUTH_SESSION_MAX_LIFETIME_HOURS=168
-AUTH_COOKIE_SECURE=true
+# Default derives from AUTH_DEPLOYMENT_ENV — `true` only when env=prod,
+# `false` otherwise so http://localhost dev works.  Set explicitly to
+# `false` for HTTP-served deployments behind a TLS-terminating proxy
+# that you trust, or `true` to force HTTPS-only cookies.
+AUTH_COOKIE_SECURE=                          # auto-derived; explicit override wins
 AUTH_COOKIE_SAMESITE=lax
 AUTH_COOKIE_DOMAIN=                          # optional
 
-# MFA
-AUTH_MFA_REQUIRED_FOR=OWNER,PLATFORM_ADMIN   # comma-sep roles
+# MFA — default empty (opt-in); set comma-sep roles to force enrolment
+AUTH_MFA_REQUIRED_FOR=                       # e.g. OWNER,PLATFORM_ADMIN
 AUTH_TOTP_ISSUER=ARGUS
 
 # Account lockout

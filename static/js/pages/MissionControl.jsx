@@ -1498,7 +1498,20 @@ function MissionControl(props) {
 
   function _commToLine(c) {
     if (!c) return null;
-    const ts = c.ts ? new Date(c.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }) : '';
+    // c.ts may already be a formatted time string ('14:35:54' from
+    // routeWsEvent) OR an ISO/epoch.  Re-parsing a "HH:MM:SS" string
+    // through Date() yields "Invalid Date" — detect and pass through.
+    let ts = '';
+    if (c.ts) {
+      if (typeof c.ts === 'string' && /^\d{1,2}:\d{2}/.test(c.ts)) {
+        ts = c.ts;
+      } else {
+        const d = new Date(c.ts);
+        ts = isNaN(d.getTime()) ? '' :
+             d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit',
+                                          second: '2-digit', hour12: false });
+      }
+    }
     if (c.type === 'llm') {
       const resp = (typeof c.response === 'string' ? c.response : safeText(c.response)) || '';
       const preview = resp.replace(/\s+/g, ' ').slice(0, 180);

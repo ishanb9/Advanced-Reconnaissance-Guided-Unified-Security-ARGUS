@@ -457,26 +457,81 @@ function HudClock() {
 }
 
 // ─── Engagement consumables strip ────────────────────────────────
-// 4 cockpit-style gauges at the bottom of the viewport.  Reads from
-// state.metrics defensively.  Click to collapse/expand.
+// 4 cockpit-style gauges at the bottom of the viewport.  Computes
+// live values from existing state when the backend isn't emitting
+// dedicated `metrics` events yet — so the strip always shows real
+// numbers instead of staring at 0% / 100% forever.
+//
+// Per-gauge danger direction:
+//   `asc`  (default): higher pct = worse (LLM tokens, agents, findings rate)
+//   `desc`         : lower  pct = worse (TIME REMAIN — 0% = out of time)
 function HudConsumables() {
   const { state } = window.useStore();
   const [collapsed, setCollapsed] = useState(false);
+  const [now, setNow] = useState(Date.now());
+
+  // 1Hz tick keeps the elapsed/time-remaining gauge live during scans
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
 
   const m = state.metrics || {};
-  const llmTokensUsed   = m.llm_tokens_used   || 0;
+
+  // ── Elapsed time ── derive from activeSession.started_at when the
+  // backend hasn't pushed a dedicated metrics event.
+  let timeElapsedSec = m.elapsed_sec || 0;
+  const startedAt = state.activeSession?.started_at;
+  if (!timeElapsedSec && startedAt) {
+    timeElapsedSec = Math.max(0, Math.floor((now - new Date(startedAt).getTime()) / 1000));
+  }
+  const timeWindowSec = m.scope_window_sec
+    || state.activeSession?.scope_window_sec
+    || 28800;  // 8h default
+
+  // ── LLM tokens — backend should populate, fall back to a rough
+  // estimate from comm history if not set.
+  let llmTokensUsed = m.llm_tokens_used || 0;
+  if (!llmTokensUsed && state.agentComms) {
+    // rough estimate: 4 chars ≈ 1 token across all stored LLM comms
+    try {
+      const totalChars = Object.values(state.agentComms || {})
+        .flat()
+        .filter(c => c && c.type === 'llm')
+        .reduce((sum, c) => sum + ((c.prompt || '').length + (c.response || '').length), 0);
+      llmTokensUsed = Math.round(totalChars / 4);
+    } catch {}
+  }
   const llmTokensBudget = m.llm_tokens_budget || 100000;
-  const timeElapsedSec  = m.elapsed_sec       || 0;
-  const timeWindowSec   = m.scope_window_sec  || 28800; // 8h default
-  const agentsActive    = (state.activeSubagents || []).length;
-  const agentsMax       = m.max_concurrency   || 8;
-  const findingsRate    = m.findings_per_hour || 0;
+
+  // ── Agents ── live from state.activeSubagents
+  const agentsActive = (state.activeSubagents || []).length;
+  const agentsMax    = m.max_concurrency || 8;
+
+  // ── Findings rate ── findings per hour
+  let findingsRate = m.findings_per_hour || 0;
+  if (!findingsRate && timeElapsedSec > 60 && state.findingsSummary) {
+    const total = (state.findingsSummary.critical || 0)
+                + (state.findingsSummary.high || 0)
+                + (state.findingsSummary.medium || 0)
+                + (state.findingsSummary.low || 0)
+                + (state.findingsSummary.info || 0);
+    findingsRate = total / (timeElapsedSec / 3600);
+  }
 
   const gauges = [
-    { label: 'LLM TOKENS',  pct: Math.min(1, llmTokensUsed / Math.max(1, llmTokensBudget)) },
-    { label: 'TIME REMAIN', pct: Math.max(0, 1 - timeElapsedSec / Math.max(1, timeWindowSec)) },
-    { label: 'AGENTS',      pct: Math.min(1, agentsActive / Math.max(1, agentsMax)) },
-    { label: 'FINDINGS Δ',  pct: Math.min(1, findingsRate / 50) },
+    { label: 'LLM TOKENS',  pct: Math.min(1, llmTokensUsed / Math.max(1, llmTokensBudget)),
+      direction: 'asc',
+      detail: `${formatCompact(llmTokensUsed)} / ${formatCompact(llmTokensBudget)}` },
+    { label: 'TIME REMAIN', pct: Math.max(0, 1 - timeElapsedSec / Math.max(1, timeWindowSec)),
+      direction: 'desc',
+      detail: formatDuration(Math.max(0, timeWindowSec - timeElapsedSec)) },
+    { label: 'AGENTS',      pct: Math.min(1, agentsActive / Math.max(1, agentsMax)),
+      direction: 'asc',
+      detail: `${agentsActive} / ${agentsMax}` },
+    { label: 'FINDINGS/h',  pct: Math.min(1, findingsRate / 50),
+      direction: 'asc',
+      detail: findingsRate ? findingsRate.toFixed(1) : '0' },
   ];
 
   return React.createElement('div', {
@@ -485,21 +540,41 @@ function HudConsumables() {
     onClick: () => setCollapsed(c => !c),
     title: 'Click to collapse/expand engagement consumables',
   },
-    gauges.map((g, i) =>
-      React.createElement('div', { key: i, className: 'gauge' },
+    gauges.map((g, i) => {
+      // danger direction: invert pct for the "desc" semantic so a
+      // low % (= bad) lights up the warn/crit colours, not a high one
+      const dangerPct = g.direction === 'desc' ? 1 - g.pct : g.pct;
+      return React.createElement('div', { key: i, className: 'gauge' },
         React.createElement('span', null, g.label),
-        React.createElement('div', { className: 'gauge-bar' },
+        React.createElement('div', { className: 'gauge-bar',
+          title: g.detail,
+        },
           React.createElement('div', {
             className: 'gauge-fill',
-            'data-warn': g.pct > 0.7,
-            'data-crit': g.pct > 0.9,
+            'data-warn': dangerPct > 0.7,
+            'data-crit': dangerPct > 0.9,
             style: { width: `${Math.round(g.pct * 100)}%` },
           })
         ),
-        React.createElement('span', null, `${Math.round(g.pct * 100)}%`)
-      )
-    )
+        React.createElement('span', { title: g.detail }, g.detail)
+      );
+    })
   );
+}
+
+// ─── Compact formatters used by HudConsumables ──────────────────
+function formatCompact(n) {
+  if (!n) return '0';
+  if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
+  if (n >= 1000) return (n / 1000).toFixed(1) + 'k';
+  return String(n);
+}
+function formatDuration(sec) {
+  if (sec < 60) return `${sec}s`;
+  if (sec < 3600) return `${Math.floor(sec / 60)}m`;
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  return m ? `${h}h ${m}m` : `${h}h`;
 }
 
 // ─── Service status dot ──────────────────────────────────────
@@ -1225,10 +1300,16 @@ function App() {
       pinned_pentest_session_id: state.activeSession?.id || null,
     };
     const id = setTimeout(() => {
+      // Belt-and-braces auth: try Bearer header if cookies fail
+      const headers = { 'Content-Type': 'application/json',
+                         'X-CSRF-Token': decodeURIComponent(csrf) };
+      try {
+        const tok = localStorage.getItem('argus.access_token');
+        if (tok) headers['Authorization'] = 'Bearer ' + tok;
+      } catch {}
       fetch('/auth/me/state', {
         method: 'PATCH', credentials: 'include',
-        headers: { 'Content-Type': 'application/json',
-                    'X-CSRF-Token': decodeURIComponent(csrf) },
+        headers,
         body: JSON.stringify({ state: payload }),
       }).catch(() => {});                       // best-effort
     }, 800);
@@ -1473,7 +1554,8 @@ function App() {
       React.createElement('div', { style: { display: 'flex', gap: 6, alignItems: 'center' } },
         React.createElement(SvcDot, { label: 'MCP',   status: sysStatus.mcp }),
         React.createElement(SvcDot, { label: 'DB',    status: sysStatus.mongo }),
-        React.createElement(SvcDot, { label: 'LLM',   status: sysStatus.ollama })
+        React.createElement(SvcDot, { label: 'LLM',
+          status: sysStatus.llm || sysStatus.ollama })
       ),
 
       // HUD telemetry strip + mission clock (T2.3)
@@ -1798,10 +1880,20 @@ function App() {
 function AuthBoundary({ children }) {
   const [phase, setPhase] = useState('checking');     // checking | login | authed | bypass
   const [me, setMe] = useState(null);
+  const [showChangePw, setShowChangePw] = useState(false);
 
   function recheck() {
     setPhase('checking');
-    fetch('/auth/me', { credentials: 'include' })
+    // Send the access token as Bearer if we have one stashed in
+    // localStorage from a prior login.  This is a belt-and-braces
+    // fallback for environments where the session cookie didn't stick
+    // (most commonly: http://localhost with AUTH_COOKIE_SECURE=true).
+    let headers = {};
+    try {
+      const tok = localStorage.getItem('argus.access_token');
+      if (tok) headers['Authorization'] = 'Bearer ' + tok;
+    } catch {}
+    fetch('/auth/me', { credentials: 'include', headers })
       .then(async (r) => {
         if (r.status === 401) { setPhase('login'); return null; }
         if (r.status === 404) {
@@ -1850,8 +1942,17 @@ function AuthBoundary({ children }) {
 
   // Expose `me` + recheck globally so children + dev tools can read
   useEffect(() => {
-    window.ArgusAuth = { me, refresh: recheck, logout: doLogout };
+    window.ArgusAuth = {
+      me, refresh: recheck, logout: doLogout,
+      openChangePassword: () => setShowChangePw(true),
+    };
   }, [me]);
+
+  // Force the change-password modal when must_change_password is set
+  // (set by bootstrap.create_owner, admin reset-owner-password, or any
+  // future "forced rotation" policy).  Forced mode disables the X
+  // button and Escape so the operator MUST rotate before doing anything.
+  const forcedChangePw = phase === 'authed' && me && me.must_change_password;
 
   async function doLogout() {
     try {
@@ -1900,8 +2001,16 @@ function AuthBoundary({ children }) {
     return React.createElement('div', null, 'Loading sign-in…');
   }
 
-  // 'authed' or 'bypass' — show the cockpit
-  return children;
+  // 'authed' or 'bypass' — show the cockpit, plus the optional
+  // change-password modal (forced or self-service).
+  const modalNode = (forcedChangePw || showChangePw) && window.ChangePasswordModal
+    ? React.createElement(window.ChangePasswordModal, {
+        forced: !!forcedChangePw,
+        onClose: () => setShowChangePw(false),
+        onSuccess: () => { setShowChangePw(false); recheck(); },
+      })
+    : null;
+  return React.createElement(React.Fragment, null, children, modalNode);
 }
 
 // ─── User chip — shown in header when authenticated ─────────────
@@ -1954,6 +2063,13 @@ function UserChip() {
           window.dispatchEvent(new CustomEvent('navigate', { detail: 'users' }));
         },
       }, '👥 User & access management'),
+      React.createElement('div', {
+        className: 'auth-user-menu-row',
+        onClick: () => {
+          setOpen(false);
+          window.ArgusAuth?.openChangePassword?.();
+        },
+      }, '🔑 Change password'),
       React.createElement('div', {
         className: 'auth-user-menu-row',
         onClick: () => {

@@ -1802,7 +1802,7 @@ async def flush_cache(prefix: Optional[str] = None):
 @app.get("/status")
 @app.get("/api/status")
 async def status():
-    mcp_ok = mongo_ok = ollama_ok = False
+    mcp_ok = mongo_ok = False
     try:
         async with httpx.AsyncClient(timeout=2) as c:
             r = await c.post(MCP_URL, json={"method": "tools/list", "params": {}})
@@ -1813,19 +1813,38 @@ async def status():
         mongo_ok = (await db.health_check()).get("status") == "ok"
     except Exception:
         pass
+
+    # ── LLM check via provider abstraction (works for Ollama / Anthropic /
+    # OpenAI / Claude Code CLI / vLLM / LM Studio / OpenAI-compat).
+    # The old code hard-coded an Ollama probe which broke for everyone
+    # using a non-Ollama provider — they'd see LLM=red even with working LLM calls.
+    llm_ok = False
+    llm_provider_name = ""
+    llm_model_name = MODEL_NAME
+    llm_message = ""
     try:
-        async with httpx.AsyncClient(timeout=2) as c:
-            r = await c.get(f"{OLLAMA_URL}/api/tags")
-            ollama_ok = r.status_code == 200
-    except Exception:
-        pass
+        from utils.llm_providers import get_provider
+        prov = get_provider()
+        llm_provider_name = prov.name
+        llm_model_name = prov.model or MODEL_NAME
+        ok, msg, _ = await prov.check_available()
+        llm_ok = bool(ok)
+        llm_message = msg or ""
+    except Exception as _llm_err:                   # pragma: no cover
+        llm_message = f"provider check error: {_llm_err}"
+
+    # Back-compat: `ollama` field kept so older frontends keep working.
+    ollama_ok = llm_ok if llm_provider_name == "ollama" else False
 
     return {
         "status":          "online",
         "mcp":             "online" if mcp_ok    else "offline",
         "mongo":           "online" if mongo_ok  else "offline",
-        "ollama":          "online" if ollama_ok else "offline",
-        "model":           MODEL_NAME,
+        "ollama":          "online" if ollama_ok else "offline",   # legacy
+        "llm":             "online" if llm_ok    else "offline",   # provider-agnostic
+        "llm_provider":    llm_provider_name,
+        "llm_message":     llm_message,
+        "model":           llm_model_name,
         "active_sessions": [sid for sid, t in active_tasks.items() if not t.done()],
         "agent_count":     len(active_agents),
         "shell_sessions":  sum(len(a._shells) for a in active_shell_agents.values()),

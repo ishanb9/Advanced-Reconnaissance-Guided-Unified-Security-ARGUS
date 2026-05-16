@@ -174,10 +174,10 @@ All settings are 12-factor — env-var with sensible defaults.
 | Var | Default | Notes |
 |-----|---------|-------|
 | `AUTH_DATABASE_URL` | `sqlite:///argus_auth.db` | Use `postgresql://...` for HA |
-| `AUTH_COOKIE_SECURE` | `true` | Require HTTPS for cookies |
+| `AUTH_COOKIE_SECURE` | `true` when `AUTH_DEPLOYMENT_ENV=prod`, else `false` | Require HTTPS for cookies. Default is dev-friendly — set explicitly to `true` if you want secure cookies in dev (only works on `https://`). **If you serve ARGUS over `http://localhost` with `secure=true`, the browser silently drops the session cookie → every login fails with 401 on `/auth/me`. See troubleshooting in §9.** |
 | `AUTH_COOKIE_SAMESITE` | `lax` | `strict` if no cross-site embeds |
 | `AUTH_COOKIE_DOMAIN` | (empty) | Set when behind a reverse proxy on a subdomain |
-| `AUTH_MFA_REQUIRED_FOR` | `OWNER,PLATFORM_ADMIN` | Comma-sep roles required to enrol MFA |
+| `AUTH_MFA_REQUIRED_FOR` | `` *(empty — MFA opt-in)* | Comma-sep roles that MUST enrol MFA. Recommended for prod: `OWNER,PLATFORM_ADMIN`. Users can always opt in voluntarily regardless of this setting. |
 | `AUTH_LOCKOUT_THRESHOLD` | `5` | Failed attempts before lockout |
 | `AUTH_LOCKOUT_DURATION_MIN` | `15` | Minutes locked |
 | `AUTH_SESSION_IDLE_TIMEOUT_HOURS` | `12` | Idle timeout |
@@ -236,6 +236,9 @@ AUTH_AUDIT_EXPORT_DIR=/var/argus/audit_archive
 
 ## 4 · Bootstrap CLI
 
+> Run all of these from the project root (the directory containing
+> `agent_server.py` and the `auth/` folder).
+
 ```bash
 # ── EASIEST PATH — one command does everything ───────────────────
 python -m auth.bootstrap quickstart --email admin@yourdomain.com
@@ -252,6 +255,32 @@ python -m auth.bootstrap quickstart \
 python -m auth.bootstrap quickstart \
     --email admin@yourdomain.com \
     --no-write-env
+
+# ── Diagnose login failures — figure out the ROOT CAUSE ─────────
+# When you get 401 even after a reset, run these to see what's wrong
+# instead of guessing:
+python -m auth.bootstrap db-info
+# Prints DB URL, resolved sqlite file, pepper state, OWNER list,
+# active sessions, lockouts.  Compare output between your reset shell
+# and your agent_server shell to spot env-var drift.
+
+python -m auth.bootstrap diagnose-login --email owner@argus.local
+# Prompts for the password (hidden input).  Reports the root cause
+# in plain English: pepper drift / text mismatch / lockout / wrong DB.
+
+# ── Break-glass: recover a lost / mismatched OWNER password ──────
+# Most common cause: AUTH_PASSWORD_PEPPER drifted between server starts,
+# so the hash no longer verifies.  This command re-hashes with the
+# CURRENT pepper + clears stale lockouts + revokes active sessions.
+python -m auth.bootstrap reset-owner-password --generate
+
+# Specific OWNER if multiple exist
+python -m auth.bootstrap reset-owner-password --email admin@yourdomain.com --generate
+
+# Interactive prompt for the password
+python -m auth.bootstrap reset-owner-password
+# Or non-interactive:
+python -m auth.bootstrap reset-owner-password --password 'MyChoice!2026'
 
 # ── Single-secret helpers ───────────────────────────────────────
 # Strong random password
@@ -381,7 +410,7 @@ The role_mapping → group claim is provider-specific:
 - [ ] HTTPS terminated (cookies require Secure)
 - [ ] `AUTH_COOKIE_DOMAIN` set if behind a subdomain proxy
 - [ ] PostgreSQL (not SQLite) for `AUTH_DATABASE_URL` if > 5 users
-- [ ] MFA enrolment forced for OWNER + PLATFORM_ADMIN minimum
+- [ ] MFA enrolment forced for at least OWNER + PLATFORM_ADMIN — set `AUTH_MFA_REQUIRED_FOR=OWNER,PLATFORM_ADMIN` (MFA is OPT-IN by default; this turns enforcement on for prod)
 - [ ] Audit log retention reviewed (SOX = 7 years, SOC 2 = 1 year, PCI = 1 year)
 - [ ] `AUTH_AUDIT_HASH_CHAIN=true` for tamper evidence
 - [ ] Audit-export directory has rotation + cold-storage backup
@@ -506,28 +535,108 @@ Check:
 3. Browser console — look for CORS or `auth-stage` rendering errors.
 4. `static/js/pages/LoginPage.jsx` must be served (look in Network tab).
 
-### "I lost the OWNER password and there's no reset email yet"
+### "Login works in `diagnose-login` but the web UI 401s every time"
 
-The auth module doesn't ship an email reset flow in v1 (deliberately —
-SMTP infrastructure is deployment-specific). Two recovery paths:
+Almost always the **secure-cookie + http://localhost** gotcha:
 
-**Path A — reset via Python REPL** (preserves all state):
+1. POST `/auth/login` → returns 200 with a valid access_token in the body
+2. Server tries to set `Set-Cookie: argus_session=...; Secure`
+3. Browser silently drops the cookie because the page is HTTP, not HTTPS
+4. Frontend stores the access_token in localStorage and reloads the page
+5. AuthBoundary calls `GET /auth/me` — without the cookie
+6. `/auth/me` returns **401**
+7. You're bounced back to the login page
+
+The `diagnose-login` command will now surface this when password verifies
+but `AUTH_COOKIE_SECURE` is true.
+
+**Fix for local dev:**
+
 ```bash
-python -c "
-from auth.db import SessionLocal
-from auth.models import User
-from auth.security.passwords import hash_password
-db = SessionLocal()
-u = db.query(User).filter(User.email == '<your-owner-email>').one()
-h, v = hash_password('NewLongPass!1234')
-u.credential.password_hash = h
-u.credential.pepper_version = v
-u.credential.must_change = True
-db.commit(); print('OK')
-"
+export AUTH_COOKIE_SECURE=false      # Linux/macOS
+$env:AUTH_COOKIE_SECURE = "false"    # Windows PowerShell
+set AUTH_COOKIE_SECURE=false         # Windows cmd
+
+# Restart agent_server in the same terminal
+uvicorn agent_server:app --host 0.0.0.0 --port 8000
 ```
 
-**Path B — nuke + rebuild** (loses all auth state):
+As of recent versions, the default `AUTH_COOKIE_SECURE` is dev-friendly:
+- `AUTH_DEPLOYMENT_ENV=prod` → defaults to `true` (HTTPS required)
+- Anything else → defaults to `false` (works on http://localhost)
+
+So if you don't set anything, dev "just works". The override is for
+the rare cases where you want non-default behavior (e.g. dev over HTTPS
+behind a local proxy).
+
+The frontend also has a Bearer-header fallback — even if the session
+cookie doesn't stick, the access_token in localStorage is sent as
+`Authorization: Bearer ...` on `/auth/me` calls. This makes the UI
+resilient to cookie issues you can't immediately fix (corporate proxies
+that strip cookies, etc.).
+
+---
+
+### "I lost the OWNER password" / "I get 401 on login but I'm sure the password is right"
+
+This is the most common cold-start papercut. Most likely causes:
+
+| Symptom | Likely cause | Fix |
+|---------|--------------|-----|
+| 401 on first try, password copied carefully | `AUTH_PASSWORD_PEPPER` was set AFTER the original hash was written. Common when a `.env.local` was sourced between server starts. | `reset-owner-password` below |
+| Missed the password printed to stderr | Auto-bootstrap prints credentials ONCE; subsequent restarts don't re-print | `reset-owner-password` below |
+| Tried > 5 wrong passwords | Account is temporarily locked for 15 min | Wait OR `reset-owner-password` (clears lockouts) |
+| Definitely typed it right, multiple machines, multiple browsers | Hash genuinely lost | `reset-owner-password` below |
+
+**Recovery — one local command (preserves all auth state):**
+
+```bash
+# Generate a fresh password automatically.
+# Run from the project root (where the auth/ folder lives).
+python -m auth.bootstrap reset-owner-password --generate
+
+#  ARGUS OWNER password reset
+#  ─────────────────────────────────────────────────────────────────
+#    Account            :  owner@argus.local
+#    New password       :  kR-Ju0gU1bFhCpVQ_LG7z_lP2GBSVkuN
+#    Lockouts cleared   :  2
+#    Sessions revoked   :  0
+#    Must change on next login: yes
+```
+
+Then sign in with the new password. You'll be prompted to rotate it.
+
+Other invocations:
+
+```bash
+# Reset a specific OWNER (if you have more than one)
+python -m auth.bootstrap reset-owner-password \
+    --email admin@yourdomain.com --generate
+
+# Pick your own password (prompted, hidden input)
+python -m auth.bootstrap reset-owner-password
+
+# Pick your own password non-interactively
+python -m auth.bootstrap reset-owner-password --password 'MyChoice!2026'
+
+# Don't revoke other active sessions (rare — usually you DO want to)
+python -m auth.bootstrap reset-owner-password --generate --keep-sessions
+```
+
+What the command does:
+1. Finds the OWNER row in the DB (first one, or by `--email`)
+2. Re-hashes the password with the CURRENT pepper + argon2 config
+3. Marks `must_change_password=True` so the new password is rotated on first login
+4. Clears any open lockouts (unless `--keep-lockouts`)
+5. Revokes all active sessions for that user (unless `--keep-sessions`)
+6. Writes a CRITICAL audit-log entry
+
+The command is **local-only** — there is no HTTP API exposure of this
+operation. It requires direct access to the auth DB file (which is
+already a strong security bar).
+
+**Last-resort — nuke + rebuild** (loses all auth state including audit log):
+
 ```bash
 rm argus_auth.db
 export AUTH_INITIAL_OWNER_EMAIL=owner@yourdomain.com
@@ -535,6 +644,9 @@ export AUTH_INITIAL_OWNER_PASSWORD=NewLongPass!1234
 python -m auth.bootstrap migrate
 # Restart ARGUS
 ```
+
+Use this only when `reset-owner-password` somehow fails — it loses
+your audit log, SCIM tokens, SSO config, user list, and audit history.
 
 ### "I locked my MFA device — how do I get back in?"
 
