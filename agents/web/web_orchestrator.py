@@ -202,7 +202,18 @@ class WebOrchestrator:
         }
 
     async def run(self) -> Dict[str, Any]:
-        """Run the full WSTG sequence.  Returns aggregated results."""
+        """Run the full WSTG sequence.  Returns aggregated results.
+
+        ── Cooperative interrupt ──────────────────────────────────────
+        Before EACH phase (and where practical, between tools inside a
+        phase) we check the EngagementContext's
+        ``should_yield_to_focused_attack`` signal.  When another
+        pipeline (typically OSINT synthesis) identifies a specific
+        attack chain the entire 14-phase compliance playbook is
+        ABORTED so the engagement does not burn another 90 minutes
+        running gobuster/nikto/dalfox against URLs that have nothing
+        to do with the identified chain.
+        """
         await self._emit_phase_matrix()
 
         if not self._targets:
@@ -214,24 +225,80 @@ class WebOrchestrator:
             f"{', '.join(t['base'] for t in self._targets[:3])}"
         )
 
-        # Each phase is a single async method; ordering matters because
-        # later phases consume earlier evidence.
-        await self._safe_phase("info",      self._phase_info)
-        await self._safe_phase("config",    self._phase_config)
-        await self._safe_phase("identity",  self._phase_identity)
-        await self._safe_phase("auth",      self._phase_auth)
-        await self._safe_phase("session",   self._phase_session)
-        await self._safe_phase("authz",     self._phase_authz)
-        await self._safe_phase("input",     self._phase_input)
-        await self._safe_phase("errors",    self._phase_errors)
-        await self._safe_phase("crypto",    self._phase_crypto)
-        await self._safe_phase("biz_logic", self._phase_biz_logic)
-        await self._safe_phase("client",    self._phase_client)
-        await self._safe_phase("api",       self._phase_api)
-        await self._safe_phase("upload",    self._phase_upload)
-        await self._safe_phase("cache",     self._phase_cache)
+        phases: List[tuple] = [
+            ("info",      self._phase_info),
+            ("config",    self._phase_config),
+            ("identity",  self._phase_identity),
+            ("auth",      self._phase_auth),
+            ("session",   self._phase_session),
+            ("authz",     self._phase_authz),
+            ("input",     self._phase_input),
+            ("errors",    self._phase_errors),
+            ("crypto",    self._phase_crypto),
+            ("biz_logic", self._phase_biz_logic),
+            ("client",    self._phase_client),
+            ("api",       self._phase_api),
+            ("upload",    self._phase_upload),
+            ("cache",     self._phase_cache),
+        ]
+
+        for phase_id, phase_fn in phases:
+            # ── Cooperative interrupt check ──────────────────────
+            if self._should_yield_now():
+                await self._note(
+                    f"WSTG playbook YIELDING at phase '{phase_id}' "
+                    f"— focused-attack signal received from another "
+                    f"pipeline.  Remaining mechanical phases skipped; "
+                    f"engagement is moving to direct exploitation."
+                )
+                # Mark all remaining phases as skipped in the matrix
+                # so the UI shows the abort clearly.
+                for remaining_id, _ in phases[phases.index((phase_id, phase_fn)):]:
+                    if remaining_id in self._results:
+                        self._results[remaining_id].notes = (
+                            "skipped — focused-attack interrupt"
+                        )
+                await self._emit_phase_matrix()
+                break
+            await self._safe_phase(phase_id, phase_fn)
 
         return self._summary()
+
+    # ── Cooperative-interrupt helper ────────────────────────────────
+    def _should_yield_now(self) -> bool:
+        """Consult the EngagementContext (if any) for any of:
+          - the focused-attack signal (another pipeline found a chain),
+          - the operator-complete flag (operator halted dispatch),
+          - the win-condition (shell + flag captured), or
+          - the stall watchdog (25+ min, 30+ actions, 0 findings).
+
+        Returns False if no context is registered for this session
+        (legacy code paths / unit tests bypass the registry).
+        """
+        try:
+            from agents.engagement_context import get_context
+            sid = (
+                getattr(self._master, "_session_id", None)
+                or self._intel.get("session_id")
+                or ""
+            )
+            if not sid:
+                return False
+            ctx = get_context(sid)
+            if ctx is None:
+                return False
+            if ctx.should_yield_to_focused_attack(
+                    pipeline_name="WebOrchestrator"):
+                return True
+            if ctx.is_engagement_complete():
+                return True
+            if ctx.is_engagement_stalled():
+                # Record the yield so tests can verify
+                ctx.pipelines_yielded.add("WebOrchestrator:stalled")
+                return True
+            return False
+        except Exception:
+            return False
 
     # ── Phase bodies ──────────────────────────────────────────────────
     async def _phase_info(self, r: PhaseResult) -> None:

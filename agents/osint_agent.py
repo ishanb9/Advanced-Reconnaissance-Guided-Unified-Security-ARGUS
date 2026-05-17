@@ -729,6 +729,26 @@ Be specific and actionable. Focus on realistic initial access paths.
             if chain.get("severity"):
                 intel["risk_verdict"] = chain["severity"]
 
+        # ── Cross-pipeline focused-attack signal ──────────────────
+        # When the OSINT synthesis mentions specific URL paths in
+        # narrative text (e.g. "the documented chain is: invite-code
+        # generation via /js/inviteapi.min.js → /api/v1/invite/generate
+        # → register → authenticated /api/v1/admin/*") we treat those
+        # as a HIGH-CONFIDENCE LEAD and raise the focused-attack
+        # signal so every long-running pipeline (WebOrchestrator's
+        # 14-phase WSTG playbook, mechanical fuzz batches) yields.
+        url_paths = self._extract_url_paths(synthesis_text)
+        vhosts    = self._extract_vhosts(synthesis_text)
+        host_for_curl = ""
+        if vhosts:
+            # Prefer the vhost that doesn't equal the raw target hostname
+            host_for_curl = vhosts[0]
+            existing_vhosts = list(intel.get("vhosts") or [])
+            for v in vhosts:
+                if v not in existing_vhosts:
+                    existing_vhosts.append(v)
+            intel["vhosts"] = existing_vhosts
+
         # ── Findings-driven trigger dispatch ────────────────────────
         # Evaluate the declarative when→actions trigger library against
         # the engagement context (which shares ``intel`` by reference).
@@ -739,6 +759,46 @@ Be specific and actionable. Focus on realistic initial access paths.
             ctx = get_context(self._session_id)
         except Exception:
             ctx = None
+
+        if ctx is not None and url_paths:
+            # Build curl commands for each identified endpoint, using
+            # the vhost Host header when known (fixes the "could not
+            # resolve 2million.htb" exit-6 storm).
+            host_arg = f"-H 'Host: {host_for_curl}' " if host_for_curl else ""
+            target_host = (
+                intel.get("target_host")
+                or intel.get("target")
+                or self._target if hasattr(self, "_target") else "TARGET"
+            )
+            focused_cmds = [
+                f"curl -sk -m 15 {host_arg}http://{target_host}{p}"
+                for p in url_paths[:8]
+            ]
+            ctx.set_focused_attack(
+                endpoints=focused_cmds,
+                reason=(
+                    f"OSINT synthesis identified {len(url_paths)} specific "
+                    f"URL path(s) in narrative — directing all execution "
+                    f"toward these endpoints instead of generic enumeration"
+                ),
+                source="osint_synthesis_url_extract",
+                vhost=host_for_curl,
+            )
+            # Also mirror into next_commands so the existing exploit-
+            # phase first-strike loop picks them up.
+            merged = list(dict.fromkeys(
+                (intel.get("next_commands") or []) + focused_cmds
+            ))
+            intel["next_commands"] = merged
+            # Force pivot regardless of severity classification.
+            intel["pivot_to_exploit"] = True
+            intel["pivot_reason"] = (
+                f"OSINT synthesis identified {len(url_paths)} specific URL "
+                f"endpoint(s) — pivoting to focused exploitation regardless "
+                f"of CVE severity score (severity score reflects noisy CVE "
+                f"queries, not the concrete chain). "
+                f"First endpoint: {url_paths[0]}"
+            )
         if ctx is not None:
             # First: pin the chain from OSINT synthesis as a top-line
             # insight the LLM sees in every subsequent prompt.
@@ -833,6 +893,78 @@ Be specific and actionable. Focus on realistic initial access paths.
         "|".join(re.escape(p) for p in _CMD_PREFIXES) +
         r")\b.*$", re.IGNORECASE | re.MULTILINE,
     )
+    # URL-path extractor — finds REST-style endpoints mentioned in
+    # narrative LLM text (e.g., "/api/v1/invite/generate",
+    # "/js/inviteapi.min.js", "/admin/login.php").  These are the
+    # SPECIFIC TARGETS a red-teamer would attack — but the previous
+    # bash-block-only parser ignored them because they're in prose,
+    # not in fenced code.
+    _URL_PATH_RE = re.compile(
+        r"(?<![A-Za-z0-9_/-])"           # left boundary
+        r"(/[A-Za-z0-9_-][A-Za-z0-9_./-]{2,80}"
+        r"(?:/[A-Za-z0-9_.-]{0,60})*)"   # any number of path segments
+        r"(?![A-Za-z0-9_/])"             # right boundary
+    )
+    # vhost names mentioned in synthesis text (e.g. "twomillion.htb",
+    # "wingdata.htb").  Used to (a) seed the focused-attack curl Host
+    # header, (b) propagate into intel["vhosts"] so downstream curls
+    # auto-add the Host header.
+    _VHOST_RE = re.compile(
+        r"\b([a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?\.htb)\b",
+        re.IGNORECASE,
+    )
+
+    @classmethod
+    def _extract_url_paths(cls, text: str) -> List[str]:
+        """Find specific URL paths mentioned in narrative LLM output.
+
+        Filters out:
+          * obvious filesystem paths (/tmp/, /usr/, /home/, /etc/, /var/)
+          * generic single-segment paths (/login, /admin) UNLESS combined
+            with other segments — those are too noisy on their own.
+          * already-deduplicated paths
+
+        Returns the de-duplicated list in order of first appearance.
+        """
+        if not text:
+            return []
+        # Filesystem-path noise that the regex catches but isn't a URL
+        _FS_PREFIXES = ("/tmp/", "/usr/", "/var/", "/etc/", "/home/",
+                          "/root/", "/bin/", "/sbin/", "/opt/", "/dev/",
+                          "/proc/", "/sys/", "/mnt/", "/media/")
+        seen: List[str] = []
+        for m in cls._URL_PATH_RE.finditer(text):
+            p = m.group(1).rstrip(".,);:")
+            if not p or len(p) < 4:
+                continue
+            if any(p.startswith(fs) for fs in _FS_PREFIXES):
+                continue
+            # Drop trailing punctuation
+            while p and p[-1] in ".,);:":
+                p = p[:-1]
+            # Require at least one slash separating a non-trivial first
+            # segment from a second segment OR a clear API-style path
+            segs = [s for s in p.split("/") if s]
+            if len(segs) < 2 and not any(
+                k in p.lower() for k in ("api", "wp-", "graphql",
+                                          "swagger", "/.git", "/.env")
+            ):
+                continue
+            if p not in seen:
+                seen.append(p)
+        return seen[:12]
+
+    @classmethod
+    def _extract_vhosts(cls, text: str) -> List[str]:
+        """Find HTB-style virtual hostnames (`*.htb`) in narrative text."""
+        if not text:
+            return []
+        seen: List[str] = []
+        for m in cls._VHOST_RE.finditer(text):
+            v = m.group(1).lower()
+            if v not in seen:
+                seen.append(v)
+        return seen[:6]
 
     @classmethod
     def _extract_exploit_chain(cls, text: str) -> Dict[str, Any]:

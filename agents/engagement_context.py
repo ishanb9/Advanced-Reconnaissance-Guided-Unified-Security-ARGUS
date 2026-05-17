@@ -289,6 +289,29 @@ class EngagementContext:
         # Keyed by ReactStep index in transcript.
         self.action_goal_tags: Dict[int, str] = {}
 
+        # ── Cross-pipeline focused-attack interrupt ────────────────
+        # When one pipeline (typically OSINT synthesis) identifies a
+        # SPECIFIC attack chain — a concrete URL/endpoint to exploit
+        # right now — it sets these fields.  ANY other long-running
+        # pipeline (WebOrchestrator's 14-phase WSTG playbook,
+        # vuln-id batch, the WSTG-style mechanical fuzzers) is
+        # expected to call ``should_yield_to_focused_attack()``
+        # cooperatively between phases AND between tools, and abort
+        # when it returns True.
+        #
+        # This is the fix the previous "phase short-circuit" approach
+        # could not solve: parallel pipelines that don't see each
+        # other.  An interrupt-flag they all poll DOES coordinate
+        # them without requiring a full rewrite.
+        self.focused_attack_endpoints: List[str] = []   # URL/cmd queue
+        self.focused_attack_reason:    str       = ""
+        self.focused_attack_source:    str       = ""
+        self.focused_attack_set_at:    float     = 0.0
+        self.focused_attack_vhost:     str       = ""   # Host header value
+        # Set of pipeline names that have ACKED the interrupt by
+        # yielding.  Useful for telemetry + tests.
+        self.pipelines_yielded:        Set[str]  = set()
+
     # ── Convenience properties wrapping the underlying intel dict ────
 
     @property
@@ -596,6 +619,46 @@ class EngagementContext:
             return True
         return False
 
+    # ── Stall watchdog ────────────────────────────────────────────
+    # Hard-stop heuristic that fires when an engagement burns
+    # significant wall-clock with zero findings AND no focused-attack
+    # signal in flight.  Prevents the "2 hours, 0 findings, 256 curls"
+    # pattern observed in the logs.  Phases that call this and get
+    # True back should mark the engagement complete (or transition to
+    # report generation) instead of cycling the playbook again.
+    def is_engagement_stalled(
+        self,
+        *,
+        max_idle_minutes: int = 25,
+        min_recent_actions: int = 30,
+    ) -> bool:
+        """Return True when the engagement is clearly not making progress.
+
+        Conditions (ALL must hold):
+          1. Wall-clock elapsed is more than ``max_idle_minutes``.
+          2. At least ``min_recent_actions`` actions have been
+             recorded (we have actually been trying things, not just
+             starting up).
+          3. Zero findings recorded.
+          4. No focused-attack signal currently in flight.
+          5. No shell access obtained.
+
+        When all hold, mechanical playbooks should yield + the
+        engagement should transition to reporting.
+        """
+        elapsed_min = (time.monotonic() - self.started_at) / 60.0
+        if elapsed_min < max_idle_minutes:
+            return False
+        if self.total_invocations < min_recent_actions:
+            return False
+        if self.findings:
+            return False
+        if self.focused_attack_endpoints:
+            return False
+        if self.intel.get("shell_access"):
+            return False
+        return True
+
     def mark_complete(self, *, reason: str = "operator halt") -> None:
         """Manually halt all further tool dispatch.
 
@@ -617,6 +680,101 @@ class EngagementContext:
     def allow_tool_post_completion(self, tool: str) -> None:
         """Add a tool to the post-completion allow-list."""
         self.post_completion_allowed_tools.add(tool.lower())
+
+    # ── Focused-attack interrupt API ────────────────────────────────
+
+    def set_focused_attack(
+        self,
+        endpoints: List[str],
+        *,
+        reason:    str = "",
+        source:    str = "",
+        vhost:     str = "",
+    ) -> None:
+        """Signal every long-running pipeline that a specific attack
+        chain has been identified and they MUST yield.
+
+        Called by OSINT synthesis (and any other pipeline) the moment
+        a concrete exploit chain becomes known.  Mechanical playbook
+        runners (WebOrchestrator, vuln batch, ...) must call
+        ``should_yield_to_focused_attack()`` between phases AND
+        between tools, and abort when it returns True.
+
+        Idempotent — additional endpoints are appended to the queue,
+        but the reason/source only update on the first call.
+        """
+        accepted: List[str] = []
+        for ep in endpoints or []:
+            ep_s = (ep or "").strip()
+            if ep_s and ep_s not in self.focused_attack_endpoints:
+                accepted.append(ep_s)
+        if not accepted and self.focused_attack_endpoints:
+            return     # already set, nothing new to add
+        if accepted:
+            self.focused_attack_endpoints.extend(accepted)
+        if not self.focused_attack_reason and reason:
+            self.focused_attack_reason = reason[:400]
+        if not self.focused_attack_source and source:
+            self.focused_attack_source = source[:80]
+        if vhost and not self.focused_attack_vhost:
+            self.focused_attack_vhost = vhost.strip()[:120]
+        if self.focused_attack_set_at == 0.0:
+            self.focused_attack_set_at = time.monotonic()
+        # Mirror into legacy intel for backward-compat consumers
+        self.intel["focused_attack_mode"]      = True
+        self.intel["focused_attack_endpoints"] = list(self.focused_attack_endpoints)
+        if vhost:
+            self.intel.setdefault("vhosts", [])
+            if vhost not in self.intel["vhosts"]:
+                self.intel["vhosts"].append(vhost)
+        # Pin the decision so every subsequent LLM prompt sees it
+        self.pin_insight(
+            text=(
+                f"FOCUSED ATTACK MODE engaged: {len(self.focused_attack_endpoints)} "
+                f"specific endpoint(s) queued. Reason: {reason[:180]!r}"
+            ),
+            phase="all", severity="critical", source=source or "focused_attack",
+        )
+
+    def should_yield_to_focused_attack(
+        self, *, pipeline_name: str = "",
+    ) -> bool:
+        """Returns True if a mechanical playbook should ABORT now.
+
+        Pipelines (WebOrchestrator, vuln batch, anything with a long
+        sequential playbook) must call this between phases AND
+        between tools, and exit cleanly when it returns True.
+
+        ``pipeline_name`` is recorded for telemetry so we can verify
+        in tests that the right pipelines yielded.
+        """
+        if not self.focused_attack_endpoints:
+            return False
+        # Caller may pass own name; default = "anonymous"
+        self.pipelines_yielded.add(pipeline_name or "anonymous")
+        return True
+
+    def pop_focused_attack_endpoint(self) -> Optional[str]:
+        """Take one endpoint off the queue for execution.
+
+        Once all endpoints are consumed, ``should_yield_to_focused_attack``
+        keeps returning True until ``clear_focused_attack`` is called
+        — because the chain may have spawned new follow-on actions.
+        """
+        if not self.focused_attack_endpoints:
+            return None
+        return self.focused_attack_endpoints.pop(0)
+
+    def clear_focused_attack(self) -> None:
+        """Remove the focused-attack signal (e.g., after exploitation
+        succeeded or the chain was exhausted)."""
+        self.focused_attack_endpoints = []
+        self.focused_attack_reason = ""
+        self.focused_attack_source = ""
+        self.focused_attack_set_at = 0.0
+        self.focused_attack_vhost = ""
+        self.intel.pop("focused_attack_mode", None)
+        self.intel.pop("focused_attack_endpoints", None)
 
     def force_block(self, tool: str, args: str, duration_sec: float = 600.0) -> None:
         """Operator / supervisor manually trips the breaker."""
@@ -683,6 +841,20 @@ class EngagementContext:
                 "captured.  Stop active testing; pivot to evidence "
                 "collection and report generation."
             )
+        # Focused-attack signal — every prompt should see this prominently
+        # so the LLM does not propose generic enumeration when a specific
+        # chain is already queued.
+        if self.focused_attack_endpoints:
+            out.append(
+                f">>> FOCUSED ATTACK MODE — "
+                f"{len(self.focused_attack_endpoints)} specific endpoint(s) "
+                f"queued for direct exploitation.  Reason: "
+                f"{self.focused_attack_reason[:200]}.  "
+                f"DO NOT propose generic enumeration; consume the queued "
+                f"endpoints and observe results."
+            )
+            for ep in self.focused_attack_endpoints[:6]:
+                out.append(f"    → {ep[:200]}")
         out.append("")
 
         # 3. Pinned insights (newest first)

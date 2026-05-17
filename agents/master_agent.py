@@ -4224,26 +4224,62 @@ class MasterAgent(BaseAgent):
             )
             await self._map_mitre("nmap", success=True)
 
-        # ── PHASE 3: VULNERABILITY ANALYSIS ───────────────────
-        await self._transition_state("VULNERABILITY_ANALYSIS")
-        if self._intel.get("cves") or self._intel.get("vulnerabilities"):
-            await self._capture_evidence(
-                phase        = "vuln_id",
-                evidence_type= "command_transcript",
-                title        = f"Vulnerability analysis — {len(self._intel.get('cves',[]))} CVEs found",
-                content      = f"CVEs: {self._intel.get('cves',[])}\nVulns: {str(self._intel.get('vulnerabilities',[]))[:500]}",
-                severity     = "high" if self._intel.get("cves") else "medium"
+        # ── PIVOT-TO-EXPLOIT SHORT-CIRCUIT ────────────────────
+        # When OSINT synthesis or finding-triggers produced concrete
+        # first-strike commands (intel["next_commands"] populated AND
+        # pivot_to_exploit set), there is NO benefit to running the
+        # remaining VULN_ANALYSIS + ATTACK_PLANNING phases — both of
+        # them are LLM-only synthesis passes that will conclude
+        # "execute the next_commands you already have."  In the
+        # failed-engagement post-mortem these two phases ate 90+
+        # minutes of wall-clock without producing a single attempted
+        # exploit.  A real pentester moves to action the moment a
+        # viable entry point is identified.
+        if self._intel.get("pivot_to_exploit") and self._intel.get("next_commands"):
+            await self.emit_reasoning(
+                step       = "skip_vuln_attack_planning",
+                reasoning  = (
+                    f"OSINT identified {len(self._intel.get('next_commands', []))} "
+                    f"concrete first-strike command(s) "
+                    f"(reason: {self._intel.get('pivot_reason','')[:120]}). "
+                    f"Skipping VULN_ANALYSIS + ATTACK_PLANNING — both phases "
+                    f"would only confirm what intel already says.  Moving "
+                    f"directly to EXPLOIT first-strike."
+                ),
+                decision   = "PHASE SKIP — VULN_ANALYSIS + ATTACK_PLANNING",
+                next_action= "Enter EXPLOITATION and consume pre-staged next_commands",
             )
-
-        # ── PHASE 4: ATTACK PLANNING (new) ────────────────────
-        await self._transition_state("ATTACK_PLANNING")
-        if not already_done("attack_planning"):
-            attack_tree = await self._phase_attack_planning(target)
-            if attack_tree:
-                self._intel["attack_tree"] = attack_tree
-            self._phases_completed.append("attack_planning")
-        else:
+            # Set lightweight placeholders so downstream code that
+            # reads attack_tree doesn't crash.
+            self._intel.setdefault("attack_tree", {
+                "source":        "pivot_short_circuit",
+                "nodes":         [],
+                "edges":         [],
+                "optimal_path":  self._intel.get("next_commands", [])[:6],
+                "reason":        self._intel.get("pivot_reason", ""),
+            })
             attack_tree = self._intel.get("attack_tree")
+        else:
+            # ── PHASE 3: VULNERABILITY ANALYSIS ───────────────────
+            await self._transition_state("VULNERABILITY_ANALYSIS")
+            if self._intel.get("cves") or self._intel.get("vulnerabilities"):
+                await self._capture_evidence(
+                    phase        = "vuln_id",
+                    evidence_type= "command_transcript",
+                    title        = f"Vulnerability analysis — {len(self._intel.get('cves',[]))} CVEs found",
+                    content      = f"CVEs: {self._intel.get('cves',[])}\nVulns: {str(self._intel.get('vulnerabilities',[]))[:500]}",
+                    severity     = "high" if self._intel.get("cves") else "medium"
+                )
+
+            # ── PHASE 4: ATTACK PLANNING (new) ────────────────────
+            await self._transition_state("ATTACK_PLANNING")
+            if not already_done("attack_planning"):
+                attack_tree = await self._phase_attack_planning(target)
+                if attack_tree:
+                    self._intel["attack_tree"] = attack_tree
+                self._phases_completed.append("attack_planning")
+            else:
+                attack_tree = self._intel.get("attack_tree")
 
         # ── PHASE 5: EXPLOITATION ─────────────────────────────
         await self._apply_pending_guidance()   # drain before exploit gate
@@ -5461,6 +5497,24 @@ class MasterAgent(BaseAgent):
                 next_action="Execute pre-staged commands as first-strike actions",
             )
 
+            # ── INLINE FIRST-STRIKE (the "exploit as soon as a lead exists" path) ───
+            # The user's directive: "in a real red team, if you find one
+            # entry point you exploit it and see."  Previously the system
+            # would only execute next_commands once VULN_ANALYSIS,
+            # ATTACK_PLANNING, and EXPLOIT phases had all spun up — a 90+
+            # minute serial delay in the failed 7209s engagement.  We
+            # execute the top 3 commands RIGHT HERE so they run within
+            # seconds of the OSINT synthesis identifying them.
+            try:
+                await self._inline_first_strike(target, max_commands=3)
+            except Exception as _fs_err:                              # noqa: BLE001
+                import logging as _lf
+                _lf.getLogger(__name__).warning(
+                    "[inline_first_strike] failed (non-fatal, the regular "
+                    "first-strike loop in _phase_exploit will still run): %s",
+                    _fs_err,
+                )
+
         self._intel["attack_path"].append({
             "phase":"osint",
             "result": f"Modules: {len(self._intel['exploit_modules'])} | CVEs: {len(self._intel['cves'])}"
@@ -5554,6 +5608,99 @@ class MasterAgent(BaseAgent):
             _l.getLogger(__name__).warning(
                 "Proactive web-intel harvest failed (non-fatal): %s", _wia_err
             )
+
+    # ─── Inline First-Strike Helper ────────────────────────────
+    #
+    # Runs the top N next_commands RIGHT NOW (within whatever phase
+    # called it) instead of waiting for the formal EXPLOIT phase to
+    # spin up.  Used immediately after OSINT synthesis writes
+    # intel["next_commands"] so a high-confidence chain is attempted
+    # within seconds of identification, the way a human red-teamer
+    # would.  Each command goes through the same engagement-context
+    # gates (necessary basis + circuit breaker + budget) as a regular
+    # subagent tool call, so this is NOT an escape hatch around the
+    # safety layers — it's a phase-ordering optimisation.
+    async def _inline_first_strike(self, target: str,
+                                       max_commands: int = 3) -> None:
+        cmds: List[str] = list(self._intel.get("next_commands") or [])
+        if not cmds:
+            return
+        executed = 0
+        for raw_cmd in cmds[:max_commands]:
+            if self._stop_requested or self._intel.get("shell_access"):
+                break
+            cmd = (raw_cmd or "").strip()
+            if not cmd:
+                continue
+            # Strip trailing comments ("# CVE-…")
+            cmd_no_comment = cmd.split("#", 1)[0].strip()
+            if not cmd_no_comment:
+                continue
+            # Pre-flight: consult engagement context's basis + circuit
+            # breaker gates BEFORE dispatch.  Refused commands are
+            # logged and skipped so the operator can see what was
+            # filtered.
+            try:
+                from agents.engagement_context import (
+                    get_context, check_command_warranted,
+                )
+                ctx = get_context(self._session_id) if self._session_id else None
+                if ctx is not None:
+                    ok, why = check_command_warranted(cmd_no_comment, ctx)
+                    if not ok:
+                        self._intel.setdefault("rejected_commands", []).append(
+                            {"cmd": cmd_no_comment[:200], "reason": why[:200],
+                             "stage": "inline_first_strike"}
+                        )
+                        await self.emit_reasoning(
+                            step       = "inline_first_strike_skip",
+                            reasoning  = f"Inline first-strike refused: {why[:200]}",
+                            decision   = f"SKIP {cmd_no_comment[:80]!r}",
+                            next_action= "Try next pre-staged command",
+                        )
+                        continue
+            except Exception:
+                pass
+            # Dispatch as a bash subagent so all the existing tool-
+            # execution plumbing (watchdog, broadcast, persistence)
+            # applies.  Capture exception to keep the OSINT phase
+            # robust — a single failed first-strike must not abort
+            # the engagement.
+            await self.emit_reasoning(
+                step       = "inline_first_strike_run",
+                reasoning  = (
+                    f"Inline first-strike #{executed + 1} (within OSINT phase, "
+                    f"before VULN/PLAN/EXPLOIT serialise) — "
+                    f"command: {cmd_no_comment[:120]}"
+                ),
+                decision   = "EXECUTE NOW",
+                next_action= "Capture output; proceed to next pre-staged command on completion",
+            )
+            try:
+                await self._dispatch_to_agent(
+                    tool    = "bash",
+                    args    = cmd_no_comment,
+                    purpose = (
+                        f"OSINT-identified first-strike command "
+                        f"executed inline during OSINT phase "
+                        f"(skip VULN/PLAN serial delay)"
+                    ),
+                    phase   = "osint_first_strike",
+                    timeout = 180,
+                )
+                executed += 1
+            except Exception as exc:                            # noqa: BLE001
+                import logging as _ll
+                _ll.getLogger(__name__).warning(
+                    "[inline_first_strike] command %r failed (non-fatal): %s",
+                    cmd_no_comment[:120], exc,
+                )
+        if executed:
+            await self._emit("inline_first_strike_summary", {
+                "executed": executed,
+                "skipped":  len(cmds[:max_commands]) - executed,
+                "remaining": max(0, len(cmds) - max_commands),
+            })
 
     # ─── PHASE: Exploitation ──────────────────────────────────
 

@@ -802,6 +802,43 @@ class BaseSubagent(ABC):
         # Falls back gracefully if no context registered (e.g. unit tests
         # that directly instantiate a subagent without a MasterAgent).
         ctx = self._engagement_context()
+
+        # ── Vhost auto-injection (fixes the "exit 6 / Could not resolve"
+        # curl storm).  When intel knows a virtual hostname for this
+        # target but the curl command was built without a Host header,
+        # auto-inject it.  Web servers behind HTB-style vhost routing
+        # 301 redirect bare-IP requests to the vhost name, and without
+        # /etc/hosts entries those redirects fail at DNS — turning every
+        # curl into wasted budget.  This applies to bare curl commands
+        # only; commands that already carry `-H 'Host: …'` are left
+        # alone.
+        if ctx is not None and tool_name == "curl" and isinstance(options, dict):
+            try:
+                vhost = (
+                    getattr(ctx, "focused_attack_vhost", "")
+                    or ((ctx.intel.get("vhosts") or [""])[0]
+                         if ctx.intel.get("vhosts") else "")
+                )
+                if vhost:
+                    cmd_str = (
+                        str(options.get("command", ""))
+                        or str(options.get("options", ""))
+                    ).lower()
+                    if cmd_str and "host:" not in cmd_str and "-h " in cmd_str:
+                        pass     # operator already has -H something else
+                    elif cmd_str and "host:" not in cmd_str:
+                        host_inject = f" -H 'Host: {vhost}' "
+                        if "command" in options:
+                            options["command"] = str(
+                                options["command"]
+                            ).replace("curl ", f"curl{host_inject}", 1)
+                        elif "options" in options:
+                            options["options"] = host_inject.lstrip() + str(
+                                options["options"]
+                            )
+            except Exception:
+                pass
+
         # Build args signature once: prefer options.options/command (the
         # actual shell line) over the bare target so curl-against-URL-X
         # and curl-against-URL-Y are scored separately.
