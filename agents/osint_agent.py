@@ -33,7 +33,7 @@ import asyncio
 import os
 import re
 import signal as _signal
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Any
 
 import httpx
 
@@ -661,11 +661,228 @@ Be specific and actionable. Focus on realistic initial access paths.
                 merged = list(dict.fromkeys(list(existing) + list(vals)))
                 intel[key] = merged
 
+        # ────────────────────────────────────────────────────────────
+        # CRITICAL FIX (was: synthesis text dropped on the floor).
+        #
+        # The LLM synthesis above frequently identifies the kill chain
+        # ("CVE-2023-28432 on MinIO — curl POST /minio/bootstrap/v1/verify")
+        # but its structured payload was only "cves" + "exploit_modules"
+        # — the actionable text was buried in raw_outputs["osint"] and
+        # never read by downstream phases.
+        #
+        # Parse the synthesis for:
+        #   * concrete CVE IDs prioritised by the LLM
+        #   * severity verdict (Critical/High/Medium/Low)
+        #   * shell commands inside ```bash or ``` code fences
+        # and stash them as STRUCTURED intel so the vuln/exploit phases
+        # can pivot immediately instead of mechanical fuzzing.
+        # ────────────────────────────────────────────────────────────
+        synthesis_text = str(result.get("synthesis", "") or "")
+        chain = self._extract_exploit_chain(synthesis_text)
+        if chain.get("critical_cves") or chain.get("next_commands"):
+            existing_chain = intel.get("exploit_chain") or {}
+            intel["exploit_chain"] = {
+                **existing_chain,
+                **chain,
+                "source":     "osint_synthesis",
+                "discovered_at_phase": "osint",
+            }
+            # ── Validate LLM-supplied commands BEFORE queueing ────────
+            # The exploit-phase first-strike loop consumes
+            # intel["next_commands"] directly.  Any unwarranted command
+            # (hydra without creds, evil-winrm without shell, sqlmap
+            # without a URL) would otherwise be dispatched unchecked.
+            # We filter them HERE so the queue only contains commands
+            # with a necessary basis under current state.
+            if chain.get("next_commands"):
+                try:
+                    from agents.engagement_context import (
+                        get_context, check_command_warranted,
+                    )
+                    ctx_now = get_context(self._session_id)
+                except Exception:
+                    ctx_now = None
+                    check_command_warranted = None
+                accepted: List[str] = []
+                rejected: List[Dict[str, str]] = []
+                for raw_cmd in chain["next_commands"]:
+                    cmd = (raw_cmd or "").strip()
+                    if not cmd:
+                        continue
+                    if ctx_now is not None and check_command_warranted is not None:
+                        ok, reason = check_command_warranted(cmd, ctx_now)
+                        if not ok:
+                            rejected.append({"cmd": cmd[:200], "reason": reason[:200]})
+                            continue
+                    accepted.append(cmd)
+                if rejected:
+                    intel.setdefault("rejected_commands", []).extend(rejected)
+                merged_cmds = list(dict.fromkeys(
+                    (intel.get("next_commands") or []) + accepted
+                ))
+                intel["next_commands"] = merged_cmds
+            if chain.get("critical_cves"):
+                merged_cves = list(dict.fromkeys(
+                    (intel.get("critical_cves") or []) + chain["critical_cves"]
+                ))
+                intel["critical_cves"] = merged_cves
+            if chain.get("severity"):
+                intel["risk_verdict"] = chain["severity"]
+
+        # ── Findings-driven trigger dispatch ────────────────────────
+        # Evaluate the declarative when→actions trigger library against
+        # the engagement context (which shares ``intel`` by reference).
+        # Triggers fire ONCE per (session, trigger_name) so re-running
+        # the OSINT phase doesn't duplicate kill-chain commands.
+        try:
+            from agents.engagement_context import get_context
+            ctx = get_context(self._session_id)
+        except Exception:
+            ctx = None
+        if ctx is not None:
+            # First: pin the chain from OSINT synthesis as a top-line
+            # insight the LLM sees in every subsequent prompt.
+            try:
+                ctx.pin_insights_from_intel()
+            except Exception:
+                pass
+            try:
+                from agents import finding_triggers as _ft
+                actions = _ft.evaluate_triggers(ctx)
+            except Exception as _exc:
+                actions = []
+                import logging as _llog
+                _llog.getLogger(__name__).debug(
+                    "finding_triggers eval failed: %s", _exc
+                )
+            # Merge command actions into intel["next_commands"];
+            # pin insight actions; subagent dispatch is recorded so the
+            # MasterAgent's pivot logic can read it.
+            trig_cmds: List[str] = []
+            for a in actions:
+                if a.kind == "command" and a.payload:
+                    trig_cmds.append(a.payload)
+                elif a.kind == "insight" and a.payload:
+                    try:
+                        ctx.pin_insight(
+                            a.payload, phase="osint",
+                            severity=("critical" if a.priority >= 9
+                                       else "important" if a.priority >= 6
+                                       else "info"),
+                            source="finding_trigger",
+                        )
+                    except Exception:
+                        pass
+                elif a.kind == "subagent" and a.payload:
+                    # Pin as an insight + record in intel for the master.
+                    sub_targets = list(intel.get("triggered_subagents") or [])
+                    if a.payload not in sub_targets:
+                        sub_targets.append(a.payload)
+                    intel["triggered_subagents"] = sub_targets
+            if trig_cmds:
+                merged_cmds = list(dict.fromkeys(
+                    (intel.get("next_commands") or []) + trig_cmds
+                ))
+                intel["next_commands"] = merged_cmds
+                # Record on the transcript so the next LLM prompt sees
+                # "10 trigger commands queued from <MinIO/SMB/etc.>"
+                try:
+                    ctx.pin_insight(
+                        f"{len(trig_cmds)} kill-chain command(s) queued by findings-trigger system",
+                        phase="osint",
+                        severity="important",
+                        source="finding_trigger_summary",
+                    )
+                except Exception:
+                    pass
+
         return {
             "cves":            [r["cve_id"] for r in result.get("cve_details", [])],
             "exploit_modules": [
                 e.get("title") or e.get("path", "")
                 for e in result.get("exploit_modules", [])
             ],
-            "raw_outputs": {"osint": str(result.get("synthesis", ""))[:2000]},
+            "exploit_chain":   intel.get("exploit_chain", {}),
+            "next_commands":   intel.get("next_commands", []),
+            "critical_cves":   intel.get("critical_cves", []),
+            "raw_outputs":     {"osint": synthesis_text[:2000]},
+        }
+
+    # ─────────────────────────────────────────────────────────────
+    #  OSINT-synthesis parser — extracts STRUCTURED actions from
+    #  the LLM's free-form "senior pentester" verdict.  Drives the
+    #  pivot trigger + exploit-phase first-strike.
+    # ─────────────────────────────────────────────────────────────
+    _CVE_RE      = re.compile(r"\bCVE-\d{4}-\d{4,7}\b", re.IGNORECASE)
+    # Severity verdict — LLM commonly emits "## Overall Risk Assessment\n\n**CRITICAL**"
+    # so allow newlines + markdown emphasis between the heading and the verdict.
+    _SEVERITY_RE = re.compile(
+        r"(?:overall\s+(?:risk|severity|assessment|verdict)|risk\s+assessment)"
+        r"[\s\S]{0,80}?\*?\*?\b(critical|high|medium|low)\b\*?\*?",
+        re.IGNORECASE,
+    )
+    # Shell commands the LLM frequently emits inside ```bash blocks OR
+    # bullet-pointed individual `curl … / searchsploit … / nuclei …` lines.
+    _CMD_PREFIXES = ("curl", "searchsploit", "nuclei", "nmap", "gobuster",
+                      "ffuf", "feroxbuster", "wfuzz", "sqlmap", "hydra",
+                      "crackmapexec", "smbclient", "rpcclient", "ldapsearch",
+                      "enum4linux", "smbmap", "wpscan", "evil-winrm",
+                      "msfconsole", "impacket-", "python3 ")
+    _CMD_LINE_RE = re.compile(
+        r"^\s*(?:[-*$#]|\d+\.\s+)?\s*(" +
+        "|".join(re.escape(p) for p in _CMD_PREFIXES) +
+        r")\b.*$", re.IGNORECASE | re.MULTILINE,
+    )
+
+    @classmethod
+    def _extract_exploit_chain(cls, text: str) -> Dict[str, Any]:
+        """Parse a senior-pentester LLM verdict and return an actionable
+        chain {critical_cves, severity, next_commands}.
+
+        Tolerant to:
+          * commands inside ```bash / ``` fences
+          * commands as bullet points (-, *, $, #, "1.")
+          * inline mention of CVE IDs anywhere in the text
+        """
+        if not text:
+            return {}
+
+        # 1. CVE IDs (deduped, preserves order of appearance)
+        cves = list(dict.fromkeys(m.group(0).upper()
+                                    for m in cls._CVE_RE.finditer(text)))
+
+        # 2. Severity / risk verdict
+        sev_match = cls._SEVERITY_RE.search(text)
+        severity = sev_match.group(1).lower() if sev_match else ""
+
+        # 3. Shell commands — extract code-fence blocks first, then the
+        #    full text for stray bullet/inline commands.
+        commands: List[str] = []
+        # ```bash … ``` and ``` … ``` fenced blocks
+        for fence in re.finditer(r"```(?:[a-zA-Z]+\s*\n)?(.*?)```",
+                                   text, flags=re.DOTALL):
+            for line in fence.group(1).splitlines():
+                stripped = line.strip().lstrip("$").lstrip("#").strip()
+                if not stripped or stripped.startswith("//") or stripped.startswith("#"):
+                    continue
+                for p in cls._CMD_PREFIXES:
+                    if stripped.lower().startswith(p.lower()):
+                        commands.append(stripped)
+                        break
+        # Stray inline / bulleted commands outside code fences
+        for m in cls._CMD_LINE_RE.finditer(text):
+            cmd = m.group(0).lstrip(" -*$#0123456789.").strip()
+            # Drop quoted/wrapped examples like "(if you …)" comments
+            cmd = cmd.split("#", 1)[0].strip()
+            if cmd and cmd not in commands:
+                commands.append(cmd)
+
+        # Cap at a reasonable number — we want the LLM's top picks, not a
+        # firehose.  More than 25 means the parser caught noise.
+        commands = commands[:25]
+
+        return {
+            "critical_cves": cves,
+            "severity":      severity,
+            "next_commands": commands,
         }

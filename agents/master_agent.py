@@ -51,6 +51,32 @@ from db.schemas import (
 )
 import db.mongo_client as db
 
+# Architectural core — the engagement-wide reasoning context.  Provides
+# the objective + react transcript + pinned insights + circuit breaker.
+# Falls back gracefully if the module is unavailable (e.g. cold-start
+# tests that skip the agents package) so this import never blocks
+# legacy callers.
+try:
+    from agents.engagement_context import (
+        EngagementContext,
+        register_context as _ec_register,
+        unregister_context as _ec_unregister,
+    )
+    _EC_AVAILABLE = True
+except Exception:    # noqa: BLE001
+    EngagementContext = None       # type: ignore[assignment]
+    _ec_register      = None       # type: ignore[assignment]
+    _ec_unregister    = None       # type: ignore[assignment]
+    _EC_AVAILABLE     = False
+
+# Findings-driven trigger system — declarative when→actions patterns.
+try:
+    from agents import finding_triggers as _ft
+    _FT_AVAILABLE = True
+except Exception:    # noqa: BLE001
+    _ft = None                     # type: ignore[assignment]
+    _FT_AVAILABLE = False
+
 # Per-session end-to-end scan logger (file-based). Never raises.
 from utils.scan_logger import (
     start_scan_logger, close_scan_logger, get_scan_logger,
@@ -500,6 +526,21 @@ class MasterAgent(BaseAgent):
         self._pause_event: asyncio.Event = asyncio.Event()
         self._pause_event.set()   # start in running state
 
+        # ── EngagementContext — the unified working memory ──────────────
+        # Holds the objective, ReAct transcript, pinned insights, circuit
+        # breaker state, and renders the canonical prompt prelude for every
+        # LLM call.  Created lazily in run() when session_id is known.
+        # All accesses must use ``self._context if self._context else``
+        # because tests / cold-start paths may bypass run().
+        self._context: Optional["EngagementContext"] = None
+        # Operator-supplied mission text (free-form goal description).
+        # When set, takes precedence over the auto-generated default
+        # objective so a CTF box can say "capture user.txt + root.txt".
+        self._operator_objective: str = ""
+        # Once-per-session trigger firing memory.  Cleared at engagement
+        # end so a fresh session starts with empty state.
+        self._triggers_evaluated_phases: set = set()
+
         # Ordered list of phases that have already completed — used to skip
         # already-done phases when resuming from a checkpoint.
         self._phases_completed: List[str] = []
@@ -705,10 +746,15 @@ class MasterAgent(BaseAgent):
         checkpoint_id:      Optional[str] = None,   # resume from checkpoint
         use_reasoning_loop: bool = False,            # enable hypothesis-driven engine
         mission_brief:      Optional[Any] = None,    # Improvement #1 — formal mission
+        objective:          str  = "",               # operator-supplied goal text
         **kwargs
     ) -> Dict:
         self._use_reasoning_loop = _REASONING_AVAILABLE  # Always use reasoning if available
         self._session_id     = session_id
+        # Stash operator-supplied objective so the EngagementContext
+        # init below picks it up.
+        if objective and objective.strip():
+            self._operator_objective = objective.strip()
 
         # ── Target normalisation (NEW: domain / URL / app support) ──────
         # Classify the operator-supplied target string into ip / cidr /
@@ -757,6 +803,59 @@ class MasterAgent(BaseAgent):
         self._intel["target_scope"]  = list(getattr(_norm, "scope_hosts", []) or [target])
         self._intel["target_resolved_ip"] = getattr(_norm, "resolved_ip", None)
         self._phases_to_run  = phases or [p.value for p in AttackPhase]
+
+        # ── Create the EngagementContext (the architectural core) ──────
+        # Shared by reference with self._intel so EVERY existing code
+        # path that mutates intel keeps working unchanged.  All NEW
+        # code paths read structured fields off the context for the
+        # benefit of objective tracking, pinned insights and the
+        # circuit breaker.
+        if _EC_AVAILABLE:
+            try:
+                # Derive the objective: operator-supplied text wins; else
+                # mission brief's goal field if present; else the default.
+                obj_text = (self._operator_objective or "").strip()
+                if not obj_text:
+                    mb = self._intel.get("mission_brief") or {}
+                    obj_text = (mb.get("goal") or mb.get("description")
+                                  or mb.get("objective") or "").strip()
+                # Notes/scope are appended as supplemental context so the
+                # LLM sees operator constraints in EVERY prompt.
+                extras: List[str] = []
+                if notes:
+                    extras.append(f"OPERATOR NOTES: {notes.strip()[:600]}")
+                if scope:
+                    extras.append(f"SCOPE: {scope.strip()[:400]}")
+                full_obj = obj_text if obj_text else None
+                if full_obj and extras:
+                    full_obj = full_obj + "\n\n" + "\n".join(extras)
+                self._context = EngagementContext(
+                    session_id = session_id,
+                    target     = self._target_host or target,
+                    objective  = full_obj or "",
+                    intel_ref  = self._intel,
+                )
+                # Append extras to the default objective when no
+                # operator goal was set.
+                if not full_obj and extras:
+                    self._context.objective = (
+                        self._context.objective.rstrip()
+                        + "\n\n" + "\n".join(extras)
+                    )
+                if _ec_register is not None:
+                    _ec_register(self._context)
+                # Emit so the UI can render the objective banner.
+                await self._emit("engagement_objective", {
+                    "scan_id":   session_id,
+                    "target":    self._target_host or target,
+                    "objective": self._context.objective,
+                })
+            except Exception as _ec_err:                    # noqa: BLE001
+                import logging as _ll
+                _ll.getLogger(__name__).warning(
+                    "[engagement_context] init failed: %s", _ec_err
+                )
+                self._context = None
 
         # ── Mission brief (Improvement #1) — coerce to MissionBrief model ───
         try:
@@ -1336,6 +1435,20 @@ class MasterAgent(BaseAgent):
             # msfconsole/ncat/evil-winrm processes leak across scans.
             await self._teardown_runtime_resources()
             close_scan_logger(session_id)
+            # Drop the EngagementContext registration so subagents from
+            # future sessions don't accidentally find this one.
+            if _EC_AVAILABLE and _ec_unregister is not None:
+                try:
+                    _ec_unregister(session_id)
+                except Exception:
+                    pass
+            # Reset finding-trigger fire memory so re-running the same
+            # session_id later starts fresh.
+            if _FT_AVAILABLE and _ft is not None:
+                try:
+                    _ft.reset_fired(session_id)
+                except Exception:
+                    pass
             return {"status": "cancelled"}
         except Exception as e:
             # Any other error (including any stray RuntimeError) — log and continue
@@ -1441,6 +1554,20 @@ class MasterAgent(BaseAgent):
             close_scan_logger(session_id)
         except Exception:
             pass
+        # Drop the EngagementContext registration so subagents from
+        # future sessions don't accidentally find this one.
+        if _EC_AVAILABLE and _ec_unregister is not None:
+            try:
+                _ec_unregister(session_id)
+            except Exception:
+                pass
+        # Reset finding-trigger fire memory so re-running the same
+        # session_id later starts fresh.
+        if _FT_AVAILABLE and _ft is not None:
+            try:
+                _ft.reset_fired(session_id)
+            except Exception:
+                pass
         return {"status": "done", "intel": self._intel}
 
     # ─── State Machine ────────────────────────────────────────
@@ -3098,6 +3225,62 @@ class MasterAgent(BaseAgent):
         #         domain from intel['domain'] / intel['ad']['dns_domain'].
         tool, args = self._normalize_action_args(tool, args)
 
+        # ── CIRCUIT BREAKER ──────────────────────────────────────
+        # Prevents the "486 curl calls / 0 findings" pathology seen on
+        # 10.129.56.165.  Tracks (tool, target_prefix) pairs and the
+        # number of consecutive empty/error invocations.  When that count
+        # exceeds a per-tool threshold, blocks further calls of the same
+        # pair until the LLM does something different (different tool,
+        # different target, or a finding lands).  Forces the agent to
+        # pivot instead of cycling.
+        cb_key = (tool, (args or "").split()[0] if args else self._target)
+        breaker = getattr(self, "_tool_circuit_breaker", None)
+        if breaker is None:
+            # {(tool, target_prefix): {"consecutive_empty": int, "blocked": bool}}
+            breaker = {}
+            self._tool_circuit_breaker = breaker
+        cb_state = breaker.get(cb_key, {"consecutive_empty": 0, "blocked": False})
+        # Per-tool thresholds — strict for known fuzz/spray tools that
+        # generate lots of noise per call, lenient for targeted tools.
+        cb_thresholds = {
+            "curl":       6,   # curl flood was the worst offender (486 calls)
+            "gobuster":   3,
+            "ffuf":       3,
+            "wfuzz":      3,
+            "dirb":       3,
+            "feroxbuster": 3,
+            "wafw00f":    2,
+            "whatweb":    3,
+            "dalfox":     2,
+            "commix":     2,
+            "davtest":    2,
+            "sqlmap":     3,
+            "nuclei":     4,
+        }
+        cb_limit = cb_thresholds.get(tool.lower(), 5)
+        if cb_state["consecutive_empty"] >= cb_limit:
+            cb_state["blocked"] = True
+            breaker[cb_key] = cb_state
+            await self.emit_reasoning(
+                step      = "circuit_breaker_trip",
+                reasoning = (f"{tool} against {cb_key[1]} has produced "
+                              f"{cb_state['consecutive_empty']} consecutive "
+                              f"empty/error results.  Blocking further calls "
+                              f"of this pair to force a pivot."),
+                decision  = f"CIRCUIT-BREAKER tripped on ({tool}, {cb_key[1]})",
+                next_action = ("LLM must choose a different tool, a different "
+                                "target, or pivot phase based on existing intel"),
+            )
+            return {
+                "stdout": "", "stderr":
+                    f"[circuit-breaker] {tool} blocked after "
+                    f"{cb_state['consecutive_empty']} unproductive calls. "
+                    f"Pivot to a different action.",
+                "exit_code": -2, "output_id": "",
+                "tool": tool, "args": args, "findings": [],
+                "circuit_breaker": True,
+            }
+
         agent_type = self._classify_tool_to_phase(tool)
         task = {
             "tool":         tool,
@@ -3107,6 +3290,12 @@ class MasterAgent(BaseAgent):
             "can_parallel": False,
         }
 
+        # Each branch below returns a result dict.  The exception handler
+        # at the end of this method tracks failures via the circuit
+        # breaker.  Successful (productive) calls are tracked by the
+        # caller via _record_dispatch_outcome in the post-dispatch hook
+        # of the LLM reasoning loop — which sees the final result dict
+        # and can distinguish "produced findings" from "stdout was empty".
         try:
             if agent_type == "recon":
                 from agents.recon_agent import ReconAgent
@@ -3246,6 +3435,8 @@ class MasterAgent(BaseAgent):
         except Exception as e:
             import logging as _log
             _log.getLogger(__name__).warning("_dispatch_to_agent error (%s): %s", tool, e)
+            # Circuit breaker: errors count as unproductive too
+            self._record_dispatch_outcome(cb_key, productive=False)
             return {
                 "stdout":    "",
                 "stderr":    str(e),
@@ -3253,6 +3444,27 @@ class MasterAgent(BaseAgent):
                 "output_id": "",
                 "error":     str(e),
             }
+
+    def _record_dispatch_outcome(self, cb_key, *, productive: bool) -> None:
+        """Update the circuit-breaker counter for a (tool, target) pair.
+
+        productive=True   → reset the consecutive-empty counter (we
+                             produced output or findings)
+        productive=False  → increment (empty output, error, timeout)
+
+        Called from _dispatch_to_agent's exception path and from the
+        post-dispatch hook in the LLM reasoning loop.
+        """
+        breaker = getattr(self, "_tool_circuit_breaker", None)
+        if breaker is None:
+            self._tool_circuit_breaker = breaker = {}
+        st = breaker.get(cb_key) or {"consecutive_empty": 0, "blocked": False}
+        if productive:
+            st["consecutive_empty"] = 0
+            st["blocked"] = False
+        else:
+            st["consecutive_empty"] = st.get("consecutive_empty", 0) + 1
+        breaker[cb_key] = st
 
     async def _check_pause_requested(self) -> bool:
         """Return True if the operator has requested a pause."""
@@ -5186,9 +5398,74 @@ class MasterAgent(BaseAgent):
             self._intel["cves"] = _merge_string_lists(self._intel["cves"], result.get("cves",[]))
         self._intel["exploit_modules"] += result.get("exploit_modules",[])
         self._merge_raw_outputs(result.get("raw_outputs",{}))
+
+        # ── CRITICAL FIX ── propagate exploit_chain + next_commands +
+        # critical_cves to master's intel.  OsintAgent.execute_tasks now
+        # parses the LLM synthesis for actionable kill-chain data; we
+        # surface it here so downstream phases can pivot immediately.
+        if result.get("exploit_chain"):
+            self._intel["exploit_chain"] = result["exploit_chain"]
+        if result.get("critical_cves"):
+            self._intel["critical_cves"] = list(dict.fromkeys(
+                (self._intel.get("critical_cves") or []) +
+                list(result["critical_cves"])
+            ))
+        if result.get("next_commands"):
+            self._intel["next_commands"] = list(dict.fromkeys(
+                (self._intel.get("next_commands") or []) +
+                list(result["next_commands"])
+            ))
+
+        # ── PIVOT TRIGGER ── if OSINT identified a CRITICAL/HIGH chain
+        # with concrete next commands, signal that the exploit phase
+        # should run them as first-strike actions, and that vuln-id
+        # heuristic scanning is redundant.  Flag is consumed downstream
+        # in the phase router + _phase_exploit's first-action loop.
+        chain = self._intel.get("exploit_chain") or {}
+        chain_severity = (chain.get("severity") or
+                           self._intel.get("risk_verdict") or "").lower()
+        has_concrete_cmds = bool(self._intel.get("next_commands"))
+        triggered_subagents = list(self._intel.get("triggered_subagents") or [])
+        # Pivot when any of these holds:
+        #   (a) OSINT synthesis identified a critical/high kill-chain, OR
+        #   (b) the findings-trigger system queued first-strike commands
+        #       (e.g. SMB null-session enum, Redis unauth probe — these
+        #       are concrete next actions even without a CVE attached), OR
+        #   (c) a trigger requested a subagent dispatch (AD recon, etc.)
+        pivot_reasons: List[str] = []
+        if chain_severity in ("critical", "high") and has_concrete_cmds:
+            pivot_reasons.append(
+                f"OSINT synthesis identified {chain_severity.upper()} "
+                f"kill-chain (CVEs: {self._intel.get('critical_cves', [])[:3]})"
+            )
+        if has_concrete_cmds and not pivot_reasons:
+            pivot_reasons.append(
+                f"Findings-trigger system queued "
+                f"{len(self._intel.get('next_commands') or [])} first-strike commands "
+                f"based on discovered services"
+            )
+        if triggered_subagents:
+            pivot_reasons.append(
+                f"Triggered subagent(s) ready: {', '.join(triggered_subagents[:3])}"
+            )
+        if pivot_reasons:
+            self._intel["pivot_to_exploit"] = True
+            self._intel["pivot_reason"] = (
+                " | ".join(pivot_reasons) +
+                " — Skipping redundant generic enumeration; jumping to exploit."
+            )
+            await self.emit_reasoning(
+                step="pivot_trigger",
+                reasoning=self._intel["pivot_reason"],
+                decision="PIVOT TO EXPLOIT",
+                next_action="Execute pre-staged commands as first-strike actions",
+            )
+
         self._intel["attack_path"].append({
             "phase":"osint",
-            "result": f"Modules: {len(self._intel['exploit_modules'])} | CVEs: {len(self._intel['cves'])}",
+            "result": f"Modules: {len(self._intel['exploit_modules'])} | CVEs: {len(self._intel['cves'])}"
+                       + (f" | PIVOT: {self._intel.get('pivot_reason','')[:60]}..."
+                          if self._intel.get("pivot_to_exploit") else ""),
             "ts": datetime.utcnow().isoformat()
         })
         await self._emit("plan_step_update", {
@@ -5299,12 +5576,107 @@ class MasterAgent(BaseAgent):
         agent._session_id = self._session_id
         self._exploit_agent = agent
 
+        # ── FIRST-STRIKE LOOP ──────────────────────────────────────
+        # When OSINT synthesis identified a concrete kill-chain
+        # (intel["next_commands"] populated, severity critical/high),
+        # execute those commands FIRST, before any heuristic planning.
+        # This is what turns "3 hours of curl flood with 0 findings"
+        # into "30 minutes to initial access".  See pivot_to_exploit flag
+        # set in _phase_osint above.
+        first_strike_cmds: List[str] = list(
+            self._intel.get("next_commands") or []
+        )
+        first_strike_consumed = 0
+        if first_strike_cmds and self._intel.get("pivot_to_exploit"):
+            await self.emit_reasoning(
+                step       = "exploit_first_strike",
+                reasoning  = (f"OSINT synthesis pre-staged "
+                              f"{len(first_strike_cmds)} command(s) targeting "
+                              f"{self._intel.get('critical_cves', [])[:3]}. "
+                              f"Executing these BEFORE generic exploit planning."),
+                decision   = "FIRST-STRIKE mode",
+                next_action= f"Dispatching {min(6, len(first_strike_cmds))} pre-staged commands",
+            )
+            for cmd_idx, raw_cmd in enumerate(first_strike_cmds[:6]):
+                if self._stop_requested or self._intel.get("shell_access"):
+                    break
+                cmd = (raw_cmd or "").strip()
+                if not cmd:
+                    continue
+                # Strip trailing comments (LLM often appends "# CVE-...")
+                cmd_no_comment = cmd.split("#", 1)[0].strip()
+                if not cmd_no_comment:
+                    continue
+                # Tool is the first whitespace-separated token; rest is args
+                parts = cmd_no_comment.split(None, 1)
+                tool  = parts[0]
+                args  = parts[1] if len(parts) > 1 else ""
+
+                fs_label = f"first_strike_{cmd_idx+1}"
+                await self._emit("plan_step_update", {
+                    "step_id":  fs_label,
+                    "label":    f"💥 First-strike: {tool}",
+                    "icon":     "🎯",
+                    "status":   "active",
+                    "result":   f"Pre-staged: {cmd_no_comment[:80]}",
+                    "detail":   f"OSINT-identified kill-chain command #{cmd_idx+1}",
+                    "found":    None,
+                    "ts":       datetime.utcnow().isoformat(),
+                })
+                try:
+                    # Use the standard dispatch so output is captured + parsed
+                    # the same way as LLM-planned commands.  Phase tagged
+                    # as "exploit" so findings land in the right bucket.
+                    output = await self._dispatch_to_agent(
+                        tool=tool, args=args, phase="exploit",
+                        target=target, timeout=120,
+                    )
+                    first_strike_consumed += 1
+                    await self.emit_reasoning(
+                        step       = fs_label,
+                        reasoning  = f"Pre-staged command produced "
+                                      f"{len(output or '')} chars of output",
+                        decision   = "Continuing first-strike sequence",
+                        next_action= "Next pre-staged command (or fall back "
+                                      "to LLM planner if all consumed)",
+                    )
+                    # Ingest as loot so the credential pipeline + LLM
+                    # response-parser see anything interesting (root creds,
+                    # env vars, tokens) leaked by the kill-chain endpoint.
+                    if output:
+                        self.ingest_loot(output, source=fs_label, tool=tool)
+                    # Early exit if shell obtained mid-strike
+                    if self._intel.get("shell_access"):
+                        break
+                except Exception as _fs_err:
+                    await self.emit_reasoning(
+                        step       = fs_label,
+                        reasoning  = f"First-strike command failed: {_fs_err}",
+                        decision   = "Continuing to next pre-staged command",
+                        next_action= "Recovery: try remaining commands or fall back to LLM planner",
+                    )
+            # Mark the queue consumed so the LLM planner below knows
+            # whether to do generic enumeration or pick up the slack.
+            self._intel["first_strike_consumed"] = first_strike_consumed
+            # Don't drain next_commands — keep for audit + retry semantics
+            if first_strike_consumed > 0 and self._intel.get("shell_access"):
+                await self._emit("plan_step_update", {
+                    "step_id": "exploit", "status": "done",
+                    "result": "Initial access obtained via first-strike chain",
+                    "detail": f"Consumed {first_strike_consumed} pre-staged command(s)",
+                    "found":  True,
+                    "ts": datetime.utcnow().isoformat(),
+                })
+                return  # short-circuit — we have a shell, post-ex will pick it up
+
         exploit_plan = self._safe_llm_result(await self._llm_plan_exploitation(target))
         await self.emit_reasoning(
             step       = "exploit_planning",
             reasoning  = exploit_plan.get("reasoning",""),
             decision   = f"Strategy: {exploit_plan.get('primary_strategy','')}",
             next_action= f"{len(exploit_plan.get('attack_vectors',[]))} attack vectors queued"
+                          + (f" (after {first_strike_consumed} first-strike)"
+                              if first_strike_consumed else "")
         )
 
         for i, vector in enumerate(_safe_list(exploit_plan.get("attack_vectors"))[:10]):
@@ -6975,7 +7347,47 @@ Return JSON:
     async def _llm_prioritise_vulns(self, target: str, result: Dict) -> Dict:
         vulns = result.get("vulnerabilities", [])
         cves  = result.get("cves", [])
-        _cve_str = _safe_join(cves[:8])
+        # ── CRITICAL FIX ── earlier phases (especially OSINT synthesis)
+        # may have already identified the kill chain.  Merge that intel
+        # into the prompt so the LLM does NOT respond with
+        # "no vulnerabilities enumerated yet" while the chain is sitting
+        # in self._intel waiting to be executed.  This was the root cause
+        # of the 3-hour-zero-findings engagement on 10.129.56.165.
+        intel_cves  = list(self._intel.get("critical_cves") or [])
+        chain       = self._intel.get("exploit_chain") or {}
+        next_cmds   = list(self._intel.get("next_commands") or [])
+        risk_verdict = (self._intel.get("risk_verdict") or
+                         chain.get("severity") or "").lower()
+
+        # If a critical chain is already known, frame the prompt around
+        # EXECUTING it, not "discovering more vulnerabilities".
+        if next_cmds and risk_verdict in ("critical", "high"):
+            cmd_block = "\n".join(f"  {i+1}. {c}" for i, c in enumerate(next_cmds[:6]))
+            prompt = f"""You already have a high-confidence exploit chain identified
+by upstream analysis on {target}.  Confirm the plan and return JSON.
+
+EXPLOIT CHAIN (from OSINT synthesis): severity={risk_verdict}
+Critical CVEs: {intel_cves}
+Pre-staged commands (run these FIRST, in order):
+{cmd_block}
+
+Additional vuln-scan output (may be empty - chain takes priority): {vulns[:5]}
+
+Return JSON:
+{{
+  "reasoning": "why these pre-staged commands are the right first action",
+  "priority_targets": {intel_cves[:5]!r},
+  "exploit_modules": [
+    {{"module": "manual_command", "command": "<first command from list>", "reliability": "excellent"}}
+  ],
+  "exploit_recommendation": "Execute the pre-staged commands NOW, do not re-enumerate",
+  "manual_exploits": {next_cmds[:5]!r},
+  "skip_redundant_scanning": true
+}}"""
+            return await self.think_json(prompt)
+
+        # No pre-staged chain — fall back to the original prompt.
+        _cve_str = _safe_join((intel_cves + cves)[:8])
         _svc_str = _fmt_svcs(self._intel.get("services", {}))
         kb = await self._kb(
             f"exploit {_cve_str} {_svc_str} metasploit initial access",
@@ -6984,8 +7396,11 @@ Return JSON:
         )
         prompt = f"""Prioritise these vulnerabilities for exploitation on {target}:
 Vulnerabilities: {vulns[:10]}
-CVEs found: {cves}
+CVEs found: {(intel_cves + cves)[:15]}
 Exploit modules from searchsploit: {result.get('exploits', [])}
+Services seen: {_svc_str}
+Critical CVEs from OSINT (priority): {intel_cves}
+Pre-staged commands available (use them if relevant): {next_cmds[:5]}
 {kb}
 Return JSON:
 {{
@@ -8120,7 +8535,28 @@ Return JSON with enumeration goals: {{
         instead of only the data passed to each individual method.
         """
         i = self._intel
-        lines = ["=== CURRENT PENTEST INTELLIGENCE ==="]
+        lines: List[str] = []
+
+        # ── Engagement context (objective + ReAct memory + pinned insights) ───
+        # This is the architectural core: every LLM prompt sees the
+        # north-star objective, the last 8 actions+observations, the
+        # pinned high-value insights, the failed-action list and the
+        # tools currently in circuit-break.  Without this block the
+        # planner re-derives context from scratch each phase, which is
+        # how the 1h35m amnesia ("no CVEs enumerated yet") happens.
+        ctx = getattr(self, "_context", None)
+        if ctx is not None:
+            try:
+                ctx_block = ctx.render_for_prompt()
+                if ctx_block:
+                    lines.append(ctx_block.rstrip())
+            except Exception as _ec_err:
+                import logging as _ll
+                _ll.getLogger(__name__).debug(
+                    "[engagement_context] render failed: %s", _ec_err
+                )
+
+        lines.append("=== CURRENT PENTEST INTELLIGENCE ===")
 
         # Improvement #16 — scope-guard block at the very top so any
         # planner that uses the intel summary as its system context

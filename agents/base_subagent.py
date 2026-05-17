@@ -771,6 +771,19 @@ class BaseSubagent(ABC):
         ``tool_timeout_warning`` WS events if the tool exceeds its deadline
         (default 10 min); the deadline can be extended via :meth:`extend_tool`.
 
+        ── Universal circuit breaker (NEW) ─────────────────────────────────
+        Before invoking the tool, consults the engagement-wide
+        EngagementContext.is_tool_blocked(tool, args).  If the (tool,
+        target-signature) pair has been unproductive past its threshold
+        (e.g. 6 empty curls, 3 empty gobusters), the call is short-
+        circuited with an explanatory message.  This is the
+        architectural protection against the "486 curls to the same
+        dead endpoint" pattern observed in the failed engagement logs.
+
+        After the tool finishes, records a ReactStep on the transcript
+        with the observation excerpt + productivity classification so
+        the LLM's next prompt sees what just happened.
+
         Parameters
         ----------
         tool_name:
@@ -785,6 +798,53 @@ class BaseSubagent(ABC):
         str
             Full tool output as a single string.
         """
+        # ── Pre-flight: engagement-wide circuit breaker ──────────────────
+        # Falls back gracefully if no context registered (e.g. unit tests
+        # that directly instantiate a subagent without a MasterAgent).
+        ctx = self._engagement_context()
+        # Build args signature once: prefer options.options/command (the
+        # actual shell line) over the bare target so curl-against-URL-X
+        # and curl-against-URL-Y are scored separately.
+        args_sig = self._args_signature_for_cb(tool_name, target, options)
+        if ctx is not None:
+            try:
+                blocked, reason = ctx.is_tool_blocked(tool_name, args_sig)
+            except Exception:
+                blocked, reason = False, ""
+            if blocked:
+                msg = f"[CIRCUIT-BREAKER] {reason}"
+                # Emit so the operator UI shows the block, and so the
+                # scan log preserves the evidence.
+                try:
+                    await self._emit("tool_circuit_breaker", {
+                        "tool":     tool_name,
+                        "subagent": self.SUBAGENT_NAME,
+                        "args_sig": args_sig,
+                        "reason":   reason,
+                    })
+                except Exception:
+                    pass
+                logger.info(
+                    "[%s] %s call short-circuited: %s",
+                    self.SUBAGENT_NAME, tool_name, reason,
+                )
+                # Record the short-circuit as an action in the transcript
+                # so the LLM sees "tried this, was blocked" in next prompt.
+                try:
+                    ctx.record_action(
+                        tool        = tool_name,
+                        args        = args_sig,
+                        phase       = (self.AGENT_NAME or "").lower(),
+                        reasoning   = "circuit-breaker short-circuit",
+                        observation = msg,
+                        productive  = False,
+                        goal_tag    = f"{self.AGENT_NAME}/{self.SUBAGENT_NAME}",
+                    )
+                except Exception:
+                    pass
+                self._tool_outputs[tool_name] = msg
+                return msg
+
         # ── Watchdog setup ────────────────────────────────────────────────
         self._kill_current_tool_flag = False   # clear one-shot kill from previous tool
         self._current_tool_name = tool_name
@@ -836,6 +896,23 @@ class BaseSubagent(ABC):
                 )
             output = "\n".join(lines)
             self._tool_outputs[tool_name] = output
+            # ── Post-flight: record observation on the engagement transcript ──
+            if ctx is not None:
+                try:
+                    # goal_tag links the action back to WHO ordered it:
+                    # "<AGENT_NAME>/<SUBAGENT_NAME>" makes the audit
+                    # trail readable in the engagement transcript.
+                    goal_tag = f"{self.AGENT_NAME}/{self.SUBAGENT_NAME}"
+                    ctx.record_action(
+                        tool        = tool_name,
+                        args        = args_sig,
+                        phase       = (self.AGENT_NAME or "").lower(),
+                        reasoning   = "",   # the planner fills this in via record_observation if it cares
+                        observation = output,
+                        goal_tag    = goal_tag,
+                    )
+                except Exception:
+                    pass
             return output
         finally:
             watchdog.cancel()
@@ -843,6 +920,38 @@ class BaseSubagent(ABC):
                 await watchdog
             except asyncio.CancelledError:
                 pass
+
+    # ── EngagementContext helpers (used by collect_tool) ─────────────
+    def _engagement_context(self):
+        """Return the active EngagementContext for this session, or None.
+
+        Subagents don't carry a context reference (constructor signature
+        is fixed), so we look it up by session_id from the global
+        registry.  Returns None if engagement_context module isn't
+        installed or no context registered for this session — callers
+        must tolerate that for unit-test paths.
+        """
+        try:
+            from agents.engagement_context import get_context
+            return get_context(self.session_id)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _args_signature_for_cb(tool_name: str, target: str,
+                                  options: Optional[dict]) -> str:
+        """Build a stable signature for circuit-breaker keying.
+
+        Prefer the user-supplied shell args (options['options'] or
+        options['command']) since that's where the actual URL / host
+        lives in the curl-flood pattern.  Fall back to target.
+        """
+        if isinstance(options, dict):
+            if "command" in options and options["command"]:
+                return str(options["command"])
+            if "options" in options and options["options"]:
+                return str(options["options"])
+        return f"{tool_name} {target or ''}".strip()
 
     # ------------------------------------------------------------------
     # Finding helpers

@@ -1,0 +1,1331 @@
+"""
+agents/engagement_context.py — the unified working memory for ARGUS.
+
+Why this exists
+===============
+The old architecture had ``self._intel`` (a dict on MasterAgent) as the
+only carrier of cross-phase state.  In practice it was:
+
+  * Phase-shaped (services, open_ports, cves) but lacking reasoning
+    structure (what did the LLM just conclude?  what's the objective?
+    what have we tried that failed?).
+  * Not propagated into every LLM prompt — each phase planner built its
+    own ad-hoc prompt and re-derived context, producing the "intel
+    snapshot is empty" syndrome at 1h35m even after OSINT had already
+    identified the kill chain.
+  * Not tied to tool-execution outcomes — so the same curl could be
+    re-fired 486 times against the same dead URL without any record
+    saying "we tried this, it didn't pan out."
+
+EngagementContext fixes those three problems by being:
+
+  1. **The objective** (what is the goal of this engagement — carried in
+     EVERY LLM prompt as the north star).
+  2. **A real reasoning transcript** (action → observation → reasoning
+     triples, compressed and budget-bounded for prompt inclusion).
+  3. **Pinned insights** (the LLM's high-value conclusions that survive
+     across phases — like "MinIO CVE-2023-28432 is the kill chain").
+  4. **Failed-action memory** (don't repeat — both at the LLM-planning
+     level and the tool-dispatch level).
+  5. **Tool usage stats** (every tool call counted; per-tool circuit
+     breakers tripped when unproductive cycles emerge).
+  6. **Output-signature dedup** (5 identical 404 pages from curl =
+     stop hitting that endpoint family).
+  7. **Findings store** (confirmed findings with evidence).
+
+It is backed by ``self._intel`` for backward compatibility, so existing
+code paths that read ``self._intel["services"]`` still work — but new
+code paths read structured fields from EngagementContext directly and
+get richer information.
+
+Design principle
+================
+The LLM is the most expensive component of an engagement.  Every prompt
+should give it MAXIMUM signal: the objective, what we know, what we've
+tried, what failed, and the recent observations.  EngagementContext's
+``render_for_prompt()`` method is the canonical prompt-prelude builder.
+"""
+from __future__ import annotations
+
+import hashlib
+import time
+from collections import deque
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+
+
+# ─────────────────────────────────────────────────────────────────────
+#  Action / observation / insight record types
+# ─────────────────────────────────────────────────────────────────────
+
+
+@dataclass
+class ReactStep:
+    """One iteration of the reason-act loop.
+
+    The reasoning + observation pair is what makes the next LLM call
+    actually intelligent — it sees what just happened, not just a
+    summary derived from intel.
+    """
+    ts:          float
+    phase:       str
+    tool:        str
+    args:        str
+    reasoning:   str
+    observation: str         # truncated tool output / outcome summary
+    productive:  bool        # did this produce findings or useful intel?
+    finding_ids: List[str] = field(default_factory=list)
+
+    def render(self, max_chars: int = 220) -> str:
+        """One-line representation for prompt inclusion."""
+        out_excerpt = self.observation.replace("\n", " ")[:max_chars]
+        flag = "✓" if self.productive else "∅"
+        return (f"  [{flag} {self.phase}] {self.tool} {self.args[:60]}"
+                f"  →  {out_excerpt}")
+
+
+@dataclass
+class PinnedInsight:
+    """A high-value LLM observation that must survive across phases.
+
+    Examples:
+      * "MinIO on 54321 is the critical attack surface (CVE-2023-28432)"
+      * "Target uses WordPress 6.2 with plugin XYZ — known RCE"
+      * "DC name resolved to FOO.local; AD attack path available via..."
+    """
+    ts:        float
+    phase:     str
+    severity:  str           # info | important | critical
+    text:      str
+    source:    str = ""      # which LLM call / subagent produced it
+    consumed_by: List[str] = field(default_factory=list)   # which phases
+                                                            # have used it
+
+
+@dataclass
+class ToolStats:
+    """Per-(tool, target_sig) circuit-breaker accounting."""
+    invocations:        int   = 0
+    productive:         int   = 0
+    consecutive_empty:  int   = 0
+    consecutive_dup:    int   = 0
+    last_invoked_at:    float = 0.0
+    last_productive_at: float = 0.0
+    blocked_until:      float = 0.0
+    output_signatures:  Set[str] = field(default_factory=set)
+
+
+# ─────────────────────────────────────────────────────────────────────
+#  Tunables
+# ─────────────────────────────────────────────────────────────────────
+
+
+# Per-tool "unproductive call" thresholds.  When (tool, target) hits the
+# threshold, further calls are short-circuited until the next productive
+# result or operator override.
+CIRCUIT_BREAKER_THRESHOLDS: Dict[str, int] = {
+    "curl":          6,    # the 486-call offender on the failed run
+    "gobuster":      3,
+    "ffuf":          3,
+    "wfuzz":         3,
+    "dirb":          3,
+    "feroxbuster":   3,
+    "wafw00f":       2,
+    "whatweb":       3,
+    "dalfox":        2,
+    "commix":        2,
+    "davtest":       2,
+    "sqlmap":        3,
+    "nuclei":        4,
+    "nikto":         3,
+    "hydra":         2,    # very loud — limit retries
+    "patator":       2,
+    "crackmapexec":  4,
+    # default = 5 (see _threshold_for)
+}
+
+# Absolute engagement-wide ceilings per tool.  A tool can run AT MOST
+# this many times during a single engagement, regardless of how
+# productive each individual call was.  Prevents a "kept finding new
+# URLs to fuzz" pattern from spiraling.
+PER_TOOL_INVOCATION_CAPS: Dict[str, int] = {
+    "curl":          120,
+    "gobuster":      20,
+    "ffuf":          20,
+    "wfuzz":         15,
+    "feroxbuster":   20,
+    "dirb":          15,
+    "nuclei":        25,
+    "nikto":         15,
+    "sqlmap":        20,
+    "hydra":         15,
+    "patator":       15,
+    "crackmapexec":  40,
+    "msfconsole":    25,
+    "searchsploit":  40,
+    # default = 200 (very high; only the loud/loop-prone tools above
+    # carry stricter ceilings)
+}
+DEFAULT_PER_TOOL_CAP = 200
+
+# Global engagement-wide invocation budget.  Total tool calls across
+# ALL tools combined.  Default 500 is high enough that a real
+# investigation never hits it, but a runaway loop does.
+DEFAULT_ENGAGEMENT_INVOCATION_BUDGET = 500
+
+# Same-action burst window: if the EXACT same (tool, args) was
+# called within this many seconds AND the prior call was
+# unproductive, block immediately on the repeat — don't wait for the
+# consecutive-N counter to climb.
+SAME_ACTION_BURST_WINDOW_SEC = 30.0
+
+# Win-condition fields on intel that, when all true, mean the
+# engagement objective is "structurally" satisfied.  When this state
+# is reached, only evidence/report/cleanup tools are allowed.
+WIN_CONDITION_INTEL_FIELDS = ("shell_access", "user_flag", "root_flag")
+
+# How long a circuit-break stays in force.  10 minutes is enough for the
+# LLM to pivot but not so long that a legitimate later attempt is blocked.
+CIRCUIT_BREAK_DURATION_SEC = 600.0
+
+# How many recent ReactSteps to render in the prompt.
+RECENT_STEPS_FOR_PROMPT = 8
+
+# How many pinned insights to render (newest-first; older ones still
+# in memory but skipped from prompt to save tokens).
+PINNED_INSIGHTS_FOR_PROMPT = 6
+
+# Output-signature uniqueness threshold — if the same (tool, target,
+# output_hash) triplet appears more than this many times, mark as dup.
+DUP_OUTPUT_THRESHOLD = 3
+
+
+# ─────────────────────────────────────────────────────────────────────
+#  The context itself
+# ─────────────────────────────────────────────────────────────────────
+
+
+class EngagementContext:
+    """Single source of truth for an engagement's state and reasoning.
+
+    Instantiate one per session; pass to MasterAgent + every subagent
+    that needs context.  Reads/writes are O(1).  Prompt rendering is
+    O(n) in transcript length but capped by ``RECENT_STEPS_FOR_PROMPT``.
+    """
+
+    def __init__(
+        self,
+        *,
+        session_id: str,
+        target:     str,
+        objective:  str = "",
+        intel_ref:  Optional[Dict[str, Any]] = None,
+    ) -> None:
+        self.session_id = session_id
+        self.target     = target
+        # Objective is THE most important field.  Every LLM prompt must
+        # include it.  Without it the LLM has no notion of "what would
+        # success look like" — which is why ARGUS executes tools for
+        # tool-execution's sake instead of working toward the goal.
+        self.objective  = objective or self._default_objective(target)
+
+        # The legacy intel dict — shared by reference so existing code
+        # paths keep working unchanged.  New code reads via the typed
+        # properties on this object.
+        self.intel: Dict[str, Any] = intel_ref if intel_ref is not None else {}
+
+        # ReAct transcript — bounded deque, oldest evicted when full.
+        self.transcript: deque[ReactStep] = deque(maxlen=200)
+
+        # Pinned insights — high-value LLM conclusions that survive
+        # across phases.  Unbounded but `render_for_prompt` only shows
+        # the most recent N.
+        self.pinned: List[PinnedInsight] = []
+
+        # Failed (tool, args_signature) pairs.  Distinct from circuit
+        # breaker — these are pairs the LLM tried that didn't help.
+        # Used to discourage repetition in subsequent prompts.
+        self.failed_actions: Set[Tuple[str, str]] = set()
+
+        # Tool statistics — keyed by (tool, target_signature).  Drives
+        # the universal circuit breaker.
+        self.tool_stats: Dict[Tuple[str, str], ToolStats] = {}
+
+        # Confirmed findings — separate from intel because findings
+        # have stronger semantics (evidence, severity, MITRE ID).
+        self.findings: List[Dict[str, Any]] = []
+
+        # Counters for engagement-wide observability.
+        self.started_at = time.monotonic()
+        self.phase_started_at: Dict[str, float] = {}
+        self.phase_completed: Dict[str, bool] = {}
+
+        # ── Engagement-wide budgets (the next tier of loop defense) ──
+        # Global invocation count across all tools — capped to prevent
+        # runaway sessions even when each individual call was nominally
+        # productive (the LLM keeps finding new URLs to fuzz, etc.).
+        self.total_invocations: int = 0
+        self.invocation_budget: int = DEFAULT_ENGAGEMENT_INVOCATION_BUDGET
+        # Per-tool absolute invocation counts (in addition to the
+        # consecutive-empty breaker, this caps total calls per tool).
+        self.invocations_per_tool: Dict[str, int] = {}
+        # Tools/categories the operator marked as exempt from the
+        # win-condition short-circuit (e.g. evidence collection,
+        # report generation, post-engagement cleanup).
+        self.post_completion_allowed_tools: Set[str] = {
+            "tar", "zip", "scp", "rsync", "shred",
+            # report-generation tools
+            "pandoc", "wkhtmltopdf",
+            # exfiltration helpers explicitly allowed once shell is owned
+            "cat", "find", "grep",
+        }
+        # Operator can mark the engagement complete manually to halt
+        # further dispatch.  Distinct from the auto-derived win
+        # condition so an operator can pause before flag capture
+        # (e.g. for evidence collection) or extend past it.
+        self.operator_marked_complete: bool = False
+        # Track which sub-goal each action serves, for traceability.
+        # Keyed by ReactStep index in transcript.
+        self.action_goal_tags: Dict[int, str] = {}
+
+    # ── Convenience properties wrapping the underlying intel dict ────
+
+    @property
+    def services(self) -> Dict[Any, Any]:
+        return self.intel.get("services", {}) or {}
+
+    @property
+    def open_ports(self) -> List[Any]:
+        return self.intel.get("open_ports", []) or []
+
+    @property
+    def critical_cves(self) -> List[str]:
+        return list(self.intel.get("critical_cves") or [])
+
+    @property
+    def exploit_chain(self) -> Dict[str, Any]:
+        return self.intel.get("exploit_chain", {}) or {}
+
+    @property
+    def next_commands(self) -> List[str]:
+        return list(self.intel.get("next_commands") or [])
+
+    # ── Action / observation recording ───────────────────────────────
+
+    def record_action(
+        self,
+        *,
+        tool:        str,
+        args:        str,
+        phase:       str,
+        reasoning:   str,
+        observation: str,
+        productive:  Optional[bool] = None,
+        finding_ids: Optional[List[str]] = None,
+        goal_tag:    str = "",
+    ) -> ReactStep:
+        """Append a ReactStep to the transcript and update tool stats.
+
+        ``productive`` defaults to a heuristic: a result is productive
+        if it contains non-trivial output (>40 useful chars) AND
+        doesn't match a known dead-pattern (404, connection refused,
+        empty body).
+        """
+        obs_excerpt = (observation or "").strip()
+        if productive is None:
+            productive = self._is_productive(obs_excerpt, tool)
+
+        step = ReactStep(
+            ts          = time.monotonic(),
+            phase       = phase or "unknown",
+            tool        = tool,
+            args        = args[:200],
+            reasoning   = reasoning[:400],
+            observation = obs_excerpt[:600],
+            productive  = productive,
+            finding_ids = list(finding_ids or []),
+        )
+        self.transcript.append(step)
+        # Track engagement-wide invocation totals (the global budget)
+        self.total_invocations += 1
+        self.invocations_per_tool[tool] = (
+            self.invocations_per_tool.get(tool, 0) + 1
+        )
+        # Goal tagging — link the action to the sub-objective it serves
+        if goal_tag:
+            self.action_goal_tags[len(self.transcript) - 1] = goal_tag[:80]
+
+        # Update tool stats (drives circuit breaker)
+        cb_key = (tool, self._target_sig(args))
+        st = self.tool_stats.get(cb_key) or ToolStats()
+        st.invocations    += 1
+        st.last_invoked_at = step.ts
+
+        # ── Signature first, so the productive branch can distinguish
+        # "productive AND novel" (real reset) from "productive AND dup"
+        # (still going in circles).
+        sig = self._signature(obs_excerpt) if obs_excerpt else ""
+        is_dup = bool(sig) and (sig in st.output_signatures)
+
+        if productive and not is_dup:
+            # Genuinely useful new output → reset both counters
+            st.productive          += 1
+            st.consecutive_empty    = 0
+            st.consecutive_dup      = 0
+            st.last_productive_at   = step.ts
+            st.blocked_until        = 0.0
+        elif productive and is_dup:
+            # Productive but identical to a prior response — still a loop
+            st.productive       += 1
+            st.consecutive_dup  += 1
+        else:
+            # Unproductive
+            st.consecutive_empty += 1
+            self.failed_actions.add((tool, args[:80]))
+            if is_dup:
+                st.consecutive_dup += 1
+        # Always record the new signature (set is idempotent)
+        if sig:
+            st.output_signatures.add(sig)
+        self.tool_stats[cb_key] = st
+        return step
+
+    # ── Insights ─────────────────────────────────────────────────────
+
+    def pin_insight(
+        self,
+        text:     str,
+        *,
+        phase:    str = "",
+        severity: str = "important",
+        source:   str = "",
+    ) -> PinnedInsight:
+        """Pin a high-value reasoning conclusion that must propagate.
+
+        Use this whenever the LLM produces an "aha" moment that should
+        survive across phases — e.g. "the attack chain is X" or
+        "service Y is the entry point."
+        """
+        ins = PinnedInsight(
+            ts=time.monotonic(), phase=phase, severity=severity,
+            text=text[:600], source=source,
+        )
+        self.pinned.append(ins)
+        return ins
+
+    def pin_insights_from_intel(self) -> None:
+        """Pull high-value entries already in intel into the pinned list.
+
+        Called once after the OSINT synthesis writes ``exploit_chain``
+        + ``critical_cves`` + ``next_commands`` — so the LLM sees them
+        in every subsequent prompt rather than having to re-derive.
+        """
+        chain = self.exploit_chain
+        cves  = self.critical_cves
+        cmds  = self.next_commands
+        sev   = (chain.get("severity") or
+                  self.intel.get("risk_verdict") or "").lower()
+        if not (chain or cves or cmds):
+            return
+        # Avoid duplicate pinning across multiple OSINT cycles
+        for p in self.pinned:
+            if p.source == "osint_synthesis":
+                return
+        bits = []
+        if sev:
+            bits.append(f"Severity: {sev.upper()}")
+        if cves:
+            bits.append(f"Critical CVEs: {', '.join(cves[:5])}")
+        if cmds:
+            bits.append(f"Pre-staged kill-chain commands ({len(cmds)}): {cmds[0][:100]}...")
+        self.pin_insight(
+            text=" | ".join(bits),
+            phase="osint",
+            severity="critical",
+            source="osint_synthesis",
+        )
+
+    # ── Findings ────────────────────────────────────────────────────
+
+    def record_finding(self, finding: Dict[str, Any]) -> None:
+        """Store a finding.  Idempotent on (title, host, severity)."""
+        sig = (finding.get("title", ""), finding.get("host", ""),
+               finding.get("severity", ""))
+        for f in self.findings:
+            if (f.get("title"), f.get("host"), f.get("severity")) == sig:
+                return
+        self.findings.append(finding)
+
+    # ── Circuit-breaker queries ─────────────────────────────────────
+
+    def is_tool_blocked(self, tool: str, args: str) -> Tuple[bool, str]:
+        """Return (blocked, reason_message).
+
+        Blocked when ANY of the following hold:
+          (0) **No necessary basis** — the tool's precondition is not
+              met against current state (wpscan with no WordPress
+              detected, hydra with no creds, evil-winrm with no
+              shell, etc.).  This is the *prescriptive* gate that
+              ensures every invocation has a reason, not just that
+              it stays under a cap.
+          (a) **Operator complete-flag** — operator manually halted
+              dispatch (only post-completion-allowed tools may run).
+          (b) **Win condition reached** — shell + flags captured;
+              only evidence/report/cleanup tools may run.
+          (c) **Engagement-wide invocation budget exhausted** —
+              total tool calls hit the global cap.
+          (d) **Per-tool absolute cap** — this tool has been called
+              its full quota for the engagement.
+          (e) **Same-action burst** — exact same (tool, args) called
+              within SAME_ACTION_BURST_WINDOW_SEC AND prior call was
+              unproductive (no need to wait for consecutive-N).
+          (f) **Consecutive-empty threshold** — (tool, target_sig)
+              has produced N unproductive results in a row.
+          (g) **Dup-output threshold** — same response signature
+              repeated DUP_OUTPUT_THRESHOLD+ times.
+          (h) **Explicit timed block** still in force.
+        """
+        tool_lc = (tool or "").lower()
+
+        # (0) — Necessary-basis check (prescriptive gate).  Run FIRST so
+        # the system never even counts an unwarranted call against the
+        # budget — it's refused at the door.
+        warranted, why = check_tool_warranted(tool, args, self)
+        if not warranted:
+            return True, f"NO BASIS — {why}"
+
+        # (a) — operator halted further dispatch
+        if self.operator_marked_complete and tool_lc not in self.post_completion_allowed_tools:
+            return True, (
+                f"Engagement marked complete by operator — "
+                f"{tool} is not in the post-completion allow-list "
+                f"({sorted(self.post_completion_allowed_tools)})"
+            )
+
+        # (b) — win condition reached
+        if self.is_engagement_complete() and tool_lc not in self.post_completion_allowed_tools:
+            return True, (
+                f"Engagement objective satisfied (shell + flags captured). "
+                f"{tool} is not an allowed post-completion tool. "
+                f"Pivot to evidence collection / report generation."
+            )
+
+        # (c) — global invocation budget
+        if self.total_invocations >= self.invocation_budget:
+            return True, (
+                f"Engagement-wide invocation budget exhausted "
+                f"({self.total_invocations}/{self.invocation_budget} calls). "
+                f"Operator must raise the budget or end the engagement."
+            )
+
+        # (d) — per-tool absolute cap
+        per_cap = PER_TOOL_INVOCATION_CAPS.get(tool_lc, DEFAULT_PER_TOOL_CAP)
+        count = self.invocations_per_tool.get(tool, 0)
+        if count >= per_cap:
+            return True, (
+                f"{tool} has been invoked {count} times "
+                f"(cap {per_cap}/engagement) — pivot to a different tool"
+            )
+
+        cb_key = (tool, self._target_sig(args))
+        st = self.tool_stats.get(cb_key)
+        now = time.monotonic()
+
+        # (e) — same-action burst (kicks in EVEN before any stats exist
+        # for newly-tracked target_sig because we check the last
+        # ReactStep on the transcript).
+        if self.transcript:
+            last = self.transcript[-1]
+            if (last.tool == tool
+                    and last.args[:80] == args[:80]
+                    and not last.productive
+                    and (now - last.ts) < SAME_ACTION_BURST_WINDOW_SEC):
+                return True, (
+                    f"Same {tool} call against {args[:60]!r} just produced "
+                    f"unproductive output {int(now - last.ts)}s ago — "
+                    f"do not immediately retry; change tool or target"
+                )
+
+        # Remaining gates need tool_stats — early return if none yet.
+        if st is None:
+            return False, ""
+
+        # (h) — explicit timed block
+        if st.blocked_until and now < st.blocked_until:
+            remain = int(st.blocked_until - now)
+            return True, (f"{tool} against {cb_key[1]} is in circuit-break "
+                          f"for {remain}s more (after "
+                          f"{st.consecutive_empty} unproductive calls)")
+
+        # (f) — consecutive-empty threshold
+        threshold = self._threshold_for(tool)
+        if st.consecutive_empty >= threshold:
+            st.blocked_until = now + CIRCUIT_BREAK_DURATION_SEC
+            self.tool_stats[cb_key] = st
+            return True, (f"{tool} against {cb_key[1]} blocked after "
+                          f"{st.consecutive_empty} consecutive empty/error "
+                          f"results — LLM must pivot to a different action")
+
+        # (g) — dup-output threshold
+        if st.consecutive_dup >= DUP_OUTPUT_THRESHOLD:
+            return True, (f"{tool} against {cb_key[1]} blocked — "
+                          f"output signature repeated "
+                          f"{st.consecutive_dup} times (same dead-end response). "
+                          f"Pivot to different tool or target")
+        return False, ""
+
+    # ── Engagement-completion check ────────────────────────────────
+
+    def is_engagement_complete(self) -> bool:
+        """Auto-derive whether the structural objective is satisfied.
+
+        Defaults to: shell_access AND (user_flag OR root_flag) — the
+        "we own the box AND have at least one flag" line.  Operator
+        can override by setting ``operator_marked_complete`` or by
+        passing a custom win-condition function later.
+        """
+        if self.operator_marked_complete:
+            return True
+        shell = bool(self.intel.get("shell_access"))
+        user_flag = bool(self.intel.get("user_flag"))
+        root_flag = bool(self.intel.get("root_flag"))
+        # Conservative: require shell + ≥1 flag.  An "evidence-only"
+        # engagement can be marked complete by operator without flags.
+        if shell and (user_flag or root_flag):
+            return True
+        return False
+
+    def mark_complete(self, *, reason: str = "operator halt") -> None:
+        """Manually halt all further tool dispatch.
+
+        Use when the operator wants to stop active testing and move to
+        evidence collection / reporting.  Post-completion-allowed tools
+        (tar, scp, pandoc, etc.) continue to function.
+        """
+        self.operator_marked_complete = True
+        self.pin_insight(
+            f"ENGAGEMENT MARKED COMPLETE: {reason}",
+            phase="all", severity="critical", source="operator",
+        )
+
+    def set_invocation_budget(self, budget: int) -> None:
+        """Adjust the global tool-call ceiling for this engagement."""
+        if budget > 0:
+            self.invocation_budget = int(budget)
+
+    def allow_tool_post_completion(self, tool: str) -> None:
+        """Add a tool to the post-completion allow-list."""
+        self.post_completion_allowed_tools.add(tool.lower())
+
+    def force_block(self, tool: str, args: str, duration_sec: float = 600.0) -> None:
+        """Operator / supervisor manually trips the breaker."""
+        cb_key = (tool, self._target_sig(args))
+        st = self.tool_stats.get(cb_key) or ToolStats()
+        st.blocked_until = time.monotonic() + duration_sec
+        self.tool_stats[cb_key] = st
+
+    def lift_block(self, tool: str, args: str = "") -> None:
+        """Operator overrides — clear the block."""
+        cb_key = (tool, self._target_sig(args))
+        st = self.tool_stats.get(cb_key)
+        if st:
+            st.blocked_until = 0.0
+            st.consecutive_empty = 0
+            st.consecutive_dup = 0
+
+    # ── Prompt rendering ────────────────────────────────────────────
+
+    def render_for_prompt(self, *, max_chars: int = 4500) -> str:
+        """Build the canonical prompt prelude.
+
+        Includes (in order):
+          1. The objective (always)
+          2. Active engagement stats (target, elapsed, findings count)
+          3. Pinned insights (most recent N) — the LLM's prior big-picture conclusions
+          4. Recent actions (last N ReactSteps) — what just happened
+          5. Failed actions (don't repeat these)
+          6. Blocked tools (don't propose these)
+
+        Budget-bounded: truncates sections from the bottom when limit hit.
+        """
+        out: List[str] = []
+
+        # 1. Objective — always present, never truncated
+        out.append("=== ENGAGEMENT OBJECTIVE ===")
+        out.append(self.objective)
+        out.append("")
+
+        # 2. Stats + engagement budget status
+        elapsed = int(time.monotonic() - self.started_at)
+        elapsed_str = f"{elapsed // 60}m {elapsed % 60}s"
+        budget_used_pct = (
+            int(100 * self.total_invocations / self.invocation_budget)
+            if self.invocation_budget > 0 else 0
+        )
+        win_marker = " | OBJECTIVE SATISFIED" if self.is_engagement_complete() else ""
+        out.append(f"Target: {self.target}  |  Elapsed: {elapsed_str}  "
+                    f"|  Findings: {len(self.findings)}  "
+                    f"|  Pinned insights: {len(self.pinned)}  "
+                    f"|  Tool calls: {self.total_invocations}/{self.invocation_budget} "
+                    f"({budget_used_pct}%){win_marker}")
+        # Warn the LLM when budget is running out so it prioritises
+        # high-value actions over enumeration.
+        if budget_used_pct >= 80:
+            out.append(
+                f"!! TOOL BUDGET WARNING: {budget_used_pct}% used — "
+                f"only the highest-value actions should be issued from "
+                f"here.  Generic enumeration must stop."
+            )
+        if self.is_engagement_complete():
+            out.append(
+                "*** OBJECTIVE STRUCTURALLY SATISFIED: shell + flag(s) "
+                "captured.  Stop active testing; pivot to evidence "
+                "collection and report generation."
+            )
+        out.append("")
+
+        # 3. Pinned insights (newest first)
+        if self.pinned:
+            out.append("=== KEY INSIGHTS (carry these forward) ===")
+            for ins in self.pinned[-PINNED_INSIGHTS_FOR_PROMPT:][::-1]:
+                marker = ("!!!" if ins.severity == "critical"
+                           else "!!" if ins.severity == "important"
+                           else " *")
+                out.append(f"{marker} [{ins.phase}] {ins.text}")
+            out.append("")
+
+        # 4. Recent ReAct steps
+        if self.transcript:
+            out.append("=== RECENT ACTIONS (observation = first 220 chars) ===")
+            for st in list(self.transcript)[-RECENT_STEPS_FOR_PROMPT:]:
+                out.append(st.render())
+            out.append("")
+
+        # 5. Failed actions — succinct list
+        if self.failed_actions:
+            out.append("=== ACTIONS ALREADY TRIED (do not repeat) ===")
+            for tool, args in list(self.failed_actions)[-12:]:
+                out.append(f"  ✗ {tool} {args[:80]}")
+            out.append("")
+
+        # 6. Blocked tools
+        blocked = self._render_blocked_tools()
+        if blocked:
+            out.append("=== CIRCUIT-BREAKER: BLOCKED TOOLS (must pivot) ===")
+            out.extend(blocked)
+            out.append("")
+
+        result = "\n".join(out)
+        if len(result) > max_chars:
+            # Hard-truncate from the bottom of sections 4-6 (preserve 1-3).
+            cut = result.rfind("\n=== ", 0, max_chars)
+            if cut > 0:
+                result = result[:cut] + "\n[context truncated to fit prompt budget]"
+            else:
+                result = result[:max_chars] + "\n[truncated]"
+        return result
+
+    # ── Internals ───────────────────────────────────────────────────
+
+    def _render_blocked_tools(self) -> List[str]:
+        now = time.monotonic()
+        out: List[str] = []
+        for (tool, target_sig), st in self.tool_stats.items():
+            if st.blocked_until and now < st.blocked_until:
+                remain = int(st.blocked_until - now)
+                out.append(f"  ⛔ {tool} {target_sig} (blocked for {remain}s)")
+            elif st.consecutive_dup >= DUP_OUTPUT_THRESHOLD:
+                out.append(f"  ⛔ {tool} {target_sig} "
+                            f"(same dead-end output {st.consecutive_dup}x)")
+        return out
+
+    @staticmethod
+    def _threshold_for(tool: str) -> int:
+        return CIRCUIT_BREAKER_THRESHOLDS.get(tool.lower(), 5)
+
+    @staticmethod
+    def _target_sig(args: str) -> str:
+        """Reduce args to a stable signature for tool-stats keying.
+
+        Strategy: keep the first whitespace-separated token, drop only
+        query string + fragment.  Different paths on the SAME host get
+        their own counters (legitimate enumeration like /admin /login
+        /backup is allowed); the dedup-by-output-signature path catches
+        the broader "curl-floods many URLs all returning the same 404"
+        pattern, so we don't need the per-host collapse.
+        """
+        if not args:
+            return ""
+        first = args.split()[0]
+        # Drop query and fragment if present
+        for sep in ("?", "#"):
+            if sep in first:
+                first = first.split(sep, 1)[0]
+        return first[:120]
+
+    @staticmethod
+    def _signature(text: str) -> str:
+        """SHA-256 of the first 512 chars (cheap dedup key for outputs)."""
+        return hashlib.sha256((text or "")[:512].encode("utf-8", errors="ignore")
+                              ).hexdigest()[:16]
+
+    @staticmethod
+    def _is_productive(observation: str, tool: str) -> bool:
+        """Heuristic for whether an observation is meaningful enough to
+        reset the empty-counter.
+
+        Conservative: short outputs, generic 404s, "connection refused",
+        and empty results count as unproductive.
+        """
+        if not observation:
+            return False
+        body = observation.strip()
+        if len(body) < 40:
+            return False
+        bodylc = body.lower()
+        dead_markers = (
+            "404 not found", "could not resolve host", "connection refused",
+            "no exploits found", "no matching template",
+            "0 paths found", "no vulnerable plugins",
+            "moved permanently",  # often redirects to /login.html etc — useful sometimes
+        )
+        # 404 NOT FOUND specifically is dead unless tool is web-fuzzer
+        # (gobuster/ffuf — they REPORT 404s as their primary output,
+        # interesting findings show up as 200/301/302/401/403).
+        web_fuzzers = ("gobuster", "ffuf", "wfuzz", "feroxbuster", "dirb")
+        if tool.lower() in web_fuzzers:
+            # Productive only if there's a non-404 line in the output
+            non_404_codes = ("status: 200", "status: 301", "status: 302",
+                              "status: 401", "status: 403", "[200 ", "[301 ",
+                              "[302 ", "[401 ", "[403 ")
+            return any(code in bodylc for code in non_404_codes)
+        # Generic dead markers — if the output is JUST one of these
+        if any(m in bodylc for m in dead_markers) and len(body) < 200:
+            return False
+        return True
+
+    @staticmethod
+    def _default_objective(target: str) -> str:
+        return (
+            f"OBJECTIVE: Compromise host {target} — gain initial access, "
+            "escalate privilege, capture any flags/credentials/sensitive data, "
+            "and document the kill chain.  PRIORITIES: (1) move toward "
+            "concrete access not generic enumeration; (2) confirm exploitable "
+            "leads with one targeted command before broad fuzzing; "
+            "(3) PIVOT immediately when intel says a high-confidence chain "
+            "exists; (4) do NOT cycle the same tool against the same target "
+            "if prior calls produced no useful output."
+        )
+
+    # ── Persistence (snapshot for /sessions/{id}/checkpoint) ────────
+
+    def snapshot(self) -> Dict[str, Any]:
+        return {
+            "session_id":     self.session_id,
+            "target":         self.target,
+            "objective":      self.objective,
+            "intel_keys":     sorted(self.intel.keys()),
+            "transcript":     [t.__dict__ for t in self.transcript],
+            "pinned":         [p.__dict__ for p in self.pinned],
+            "failed_actions": list(self.failed_actions),
+            "findings_count": len(self.findings),
+            "tool_stats":     {
+                f"{k[0]}|{k[1]}": {
+                    "invocations":      v.invocations,
+                    "productive":       v.productive,
+                    "consecutive_empty": v.consecutive_empty,
+                    "blocked":          v.blocked_until > time.monotonic(),
+                }
+                for k, v in self.tool_stats.items()
+            },
+        }
+
+
+# ─────────────────────────────────────────────────────────────────────
+#  Session registry — lets subagents discover the active context.
+# ─────────────────────────────────────────────────────────────────────
+#
+# Subagents are spawned by MasterAgent and only receive (session_id,
+# target, broadcast, db) in their constructor.  We register the
+# EngagementContext under session_id so any subagent can look it up
+# without changing the constructor signature.
+#
+# Thread-safety: ARGUS is asyncio single-threaded so a plain dict is
+# fine.  Each session registers exactly once at engagement start and
+# unregisters at completion.
+
+_ACTIVE_CONTEXTS: Dict[str, "EngagementContext"] = {}
+
+
+def register_context(ctx: "EngagementContext") -> None:
+    """Register the active context for this session.
+
+    Idempotent — replacing an existing entry is allowed (the MasterAgent
+    may re-instantiate during a hot resume).
+    """
+    _ACTIVE_CONTEXTS[ctx.session_id] = ctx
+
+
+def get_context(session_id: str) -> Optional["EngagementContext"]:
+    """Return the EngagementContext for ``session_id`` if any.
+
+    Subagents call this from ``collect_tool`` to consult the circuit
+    breaker.  Returns ``None`` if no context is registered — callers
+    must tolerate that for backward compatibility with code paths that
+    haven't migrated yet.
+    """
+    return _ACTIVE_CONTEXTS.get(session_id)
+
+
+def unregister_context(session_id: str) -> Optional["EngagementContext"]:
+    """Remove and return the context for ``session_id`` (or ``None``)."""
+    return _ACTIVE_CONTEXTS.pop(session_id, None)
+
+
+# ═════════════════════════════════════════════════════════════════════
+#  Tool-Justification Layer — "necessary basis" gate
+# ═════════════════════════════════════════════════════════════════════
+#
+# The circuit-breaker prevents runaway loops AFTER a tool has been
+# called too many times.  The justification layer prevents the call
+# in the first place when there is no STATE-BASED REASON to make it.
+#
+# A "necessary basis" for invoking a tool means at least one of:
+#   * a discovered service / open port that this tool targets
+#     (e.g. wpscan only after WordPress is detected, enum4linux only
+#     when 445 is open)
+#   * a discovered CVE / exploit module that this tool exploits
+#     (e.g. msfconsole only when a specific exploit module is known)
+#   * an operator-supplied directive
+#   * a trigger-fired action (which already carries its own rationale)
+#
+# Tools without a registered precondition default to "permitted with
+# warning" (information gathering tools like nmap, dig, curl-info).
+# Aggressive / specific tools without preconditions are REFUSED.
+
+@dataclass
+class ToolPrecondition:
+    """Declarative gate on whether a tool may run given current state."""
+    tool: str
+    # Port-based: at least one of these ports must be open
+    requires_open_port: List[int] = field(default_factory=list)
+    # Service-banner regex (case-insensitive) — must match in any service
+    requires_service_re: str = ""
+    # Intel keys that must be truthy (e.g. "shell_access" for post-exploit tools)
+    requires_intel_key: str = ""
+    # Args must contain at least one of these substrings (lower-cased match)
+    requires_args_contains: List[str] = field(default_factory=list)
+    # Custom callable: takes (ctx, args) → bool
+    custom_check: Optional[Any] = None
+    # Tier: "discovery" (permissive default-allow) | "targeted" (must match) |
+    #       "aggressive" (refuse without strong basis)
+    tier: str = "targeted"
+    # Human-readable refusal message
+    rationale: str = ""
+
+
+# Default precondition registry.  Keys are tool basenames (lowercased,
+# no path/options).  Tools NOT in this registry get the implicit
+# permissive default ("discovery" tier — allowed if invocations are
+# within cap).
+DEFAULT_TOOL_PRECONDITIONS: Dict[str, ToolPrecondition] = {
+    # ── Web-app testing — must have HTTP/HTTPS service ─────────────
+    "wpscan": ToolPrecondition(
+        tool="wpscan",
+        requires_service_re=r"wordpress|wp-content|wp-login|wp-json",
+        tier="targeted",
+        rationale="wpscan only runs after WordPress is detected in service fingerprinting",
+    ),
+    "nikto": ToolPrecondition(
+        tool="nikto",
+        requires_open_port=[80, 443, 8080, 8443, 8000, 8888],
+        requires_service_re=r"http|https|nginx|apache|tomcat|iis|lighttpd",
+        tier="targeted",
+        rationale="nikto requires a known HTTP/HTTPS service",
+    ),
+    "gobuster": ToolPrecondition(
+        tool="gobuster",
+        requires_open_port=[80, 443, 8080, 8443, 8000, 8888],
+        requires_service_re=r"http|nginx|apache|tomcat|iis|lighttpd|jetty|node|express",
+        requires_args_contains=["http://", "https://", "-u "],
+        tier="targeted",
+        rationale="gobuster requires a target URL and a confirmed web server",
+    ),
+    "ffuf": ToolPrecondition(
+        tool="ffuf",
+        requires_args_contains=["http://", "https://", "-u "],
+        tier="targeted",
+        rationale="ffuf requires a target URL",
+    ),
+    "wfuzz": ToolPrecondition(
+        tool="wfuzz",
+        requires_args_contains=["http://", "https://"],
+        tier="targeted",
+        rationale="wfuzz requires a target URL",
+    ),
+    "feroxbuster": ToolPrecondition(
+        tool="feroxbuster",
+        requires_args_contains=["http://", "https://", "-u "],
+        tier="targeted",
+        rationale="feroxbuster requires a target URL",
+    ),
+    "dirb": ToolPrecondition(
+        tool="dirb",
+        requires_args_contains=["http://", "https://"],
+        tier="targeted",
+        rationale="dirb requires a target URL",
+    ),
+    "dalfox": ToolPrecondition(
+        tool="dalfox",
+        requires_args_contains=["http://", "https://"],
+        tier="targeted",
+        rationale="dalfox (XSS) needs a target URL with parameters",
+    ),
+    "sqlmap": ToolPrecondition(
+        tool="sqlmap",
+        requires_args_contains=["-u ", "--url", "-r ", "--data"],
+        tier="aggressive",
+        rationale="sqlmap requires a specific URL/request with parameters; do not run blind",
+    ),
+
+    # ── SMB / Windows file-share tools — port 445 must be open ─────
+    "enum4linux": ToolPrecondition(
+        tool="enum4linux",
+        requires_open_port=[139, 445],
+        tier="targeted",
+        rationale="enum4linux requires SMB port 139 or 445 open",
+    ),
+    "enum4linux-ng": ToolPrecondition(
+        tool="enum4linux-ng",
+        requires_open_port=[139, 445],
+        tier="targeted",
+        rationale="enum4linux-ng requires SMB port 139 or 445 open",
+    ),
+    "smbclient": ToolPrecondition(
+        tool="smbclient",
+        requires_open_port=[139, 445],
+        tier="targeted",
+        rationale="smbclient requires SMB port 139 or 445 open",
+    ),
+    "smbmap": ToolPrecondition(
+        tool="smbmap",
+        requires_open_port=[139, 445],
+        tier="targeted",
+        rationale="smbmap requires SMB port 139 or 445 open",
+    ),
+    "rpcclient": ToolPrecondition(
+        tool="rpcclient",
+        requires_open_port=[135, 139, 445],
+        tier="targeted",
+        rationale="rpcclient requires MS-RPC or SMB ports open",
+    ),
+
+    # ── AD / LDAP / Kerberos ───────────────────────────────────────
+    "ldapsearch": ToolPrecondition(
+        tool="ldapsearch",
+        requires_open_port=[389, 636, 3268, 3269],
+        tier="targeted",
+        rationale="ldapsearch requires LDAP/LDAPS port open",
+    ),
+    "kerbrute": ToolPrecondition(
+        tool="kerbrute",
+        requires_open_port=[88],
+        tier="aggressive",
+        rationale="kerbrute requires Kerberos port 88 open AND a userlist",
+    ),
+    "impacket-getnpusers": ToolPrecondition(
+        tool="impacket-getnpusers",
+        requires_open_port=[88, 389],
+        tier="targeted",
+        rationale="GetNPUsers (AS-REP roast) requires Kerberos + AD",
+    ),
+    "impacket-getuserspns": ToolPrecondition(
+        tool="impacket-getuserspns",
+        requires_open_port=[88, 389],
+        tier="targeted",
+        rationale="GetUserSPNs (Kerberoast) requires Kerberos + AD",
+    ),
+    "evil-winrm": ToolPrecondition(
+        tool="evil-winrm",
+        requires_open_port=[5985, 5986],
+        requires_args_contains=["-u ", "-p ", "-i "],
+        tier="aggressive",
+        rationale="evil-winrm requires WinRM ports open AND credentials",
+    ),
+
+    # ── Database probes — port + (sometimes) credentials ───────────
+    "mysql": ToolPrecondition(
+        tool="mysql",
+        requires_open_port=[3306],
+        tier="targeted",
+        rationale="mysql client requires port 3306",
+    ),
+    "psql": ToolPrecondition(
+        tool="psql",
+        requires_open_port=[5432],
+        tier="targeted",
+        rationale="psql requires PostgreSQL port 5432",
+    ),
+    "mongo": ToolPrecondition(
+        tool="mongo",
+        requires_open_port=[27017, 27018],
+        tier="targeted",
+        rationale="mongo client requires MongoDB port open",
+    ),
+    "redis-cli": ToolPrecondition(
+        tool="redis-cli",
+        requires_open_port=[6379],
+        tier="targeted",
+        rationale="redis-cli requires port 6379 open",
+    ),
+    "impacket-mssqlclient": ToolPrecondition(
+        tool="impacket-mssqlclient",
+        requires_open_port=[1433],
+        tier="targeted",
+        rationale="mssqlclient requires MSSQL port 1433 open",
+    ),
+
+    # ── Other targeted protocols ───────────────────────────────────
+    "showmount": ToolPrecondition(
+        tool="showmount",
+        requires_open_port=[2049],
+        tier="targeted",
+        rationale="showmount requires NFS port 2049 open",
+    ),
+    "snmpwalk": ToolPrecondition(
+        tool="snmpwalk",
+        requires_open_port=[161],
+        tier="targeted",
+        rationale="snmpwalk requires SNMP port 161 open",
+    ),
+    "snmpget": ToolPrecondition(
+        tool="snmpget",
+        requires_open_port=[161],
+        tier="targeted",
+        rationale="snmpget requires SNMP port 161 open",
+    ),
+
+    # ── Aggressive / brute-force — require strong basis ────────────
+    "hydra": ToolPrecondition(
+        tool="hydra",
+        requires_args_contains=["-l ", "-L ", "-p ", "-P "],
+        tier="aggressive",
+        rationale="hydra requires explicit user/password (list) arguments AND a known service target",
+    ),
+    "patator": ToolPrecondition(
+        tool="patator",
+        requires_args_contains=["user=", "password=", "host="],
+        tier="aggressive",
+        rationale="patator requires explicit user/password/host arguments",
+    ),
+    "medusa": ToolPrecondition(
+        tool="medusa",
+        requires_args_contains=["-u ", "-U ", "-p ", "-P "],
+        tier="aggressive",
+        rationale="medusa requires user/password arguments",
+    ),
+    "msfconsole": ToolPrecondition(
+        tool="msfconsole",
+        requires_args_contains=["use ", "exploit/", "auxiliary/", "post/"],
+        tier="aggressive",
+        rationale="msfconsole must specify a concrete module (exploit/auxiliary/post)",
+    ),
+
+    # ── Post-exploit tools — require shell ─────────────────────────
+    "linpeas": ToolPrecondition(
+        tool="linpeas",
+        requires_intel_key="shell_access",
+        tier="aggressive",
+        rationale="linpeas needs a Linux shell foothold first",
+    ),
+    "winpeas": ToolPrecondition(
+        tool="winpeas",
+        requires_intel_key="shell_access",
+        tier="aggressive",
+        rationale="winpeas needs a Windows shell foothold first",
+    ),
+    "mimikatz": ToolPrecondition(
+        tool="mimikatz",
+        requires_intel_key="shell_access",
+        tier="aggressive",
+        rationale="mimikatz needs a Windows shell with high privileges",
+    ),
+    "bloodhound": ToolPrecondition(
+        tool="bloodhound",
+        requires_open_port=[88, 389],
+        tier="targeted",
+        rationale="BloodHound requires AD environment + ideally creds for SharpHound",
+    ),
+
+    # ── Search/info tools — broad but need a search term ───────────
+    "searchsploit": ToolPrecondition(
+        tool="searchsploit",
+        requires_args_contains=[" "],   # any non-empty search term
+        tier="discovery",
+        rationale="searchsploit requires a search term",
+    ),
+
+    # ── Discovery — broadly allowed ────────────────────────────────
+    "nmap":     ToolPrecondition(tool="nmap",     tier="discovery"),
+    "rustscan": ToolPrecondition(tool="rustscan", tier="discovery"),
+    "masscan":  ToolPrecondition(tool="masscan",  tier="discovery"),
+    "dig":      ToolPrecondition(tool="dig",      tier="discovery"),
+    "host":     ToolPrecondition(tool="host",     tier="discovery"),
+    "nslookup": ToolPrecondition(tool="nslookup", tier="discovery"),
+    "whois":    ToolPrecondition(tool="whois",    tier="discovery"),
+    "ping":     ToolPrecondition(tool="ping",     tier="discovery"),
+    "traceroute": ToolPrecondition(tool="traceroute", tier="discovery"),
+    "curl":     ToolPrecondition(tool="curl",     tier="discovery"),
+    "wget":     ToolPrecondition(tool="wget",     tier="discovery"),
+    "whatweb":  ToolPrecondition(tool="whatweb",  tier="discovery"),
+    "wafw00f":  ToolPrecondition(tool="wafw00f",  tier="discovery"),
+    "nuclei":   ToolPrecondition(tool="nuclei",   tier="targeted",
+                                  requires_args_contains=["-u ", "-l ", "-target"],
+                                  rationale="nuclei requires a target URL/host argument"),
+}
+
+
+def register_precondition(precond: ToolPrecondition) -> None:
+    """Plug-in hook for per-engagement tool gating overrides."""
+    DEFAULT_TOOL_PRECONDITIONS[precond.tool.lower()] = precond
+
+
+def get_precondition(tool: str) -> Optional[ToolPrecondition]:
+    return DEFAULT_TOOL_PRECONDITIONS.get((tool or "").lower())
+
+
+def check_command_warranted(cmd_line: str, ctx: "EngagementContext"
+                              ) -> Tuple[bool, str]:
+    """Validate a full shell command line (e.g. from intel['next_commands']).
+
+    Splits off the first whitespace-token as the tool and feeds the
+    rest to ``check_tool_warranted``.  Lets the master agent filter
+    LLM-supplied or trigger-supplied commands BEFORE queueing them
+    for dispatch.
+    """
+    cmd_line = (cmd_line or "").strip()
+    if not cmd_line:
+        return False, "empty command"
+    parts = cmd_line.split(None, 1)
+    tool = parts[0]
+    args = parts[1] if len(parts) > 1 else ""
+    return check_tool_warranted(tool, args, ctx)
+
+
+def check_tool_warranted(tool: str, args: str, ctx: "EngagementContext"
+                          ) -> Tuple[bool, str]:
+    """Return (warranted, reason).
+
+    A tool is "warranted" iff its precondition is satisfied OR no
+    precondition is registered AND it's not an aggressive verb.
+    """
+    if not tool:
+        return False, "no tool name"
+    tool_lc = tool.lower()
+    # Strip path / leading subprocess.run(...) wrapping
+    base = tool_lc.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+    pre = get_precondition(base) or get_precondition(tool_lc)
+    if pre is None:
+        # Unknown tool — discovery-tier default, allowed
+        return True, ""
+
+    # ── Tier gate ──
+    # "discovery" tools allowed if args provided
+    if pre.tier == "discovery":
+        if pre.requires_args_contains and not _args_contain_any(args, pre.requires_args_contains):
+            return False, (
+                f"{tool} ({pre.tier} tier) needs args containing one of "
+                f"{pre.requires_args_contains}; got: {args[:80]!r}. "
+                + (pre.rationale or "")
+            )
+        return True, ""
+
+    # ── Targeted / aggressive: every declared requirement must hold ──
+    if pre.requires_open_port:
+        if not any(_port_open_ctx(ctx, p) for p in pre.requires_open_port):
+            return False, (
+                f"{tool} requires one of ports {pre.requires_open_port} open, "
+                f"but ports {list(ctx.open_ports)} are open. "
+                + (pre.rationale or "")
+            )
+    if pre.requires_service_re:
+        import re as _re
+        services = ctx.services or {}
+        hit = False
+        for _p, svc in services.items():
+            if isinstance(svc, dict):
+                hay = " ".join(str(svc.get(k, "")) for k in
+                                ("service", "product", "version", "banner",
+                                  "extrainfo", "info")).lower()
+                if _re.search(pre.requires_service_re, hay, _re.IGNORECASE):
+                    hit = True
+                    break
+        if not hit:
+            return False, (
+                f"{tool} requires a service matching r{pre.requires_service_re!r} "
+                f"in fingerprinted services, but none matched. "
+                + (pre.rationale or "")
+            )
+    if pre.requires_intel_key:
+        if not ctx.intel.get(pre.requires_intel_key):
+            return False, (
+                f"{tool} requires intel.{pre.requires_intel_key} to be truthy "
+                f"(currently {ctx.intel.get(pre.requires_intel_key)!r}). "
+                + (pre.rationale or "")
+            )
+    if pre.requires_args_contains:
+        if not _args_contain_any(args, pre.requires_args_contains):
+            return False, (
+                f"{tool} requires args to contain one of "
+                f"{pre.requires_args_contains}; got: {args[:80]!r}. "
+                + (pre.rationale or "")
+            )
+    if pre.custom_check is not None:
+        try:
+            ok = bool(pre.custom_check(ctx, args))
+        except Exception:
+            ok = False
+        if not ok:
+            return False, (
+                f"{tool} failed its custom precondition check. "
+                + (pre.rationale or "")
+            )
+    return True, ""
+
+
+def _args_contain_any(args: str, needles: Iterable[str]) -> bool:
+    a = (args or "").lower()
+    return any((n or "").lower() in a for n in needles)
+
+
+def _port_open_ctx(ctx: "EngagementContext", port: int) -> bool:
+    """Reuse port-check from EngagementContext without circular import."""
+    ports = ctx.open_ports or []
+    for p in ports:
+        try:
+            if int(p) == int(port):
+                return True
+        except Exception:
+            continue
+    # Also check services dict (some pipelines populate services without open_ports)
+    services = ctx.services or {}
+    for p in services.keys():
+        try:
+            if int(p) == int(port):
+                return True
+        except Exception:
+            continue
+    return False
+
+
+__all__ = [
+    "EngagementContext", "ReactStep", "PinnedInsight", "ToolStats",
+    "CIRCUIT_BREAKER_THRESHOLDS", "PER_TOOL_INVOCATION_CAPS",
+    "DEFAULT_ENGAGEMENT_INVOCATION_BUDGET",
+    "register_context", "get_context", "unregister_context",
+    # Justification layer
+    "ToolPrecondition", "DEFAULT_TOOL_PRECONDITIONS",
+    "register_precondition", "get_precondition",
+    "check_tool_warranted", "check_command_warranted",
+]
