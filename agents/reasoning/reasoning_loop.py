@@ -2325,15 +2325,49 @@ class ReasoningLoop:
                     # Vault ingest is advisory; never fail the emit on it.
                     pass
 
+                # ── PERSIST to db.credentials so the UI panel + the
+                # API endpoint /sessions/{id}/credentials actually has
+                # data.  Previously credentials only flowed via WS
+                # events into in-memory frontend state and were lost
+                # on page reload.
+                _persist_user    = cred.get("user") or cred.get("username") or "?"
+                _persist_host    = cred.get("host") or self._target
+                _persist_service = str(cred.get("service") or cred.get("port") or "?")
+                _persist_secret  = (cred.get("pass") or cred.get("password")
+                                       or cred.get("hash") or "")
+                _persist_type    = ("hash" if cred.get("hash")
+                                       else "ssh_key" if cred.get("key")
+                                       else "plaintext")
+                try:
+                    import db.mongo_client as _db
+                    await _db.store_credential(
+                        session_id = self._session_id,
+                        user       = _persist_user,
+                        secret     = _persist_secret,
+                        cred_type  = _persist_type,
+                        service    = _persist_service,
+                        host       = _persist_host,
+                        port       = cred.get("port"),
+                        found_by   = cred.get("found_by") or "credential_vault",
+                        phase      = "exploit",
+                        extra      = {k: v for k, v in cred.items() if k not in
+                                       ("user","username","pass","password",
+                                         "hash","host","service","port","found_by")},
+                    )
+                except Exception:
+                    # Persistence is best-effort; never fail the emit.
+                    pass
+
                 await self._emit({
                     "type":       "credential_found",
                     "session_id": self._session_id,
                     "agent":      "master",
                     "data": {
-                        "user":    cred.get("user") or cred.get("username") or "?",
-                        "host":    cred.get("host") or self._target,
-                        "service": cred.get("service") or cred.get("port") or "?",
-                        "secret":  (cred.get("pass") or cred.get("password") or cred.get("hash") or "")[:40],
+                        "user":    _persist_user,
+                        "host":    _persist_host,
+                        "service": _persist_service,
+                        "secret":  _persist_secret[:40],
+                        "type":    _persist_type,
                     },
                 })
                 emitted.append("credential_found")

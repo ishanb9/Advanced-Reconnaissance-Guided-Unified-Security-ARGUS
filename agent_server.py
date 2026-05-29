@@ -2000,14 +2000,26 @@ async def save_neo4j_settings(req: Neo4jSettingsRequest):
 @app.get("/sessions/{session_id}/credentials")
 async def get_credentials(session_id: str, service: Optional[str] = None,
                           cred_type: Optional[str] = None):
-    """Get all discovered credentials for a session."""
-    mdb = db.get_db()
-    query: dict = {"session_id": session_id}
-    if service:
-        query["service"] = service
-    if cred_type:
-        query["type"] = cred_type
-    docs = await mdb.credentials.find(query, {"_id": 0}).sort("timestamp", -1).to_list(500)
+    """Get all discovered credentials for a session.
+
+    Backed by db.credentials, which is now actually written to by
+    `reasoning_loop._handle_credential_signal` (previously the
+    collection existed but nothing inserted into it).
+    """
+    try:
+        docs = await db.get_credentials(session_id, service=service,
+                                            cred_type=cred_type)
+    except AttributeError:
+        # Fallback for older deployments that don't have the helper yet
+        mdb = db.get_db()
+        query: dict = {"session_id": session_id}
+        if service:
+            query["service"] = service
+        if cred_type:
+            query["type"] = cred_type
+        docs = await mdb.credentials.find(
+            query, {"_id": 0}
+        ).sort("timestamp", -1).to_list(500)
     return {"credentials": docs, "count": len(docs)}
 
 

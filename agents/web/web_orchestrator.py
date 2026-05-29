@@ -267,6 +267,7 @@ class WebOrchestrator:
     # ── Cooperative-interrupt helper ────────────────────────────────
     def _should_yield_now(self) -> bool:
         """Consult the EngagementContext (if any) for any of:
+          - **target profile says no web app exists** (e.g. ad_dc),
           - the focused-attack signal (another pipeline found a chain),
           - the operator-complete flag (operator halted dispatch),
           - the win-condition (shell + flag captured), or
@@ -287,6 +288,29 @@ class WebOrchestrator:
             ctx = get_context(sid)
             if ctx is None:
                 return False
+            # NEW: profile-based hard skip.  An AD DC has no web app
+            # surface (WinRM HTTPAPI on 5985 doesn't count) and running
+            # WSTG against its closed port 80 produces hundreds of
+            # exit-28 timeouts.  Same goes for db_server, ssh_only,
+            # smb_only profiles.
+            try:
+                if ctx.should_skip_web_testing():
+                    ctx.pipelines_yielded.add("WebOrchestrator:wrong_profile")
+                    return True
+            except Exception:
+                pass
+            # UNIVERSAL: scanners must yield when engagement enters
+            # post_exploit / complete mode.  This is the reactive-
+            # dispatch contract: once an entry succeeds (shell, creds,
+            # flag, loot), ALL scanners stop so privesc + loot can run.
+            try:
+                if ctx.should_scanners_yield():
+                    ctx.pipelines_yielded.add(
+                        f"WebOrchestrator:mode={ctx.engagement_mode}"
+                    )
+                    return True
+            except Exception:
+                pass
             if ctx.should_yield_to_focused_attack(
                     pipeline_name="WebOrchestrator"):
                 return True

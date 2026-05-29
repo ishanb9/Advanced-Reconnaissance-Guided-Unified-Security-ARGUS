@@ -202,6 +202,15 @@ const INIT = {
     corrections: [],
     stats: { total: 0, blocking: 0, advisory: 0, toolsValidated: 0, phasesValidated: 0 },
   },
+  // Error Analyzer — LLM-driven tool-error triage + course correction
+  metaErrorAnalyzerState: {
+    status:      'idle',
+    phase:       '',
+    history:     [],
+    corrections: [],
+    stats: { total: 0, blocking: 0, advisory: 0,
+             tool_missing: 0, wrong_target: 0, transient: 0, other: 0 },
+  },
 
   // ── Red-Team Expert (senior tactician / oversight) ──────────────────────────
   expertState: {
@@ -1146,8 +1155,9 @@ function reducer(state, action) {
     case 'META_AGENT_STATUS': {
       const { agent, status, phase } = action.payload;
       const a = (agent || '').toLowerCase();
-      const isChecker = a.includes('checker');
-      const key = isChecker ? 'metaCheckerState' : 'metaValidatorState';
+      const key = a.includes('error') ? 'metaErrorAnalyzerState'
+                : a.includes('checker') ? 'metaCheckerState'
+                : 'metaValidatorState';
       return {
         ...state,
         [key]: { ...state[key], status, phase: phase || state[key].phase },
@@ -1157,8 +1167,9 @@ function reducer(state, action) {
     case 'META_AGENT_THINKING': {
       const { agent, chunk, thought_id, ts } = action.payload;
       const a = (agent || '').toLowerCase();
-      const isChecker = a.includes('checker');
-      const key = isChecker ? 'metaCheckerState' : 'metaValidatorState';
+      const key = a.includes('error') ? 'metaErrorAnalyzerState'
+                : a.includes('checker') ? 'metaCheckerState'
+                : 'metaValidatorState';
       const prev = state[key];
       let history = [...prev.history];
       const last = history[history.length - 1];
@@ -1173,8 +1184,10 @@ function reducer(state, action) {
 
     case 'META_AGENT_CORRECTION': {
       const corr = action.payload;
-      const isChecker = corr.source && corr.source.includes('checker');
-      const key = isChecker ? 'metaCheckerState' : 'metaValidatorState';
+      const src = (corr.source || '').toLowerCase();
+      const key = src.includes('error') ? 'metaErrorAnalyzerState'
+                : src.includes('checker') ? 'metaCheckerState'
+                : 'metaValidatorState';
       const prev = state[key];
       const corrections = [corr, ...prev.corrections].slice(0, 200);
       const stats = {
@@ -1215,6 +1228,20 @@ function reducer(state, action) {
         metaValidatorState: {
           ...prev,
           stats: { ...prev.stats, phasesValidated: (prev.stats.phasesValidated || 0) + 1 },
+        },
+      };
+    }
+
+    case 'META_ERROR_ANALYZER_STATS': {
+      // Authoritative stats snapshot from the backend error_analysis
+      // event — keeps the panel's classification counters in sync even
+      // for fast-path classifications that don't emit a correction.
+      const prev = state.metaErrorAnalyzerState;
+      return {
+        ...state,
+        metaErrorAnalyzerState: {
+          ...prev,
+          stats: { ...prev.stats, ...(action.payload || {}) },
         },
       };
     }
@@ -3127,6 +3154,25 @@ function routeWsEvent(msg, dispatch, shellListeners, sessionId) {
         data,
       }});
       break;
+
+    // ── Error Analyzer ───────────────────────────────────────────────────
+    case 'error_analysis': {
+      const cls   = data.classification || 'other';
+      const conf  = ((data.confidence || 0) * 100).toFixed(0);
+      const icon  = (data.block_tool || data.block_target) ? '⛔'
+                  : cls === 'transient' ? '🔁' : '🔧';
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'error_analyzer', eventType: 'error_analysis',
+        message: `${icon} Error Analyzer [${cls} ${conf}%] ${data.tool || '?'}: ${(data.course_correction || '').slice(0, 100)}`,
+        data,
+      }});
+      // Keep the panel summary stats live even if no meta_correction
+      // was emitted (e.g. fast-path transient classifications).
+      if (data.stats) {
+        dispatch({ type: 'META_ERROR_ANALYZER_STATS', payload: data.stats });
+      }
+      break;
+    }
 
     case 'meta_checker_post_phase': {
       dispatch({ type: 'META_CHECKER_PHASE_DONE' });

@@ -287,6 +287,21 @@ function _MetaSubPanel({ agentKey, label, icon, accentColor, agentState }) {
           label: 'Phases Validated',
           color: 'var(--text-secondary)',
         }),
+        agentKey === 'error_analyzer' && React.createElement(_MetaStatCell, {
+          value: stats.tool_missing || 0,
+          label: 'Tool Missing',
+          color: (stats.tool_missing || 0) > 0 ? 'var(--critical)' : 'var(--text-muted)',
+        }),
+        agentKey === 'error_analyzer' && React.createElement(_MetaStatCell, {
+          value: stats.wrong_target || 0,
+          label: 'Wrong Target',
+          color: (stats.wrong_target || 0) > 0 ? 'var(--medium)' : 'var(--text-muted)',
+        }),
+        agentKey === 'error_analyzer' && React.createElement(_MetaStatCell, {
+          value: stats.transient || 0,
+          label: 'Transient',
+          color: 'var(--text-secondary)',
+        }),
       ),
     ),
   );
@@ -299,19 +314,23 @@ function MetaAgentsPanel() {
 
   const checkerState   = state.metaCheckerState;
   const validatorState = state.metaValidatorState;
+  const errorState     = state.metaErrorAnalyzerState;
 
   const checkerTotal    = (checkerState   && checkerState.stats.total)   || 0;
   const validatorTotal  = (validatorState && validatorState.stats.total) || 0;
-  const totalAll        = checkerTotal + validatorTotal;
+  const errorTotal      = (errorState     && errorState.stats.total)     || 0;
+  const totalAll        = checkerTotal + validatorTotal + errorTotal;
   const blockingTotal   = (
     ((checkerState   && checkerState.stats.blocking)   || 0) +
-    ((validatorState && validatorState.stats.blocking) || 0)
+    ((validatorState && validatorState.stats.blocking) || 0) +
+    ((errorState     && errorState.stats.blocking)     || 0)
   );
   const hasBlocking     = blockingTotal > 0;
 
   const checkerActive   = checkerState   && checkerState.status   === 'thinking';
   const validatorActive = validatorState && validatorState.status === 'thinking';
-  const anyActive       = checkerActive || validatorActive;
+  const errorActive     = errorState     && errorState.status     === 'thinking';
+  const anyActive       = checkerActive || validatorActive || errorActive;
 
   // Border tints based on state
   const outerBorder = hasBlocking
@@ -382,7 +401,7 @@ function MetaAgentsPanel() {
             style: { fontSize: 12, fontWeight: 700, color: 'var(--violet)' }
           }, 'Meta-Agents'),
           React.createElement('span', { style: { fontSize: 10, color: 'var(--text-muted)' } }, '—'),
-          React.createElement('span', { style: { fontSize: 10, color: 'var(--text-muted)' } }, 'Auditor & Validator'),
+          React.createElement('span', { style: { fontSize: 10, color: 'var(--text-muted)' } }, 'Auditor · Validator · Error Analyzer'),
           // Global correction badge
           totalAll > 0 && React.createElement('span', {
             style: {
@@ -406,8 +425,8 @@ function MetaAgentsPanel() {
             className: 'status-dot thinking', style: { flexShrink: 0 }
           }),
           anyActive
-            ? `${[checkerActive && 'Checker', validatorActive && 'Validator'].filter(Boolean).join(' + ')} active`
-            : 'Both agents idle — activate by starting a scan',
+            ? `${[checkerActive && 'Checker', validatorActive && 'Validator', errorActive && 'ErrorAnalyzer'].filter(Boolean).join(' + ')} active`
+            : 'All agents idle — activate by starting a scan',
         ),
       ),
 
@@ -428,6 +447,13 @@ function MetaAgentsPanel() {
         React.createElement('span', {
           className: `status-dot ${validatorActive ? 'running' : 'idle'}`,
           title:     'Issue Validator',
+        }),
+        React.createElement('span', {
+          style: { fontSize: 8, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', marginLeft: 4, marginRight: 2 }
+        }, 'EA'),
+        React.createElement('span', {
+          className: `status-dot ${errorActive ? 'thinking' : 'idle'}`,
+          title:     'Error Analyzer',
         }),
       ),
 
@@ -468,6 +494,13 @@ function MetaAgentsPanel() {
         icon:        '🔍',
         accentColor: 'var(--cyan)',
         agentState:  validatorState,
+      }),
+      React.createElement(_MetaSubPanel, {
+        agentKey:    'error_analyzer',
+        label:       'Error Analyzer',
+        icon:        '🔧',
+        accentColor: 'var(--medium)',
+        agentState:  errorState,
       }),
     ),
   );

@@ -1568,6 +1568,21 @@ class MasterAgent(BaseAgent):
                 _ft.reset_fired(session_id)
             except Exception:
                 pass
+        # Stop + unregister the Error Analyzer agent
+        try:
+            from agents.meta.error_analyzer_agent import unregister_analyzer
+            if getattr(self, "_error_analyzer", None) is not None:
+                self._error_analyzer.request_stop()
+            unregister_analyzer(session_id)
+        except Exception:
+            pass
+        # Unregister the OSINT intel cascade (cancels any in-flight
+        # fan-outs and frees the per-session source factories)
+        try:
+            from agents.osint.intel_cascade import unregister_cascade
+            unregister_cascade(session_id)
+        except Exception:
+            pass
         return {"status": "done", "intel": self._intel}
 
     # ─── State Machine ────────────────────────────────────────
@@ -1587,6 +1602,12 @@ class MasterAgent(BaseAgent):
             decision   = f"State machine: {new_state}",
             next_action= f"Execute {new_state.lower().replace('_',' ')} phase",
         )
+        # Stamp phase start so the wall-clock budget can be enforced
+        try:
+            if self._context is not None:
+                self._context.mark_phase_started(new_state)
+        except Exception:
+            pass
 
     # ─── Long-Term Memory ─────────────────────────────────────
 
@@ -2207,6 +2228,45 @@ class MasterAgent(BaseAgent):
             await self._await_and_sync_subagents(coros, phase="post", timeout=300.0)
 
         elif phase == "lateral":
+            # ── OS / profile gate (Overpass-3 post-mortem) ──────────
+            # The AD subagents (enum4linux-ng, GetUserSPNs, ntlmrelayx)
+            # only make sense against Windows / Active Directory
+            # targets.  On the Overpass-3 LINUX box they ran anyway and
+            # wasted ~15 minutes (ntlm_capture alone = 844s) producing
+            # only "Null session not allowed" / "no SPNs" noise.
+            # Gate the entire AD lateral block behind a Windows/AD
+            # signal: SMB/LDAP/Kerberos ports, a discovered domain, or
+            # an explicit ad_dc target profile.
+            _open = set()
+            for p in (self._intel.get("open_ports") or []):
+                try:
+                    _open.add(int(str(p).split("/")[0]))
+                except Exception:
+                    pass
+            _os = (self._intel.get("os_guess") or "").lower()
+            _has_ad_ports = bool(_open & {445, 139, 389, 88, 636, 3268})
+            _has_domain   = bool(self._intel.get("domain") or self._intel.get("dc_ip"))
+            _is_windows   = "windows" in _os
+            _profile      = (self._intel.get("target_profile") or "").lower()
+            _ad_context = (_has_ad_ports or _has_domain or _is_windows
+                             or _profile in ("ad_dc", "windows"))
+            if not _ad_context:
+                await self.emit_reasoning(
+                    step       = "lateral_skip_no_ad",
+                    reasoning  = (
+                        f"Lateral AD subagents SKIPPED — no Active Directory "
+                        f"context (open ports {sorted(_open)}, os={_os or '?'}, "
+                        f"profile={_profile or '?'}).  enum4linux-ng / "
+                        f"Kerberos / NTLM-relay only apply to Windows/AD "
+                        f"targets; running them on a Linux host wastes "
+                        f"~15 min producing only negative results."
+                    ),
+                    decision   = "SKIP lateral AD enumeration",
+                    next_action= "Use Linux-appropriate lateral techniques (SSH key reuse, sudo, NFS) instead",
+                )
+                # Linux-appropriate lateral: credential reuse via SSH to
+                # adjacent hosts is handled by the loot/cred pipeline.
+                return
             from agents.lateral.ad_enum_subagent      import AdEnumSubagent
             from agents.lateral.kerberos_subagent     import KerberosSubagent
             from agents.lateral.ntlm_capture_subagent import NtlmCaptureSubagent
@@ -3846,7 +3906,100 @@ class MasterAgent(BaseAgent):
             except Exception:
                 pass
 
+            # ── LOOT + FLAG HUNTER (user directive) ─────────────────
+            # The moment a shell is confirmed, fire the loot/flag
+            # hunting playbook.  Re-evaluating the finding-triggers now
+            # (shell_access just flipped True) makes the
+            # `loot_and_flag_hunter` trigger fire — its shell_exec
+            # commands run THROUGH the active shell, hunting flags,
+            # SSH keys, creds, sudo rights and SUID binaries.
+            try:
+                await self._dispatch_loot_and_flag_hunt(host)
+            except Exception as _loot_err:
+                import logging as _ll
+                _ll.getLogger(__name__).warning(
+                    "[loot_hunter] dispatch failed (non-fatal): %s", _loot_err
+                )
+
         return was_first
+
+    async def _dispatch_loot_and_flag_hunt(self, host: str) -> None:
+        """Run the loot/flag hunting playbook through the active shell.
+
+        Triggered automatically by register_shell the instant a
+        foothold is confirmed.  Pulls the `loot_and_flag_hunter`
+        trigger's shell_exec commands and dispatches each one through
+        the active shell session.  Captures any flag/credential
+        discovered into intel so the win-condition tracker + UI see it.
+        """
+        if not _FT_AVAILABLE or _ft is None or self._context is None:
+            return
+        await self.emit_reasoning(
+            step       = "loot_flag_hunt",
+            reasoning  = (
+                f"Shell confirmed on {host} — dispatching loot + flag "
+                f"hunting playbook (flags, SSH keys, credentials, sudo "
+                f"rights, SUID binaries) through the active shell."
+            ),
+            decision   = "HUNT LOOT + FLAGS",
+            next_action= "Execute post-foothold loot commands on the target",
+        )
+        try:
+            actions = _ft.evaluate_triggers(self._context)
+        except Exception:
+            actions = []
+        loot_cmds = [
+            a.payload for a in actions
+            if a.kind == "command" and a.payload.startswith("shell_exec")
+        ]
+        # Fallback: if the trigger didn't yield (already fired), use a
+        # built-in minimal flag+loot set so we ALWAYS hunt on foothold.
+        if not loot_cmds:
+            loot_cmds = [
+                "shell_exec find / -type f \\( -name user.txt -o -name root.txt -o -name flag.txt \\) 2>/dev/null",
+                "shell_exec id; sudo -n -l 2>/dev/null",
+                "shell_exec find / -perm -4000 -type f 2>/dev/null | head -40",
+                "shell_exec find / -name id_rsa -o -name authorized_keys 2>/dev/null | head -20",
+            ]
+        for cmd in loot_cmds[:10]:
+            if self._stop_requested:
+                break
+            try:
+                out = await self._dispatch_to_agent(
+                    tool="shell_exec",
+                    args=cmd.replace("shell_exec", "", 1).strip(),
+                    purpose="Loot + flag hunt through active shell",
+                    phase="post_exploit",
+                    timeout=60,
+                )
+                # Capture flags from output
+                self._capture_flags_from_output(
+                    out.get("stdout", "") if isinstance(out, dict) else str(out)
+                )
+            except Exception:
+                continue
+
+    def _capture_flags_from_output(self, text: str) -> None:
+        """Extract HTB/THM-style flags from command output into intel."""
+        if not text:
+            return
+        import re as _re
+        # HTB/THM flag formats: 32-hex user/root flags, HTB{...}, flag{...}
+        patterns = [
+            r"\bHTB\{[^}]{4,}\}",
+            r"\bflag\{[^}]{4,}\}",
+            r"\bTHM\{[^}]{4,}\}",
+            r"\b[0-9a-f]{32}\b",
+        ]
+        for pat in patterns:
+            for m in _re.findall(pat, text):
+                # Heuristic: 32-hex only counts if the line mentions a flag file
+                if pat.endswith("{32}") and "txt" not in text.lower() and "flag" not in text.lower():
+                    continue
+                if "user" in text.lower() and not self._intel.get("user_flag"):
+                    self._intel["user_flag"] = m
+                elif "root" in text.lower() and not self._intel.get("root_flag"):
+                    self._intel["root_flag"] = m
 
     async def notify_pivot_event(self, event_type: str, payload: Any) -> None:
         """Public hook called when a high-value engagement event fires.
@@ -4078,6 +4231,104 @@ class MasterAgent(BaseAgent):
         # ── AUTO-CHECKPOINT 1: after recon ────────────────────
         await self._check_pause("recon")
 
+        # ── Spawn the reactive entry-attempt dispatcher ─────────────
+        # Long-running parallel task that fires exploit attempts the
+        # MOMENT a viable entry point appears in intel, without
+        # blocking the main phase pipeline.  Lives for the entire
+        # engagement or until post_exploit / complete mode.
+        if _EC_AVAILABLE and self._context is not None:
+            try:
+                _entry_task = asyncio.create_task(
+                    self._entry_attempt_dispatcher(target)
+                )
+                self._background_tasks.append(_entry_task)
+                await self.emit_reasoning(
+                    step       = "entry_dispatcher_started",
+                    reasoning  = (
+                        "Reactive entry-attempt dispatcher started.  Runs in "
+                        "parallel with the phase pipeline; fires exploit "
+                        "attempts the moment a viable entry point is detected "
+                        "in intel.  When entry succeeds, engagement pivots to "
+                        "post_exploit mode and all scanning yields."
+                    ),
+                    decision   = "DISPATCHER READY",
+                    next_action= "Continue phase pipeline; dispatcher reacts in background",
+                )
+            except Exception as _disp_err:
+                import logging as _ll
+                _ll.getLogger(__name__).warning(
+                    "[entry_dispatcher] startup failed (non-fatal): %s",
+                    _disp_err,
+                )
+
+        # ── Spawn the Error Analyzer agent (NEW) ─────────────────────
+        # Subscribes to tool errors emitted by collect_tool and runs
+        # LLM-driven triage on each unique error.  Without it the
+        # system blindly re-tries the same broken command (e.g. 1,292
+        # curls against the wrong port).
+        try:
+            from agents.meta.error_analyzer_agent import (
+                ErrorAnalyzerAgent, register_analyzer,
+            )
+            try:
+                _ea_db = db.get_db()
+            except Exception:
+                _ea_db = None
+            self._error_analyzer = ErrorAnalyzerAgent(
+                broadcast  = self.broadcast,
+                session_id = session_id,
+                db_conn    = _ea_db,
+                enabled    = True,
+            )
+            register_analyzer(self._error_analyzer)
+            _err_task = asyncio.create_task(self._error_analyzer.run())
+            self._background_tasks.append(_err_task)
+            await self.emit_reasoning(
+                step       = "error_analyzer_started",
+                reasoning  = (
+                    "Error Analyzer agent started.  Every tool error is "
+                    "classified by the LLM (transient / wrong_target / "
+                    "tool_missing / bad_args / unsupported / scope_drift) "
+                    "and a course correction is pinned on the engagement "
+                    "context — so the platform stops looping on dead ends."
+                ),
+                decision   = "ERROR ANALYZER READY",
+                next_action= "Errors will be triaged in real time",
+            )
+        except Exception as _err_init:
+            import logging as _ll
+            _ll.getLogger(__name__).warning(
+                "[error_analyzer] startup failed (non-fatal): %s", _err_init,
+            )
+            self._error_analyzer = None
+
+        # ── Target profile classification (genuinely different fix) ──
+        # Now that RECON has discovered ports/services, classify what
+        # KIND of target this is.  Profile drives whether WSTG runs,
+        # whether the AD chain triggers, etc.  In the support.htb run
+        # this would have classified the target as ad_dc and skipped
+        # the 14-phase WSTG playbook (which wasted ~90 minutes hammering
+        # port 80 on a Domain Controller that has no web app surface).
+        if _EC_AVAILABLE and self._context is not None:
+            try:
+                profile = self._context.commit_target_profile()
+                await self.emit_reasoning(
+                    step       = "target_profile_classified",
+                    reasoning  = (
+                        f"Recon discovered {len(self._intel.get('open_ports', []))} "
+                        f"open ports.  Target profile classified as: {profile!r}.  "
+                        f"Phase router will skip irrelevant playbooks."
+                    ),
+                    decision   = f"TARGET PROFILE = {profile}",
+                    next_action= "Dispatch profile-appropriate intel phases",
+                )
+            except Exception as _profile_err:
+                import logging as _ll
+                _ll.getLogger(__name__).warning(
+                    "[target_profile] classification failed (non-fatal): %s",
+                    _profile_err,
+                )
+
         # ── PHASE 2: PARALLEL intelligence gathering ──────────
         # Run vuln scan + web testing + OSINT simultaneously
         await self._apply_pending_guidance()   # drain before parallel phase starts
@@ -4091,12 +4342,48 @@ class MasterAgent(BaseAgent):
         _COMMON_WEB_PORTS = {80, 443, 8080, 8443, 8000, 8008, 8888, 3000, 5000, 9000, 8181, 4443, 7443}
         for port, svc in self._intel["services"].items():
             svc_name = (svc.get("service","") if isinstance(svc,dict) else str(svc)).lower()
+            svc_banner = (svc.get("banner", "") + " " + svc.get("product", "") + " " + svc.get("version", "")
+                            if isinstance(svc, dict) else "").lower()
+            # WinRM on 5985 looks like HTTP but is admin-only, not a web
+            # app — exclude so we don't waste WSTG cycles on it.
+            try:
+                port_int = int(str(port).split("/")[0])
+            except Exception:
+                continue
+            if port_int == 5985 and ("httpapi" in svc_banner or "winrm" in svc_banner):
+                continue
             is_web_svc = any(x in svc_name for x in ("http", "https", "web", "ssl/http", "http?", "www"))
-            is_web_port = int(str(port).split("/")[0]) in _COMMON_WEB_PORTS
+            is_web_port = port_int in _COMMON_WEB_PORTS
             if is_web_svc or is_web_port:
-                web_ports.append(port)
+                web_ports.append(port_int)
         # Deduplicate and sort
-        web_ports = sorted(set(int(str(p).split("/")[0]) for p in web_ports))
+        web_ports = sorted(set(web_ports))
+
+        # ── Port-aware refinement (Overpass-3 fix) ─────────────────
+        # When the EngagementContext can identify a *primary* web port
+        # via service-banner heuristics, narrow the list to that one
+        # port.  This stops WSTG from spending 27 minutes hitting port
+        # 80 (closed) while the actual Werkzeug app is on 8080.
+        try:
+            if self._context is not None:
+                primary = self._context.primary_web_port()
+                if primary is not None:
+                    if primary in web_ports:
+                        web_ports = [primary] + [p for p in web_ports if p != primary]
+                    else:
+                        web_ports = [primary] + web_ports
+                    await self.emit_reasoning(
+                        step       = "web_port_focus",
+                        reasoning  = (
+                            f"EngagementContext.primary_web_port() identified "
+                            f"port {primary} as the real web service.  WSTG "
+                            f"will target it first instead of mechanical 80/443."
+                        ),
+                        decision   = f"WEB FOCUS PORT = {primary}",
+                        next_action= "WebOrchestrator will use this port",
+                    )
+        except Exception:
+            pass
 
         # ── Force web phase for URL/app targets even without port scan ──
         # When the operator gave a URL or app target, port-scan output may
@@ -4600,10 +4887,33 @@ class MasterAgent(BaseAgent):
             })
         result = await agent.execute_tasks(target, tasks, "RECON", self._intel)
 
-        self._intel["open_ports"]  = result.get("open_ports",[])
-        self._intel["services"]    = result.get("services",{})
-        self._intel["os_guess"]    = result.get("os_guess","unknown") or "unknown"
-        self._intel["web_paths"]   = result.get("web_paths",[])
+        # ── State-corruption fix (Overpass-3 post-mortem) ──────────
+        # Previously this used "=" which CLOBBERED the existing intel
+        # any time recon was called a second time (resume / re-plan /
+        # reasoning-loop retry) and the new result happened to be
+        # empty.  Real-world impact: the master LLM saw "Ports open: 0"
+        # for 11 iterations after the initial 8 ports had been
+        # discovered — and burned 30 minutes asking for "another port
+        # scan" each time.  We now MERGE instead.
+        new_ports = result.get("open_ports") or []
+        if new_ports:
+            existing = list(self._intel.get("open_ports") or [])
+            merged = list(dict.fromkeys(existing + list(new_ports)))
+            self._intel["open_ports"] = merged
+        # NEVER blank-overwrite: if recon returned nothing, keep what
+        # we had.
+        new_services = result.get("services") or {}
+        if new_services:
+            cur = dict(self._intel.get("services") or {})
+            cur.update(new_services)
+            self._intel["services"] = cur
+        new_os = (result.get("os_guess") or "").strip()
+        if new_os and new_os != "unknown":
+            self._intel["os_guess"] = new_os
+        new_paths = result.get("web_paths") or []
+        if new_paths:
+            cur_paths = list(self._intel.get("web_paths") or [])
+            self._intel["web_paths"] = list(dict.fromkeys(cur_paths + new_paths))
         self._intel["service_versions"].update(result.get("service_versions",{}))
         for u in result.get("users",[]):
             if u not in self._intel["users"]: self._intel["users"].append(u)
@@ -4807,6 +5117,37 @@ class MasterAgent(BaseAgent):
             "result":  "Master planning vulnerability assessment",
             "detail":  "", "found": None, "ts": datetime.utcnow().isoformat()
         })
+        # Stamp phase start for the wall-clock budget check
+        if self._context is not None:
+            try:
+                self._context.mark_phase_started("vuln_id")
+            except Exception:
+                pass
+
+        # ── Phase-skip when pivot signal already raised ──────────────
+        # If OSINT (or any pipeline) already identified a viable entry
+        # point and set focused_attack endpoints / next_commands, there
+        # is NO benefit to running generic VULN_ID scans for 12 minutes.
+        # Skip to EXPLOIT immediately.
+        try:
+            if self._context is not None and (
+                self._context.is_post_exploit_mode()
+                or self._intel.get("pivot_to_exploit")
+                or self._context.focused_attack_endpoints
+            ):
+                await self.emit_reasoning(
+                    step       = "vuln_id_skip_pivot",
+                    reasoning  = (
+                        "VULN_ID skipped — a viable entry point is already "
+                        "identified (pivot_to_exploit or focused_attack set). "
+                        "Generic vuln-scans would only delay exploitation."
+                    ),
+                    decision   = "SKIP VULN_ID",
+                    next_action= "Continue directly to EXPLOIT",
+                )
+                return
+        except Exception:
+            pass
 
         from agents.vuln_agent import VulnAgent
         agent = VulnAgent(broadcast=self.broadcast)
@@ -4881,7 +5222,40 @@ class MasterAgent(BaseAgent):
 
         Each stage feeds the next; no fire-and-forget background tasks.
         All tool output is visible in the event feed in real time.
+
+        ── Profile-aware self-abort ─────────────────────────────────
+        If the EngagementContext's target_profile classifier says the
+        target has no web app surface (ad_dc, db_server, ssh_only,
+        smb_only), this phase RETURNS IMMEDIATELY without running any
+        tools.  This prevents the 90-minute WSTG fuzz storm that
+        consumed the support.htb engagement.
         """
+        # Profile-aware abort BEFORE any work is queued.  Two invocations
+        # of _phase_web_testing in the same engagement (which was the
+        # pathology in the support.htb run) both hit this guard.
+        if self._context is not None:
+            try:
+                if self._context.should_skip_web_testing():
+                    profile = self._context.get_target_profile()
+                    await self.emit_reasoning(
+                        step       = "web_testing_skipped_by_profile",
+                        reasoning  = (
+                            f"Target profile is {profile!r} — this target has "
+                            f"no real web application surface, so the 14-phase "
+                            f"WSTG playbook would only produce timeouts against "
+                            f"closed ports.  Skipping web phase entirely."
+                        ),
+                        decision   = f"SKIP web_testing (profile={profile})",
+                        next_action= "Proceed directly to exploit / post-exploit",
+                    )
+                    await self._emit("phase_skipped", {
+                        "phase":   "web_testing",
+                        "reason":  f"target_profile={profile}: no web app surface",
+                    })
+                    return
+            except Exception:
+                pass
+
         # Defensive coercion — callers (bootstrap, reasoning_loop) occasionally
         # pass a set/tuple. Slicing/indexing below requires a list.
         if not isinstance(web_ports, list):
@@ -5702,6 +6076,187 @@ class MasterAgent(BaseAgent):
                 "remaining": max(0, len(cmds) - max_commands),
             })
 
+    # ─── Reactive Entry-Attempt Dispatcher (parallel background task) ──
+    #
+    # The user's requirement: "attempt exploit as soon as it finds a
+    # valid entry point, even if other scanning wants to run in
+    # parallel. if entry is successful, every focus should move to
+    # loot finding and privilege escalation".
+    #
+    # Implementation: a single async task spawned at engagement start
+    # that awaits the EngagementContext's "new entry point" event.
+    # Each time the event fires (because record_finding or
+    # set_focused_attack triggered detect_entry_points), the
+    # dispatcher pops the highest-priority entry point and runs an
+    # exploit attempt — concurrently with whatever phase is currently
+    # active in the main flow.
+    #
+    # When entry succeeds (detect_success_signals fires), the
+    # context transitions to post_exploit mode and all scanners
+    # yield.  The dispatcher then cancels itself.
+    async def _entry_attempt_dispatcher(self, target: str) -> None:
+        """Background task: react to new entry points immediately.
+
+        Runs alongside the main phase pipeline.  Lives for the
+        entire engagement until either (a) the context transitions
+        to post_exploit / complete, or (b) the master is cancelled.
+        """
+        if self._context is None:
+            return
+        ctx = self._context
+        attempts_dispatched = 0
+        max_concurrent_attempts = 2     # don't overload the engagement
+        in_flight: List[Any] = []
+        import logging as _lg
+        _log = _lg.getLogger(__name__)
+        try:
+            while not self._stop_requested:
+                # If we've already won, stop dispatching new attempts
+                if ctx.is_post_exploit_mode():
+                    await self.emit_reasoning(
+                        step       = "entry_dispatcher_done_post_exploit",
+                        reasoning  = (
+                            "Entry succeeded — engagement is in post_exploit "
+                            f"mode after {attempts_dispatched} dispatched "
+                            "attempt(s).  Stopping entry-attempt dispatcher; "
+                            "loot + privesc + lateral pipelines will now run."
+                        ),
+                        decision   = "STOP entry dispatcher",
+                        next_action= "Yield to post-exploit pipelines",
+                    )
+                    return
+                # Wait up to 30s for a new entry-point event, then loop
+                # so we periodically re-check the mode + stop signal.
+                got = await ctx.wait_for_entry_point(timeout=30.0)
+                if not got:
+                    # Even without an event, run the detector once in
+                    # case findings appeared via legacy code paths
+                    # that don't trigger the event.
+                    try:
+                        new = ctx.detect_entry_points()
+                    except Exception:
+                        new = []
+                    if not new:
+                        continue
+                # Drain everything currently queued
+                while True:
+                    ep = ctx.pop_entry_point()
+                    if ep is None:
+                        break
+                    if attempts_dispatched >= max_concurrent_attempts and not all(
+                        t.done() for t in in_flight
+                    ):
+                        # Re-queue and wait a bit
+                        ctx.entry_points.insert(0, ep)
+                        break
+                    attempts_dispatched += 1
+                    # Spawn the attempt — runs in parallel with the
+                    # main phase pipeline.
+                    task = asyncio.create_task(
+                        self._execute_entry_attempt(target, ep)
+                    )
+                    in_flight.append(task)
+                    self._background_tasks.append(task)
+                # Sweep finished tasks
+                in_flight = [t for t in in_flight if not t.done()]
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:                                   # noqa: BLE001
+            _log.warning("[entry_dispatcher] unexpected error: %s", exc)
+
+    async def _execute_entry_attempt(self, target: str,
+                                         entry: Dict[str, Any]) -> None:
+        """Execute ONE entry-point attempt.
+
+        The entry's ``type`` field determines what kind of attempt:
+          * pre_staged_commands   — bash-execute up to 3 commands
+          * focused_endpoints     — curl each endpoint sequentially
+          * exploitable_cve       — emit reasoning so the LLM picks the
+                                     concrete exploit module
+          * finding_match         — emit reasoning + queue a follow-up
+          * credentials_available — try evil-winrm / ssh / etc. with creds
+        """
+        ctx = self._context
+        if ctx is None:
+            return
+        etype = entry.get("type")
+        priority = entry.get("priority", 5)
+        await self.emit_reasoning(
+            step       = "entry_attempt_dispatched",
+            reasoning  = (
+                f"Entry-point dispatcher firing: type={etype!r} "
+                f"priority={priority}.  Running in PARALLEL with the "
+                f"current phase (no blocking)."
+            ),
+            decision   = f"DISPATCH entry attempt: {etype}",
+            next_action= "Execute attempt; success will pivot engagement to post_exploit",
+        )
+
+        try:
+            if etype == "pre_staged_commands":
+                for cmd in (entry.get("commands") or [])[:3]:
+                    cmd = (cmd or "").split("#", 1)[0].strip()
+                    if not cmd or self._stop_requested:
+                        break
+                    if ctx.is_post_exploit_mode():
+                        break
+                    try:
+                        await self._dispatch_to_agent(
+                            tool="bash", args=cmd,
+                            purpose=f"Entry attempt ({etype})",
+                            phase="entry_attempt", timeout=180,
+                        )
+                    except Exception:
+                        continue
+
+            elif etype == "focused_endpoints":
+                for ep in (entry.get("endpoints") or [])[:5]:
+                    if self._stop_requested or ctx.is_post_exploit_mode():
+                        break
+                    try:
+                        await self._dispatch_to_agent(
+                            tool="bash", args=ep,
+                            purpose=f"Entry attempt ({etype})",
+                            phase="entry_attempt", timeout=60,
+                        )
+                    except Exception:
+                        continue
+
+            elif etype == "credentials_available":
+                # Universal credential-test cascade: try the creds
+                # against discovered services.  AD chains use evil-winrm
+                # /  crackmapexec; SSH targets use sshpass.  We emit a
+                # reasoning step here and let the LLM-driven exploit
+                # phase decide the best vector.
+                await self.emit_reasoning(
+                    step       = "creds_available",
+                    reasoning  = (
+                        f"Credentials harvested: {len(entry.get('creds') or [])}.  "
+                        f"Trying them against discovered services."
+                    ),
+                    decision   = "TEST creds against all eligible services",
+                    next_action= "Will dispatch evil-winrm / sshpass / crackmapexec auth-probe",
+                )
+
+            elif etype in ("finding_match", "exploitable_cve"):
+                # These are reasoning-only entries — surface them to
+                # the LLM so the next exploit-planning cycle picks them
+                # up.  No direct command execution from this branch.
+                await self.emit_reasoning(
+                    step       = "entry_finding_surfaced",
+                    reasoning  = (
+                        f"Entry-point finding surfaced: {entry.get('subtype') or entry.get('cves')}.  "
+                        f"LLM exploit planner will incorporate on next cycle."
+                    ),
+                    decision   = "SURFACE to LLM planner",
+                    next_action= "Continue parallel scanning + await LLM action",
+                )
+        except Exception as exc:                                # noqa: BLE001
+            import logging as _lg
+            _lg.getLogger(__name__).warning(
+                "[entry_attempt] %s failed: %s", etype, exc,
+            )
+
     # ─── PHASE: Exploitation ──────────────────────────────────
 
     async def _phase_exploit(self, target: str):
@@ -6082,6 +6637,35 @@ class MasterAgent(BaseAgent):
     async def _phase_post_exploit(self, target: str):
         """Master plans post-exploit enumeration. Agent executes."""
         await self._advance_phase(AttackPhase.POST_EXPLOIT)
+
+        # ── Foothold gate (Overpass-3 post-mortem) ──────────────────
+        # POST_EXPLOIT enumeration + the lateral AD subagents only make
+        # sense once we actually have a foothold.  On the Overpass-3
+        # run this phase executed with shell_access=False and ran
+        # enum4linux/kerberos/ntlm against a Linux host with no shell —
+        # pure waste.  Skip the whole phase unless we have a shell OR
+        # harvested credentials to act on.
+        has_shell = bool(self._intel.get("shell_access"))
+        has_creds = bool(self._intel.get("credentials"))
+        if not has_shell and not has_creds:
+            await self.emit_reasoning(
+                step       = "post_exploit_skip_no_foothold",
+                reasoning  = (
+                    "POST_EXPLOIT skipped — no shell access and no harvested "
+                    "credentials.  Post-exploit enumeration + lateral movement "
+                    "require a foothold first.  Returning to exploitation "
+                    "instead of running blind enumeration."
+                ),
+                decision   = "SKIP POST_EXPLOIT (no foothold)",
+                next_action= "Continue exploitation attempts to establish a foothold",
+            )
+            await self._emit("plan_step_update", {
+                "step_id": "post_exploit", "status": "skipped",
+                "result":  "No foothold yet — post-exploit deferred",
+                "detail":  "", "found": False, "ts": datetime.utcnow().isoformat()
+            })
+            return
+
         await self._emit("plan_step_update", {
             "step_id": "post_exploit", "status": "active",
             "result":  f"Harvesting credentials and mapping network as {self._intel.get('current_user','?')}",

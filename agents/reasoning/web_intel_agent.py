@@ -447,17 +447,46 @@ class WebIntelAgent:
         self._query_cache[query] = results
         return results
 
+    # Per-session Google CSE health cache so we don't spam 403s.
+    # Keyed by (api_key prefix) — a "dead" key stays dead for the
+    # rest of the engagement when the failure mode is structural
+    # (accessNotConfigured, forbidden), or for 30 minutes when it
+    # is transient (rate limit / quota).
+    _CSE_DEAD: Dict[str, float] = {}
+
+    @classmethod
+    def _cse_is_dead(cls, key: str) -> bool:
+        import time as _t
+        dead_until = cls._CSE_DEAD.get(key[:16])
+        return dead_until is not None and _t.time() < dead_until
+
+    @classmethod
+    def _cse_mark_dead(cls, key: str, *, permanent: bool) -> None:
+        import time as _t
+        # Permanent failures stay marked for 24h (engagement-scoped);
+        # transient failures clear after 30 minutes
+        ttl = 86400.0 if permanent else 1800.0
+        cls._CSE_DEAD[key[:16]] = _t.time() + ttl
+
     async def _search_google(self, q: str, key: str, cx: str) -> List[WebSearchResult]:
         """Call Google Custom Search JSON API.  Surfaces the server-side
         error reason on 403/429 so the operator can fix project setup.
 
         Common 403 reasons:
-          • PERMISSION_DENIED — Custom Search JSON API not enabled on the
-            project that owns the API key.  Enable at:
+          • PERMISSION_DENIED / accessNotConfigured — Custom Search
+            JSON API not enabled on the project that owns the API key.
+            We mark the key DEAD permanently for the engagement so
+            subsequent calls go straight to DDG with no per-query
+            403 noise.  Enable at:
             https://console.cloud.google.com/apis/library/customsearch.googleapis.com
           • dailyLimitExceeded — free-tier 100 queries/day exhausted
-          • rateLimitExceeded — temporary, retry shortly
+            — DEAD for 30 minutes.
+          • rateLimitExceeded — transient — DEAD for 30 minutes.
         """
+        # Skip the API call entirely if the key is already known dead
+        if self._cse_is_dead(key):
+            return []
+
         url = "https://www.googleapis.com/customsearch/v1"
         async with httpx.AsyncClient(timeout=12) as client:
             resp = await client.get(url, params={
@@ -472,14 +501,21 @@ class WebIntelAgent:
                 errs    = err.get("errors") or []
                 if errs and isinstance(errs[0], dict):
                     reason = errs[0].get("reason", "")
+                # Mark dead so future queries skip the API call
+                permanent = reason in (
+                    "accessNotConfigured", "PERMISSION_DENIED",
+                    "forbidden", "keyInvalid",
+                )
+                self._cse_mark_dead(key, permanent=permanent)
                 logger.warning(
-                    "[web_intel] Google CSE %d (%s): %s — falling back to DDG. "
-                    "If reason='forbidden' or 'accessNotConfigured', enable the "
-                    "Custom Search JSON API at "
+                    "[web_intel] Google CSE %d (%s): %s — marking key %s; "
+                    "falling back to DDG.  Enable Custom Search JSON API at "
                     "console.cloud.google.com/apis/library/customsearch.googleapis.com",
                     resp.status_code, reason or "unknown", msg[:200],
+                    "permanently dead" if permanent else "dead for 30 minutes",
                 )
             except Exception:
+                self._cse_mark_dead(key, permanent=False)
                 logger.warning(
                     "[web_intel] Google CSE HTTP %d (body unparseable) — falling back to DDG",
                     resp.status_code,

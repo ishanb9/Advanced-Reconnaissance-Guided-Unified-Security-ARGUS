@@ -289,6 +289,49 @@ class EngagementContext:
         # Keyed by ReactStep index in transcript.
         self.action_goal_tags: Dict[int, str] = {}
 
+        # ── Engagement-mode state machine (reactive dispatch) ────
+        # The big architectural shift: instead of a fixed phase
+        # pipeline (recon → osint → vuln → exploit → post-exploit),
+        # we model the engagement as a reactive state machine.  All
+        # pipelines (scanners, exploit, loot, privesc) poll this
+        # state and react cooperatively.
+        #
+        # States:
+        #   "scanning"           — broad exploration, all scanners run
+        #   "attempting_entry"   — viable entry point identified;
+        #                          exploit attempt is in flight IN
+        #                          PARALLEL with continued scanning.
+        #                          Scanning does NOT stop here — the
+        #                          user explicitly wanted "even if
+        #                          other scanning wants to run in
+        #                          parallel".
+        #   "post_exploit"       — entry succeeded (shell / creds /
+        #                          flag / loot).  ALL active scanning
+        #                          STOPS.  Only loot, privesc, and
+        #                          lateral pipelines run.
+        #   "complete"           — objective satisfied or operator halt
+        #
+        # The transition functions are idempotent — calling them
+        # multiple times is safe.  Each transition publishes an event
+        # so pipelines polling between phases can react.
+        self.engagement_mode: str = "scanning"
+        # Each accumulated entry point becomes a dispatchable target
+        # for the entry-attempt dispatcher.  Newest at the front so
+        # the dispatcher picks fresh leads first.
+        self.entry_points: List[Dict[str, Any]] = []
+        # Set of entry-point signature hashes already seen, so the
+        # detector doesn't re-fire on the same finding repeatedly.
+        self._entry_point_sigs: Set[str] = set()
+        # Success signals accumulated (kept for audit trail even after
+        # mode transitions to complete).
+        self.success_signals: List[Dict[str, Any]] = []
+        # Async event the entry-attempt dispatcher awaits.  Set every
+        # time a new entry point appears; the dispatcher consumes
+        # one at a time.
+        self._new_entry_point_event: Any = None      # lazy asyncio.Event
+        # Mode-change subscribers (callable(old_mode, new_mode, reason))
+        self._mode_subscribers: List[Any] = []
+
         # ── Cross-pipeline focused-attack interrupt ────────────────
         # When one pipeline (typically OSINT synthesis) identifies a
         # SPECIFIC attack chain — a concrete URL/endpoint to exploit
@@ -472,13 +515,30 @@ class EngagementContext:
     # ── Findings ────────────────────────────────────────────────────
 
     def record_finding(self, finding: Dict[str, Any]) -> None:
-        """Store a finding.  Idempotent on (title, host, severity)."""
+        """Store a finding.  Idempotent on (title, host, severity).
+
+        After storing, runs both detectors:
+          * detect_entry_points() — might transition mode to attempting_entry
+          * detect_success_signals() — might transition to post_exploit
+
+        Synchronous so the caller sees the updated mode immediately.
+        """
         sig = (finding.get("title", ""), finding.get("host", ""),
                finding.get("severity", ""))
         for f in self.findings:
             if (f.get("title"), f.get("host"), f.get("severity")) == sig:
                 return
         self.findings.append(finding)
+        # ── Reactive dispatch hook ──────────────────────────────
+        # Findings are the primary signal source: a finding titled
+        # "Anonymous Bind Allowed" is a viable entry point and the
+        # exploit attempt should fire RIGHT NOW.  Same for shell-
+        # access findings, default creds, etc.
+        try:
+            self.detect_entry_points()
+            self.detect_success_signals()
+        except Exception:
+            pass
 
     # ── Circuit-breaker queries ─────────────────────────────────────
 
@@ -681,6 +741,695 @@ class EngagementContext:
         """Add a tool to the post-completion allow-list."""
         self.post_completion_allowed_tools.add(tool.lower())
 
+    # ── Target classification (genuinely different fix) ─────────────
+    #
+    # The previous "phase machine + circuit breakers" model assumes
+    # every target needs the same phase pipeline (recon → vuln → web
+    # → exploit).  That assumption is wrong: an AD Domain Controller
+    # has no web app, a SOAP-only API has no AD, and an IoT device
+    # has neither.  Running the WSTG 14-phase OWASP playbook against
+    # a DC's closed port 80 burned 90 minutes in the last engagement.
+    #
+    # The correct primitive is to CLASSIFY the target after recon and
+    # dispatch only the phases that apply.  Profile names are
+    # intentionally stable strings (lowercased) so trigger logic can
+    # branch on them.
+
+    AD_PORTS_REQUIRED   = (88, 389)        # kerberos + LDAP = AD
+    AD_PORTS_SUPPORTING = (445, 139, 636, 3268, 3269, 5985, 5986, 9389)
+    WEB_PORTS_COMMON    = (80, 443, 8080, 8443, 8000, 8888, 3000, 5000, 8181)
+    DB_PORTS            = (1433, 3306, 5432, 27017, 6379, 9200)
+
+    def classify_target_profile(self) -> str:
+        """Categorise the target so phase routing can skip irrelevant
+        playbooks.  Called by the master agent after RECON completes.
+
+        Returns one of: ``ad_dc``, ``web_app``, ``mixed``, ``db_server``,
+        ``smb_only``, ``ssh_only``, ``unknown``.
+        """
+        ports = set()
+        for p in (self.open_ports or []):
+            try:
+                ports.add(int(str(p).split("/")[0]))
+            except Exception:
+                continue
+        # Some pipelines populate services without open_ports (e.g.
+        # banner_subagent stores its findings as services dict only).
+        for p in self.services.keys():
+            try:
+                ports.add(int(str(p).split("/")[0]))
+            except Exception:
+                continue
+
+        has_ad = all(p in ports for p in self.AD_PORTS_REQUIRED)
+        # 5985 is WinRM HTTPAPI — looks like HTTP but is admin-only,
+        # NOT a web app surface.  Exclude when classifying as web.
+        web_ports_found = [
+            p for p in ports if p in self.WEB_PORTS_COMMON and p != 5985
+        ]
+        has_web = len(web_ports_found) > 0
+
+        # Detect actual web SERVICE (not just an open port) from
+        # service banners to reduce false positives.
+        has_real_web_service = False
+        for svc in self.services.values():
+            if isinstance(svc, dict):
+                banner = " ".join(str(svc.get(k, "")) for k in
+                                    ("service", "product", "version", "banner")).lower()
+                # WinRM HTTPAPI looks like http but is NOT a web app
+                if "httpapi" in banner or "winrm" in banner:
+                    continue
+                if any(h in banner for h in ("http", "nginx", "apache",
+                                                "iis", "tomcat", "jetty",
+                                                "lighttpd", "caddy", "express",
+                                                "node", "django", "flask",
+                                                "wordpress", "drupal", "joomla")):
+                    has_real_web_service = True
+                    break
+
+        # DB-only target?
+        db_ports = [p for p in ports if p in self.DB_PORTS]
+
+        # Decision tree (most specific first)
+        if has_ad and has_real_web_service:
+            return "mixed"
+        if has_ad:
+            return "ad_dc"
+        if has_real_web_service:
+            return "web_app"
+        if db_ports:
+            return "db_server"
+        # SMB without AD = file-server style
+        if 445 in ports or 139 in ports:
+            return "smb_only"
+        # SSH only is common for Linux boxes
+        if 22 in ports and len(ports) <= 3:
+            return "ssh_only"
+        return "unknown"
+
+    def commit_target_profile(self) -> str:
+        """Run classify_target_profile and persist the result.
+
+        Stores the profile on ``intel["target_profile"]`` for backward
+        compat with legacy consumers AND on the context itself for
+        typed access.  Pins it as an insight so it surfaces in every
+        subsequent LLM prompt.
+        """
+        profile = self.classify_target_profile()
+        self.intel["target_profile"] = profile
+        # Pin so the LLM sees the verdict in every subsequent prompt
+        if not any(p.source == "target_profile" for p in self.pinned):
+            self.pin_insight(
+                text=(
+                    f"TARGET PROFILE = {profile!r}.  "
+                    f"Open ports: {sorted(set(int(str(p).split('/')[0]) for p in (self.open_ports or []) if str(p).split('/')[0].isdigit()))[:10]}.  "
+                    f"Phase router will dispatch the playbook(s) "
+                    f"appropriate for this profile and SKIP irrelevant ones "
+                    f"(e.g. WSTG is skipped for ad_dc profile because the "
+                    f"target has no web application surface)."
+                ),
+                phase="recon",
+                severity="critical",
+                source="target_profile",
+            )
+        return profile
+
+    def get_target_profile(self) -> str:
+        """Cheap accessor — falls back to recomputation if not yet committed."""
+        return (self.intel.get("target_profile")
+                  or self.classify_target_profile())
+
+    def should_skip_web_testing(self) -> bool:
+        """Return True when WSTG / WebOrchestrator should NOT run.
+
+        Skips when:
+          * profile is ad_dc / db_server / ssh_only / smb_only
+            (no web app surface at all), OR
+          * profile is unknown AND no web ports are actually open
+        """
+        profile = self.get_target_profile()
+        if profile in ("ad_dc", "db_server", "ssh_only", "smb_only"):
+            return True
+        if profile == "unknown":
+            ports = set()
+            for p in self.open_ports or []:
+                try:
+                    ports.add(int(str(p).split("/")[0]))
+                except Exception:
+                    continue
+            web_ports = ports & set(self.WEB_PORTS_COMMON)
+            if not web_ports:
+                return True
+        return False
+
+    # ═════════════════════════════════════════════════════════════
+    #  Port targeting helpers (universal across target types)
+    # ═════════════════════════════════════════════════════════════
+
+    def primary_web_port(self) -> Optional[int]:
+        """Return the BEST web port to target on this host.
+
+        Priority (in order):
+          1. A non-default port (8080, 8443, 3000, 5000, etc.) where
+             the service banner positively identifies a web app —
+             this catches the Overpass-3 / TwoMillion pattern where
+             the actual app is on 8080 and port 80 is closed/filtered.
+          2. Standard ports (80, 443) where a web service banner is
+             present.
+          3. None when no web service is identified anywhere.
+
+        The point: WSTG / WebOrchestrator / curl-spray pipelines must
+        target the REAL web port, not blindly hit 80.  The failed
+        Overpass-3 run wasted 27 minutes hitting port 80 (closed)
+        while the actual Werkzeug app was on 8080.
+        """
+        services = self.services or {}
+        open_ports = set()
+        for p in self.open_ports or []:
+            try:
+                open_ports.add(int(str(p).split("/")[0]))
+            except Exception:
+                continue
+
+        # First pass: prefer NON-DEFAULT web ports with positive banners
+        # (these are usually the "real" application servers)
+        non_default = (8080, 8443, 8000, 8888, 3000, 5000, 9000, 8181,
+                          4443, 7443, 5985)   # 5985 excluded later
+        for port, svc in services.items():
+            try:
+                port_int = int(str(port).split("/")[0])
+            except Exception:
+                continue
+            if port_int == 5985:
+                continue  # WinRM, not a real web app
+            if port_int not in non_default:
+                continue
+            if port_int not in open_ports and open_ports:
+                continue  # port not actually open
+            if isinstance(svc, dict):
+                banner = " ".join(str(svc.get(k, "")) for k in
+                                    ("service", "product", "version",
+                                      "banner", "extrainfo", "info")).lower()
+                if any(h in banner for h in (
+                    "http", "nginx", "apache", "tomcat", "jetty",
+                    "werkzeug", "express", "node", "django", "flask",
+                    "wordpress", "drupal", "joomla", "iis", "lighttpd",
+                    "caddy",
+                )):
+                    return port_int
+
+        # Second pass: standard 80/443 with a service banner
+        for port_candidate in (443, 80):
+            svc = services.get(port_candidate) or services.get(str(port_candidate))
+            if not svc:
+                continue
+            if open_ports and port_candidate not in open_ports:
+                continue
+            if isinstance(svc, dict):
+                banner = " ".join(str(svc.get(k, "")) for k in
+                                    ("service", "product", "version",
+                                      "banner")).lower()
+                if any(h in banner for h in (
+                    "http", "nginx", "apache", "tomcat", "iis"
+                )):
+                    return port_candidate
+
+        # Last resort: ANY non-default port that's open and might be web
+        for port_int in sorted(open_ports):
+            if port_int in non_default and port_int != 5985:
+                return port_int
+        # Fallback to 80 only if it's actually open
+        if 80 in open_ports:
+            return 80
+        if 443 in open_ports:
+            return 443
+        return None
+
+    def primary_web_url(self, *, scheme_hint: str = "") -> Optional[str]:
+        """Return a canonical http(s)://host:port URL for web pipelines."""
+        port = self.primary_web_port()
+        if port is None:
+            return None
+        host = (self.intel.get("target_host") or self.target or "").strip()
+        if not host:
+            return None
+        # Pick scheme heuristically
+        scheme = scheme_hint.lower() if scheme_hint else ""
+        if not scheme:
+            scheme = "https" if port in (443, 8443, 4443, 7443) else "http"
+        # Don't append default ports to the URL
+        if (scheme == "http" and port == 80) or (scheme == "https" and port == 443):
+            return f"{scheme}://{host}"
+        return f"{scheme}://{host}:{port}"
+
+    # ═════════════════════════════════════════════════════════════
+    #  Phase wall-clock budgets (hard time caps)
+    # ═════════════════════════════════════════════════════════════
+
+    # Default budgets in seconds.  Tunable via set_phase_budget().
+    # Designed against the failed-engagement post-mortem: vuln_id ran
+    # for 40 minutes producing zero findings; wstg config phase ran
+    # for 27 minutes.  These caps force-advance regardless of
+    # internal completion state.
+    PHASE_BUDGET_DEFAULTS: Dict[str, float] = {
+        "recon":       600.0,     # 10 min
+        "osint":       600.0,     # 10 min
+        "vuln_id":     720.0,     # 12 min
+        "web_testing": 900.0,     # 15 min
+        "exploit":    1500.0,     # 25 min
+        "post_exploit":1200.0,    # 20 min
+        "lateral":     900.0,     # 15 min
+        "privesc":     900.0,
+    }
+
+    def set_phase_budget(self, phase: str, seconds: float) -> None:
+        """Override default phase budget."""
+        if not phase:
+            return
+        if not hasattr(self, "_phase_budgets"):
+            self._phase_budgets: Dict[str, float] = {}
+        self._phase_budgets[phase.lower()] = max(60.0, float(seconds))
+
+    def get_phase_budget(self, phase: str) -> float:
+        """Return wall-clock seconds remaining or 0 if not started yet."""
+        if not phase:
+            return 0.0
+        key = phase.lower().replace("attackphase.", "")
+        custom = getattr(self, "_phase_budgets", {}).get(key)
+        return custom if custom is not None else self.PHASE_BUDGET_DEFAULTS.get(
+            key, 900.0
+        )
+
+    def is_phase_budget_exceeded(self, phase: str) -> bool:
+        """True if the named phase has been running longer than its budget."""
+        key = phase.lower().replace("attackphase.", "")
+        started = self.phase_started_at.get(key)
+        if started is None:
+            return False
+        budget = self.get_phase_budget(key)
+        return (time.monotonic() - started) > budget
+
+    def mark_phase_started(self, phase: str) -> None:
+        key = phase.lower().replace("attackphase.", "")
+        if key not in self.phase_started_at:
+            self.phase_started_at[key] = time.monotonic()
+
+    # ═════════════════════════════════════════════════════════════
+    #  Engagement-mode state machine + reactive dispatch
+    # ═════════════════════════════════════════════════════════════
+
+    def transition_mode(self, new_mode: str, *,
+                          reason: str = "", payload: Optional[Dict] = None) -> bool:
+        """Move the engagement to a new mode.
+
+        Returns True if a transition occurred, False if no-op (same
+        mode).  Publishes a pinned insight + invokes all subscribers.
+        Idempotent.
+        """
+        valid = ("scanning", "attempting_entry", "post_exploit", "complete")
+        if new_mode not in valid:
+            return False
+        old = self.engagement_mode
+        if old == new_mode:
+            return False
+        # Forbid going backward from post_exploit / complete except to
+        # complete (so a successful entry can't be "undone" by later
+        # noisy scanner traffic).
+        if old in ("post_exploit", "complete") and new_mode in ("scanning", "attempting_entry"):
+            return False
+        self.engagement_mode = new_mode
+        severity = ("critical" if new_mode in ("post_exploit", "complete")
+                     else "important")
+        self.pin_insight(
+            text=(
+                f"ENGAGEMENT MODE: {old!r} → {new_mode!r}.  "
+                f"Reason: {reason[:280]}.  "
+                + (
+                    "Scanning continues IN PARALLEL with exploit dispatch."
+                    if new_mode == "attempting_entry"
+                    else
+                    "ALL ACTIVE SCANNING MUST STOP.  Focus shifts to loot "
+                    "harvesting + privilege escalation + lateral movement."
+                    if new_mode == "post_exploit"
+                    else
+                    "Engagement objective satisfied.  No further dispatch."
+                    if new_mode == "complete"
+                    else
+                    "Resumed broad exploration."
+                )
+            ),
+            phase=self.engagement_mode,
+            severity=severity,
+            source="engagement_mode",
+        )
+        # Notify subscribers (synchronous — they should be cheap)
+        for cb in list(self._mode_subscribers):
+            try:
+                cb(old, new_mode, reason)
+            except Exception:
+                pass
+        return True
+
+    def subscribe_mode_changes(self, callback) -> None:
+        """Register callable(old_mode, new_mode, reason)."""
+        if callable(callback) and callback not in self._mode_subscribers:
+            self._mode_subscribers.append(callback)
+
+    def is_post_exploit_mode(self) -> bool:
+        """Cheap helper for scanners to poll between phases."""
+        return self.engagement_mode in ("post_exploit", "complete")
+
+    def is_attempting_entry(self) -> bool:
+        return self.engagement_mode == "attempting_entry"
+
+    def should_scanners_yield(self) -> bool:
+        """Universal: any scanner-style pipeline (WSTG, vuln-batch, recon)
+        should yield when this returns True.
+
+        Returns True only when:
+          * engagement is in post_exploit or complete mode, OR
+          * operator manually halted, OR
+          * win-condition met
+        Note: attempting_entry does NOT trigger yield — the user
+        explicitly wanted scanning to continue in parallel.
+        """
+        return (self.is_post_exploit_mode()
+                  or self.operator_marked_complete
+                  or self.is_engagement_complete())
+
+    # ── Entry-point detector (universal: AD / Linux / IoT / web) ──
+
+    # Title fragments that universally indicate a viable entry point.
+    # Designed to match findings from recon/vuln subagents regardless
+    # of target type.  Lowercased substring match.
+    _ENTRY_FINDING_PATTERNS = (
+        "anonymous bind allowed",
+        "null session",
+        "default credentials",
+        "default password",
+        "default creds",
+        "guest access",
+        "guest login",
+        "no authentication",
+        "unauthenticated access",
+        "weak credentials",
+        "weak password",
+        "credential exposure",
+        "exposed credentials",
+        "leaked credentials",
+        "valid credentials",
+        "shell access",
+        "rce confirmed",
+        "remote code execution",
+        "command injection",
+        "sql injection",
+        "lfi confirmed",
+        "ssrf confirmed",
+        "directory traversal",
+        "unauthenticated rce",
+        "telnet allowed",
+        "ftp anonymous",
+        "ftp anon",
+        "snmp public",
+        "snmp default community",
+        "redis unauth",
+        "mongodb unauth",
+        "elasticsearch unauth",
+        "docker api exposed",
+        "kubelet anonymous",
+        "wp-admin accessible",
+        "tomcat manager",
+        "phpmyadmin accessible",
+        "jenkins anonymous",
+        "git repository exposed",
+        ".env exposed",
+        "backup file accessible",
+    )
+
+    def detect_entry_points(self) -> List[Dict[str, Any]]:
+        """Scan intel for VIABLE ENTRY POINTS, regardless of target type.
+
+        Returns a list of new (not previously detected) entry-point
+        descriptors.  Side effect: appends them to
+        ``self.entry_points`` and (if the engagement is still in
+        ``scanning`` mode) transitions to ``attempting_entry``.
+
+        This is UNIVERSAL by design — it checks intel fields that are
+        populated regardless of whether the target is AD / Linux /
+        Windows / IoT / web app / database.  Specific protocols don't
+        need bespoke detection logic here; the per-protocol triggers
+        in finding_triggers.py populate intel["next_commands"] which
+        is one of the signals this detector watches for.
+        """
+        new_entries: List[Dict[str, Any]] = []
+
+        def _sig(d: Dict[str, Any]) -> str:
+            """Stable hash so the same entry doesn't fire twice."""
+            return hashlib.sha256(
+                (str(d.get("type", "")) + "|" + str(d.get("key", ""))[:200]
+                  ).encode("utf-8", errors="ignore")
+            ).hexdigest()[:24]
+
+        # 1. Findings with entry-point titles (universal across targets)
+        for f in self.findings:
+            title = (f.get("title") if isinstance(f, dict) else "").lower()
+            if not title:
+                continue
+            for pattern in self._ENTRY_FINDING_PATTERNS:
+                if pattern in title:
+                    entry = {
+                        "type":     "finding_match",
+                        "subtype":  pattern,
+                        "key":      f.get("finding_id") or f.get("title"),
+                        "finding":  {k: v for k, v in f.items() if k != "_id"},
+                        "severity": f.get("severity", "HIGH"),
+                        "priority": 9,
+                    }
+                    s = _sig(entry)
+                    if s not in self._entry_point_sigs:
+                        self._entry_point_sigs.add(s)
+                        new_entries.append(entry)
+                    break
+
+        # 2. Concrete commands already pre-staged by finding_triggers
+        #    (these encode entry attempts for AD, Linux SSH, IoT, DB, etc.)
+        cmds = self.intel.get("next_commands") or []
+        if cmds:
+            entry = {
+                "type":     "pre_staged_commands",
+                "key":      f"next_commands::{len(cmds)}::{cmds[0][:80]}",
+                "commands": list(cmds),
+                "priority": 10,
+            }
+            s = _sig(entry)
+            if s not in self._entry_point_sigs:
+                self._entry_point_sigs.add(s)
+                new_entries.append(entry)
+
+        # 3. URL endpoints identified by OSINT URL-extractor
+        if self.focused_attack_endpoints:
+            entry = {
+                "type":      "focused_endpoints",
+                "key":       f"focused::{len(self.focused_attack_endpoints)}",
+                "endpoints": list(self.focused_attack_endpoints),
+                "priority":  10,
+            }
+            s = _sig(entry)
+            if s not in self._entry_point_sigs:
+                self._entry_point_sigs.add(s)
+                new_entries.append(entry)
+
+        # 4. Credentials already in intel (any harvest path)
+        creds = self.intel.get("credentials") or []
+        if creds:
+            entry = {
+                "type":  "credentials_available",
+                "key":   f"creds::{len(creds)}",
+                "creds": creds,
+                "priority": 10,
+            }
+            s = _sig(entry)
+            if s not in self._entry_point_sigs:
+                self._entry_point_sigs.add(s)
+                new_entries.append(entry)
+
+        # 5. Known-exploitable CVE present (osint synthesis identified
+        #    a critical/high chain with concrete CVEs)
+        chain = self.exploit_chain
+        cves = chain.get("critical_cves") if chain else None
+        if cves:
+            entry = {
+                "type":     "exploitable_cve",
+                "key":      f"cves::{','.join(cves[:3])}",
+                "cves":     list(cves),
+                "severity": (chain.get("severity", "high") or "high").lower(),
+                "priority": 9,
+            }
+            s = _sig(entry)
+            if s not in self._entry_point_sigs:
+                self._entry_point_sigs.add(s)
+                new_entries.append(entry)
+
+        # ── Update state machine + queue ────────────────────────────
+        if new_entries:
+            for e in new_entries:
+                # Newest highest-priority at the front
+                self.entry_points.insert(0, e)
+            # Trip the asyncio event so the dispatcher wakes up
+            try:
+                import asyncio as _aio
+                if self._new_entry_point_event is None:
+                    self._new_entry_point_event = _aio.Event()
+                self._new_entry_point_event.set()
+            except Exception:
+                pass
+            # If we're still in pure scanning mode, escalate.  Do NOT
+            # downgrade from post_exploit/complete back to attempting.
+            if self.engagement_mode == "scanning":
+                reasons = ", ".join(f"{e['type']}({e.get('subtype','')})"
+                                       for e in new_entries[:3])
+                self.transition_mode(
+                    "attempting_entry",
+                    reason=f"Detected {len(new_entries)} new entry point(s): {reasons}",
+                )
+
+        return new_entries
+
+    def pop_entry_point(self) -> Optional[Dict[str, Any]]:
+        """Take one entry point off the queue for an exploit attempt."""
+        if not self.entry_points:
+            return None
+        return self.entry_points.pop(0)
+
+    async def wait_for_entry_point(self, timeout: float = 30.0) -> bool:
+        """Async helper for the dispatcher to await the next entry point.
+
+        Returns True if an event fired before timeout, False otherwise.
+        """
+        try:
+            import asyncio as _aio
+            if self._new_entry_point_event is None:
+                self._new_entry_point_event = _aio.Event()
+            try:
+                await _aio.wait_for(self._new_entry_point_event.wait(),
+                                      timeout=timeout)
+                self._new_entry_point_event.clear()
+                return True
+            except _aio.TimeoutError:
+                return False
+        except Exception:
+            return False
+
+    # ── Success detector (universal: shell, creds, flag, loot) ────
+
+    def detect_success_signals(self) -> List[Dict[str, Any]]:
+        """Check intel for indications of successful initial access.
+
+        Returns NEW signals (not previously detected).  Side effect:
+        if any signal is found, transitions mode to ``post_exploit``.
+
+        Universal: works for Windows shell, Linux shell, web app
+        admin login, IoT credential bypass, database access, etc.
+        """
+        signals: List[Dict[str, Any]] = []
+        # Reuse the entry-point sig set so a signal isn't fired twice
+        # — but tag the keys so they're distinct from entry-point keys.
+        def _sig(d: Dict[str, Any]) -> str:
+            return ("SUCCESS::" + hashlib.sha256(
+                (str(d.get("type", "")) + "|" + str(d.get("key", ""))[:200]
+                  ).encode("utf-8", errors="ignore")
+            ).hexdigest()[:24])
+
+        # Shell access of any kind
+        if self.intel.get("shell_access"):
+            sig = {"type": "shell", "key": "shell_access",
+                    "details": self.intel.get("shell_id") or "active"}
+            s = _sig(sig)
+            if s not in self._entry_point_sigs:
+                self._entry_point_sigs.add(s)
+                signals.append(sig)
+
+        # Credentials harvested (any source)
+        if self.intel.get("credentials"):
+            sig = {"type": "credentials", "key": f"creds::{len(self.intel['credentials'])}",
+                    "details": self.intel.get("credentials")}
+            s = _sig(sig)
+            if s not in self._entry_point_sigs:
+                self._entry_point_sigs.add(s)
+                signals.append(sig)
+
+        # Flags captured
+        for fkey in ("user_flag", "root_flag"):
+            if self.intel.get(fkey):
+                sig = {"type": "flag", "key": fkey}
+                s = _sig(sig)
+                if s not in self._entry_point_sigs:
+                    self._entry_point_sigs.add(s)
+                    signals.append(sig)
+
+        # Loot harvested
+        loot = self.intel.get("loot") or {}
+        for loot_kind in ("ssh_keys", "nt_hashes", "kerberos_tgts",
+                            "kerberos_tgss", "secrets"):
+            if loot.get(loot_kind):
+                sig = {"type": "loot",
+                        "key": f"loot::{loot_kind}::{len(loot[loot_kind])}",
+                        "kind": loot_kind, "count": len(loot[loot_kind])}
+                s = _sig(sig)
+                if s not in self._entry_point_sigs:
+                    self._entry_point_sigs.add(s)
+                    signals.append(sig)
+
+        if signals:
+            for sg in signals:
+                self.success_signals.append(sg)
+            # Win condition met? Mark complete.  Else pivot to post_exploit.
+            if self.is_engagement_complete():
+                self.transition_mode(
+                    "complete",
+                    reason="Win condition satisfied (shell + flag captured)",
+                )
+            else:
+                kinds = ", ".join(sg["type"] for sg in signals)
+                self.transition_mode(
+                    "post_exploit",
+                    reason=(
+                        f"Entry succeeded — signals detected: {kinds}.  "
+                        "All scanning stops; loot + privesc + lateral take over."
+                    ),
+                )
+        return signals
+
+    def extract_ad_domain(self) -> str:
+        """Pull the AD domain (e.g. ``support.htb``) out of intel.
+
+        Looks at LDAP service banners (which encode the domain via
+        ``Microsoft Windows Active Directory LDAP (Domain: …)``) and
+        falls back to the target if nothing matches.
+        """
+        import re as _re
+        for svc in self.services.values():
+            if not isinstance(svc, dict):
+                continue
+            blob = " ".join(str(svc.get(k, "")) for k in
+                              ("service", "product", "version", "banner",
+                                "extrainfo", "info"))
+            m = _re.search(r"Domain:\s*([A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)+)", blob, _re.IGNORECASE)
+            if m:
+                # Strip trailing dot/0 the LDAP banner sometimes appends
+                return m.group(1).rstrip("0.").lower()
+        # Fall back to DN-style extraction from a previously pinned
+        # finding text (the service_banner subagent emits
+        # "Base DN: DC=support,DC=htb").
+        for p in self.pinned + self.findings:
+            text = p.text if hasattr(p, "text") else (p.get("description", "") if isinstance(p, dict) else "")
+            m = _re.search(r"DC=([A-Za-z0-9_-]+(?:,DC=[A-Za-z0-9_-]+)+)", text or "", _re.IGNORECASE)
+            if m:
+                # "DC=support,DC=htb" → "support.htb"
+                parts = [seg.split("=", 1)[1] for seg in m.group(0).split(",")]
+                return ".".join(parts).lower()
+        return ""
+
     # ── Focused-attack interrupt API ────────────────────────────────
 
     def set_focused_attack(
@@ -735,6 +1484,11 @@ class EngagementContext:
             ),
             phase="all", severity="critical", source=source or "focused_attack",
         )
+        # Reactive dispatch — focused endpoints ARE entry points
+        try:
+            self.detect_entry_points()
+        except Exception:
+            pass
 
     def should_yield_to_focused_attack(
         self, *, pipeline_name: str = "",

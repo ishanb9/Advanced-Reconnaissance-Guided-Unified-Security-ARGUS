@@ -1179,6 +1179,74 @@ async def get_flags(session_id: str) -> List[Dict]:
 
 
 # ═══════════════════════════════════════════════════════════
+#  CREDENTIALS
+# ═══════════════════════════════════════════════════════════
+#
+# Persistence fix (Overpass-3 post-mortem).  Previously the API
+# endpoint `/sessions/{id}/credentials` queried `db.credentials` but
+# nothing in the codebase EVER inserted into that collection — so
+# the Foothold UI panel was always empty even after credentials were
+# captured.  `store_credential()` is the missing writer.
+
+async def store_credential(
+    session_id: str,
+    user:       str,
+    secret:     str,
+    cred_type:  str           = "plaintext",
+    service:    Optional[str] = None,
+    host:       Optional[str] = None,
+    port:       Optional[int] = None,
+    found_by:   Optional[str] = None,
+    phase:      str           = "exploit",
+    extra:      Optional[Dict] = None,
+) -> Dict:
+    """Persist a discovered credential.
+
+    Idempotent on (session_id, user, host, service, secret) so the
+    same cred captured twice (e.g. by hydra and the credential vault)
+    does not produce duplicate rows.
+    """
+    db = get_db()
+    now = datetime.utcnow()
+    key = {
+        "session_id": session_id,
+        "user":       user or "",
+        "host":       host or "",
+        "service":    service or "",
+        "secret":     secret or "",
+    }
+    doc = {
+        **key,
+        "type":       cred_type or "plaintext",
+        "port":       port,
+        "found_by":   found_by or "",
+        "phase":      phase,
+        "extra":      extra or {},
+        "timestamp":  now,
+    }
+    # Upsert keyed on the natural key so a re-emission updates the
+    # record but doesn't duplicate.
+    await db.credentials.update_one(key, {"$set": doc, "$setOnInsert": {
+        "created_at": now,
+    }}, upsert=True)
+    return _serialize(doc)
+
+
+async def get_credentials(session_id: str,
+                              service: Optional[str] = None,
+                              cred_type: Optional[str] = None) -> List[Dict]:
+    """Return stored credentials for a session."""
+    db = get_db()
+    q: Dict[str, Any] = {"session_id": session_id}
+    if service:
+        q["service"] = service
+    if cred_type:
+        q["type"] = cred_type
+    cursor = db.credentials.find(q, {"_id": 0}).sort("timestamp", DESCENDING)
+    return await cursor.to_list(length=500)
+
+
+# ═══════════════════════════════════════════════════════════
 #  ATTACK GRAPH
 # ═══════════════════════════════════════════════════════════
 

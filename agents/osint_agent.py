@@ -58,6 +58,15 @@ from agents.osint.builtwith_subagent       import BuiltWithSubagent
 from agents.osint.tineye_subagent          import TinEyeSubagent
 from agents.osint.spiderfoot_subagent      import SpiderFootSubagent
 from agents.osint.censys_subagent          import CensysSubagent
+from agents.osint.github_poc_subagent       import GitHubPoCSubagent
+from agents.osint.cisa_kev_subagent         import CisaKevSubagent
+from agents.osint.crtsh_subagent            import CrtshSubagent
+from agents.osint.vulners_subagent          import VulnersSubagent
+from agents.osint.hackerone_subagent        import HackerOneSubagent
+from agents.osint.intel_cascade             import (
+    IntelCascade, IntelSignal,
+    register_cascade, get_cascade, unregister_cascade,
+)
 
 
 class OsintAgent(BaseAgent):
@@ -108,6 +117,19 @@ class OsintAgent(BaseAgent):
             "sources": [k for k, v in SOURCES_ENABLED.items() if v],
         })
 
+        # ── Register the intel cascade for this engagement ─────────
+        # The cascade is the "real-world tester" pivot — when any new
+        # banner / CVE / domain / finding appears (now or later during
+        # vuln_id / exploit phases), it fans out queries across every
+        # relevant source automatically.
+        cascade = IntelCascade(
+            session_id = session_id,
+            target     = target,
+            broadcast  = self.broadcast,
+            discovery  = self._discovery,
+        )
+        register_cascade(cascade)
+
         # ── Wave 1: NVD CVE search (fast, always-on) ──────────────
         cves = await self._run_nvd(target, search_terms, session_id)
         result["cve_details"].extend(cves)
@@ -115,6 +137,27 @@ class OsintAgent(BaseAgent):
         # ── Wave 2: ExploitDB ─────────────────────────────────────
         exploits = await self._run_exploitdb(search_terms, session_id)
         result["exploit_modules"].extend(exploits)
+
+        # ── Surface CVEs + product+version into discovery context so
+        # the GitHub PoC subagent can use them as search queries ────
+        cve_ids = [r["cve_id"] for r in cves if r.get("cve_id")]
+        cves_with_score = [
+            (r["cve_id"], r.get("cvss_score", 0)) for r in cves
+            if r.get("cve_id")
+        ]
+        self._discovery.setdefault("critical_cves", []).extend(cve_ids)
+        self._discovery.setdefault("cves_with_score", []).extend(cves_with_score)
+        # Deduplicate to keep the lists tight
+        self._discovery["critical_cves"] = list(dict.fromkeys(
+            self._discovery["critical_cves"]
+        ))
+        seen_sc = set()
+        deduped: List[tuple] = []
+        for c, s in self._discovery["cves_with_score"]:
+            if c not in seen_sc:
+                seen_sc.add(c)
+                deduped.append((c, s))
+        self._discovery["cves_with_score"] = deduped
 
         # ── Wave 3: All subagents run concurrently ─────────────────
         subagent_results = await self._run_all_subagents(target, session_id)
@@ -135,6 +178,61 @@ class OsintAgent(BaseAgent):
         result["emails"]       = list(dict.fromkeys(result["emails"]))
         result["subdomains"]   = list(dict.fromkeys(result["subdomains"]))
         result["technologies"] = list(dict.fromkeys(result["technologies"]))
+
+        # ── Wave 3.5: CISA KEV check (runs after NVD writes CVEs) ──
+        # Must run AFTER _run_nvd has surfaced cves_with_score into
+        # self._discovery.  KEV is the strongest signal we have:
+        # CVEs in KEV are by definition being exploited in the wild.
+        if SOURCES_ENABLED.get("cisa_kev", True):
+            try:
+                kev = CisaKevSubagent(
+                    session_id   = session_id,
+                    target       = target,
+                    broadcast_fn = self.broadcast,
+                    discovery    = self._discovery,
+                )
+                kev_results = await kev.run()
+                for r in kev_results:
+                    # Promote KEV-listed CVEs into the discovery
+                    # context as `kev_cves` (consumed by master agent
+                    # + cascade for prioritisation)
+                    raw = (r or {}).get("raw") or {}
+                    if raw.get("data_type") == "kev":
+                        cid = raw.get("cve_id")
+                        if cid:
+                            existing = list(self._discovery.get("kev_cves") or [])
+                            if cid not in existing:
+                                existing.append(cid)
+                                self._discovery["kev_cves"] = existing
+            except Exception as exc:
+                await self._emit("osint_warning", {
+                    "message": f"CISA KEV check failed: {exc}"
+                })
+
+        # ── Wave 3.6: Intel Cascade fan-out for everything we know ──
+        # Harvest signals from current intel (services + CVEs +
+        # domains) and let the cascade scatter queries across every
+        # registered source in parallel.  Each signal fires its
+        # sources exactly once per engagement.
+        try:
+            count = cascade.harvest_signals_from_intel({
+                "services":        services,
+                "cves_with_score": self._discovery.get("cves_with_score"),
+                "critical_cves":   self._discovery.get("critical_cves"),
+                "hostnames":       self._discovery.get("hostnames"),
+                "subdomains":      self._discovery.get("subdomains"),
+            })
+            if count:
+                await self._emit("osint_status", {
+                    "message": f"Intel cascade: harvested {count} new signals",
+                })
+            # Wait briefly for fan-out to complete before synthesis,
+            # but cap at 60s so a slow source doesn't stall OSINT.
+            await cascade.join(timeout=60.0)
+        except Exception as exc:
+            await self._emit("osint_warning", {
+                "message": f"Intel cascade fan-out failed: {exc}"
+            })
 
         # ── Wave 4: HIBP with harvested emails ────────────────────
         # Combine harvested emails with any emails already known in discovery.
@@ -172,8 +270,15 @@ class OsintAgent(BaseAgent):
             "emails":        len(result["emails"]),
             "subdomains":    len(result["subdomains"]),
             "technologies":  len(result["technologies"]),
+            "kev_cves":      len(self._discovery.get("kev_cves") or []),
         })
 
+        # Surface KEV CVEs into the result so master_agent.execute_tasks
+        # can fold them into the global intel for downstream prompts.
+        result["kev_cves"] = list(self._discovery.get("kev_cves") or [])
+        # Keep the cascade alive across the engagement — vuln_id /
+        # exploit phases can submit new signals.  The MasterAgent's
+        # shutdown path calls unregister_cascade(session_id).
         return result
 
     # ─────────────────────────────────────────────────────────────
@@ -215,6 +320,17 @@ class OsintAgent(BaseAgent):
             named_coros.append(("spiderfoot",   _mk(SpiderFootSubagent).run()))
         if SOURCES_ENABLED.get("censys"):
             named_coros.append(("censys",       _mk(CensysSubagent).run()))
+        if SOURCES_ENABLED.get("github_poc", True):
+            named_coros.append(("github_poc",   _mk(GitHubPoCSubagent).run()))
+        if SOURCES_ENABLED.get("crtsh", True):
+            named_coros.append(("crtsh",        _mk(CrtshSubagent).run()))
+        if SOURCES_ENABLED.get("hackerone", True):
+            named_coros.append(("hackerone",    _mk(HackerOneSubagent).run()))
+        if SOURCES_ENABLED.get("vulners", True):
+            named_coros.append(("vulners",      _mk(VulnersSubagent).run()))
+        # CISA KEV runs LAST (after NVD writes CVEs into discovery)
+        # but is critical — actively-exploited check.  Handled below
+        # outside the parallel batch.
 
         if not named_coros:
             return []
@@ -247,29 +363,114 @@ class OsintAgent(BaseAgent):
     async def _run_nvd(
         self, target: str, search_terms: List[str], session_id: str
     ) -> List[Dict]:
+        """Run NVD lookups — CPE-first, keyword fallback.
+
+        CHANGE (Overpass-3 post-mortem): the old code did
+        `keywordSearch=OpenSSH` which returned CVE-1999-0661 (Solaris
+        telnet from 1999) and other ancient junk against modern
+        targets.  Now we try to build a CPE 2.3 identifier
+        (`cpe:2.3:a:openbsd:openssh:7.6p1`) and use NVD's
+        `virtualMatchString` / `cpeName` parameter for product+version
+        matching first.  When CPE construction fails, we fall back to
+        `keywordSearch` BUT additionally filter results by published
+        date so only CVEs from the last 8 years pass through (older
+        CVEs against modern banners are noise).
+        """
         if not SOURCES_ENABLED.get("nvd"):
             return []
 
-        queries = [t for t in search_terms if len(t) > 3][:8]
-        if not queries and not self._is_ip(target):
-            queries = [target.split(".")[0]]
+        from agents.osint.cpe_builder import map_search_term_to_cpe
+
+        cpe_queries:     List[Tuple[str, Optional[str]]] = []
+        keyword_queries: List[str] = []
+        for term in search_terms[:12]:
+            if not term or len(term) < 3:
+                continue
+            cm = map_search_term_to_cpe(term)
+            if cm is not None and cm.confidence >= 0.60:
+                cpe_queries.append((cm.cpe_uri, cm.version))
+            elif len(term) > 3 and len(term) < 80:
+                keyword_queries.append(term)
+
+        if not cpe_queries and not keyword_queries:
+            if not self._is_ip(target):
+                keyword_queries = [target.split(".")[0]]
+            else:
+                return []
 
         results: List[Dict] = []
-        for q in queries:
+        # ── CPE pass — version-specific, low-noise ──
+        for cpe_uri, version in cpe_queries[:8]:
             if self._stop_requested:
                 break
-            await self.set_status(AgentStatus.RUNNING, f"NVD CVE search: {q}")
-            results.extend(await self._search_nvd(q, session_id))
-            await asyncio.sleep(0.5)
+            await self.set_status(AgentStatus.RUNNING,
+                                     f"NVD CPE search: {cpe_uri}")
+            sub = await self._search_nvd_cpe(cpe_uri, version, session_id)
+            results.extend(sub)
+            await asyncio.sleep(0.4)
+
+        # ── Keyword fallback — used only when no CPE matched ──
+        # Cap aggressively because keyword results are low-signal.
+        if not results:
+            for q in keyword_queries[:4]:
+                if self._stop_requested:
+                    break
+                await self.set_status(AgentStatus.RUNNING,
+                                         f"NVD keyword fallback: {q}")
+                results.extend(
+                    await self._search_nvd(q, session_id, modern_only=True)
+                )
+                await asyncio.sleep(0.5)
 
         return results
 
-    async def _search_nvd(self, keyword: str, session_id: str) -> List[Dict]:
-        # Bug-fix (post-mortem of v2 crash 2026-04-19): the OSINT planner
-        # was forwarding command-fragment "queries" like
-        # "-d 10.129.33.11 -b all" or "net:10.129.33.11/24" to NVD, which
-        # always 404s.  Reject obvious junk before firing — anything that
-        # isn't a plausible service+version keyword is dropped silently.
+    async def _search_nvd_cpe(self, cpe_uri: str,
+                                 product_version: Optional[str],
+                                 session_id: str) -> List[Dict]:
+        """Query NVD for CVEs that apply to a specific CPE 2.3 identifier.
+
+        Uses `virtualMatchString` which honours the version range
+        constraints inside a CPE — so a query for
+        `cpe:2.3:a:openbsd:openssh:7.6p1` returns ONLY CVEs whose
+        affected-CPE range includes 7.6p1, instead of every OpenSSH
+        CVE ever recorded.
+        """
+        url     = "https://services.nvd.nist.gov/rest/json/cves/2.0"
+        headers = {
+            "User-Agent": "ARGUS-pentest/1.0",
+            "Accept":     "application/json",
+        }
+        if NVD_API_KEY:
+            headers["apiKey"] = NVD_API_KEY
+        params: Dict[str, Any] = {
+            "virtualMatchString": cpe_uri,
+            "resultsPerPage":     20,
+            "startIndex":         0,
+        }
+        try:
+            async with httpx.AsyncClient(
+                timeout=TIMEOUTS.get("default", 20)
+            ) as client:
+                resp = await client.get(url, params=params, headers=headers)
+            if resp.status_code != 200:
+                # CPE-format error → silently fall back; rate limit → skip
+                return []
+            data = resp.json()
+        except Exception:
+            return []
+        return await self._ingest_nvd_response(
+            data, keyword=cpe_uri, session_id=session_id,
+            product_version=product_version, source_label="nvd_cpe",
+        )
+
+    async def _search_nvd(self, keyword: str, session_id: str,
+                              modern_only: bool = False) -> List[Dict]:
+        """Keyword search fallback — used only when CPE construction fails.
+
+        With `modern_only=True` (the new default for the fallback path)
+        we only ask NVD for CVEs published in the last 8 years.  This
+        cuts the CVE-1999/2008 noise that polluted previous runs.
+        """
         kw = (keyword or "").strip()
         if not kw or len(kw) < 3 or len(kw) > 80:
             return []
@@ -285,7 +486,22 @@ class OsintAgent(BaseAgent):
         }
         if NVD_API_KEY:
             headers["apiKey"] = NVD_API_KEY
-        params  = {"keywordSearch": kw, "resultsPerPage": 5, "startIndex": 0}
+        params: Dict[str, Any]  = {
+            "keywordSearch":  kw,
+            "resultsPerPage": 10,
+            "startIndex":     0,
+        }
+        if modern_only:
+            # NVD expects ISO 8601 timestamps for the date filter
+            from datetime import datetime, timedelta, timezone as _tz
+            now   = datetime.now(_tz.utc)
+            start = now - timedelta(days=365 * 8)
+            params["pubStartDate"] = start.strftime(
+                "%Y-%m-%dT%H:%M:%S.000+00:00"
+            )
+            params["pubEndDate"]   = now.strftime(
+                "%Y-%m-%dT%H:%M:%S.000+00:00"
+            )
 
         try:
             async with httpx.AsyncClient(
@@ -307,21 +523,54 @@ class OsintAgent(BaseAgent):
             })
             return []
 
+        return await self._ingest_nvd_response(
+            data, keyword=keyword, session_id=session_id,
+            product_version=None, source_label="nvd",
+        )
+
+    async def _ingest_nvd_response(
+        self, data: Dict, *, keyword: str, session_id: str,
+        product_version: Optional[str], source_label: str,
+    ) -> List[Dict]:
+        """Parse + filter + store NVD vulnerability entries.
+
+        Filtering rules applied (Overpass-3 post-mortem):
+          * Drop CVEs older than 2017 unless their CVSS >= 9.0
+          * If we have a discovered version, drop CVEs whose
+            affected-version range demonstrably excludes it
+            (uses agents.osint.cpe_builder.in_version_range)
+          * Score each entry's relevance (0.0–1.0) so the synthesis
+            prompt can rank — instead of receiving a flat dump of
+            generic CVEs.
+        """
+        from agents.osint.cpe_builder import in_version_range
+        from datetime import datetime as _dt
+
         results: List[Dict] = []
-        for vuln in data.get("vulnerabilities", [])[:5]:
+        for vuln in data.get("vulnerabilities", [])[:15]:
             cve    = vuln.get("cve", {})
             cve_id = cve.get("id", "")
-            desc   = next(
+            if not cve_id:
+                continue
+            desc = next(
                 (d["value"] for d in cve.get("descriptions", []) if d.get("lang") == "en"),
                 "",
             )
+            published = cve.get("published") or ""
+            year = None
+            try:
+                if published:
+                    year = int(published[:4])
+            except Exception:
+                year = None
+
             score    = 0.0
             severity = FindingSeverity.INFO
             for key in ("cvssMetricV31", "cvssMetricV30", "cvssMetricV2"):
                 metrics = cve.get("metrics", {}).get(key, [])
                 if metrics:
                     cvss     = metrics[0].get("cvssData", {})
-                    score    = cvss.get("baseScore", 0.0)
+                    score    = cvss.get("baseScore", 0.0) or 0.0
                     severity = {
                         "CRITICAL": FindingSeverity.CRITICAL,
                         "HIGH":     FindingSeverity.HIGH,
@@ -330,13 +579,40 @@ class OsintAgent(BaseAgent):
                     }.get(cvss.get("baseSeverity", "").upper(), FindingSeverity.INFO)
                     break
 
+            # ── Relevance filter A: age + severity gate ──
+            # Drop ancient CVEs that aren't CRITICAL (>= 9.0)
+            if year is not None and year < 2017 and score < 9.0:
+                continue
+
+            # ── Relevance filter B: version applicability ──
+            if product_version:
+                applies = in_version_range(product_version, desc + " " + cve_id)
+                if applies is False:
+                    continue   # explicit non-match
+                applicability = applies   # True / None
+            else:
+                applicability = None
+
+            # Relevance score: blend CVSS with version-applicability and recency
+            relevance = min(score / 10.0, 1.0)
+            if applicability is True:
+                relevance = min(1.0, relevance + 0.2)
+            if year is not None and year >= 2020:
+                relevance = min(1.0, relevance + 0.1)
+            elif year is not None and year < 2014:
+                relevance *= 0.5
+
             entry = {
-                "cve_id":      cve_id,
-                "description": desc[:500],
-                "cvss_score":  score,
-                "severity":    severity,
-                "url":         f"https://nvd.nist.gov/vuln/detail/{cve_id}",
-                "keyword":     keyword,
+                "cve_id":         cve_id,
+                "description":    desc[:500],
+                "cvss_score":     score,
+                "severity":       severity,
+                "url":            f"https://nvd.nist.gov/vuln/detail/{cve_id}",
+                "keyword":        keyword,
+                "published_year": year,
+                "applies":        applicability,
+                "relevance":      round(relevance, 3),
+                "product_version": product_version,
             }
             results.append(entry)
 
@@ -344,28 +620,39 @@ class OsintAgent(BaseAgent):
                 session_id = session_id,
                 host       = self._session_id or "",
                 query      = keyword,
-                source     = "nvd",
+                source     = source_label,
                 title      = f"{cve_id}: {desc[:80]}",
                 summary    = desc[:400],
                 url        = entry["url"],
                 cves       = [cve_id],
                 severity   = severity,
-                relevance  = min(score / 10.0, 1.0),
-                raw        = {"score": score, "keyword": keyword, "data_type": "cve"},
+                relevance  = relevance,
+                raw        = {
+                    "score":           score,
+                    "keyword":         keyword,
+                    "data_type":       "cve",
+                    "published_year":  year,
+                    "applies":         applicability,
+                    "product_version": product_version,
+                },
             )
 
-            if score >= 7.0:
+            if score >= 7.0 and applicability is not False:
                 await self.store_finding(
                     severity    = severity,
                     title       = f"CVE: {cve_id} (CVSS {score})",
                     description = desc[:400],
                     host        = "internet_intel",
                     cves        = [cve_id],
-                    tool_used   = "nvd_api",
-                    extra       = {"cvss_score": score, "keyword": keyword},
+                    tool_used   = source_label,
+                    extra       = {"cvss_score": score, "keyword": keyword,
+                                    "applies": applicability,
+                                    "product_version": product_version},
                 )
 
-        return results
+        # Sort by relevance desc — caller benefits from top-N triage
+        results.sort(key=lambda r: r["relevance"], reverse=True)
+        return results[:10]
 
     # ─────────────────────────────────────────────────────────────
     #  ExploitDB search
@@ -387,6 +674,25 @@ class OsintAgent(BaseAgent):
         return results
 
     async def _search_exploitdb(self, query: str, session_id: str) -> List[Dict]:
+        """ExploitDB lookup with version-aware filtering.
+
+        Overpass-3 post-mortem: an OpenSSH 7.6 target was matched
+        against "OpenSSH 1.2 - '.scp' File Create/Overwrite" (1999)
+        and "FreeBSD OpenSSH 3.5p1 - Remote Command Execution".
+        Neither applies to 7.6.  We now extract the version mentioned
+        in the title and discard any title that demonstrably does NOT
+        apply to the discovered version.
+        """
+        from agents.osint.cpe_builder import (
+            map_search_term_to_cpe, in_version_range,
+        )
+
+        # Pull discovered version (if any) from the query — we get
+        # strings like "OpenSSH 7.6p1 Ubuntu 4ubuntu0.3" or
+        # "Apache 2.4.66" from the master's search_terms list.
+        cm = map_search_term_to_cpe(query)
+        product_version = cm.version if cm is not None else None
+
         results: List[Dict] = []
         try:
             async with httpx.AsyncClient(
@@ -401,29 +707,62 @@ class OsintAgent(BaseAgent):
                     },
                 )
             if resp.status_code == 200:
-                for item in resp.json().get("data", [])[:5]:
+                kept = 0
+                # Pull more candidates so the filter has room to work
+                for item in resp.json().get("data", [])[:25]:
                     edb_id = item.get("id", "")
                     title  = item.get("description", "")
+                    # Strip ANSI colour codes that exploit-db search returns
+                    clean_title = re.sub(r"\x1b\[[0-9;]*[a-zA-Z]", "", title)
+                    # ── Filter ── exclude exploits whose title's version
+                    # range provably excludes the discovered version
+                    if product_version:
+                        applies = in_version_range(product_version, clean_title)
+                        if applies is False:
+                            continue
+                    # Drop ancient-date prefixes: anything starting with
+                    # "OpenSSH 1.x"/"OpenSSH 2.x" / "Apache 1." etc when
+                    # the discovered version is in the modern major range.
+                    if product_version and self._ancient_for_modern(
+                        clean_title, product_version
+                    ):
+                        continue
+                    # Compute relevance: title-mention boost + applicability
+                    rel = 0.60
+                    if product_version and product_version in clean_title:
+                        rel = 0.95
+                    elif product_version:
+                        rel = 0.45 if "applies" not in locals() else (
+                            0.95 if applies is True
+                            else 0.55 if applies is None
+                            else 0.10
+                        )
                     results.append({
-                        "edb_id":   str(edb_id),
-                        "title":    title,
-                        "url":      f"https://www.exploit-db.com/exploits/{edb_id}",
-                        "type":     item.get("type", {}).get("name", ""),
-                        "platform": item.get("platform", {}).get("name", ""),
-                        "keyword":  query,
+                        "edb_id":         str(edb_id),
+                        "title":          clean_title,
+                        "url":            f"https://www.exploit-db.com/exploits/{edb_id}",
+                        "type":           item.get("type", {}).get("name", ""),
+                        "platform":       item.get("platform", {}).get("name", ""),
+                        "keyword":        query,
+                        "product_version": product_version,
+                        "relevance":      round(rel, 3),
                     })
                     await db.store_osint_result(
                         session_id = session_id,
                         query      = query,
                         source     = "exploit_db",
-                        title      = title[:100],
-                        summary    = f"ExploitDB #{edb_id}: {title}",
+                        title      = clean_title[:100],
+                        summary    = f"ExploitDB #{edb_id}: {clean_title}",
                         url        = f"https://www.exploit-db.com/exploits/{edb_id}",
                         exploits   = [str(edb_id)],
                         severity   = FindingSeverity.HIGH,
-                        relevance  = 0.80,
-                        raw        = {**item, "data_type": "exploit"},
+                        relevance  = rel,
+                        raw        = {**item, "data_type": "exploit",
+                                       "product_version": product_version},
                     )
+                    kept += 1
+                    if kept >= 5:
+                        break
         except Exception as exc:
             await self._emit("osint_warning", {
                 "message": f"ExploitDB error for '{query}': {exc}"
@@ -471,33 +810,135 @@ class OsintAgent(BaseAgent):
     async def _synthesize_intel(
         self, target: str, result: Dict, services: Dict
     ) -> str:
-        cve_summary    = [
-            (r["cve_id"], r.get("cvss_score", 0))
-            for r in result.get("cve_details", [])[:10]
+        """Synthesise the OSINT findings into an actionable kill-chain.
+
+        IMPORTANT CHANGE (Overpass-3 post-mortem):
+        Previously this prompt dumped a flat (cve_id, cvss) list and
+        asked the LLM to "synthesise".  The LLM correctly noted "these
+        CVEs are ancient and don't apply" but the operator wasted 30
+        minutes waiting for that conclusion.
+
+        We now PRE-FILTER and ANNOTATE before the LLM ever sees the
+        data:
+          • Only CVEs with relevance >= 0.4 are passed
+          • Each CVE shows: cvss + published year + applicability +
+            relevance score
+          • GitHub PoC hits surface alongside ExploitDB
+          • The prompt explicitly tells the LLM which version was
+            discovered so it can reason about applicability
+          • The LLM is asked to produce a STRUCTURED block of
+            concrete next commands the master can execute
+        """
+        # ── Filter + rank CVEs ──
+        cve_details = [
+            r for r in result.get("cve_details", [])
+            if (r.get("relevance") or 0) >= 0.40
         ]
-        exploit_titles = [e.get("title", "") for e in result.get("exploit_modules", [])[:10]]
-        tech_stack     = result.get("technologies", [])[:10]
-        emails_found   = result.get("emails", [])[:5]
+        cve_details.sort(key=lambda r: r.get("relevance", 0), reverse=True)
+        cve_rows = [
+            (
+                r.get("cve_id", "?"),
+                f"CVSS {r.get('cvss_score', 0):.1f}",
+                f"yr={r.get('published_year', '?')}",
+                f"rel={r.get('relevance', 0):.2f}",
+                "APPLIES" if r.get("applies") is True
+                  else "MAYBE"  if r.get("applies") is None
+                  else "DOES_NOT_APPLY",
+                r.get("description", "")[:120],
+            )
+            for r in cve_details[:8]
+        ]
+
+        # ── Filter exploits by relevance ──
+        exploits = [
+            (e.get("title", ""), e.get("relevance", 0.5),
+              e.get("product_version", ""), e.get("url", ""))
+            for e in result.get("exploit_modules", [])
+            if (e.get("relevance") or 0) >= 0.50
+        ]
+        exploits.sort(key=lambda t: t[1], reverse=True)
+        exploits = exploits[:8]
+
+        # ── Pull GitHub PoC + Shodan hits from intelligence list ──
+        github_pocs: List[str] = []
+        for item in result.get("intelligence", [])[:30]:
+            if not isinstance(item, dict):
+                continue
+            raw = item.get("raw") or {}
+            if raw.get("data_type") == "github_poc":
+                for repo in (raw.get("repos") or [])[:3]:
+                    github_pocs.append(
+                        f"{repo.get('name', '?')} ({repo.get('stars', 0)}★, "
+                        f"{repo.get('lang', '?')}, {repo.get('updated', '?')}) "
+                        f"— {repo.get('url', '')}"
+                    )
+
+        tech_stack   = (result.get("technologies") or [])[:10]
+        emails_found = (result.get("emails") or [])[:5]
+
+        # Service summary — show only the high-signal fields per port
+        service_lines = []
+        for port, svc in list(services.items())[:8]:
+            if isinstance(svc, dict):
+                product = svc.get("product") or svc.get("service") or "?"
+                version = svc.get("version") or "?"
+                service_lines.append(f"  {port}/tcp  {product}  {version}")
+            else:
+                service_lines.append(f"  {port}/tcp  {svc}")
+        services_block = "\n".join(service_lines) or "  (none discovered)"
+
+        cve_block = "\n".join(
+            f"  • {row[0]}  {row[1]}  {row[2]}  {row[3]}  [{row[4]}]\n      {row[5]}"
+            for row in cve_rows
+        ) or "  (no version-applicable CVEs after filtering)"
+        exploit_block = "\n".join(
+            f"  • [{rel:.2f}] {title}  (v={pv or '?'}, {url})"
+            for title, rel, pv, url in exploits
+        ) or "  (no exploits passed version-applicability filter)"
+        github_block = "\n".join(f"  • {x}" for x in github_pocs[:10]) or \
+                          "  (no GitHub PoCs found yet)"
 
         prompt = f"""
-You are a senior penetration tester. Synthesize the following OSINT intelligence.
+You are a senior penetration tester producing an OSINT synthesis.
 
-Target       : {target}
-Services     : {list(services.values())[:5]}
-CVEs found   : {cve_summary}
-Exploits     : {exploit_titles}
-Technologies : {tech_stack}
-Emails found : {emails_found}
+NOTE: All CVEs/exploits listed below have ALREADY been version-filtered
+against the discovered service versions.  Items marked [APPLIES] match
+the discovered version; [MAYBE] need manual confirmation; the
+[DOES_NOT_APPLY] items have already been removed.  DO NOT advise
+re-validating the filter — just use the data.
 
-Provide:
-1. Most critical attack vectors to prioritise
-2. Which CVEs have reliable public exploits
-3. Recommended Metasploit modules
-4. Social engineering opportunities (if emails found)
-5. Overall risk assessment (Critical / High / Medium / Low)
+Target  : {target}
+Services:
+{services_block}
 
-Be specific and actionable. Focus on realistic initial access paths.
-"""
+CVEs (relevance-ranked, version-filtered):
+{cve_block}
+
+Exploits (relevance-ranked, version-filtered):
+{exploit_block}
+
+GitHub PoCs (runnable code, star-ranked):
+{github_block}
+
+Technologies fingerprinted: {tech_stack}
+Emails harvested          : {emails_found}
+
+Produce:
+1. **Most critical attack vectors** — name the top 1-3 concrete paths
+   given the version-applicable findings (NOT generic categories).
+2. **Reliable public exploits** — which CVEs have PoCs that work
+   against the discovered versions.  If GitHub repo URLs were found,
+   reference them.
+3. **Concrete next commands** — a fenced ```bash block with the EXACT
+   shell commands the operator should run next.  Each command must
+   reference the discovered service+version, target a real port from
+   the Services list above, and be runnable as-is.  No placeholder
+   `<targets>` syntax.
+4. **Overall risk** — Critical / High / Medium / Low with a one-line
+   rationale.
+
+Be terse.  Focus on initial-access paths, not generic categories.
+""".strip()
         return await self.think(prompt, timeout=60)
 
     # ─────────────────────────────────────────────────────────────
@@ -513,6 +954,32 @@ Be specific and actionable. Focus on realistic initial access paths.
     @staticmethod
     def _is_ip(s: str) -> bool:
         return bool(re.match(r'^\d{1,3}(?:\.\d{1,3}){3}$', s or ""))
+
+    @staticmethod
+    def _ancient_for_modern(title: str, discovered_version: str) -> bool:
+        """Return True if `title` mentions an ancient version that
+        couldn't possibly apply to the modern `discovered_version`.
+
+        Catches the Overpass-3 pattern: target had OpenSSH 7.6p1 but
+        results included "OpenSSH 1.2 - '.scp' File Create/Overwrite"
+        and "FreeBSD OpenSSH 3.5p1".  Compares major versions —
+        anything 2+ majors lower is dropped.
+        """
+        if not discovered_version or not title:
+            return False
+        try:
+            from agents.osint.cpe_builder import extract_versions
+            discovered_major = int(discovered_version.split(".")[0])
+        except Exception:
+            return False
+        versions_in_title = extract_versions(title)
+        if not versions_in_title:
+            return False
+        try:
+            title_major = int(versions_in_title[0].split(".")[0])
+        except Exception:
+            return False
+        return (discovered_major - title_major) >= 2
 
     # ── Legacy compatibility: execute_tasks (called by master_agent) ──────────
 
@@ -653,13 +1120,36 @@ Be specific and actionable. Focus on realistic initial access paths.
 
         # Fold any newly-harvested artefacts back into master's intel so
         # downstream phases (vuln/exploit) see them.
-        for key in ("emails", "subdomains", "technologies"):
+        for key in ("emails", "subdomains", "technologies", "kev_cves"):
             vals = result.get(key) or []
             if vals:
                 intel.setdefault(key, [])
                 existing = intel[key] if isinstance(intel[key], list) else []
                 merged = list(dict.fromkeys(list(existing) + list(vals)))
                 intel[key] = merged
+
+        # If any CVEs were found to be KEV-listed (actively exploited),
+        # add them as critical pinned insights on the engagement context
+        # so the master agent + LLM see them in every subsequent prompt.
+        if result.get("kev_cves"):
+            try:
+                from agents.engagement_context import get_context
+                ctx_kev = get_context(self._session_id)
+                if ctx_kev is not None:
+                    ctx_kev.pin_insight(
+                        text=(
+                            f"🔥 ACTIVELY EXPLOITED CVE(s) on this target: "
+                            f"{', '.join(result['kev_cves'][:5])}.  "
+                            f"CISA KEV-listed = confirmed in-the-wild "
+                            f"exploitation.  These are the highest-priority "
+                            f"vectors to attempt."
+                        ),
+                        phase="osint",
+                        severity="critical",
+                        source="cisa_kev",
+                    )
+            except Exception:
+                pass
 
         # ────────────────────────────────────────────────────────────
         # CRITICAL FIX (was: synthesis text dropped on the floor).
@@ -721,6 +1211,28 @@ Be specific and actionable. Focus on realistic initial access paths.
                     (intel.get("next_commands") or []) + accepted
                 ))
                 intel["next_commands"] = merged_cmds
+                # ── CRITICAL: auto-fire focused_attack from synthesis ──
+                # The user's directive: "web testing continues
+                # unnecessarily even if initial foothold method is
+                # possibly identified".  The moment OSINT writes
+                # concrete commands, raise the focused-attack signal so
+                # WSTG / WebOrchestrator / mechanical fuzz batches all
+                # YIELD immediately (via should_scanners_yield contract).
+                # The entry-attempt dispatcher then runs the commands
+                # in parallel — no further phase wait.
+                if ctx_now is not None and accepted:
+                    try:
+                        ctx_now.set_focused_attack(
+                            endpoints=accepted[:10],
+                            reason=(
+                                "OSINT synthesis identified concrete kill-"
+                                "chain commands.  All scanners must yield "
+                                "so these can execute first."
+                            ),
+                            source="osint_synthesis_autofire",
+                        )
+                    except Exception:
+                        pass
             if chain.get("critical_cves"):
                 merged_cves = list(dict.fromkeys(
                     (intel.get("critical_cves") or []) + chain["critical_cves"]

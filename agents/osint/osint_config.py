@@ -121,6 +121,22 @@ SOURCES_ENABLED: dict = {
     "builtwith":        bool(BUILTWITH_API_KEY),            # Tech fingerprinting (needs API key)
     "censys":           bool(CENSYS_API_ID and CENSYS_API_SECRET), # Censys host/cert intel (needs API ID + secret)
     "spiderfoot":       False,                             # SpiderFoot local (set True if running)
+    # GitHub PoC — works without auth (rate-limited).  Set GITHUB_TOKEN
+    # env var for higher per-hour limits.
+    "github_poc":       True,
+    # CISA KEV — free JSON catalog of actively-exploited CVEs (no auth).
+    # Critical signal: any discovered CVE that's KEV-listed is a
+    # guaranteed working exploit path.
+    "cisa_kev":         True,
+    # crt.sh — free Certificate Transparency subdomain enumeration.
+    # No auth, rate-limited generously (≈1 req/s).  Domain-only.
+    "crtsh":            True,
+    # Vulners — aggregator of 200+ vulnerability databases.
+    # Anonymous quota is small; set VULNERS_API_KEY env var to lift.
+    "vulners":          True,
+    # HackerOne disclosed reports — public search of real-world attack
+    # patterns + bug bounty reports.  No auth needed.
+    "hackerone":        True,
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -142,6 +158,12 @@ TIMEOUTS: dict = {
     "tineye":           20,
     "google_dorks":     15,
     "censys":           20,
+    # New free sources
+    "cisa_kev":         20,
+    "crtsh":            30,
+    "vulners":          20,
+    "hackerone":        20,
+    "github_poc":       20,
 }
 
 # ─────────────────────────────────────────────────────────────────────────────

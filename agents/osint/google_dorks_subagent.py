@@ -65,12 +65,45 @@ GENERAL_DORKS: List[Tuple[str, str, FindingSeverity]] = [
 ]
 
 
+# Global Google CSE health cache shared across all dorks subagent
+# instances and all sessions.  When the bundled / operator-supplied
+# key returns accessNotConfigured / forbidden once, the rest of the
+# engagement skips Google CSE entirely — no per-query 403 noise.
+_CSE_DEAD_KEYS: Dict[str, float] = {}
+
+
+def _cse_key_dead(key: str) -> bool:
+    import time as _t
+    until = _CSE_DEAD_KEYS.get((key or "")[:16])
+    return until is not None and _t.time() < until
+
+
+def _cse_mark_dead(key: str, *, permanent: bool) -> None:
+    import time as _t
+    ttl = 86400.0 if permanent else 1800.0
+    _CSE_DEAD_KEYS[(key or "")[:16]] = _t.time() + ttl
+
+
 class GoogleDorksSubagent(OsintSubagentBase):
     SOURCE_NAME  = "google_dorks"
     DISPLAY_NAME = "Google Dorks"
 
     async def run(self) -> List[Dict]:
         if not SOURCES_ENABLED.get("google_dorks"):
+            return []
+        # ── Pre-flight: if the API key was marked dead in a previous
+        # call, skip the entire dork batch.  This stops the 56-query
+        # 403 flood we saw against accessNotConfigured projects.
+        if _cse_key_dead(GOOGLE_API_KEY):
+            await self._emit("osint_status", {
+                "message": (
+                    "Google Dorks SKIPPED — API key previously failed "
+                    "(accessNotConfigured / quota exhausted / invalid).  "
+                    "Configure GOOGLE_API_KEY + enable Custom Search JSON "
+                    "API at console.cloud.google.com/apis/library/"
+                    "customsearch.googleapis.com to re-enable."
+                )
+            })
             return []
 
         target = self._target
@@ -215,13 +248,33 @@ class GoogleDorksSubagent(OsintSubagentBase):
 
         if not resp:
             return
-        # 429 = rate limit, 403 = daily quota exhausted ("quotaExceeded").
+        # 429 = rate limit, 403 = daily quota exhausted, accessNotConfigured,
+        # or API key permission denied.  Mark the key dead in either case
+        # so subsequent calls (this scan + same key on next scan) skip
+        # the API and go straight to DDG.
         if resp.status_code in (403, 429):
+            permanent = False
+            reason = ""
+            try:
+                err = resp.json().get("error", {})
+                if (err.get("errors") or []) and isinstance(err["errors"][0], dict):
+                    reason = err["errors"][0].get("reason", "")
+                if reason in ("accessNotConfigured", "PERMISSION_DENIED",
+                                "forbidden", "keyInvalid"):
+                    permanent = True
+            except Exception:
+                pass
+            _cse_mark_dead(GOOGLE_API_KEY, permanent=permanent)
             self._quota_exhausted = True
             await self._emit("osint_warning", {
                 "message": (
-                    f"Google Dorks: HTTP {resp.status_code} — free-tier daily "
-                    "quota (100/day) likely exhausted. Stopping further dorks."
+                    f"Google Dorks: HTTP {resp.status_code} ({reason or 'unknown'}) — "
+                    + (
+                        "Custom Search JSON API not enabled on the project for "
+                        "this key — marking dead for the engagement."
+                        if permanent else
+                        "rate/quota — stopping further dorks for 30 minutes."
+                    )
                 )
             })
             return
@@ -241,7 +294,11 @@ class GoogleDorksSubagent(OsintSubagentBase):
                 reason = (err.get("errors") or [{}])[0].get("reason", "")
             except Exception:
                 pass
-            if reason in ("quotaExceeded", "dailyLimitExceeded", "rateLimitExceeded"):
+            permanent = reason in ("accessNotConfigured", "PERMISSION_DENIED",
+                                       "forbidden", "keyInvalid")
+            if reason in ("quotaExceeded", "dailyLimitExceeded",
+                           "rateLimitExceeded") or permanent:
+                _cse_mark_dead(GOOGLE_API_KEY, permanent=permanent)
                 self._quota_exhausted = True
                 await self._emit("osint_warning", {
                     "message": f"Google Dorks: {reason} — stopping further dorks."

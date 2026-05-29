@@ -950,6 +950,36 @@ class BaseSubagent(ABC):
                     )
                 except Exception:
                     pass
+            # ── Error Analyzer hand-off ─────────────────────────────
+            # Surface stderr / non-zero exit / "Tool not found" lines
+            # to the ErrorAnalyzerAgent so it can classify + course-
+            # correct via the LLM.  Best-effort — never fail the tool.
+            try:
+                stderr_blob = "\n".join(l for l in lines if "[STDERR]" in l
+                                                          or "[AGENT ERROR]" in l
+                                                          or "[MCP ERROR]" in l)
+                exit_code = 0
+                for l in reversed(lines):
+                    if l.startswith("[EXIT "):
+                        try:
+                            exit_code = int(l.split()[1].rstrip("]"))
+                        except Exception:
+                            exit_code = -1
+                        break
+                if stderr_blob or exit_code not in (0, ):
+                    from agents.meta.error_analyzer_agent import _GLOBAL_REGISTRY  # type: ignore
+                    analyzer = _GLOBAL_REGISTRY.get(self.session_id)
+                    if analyzer is not None:
+                        analyzer.ingest_error(
+                            tool      = tool_name,
+                            args      = args_sig,
+                            target    = target,
+                            exit_code = exit_code,
+                            stderr    = stderr_blob,
+                            phase     = (self.AGENT_NAME or "").lower(),
+                        )
+            except Exception:
+                pass
             return output
         finally:
             watchdog.cancel()
