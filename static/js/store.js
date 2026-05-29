@@ -212,6 +212,19 @@ const INIT = {
              tool_missing: 0, wrong_target: 0, transient: 0, other: 0 },
   },
 
+  // Exploit Lab — Tier-2 LLM exploit-code synthesis (live development view)
+  exploitLab: {
+    active:         false,
+    status:         'idle',   // 'idle' | 'running' | 'success' | 'failed'
+    target:         '',
+    cves:           [],
+    services:       [],
+    currentAttempt: 0,
+    maxIterations:  0,
+    attempts:       [],       // [{ attempt, plan, language, code, run_command,
+                              //    output, verdict, evidence }]
+  },
+
   // ── Red-Team Expert (senior tactician / oversight) ──────────────────────────
   expertState: {
     status:        'idle',    // 'idle' | 'thinking' | 'directing'
@@ -1244,6 +1257,58 @@ function reducer(state, action) {
           stats: { ...prev.stats, ...(action.payload || {}) },
         },
       };
+    }
+
+    // ── Exploit Lab (Tier-2 LLM exploit synthesis) live view ────────────
+    case 'EXPLOIT_LAB_EVENT': {
+      const d   = action.payload || {};
+      const ph  = d.stage;
+      const lab = { ...state.exploitLab };
+
+      if (ph === 'started') {
+        return { ...state, exploitLab: {
+          active: true, status: 'running',
+          target: d.target || '', cves: d.cves || [],
+          services: d.services || [], currentAttempt: 0,
+          maxIterations: d.max_iterations || 0, attempts: [],
+        }};
+      }
+
+      const attempts = Array.isArray(lab.attempts) ? lab.attempts.slice() : [];
+      const idx = Math.max(0, (d.attempt || 1) - 1);
+      const cur = attempts[idx] || { attempt: d.attempt || idx + 1 };
+
+      if (ph === 'iteration') {
+        lab.currentAttempt = d.attempt || lab.currentAttempt;
+        attempts[idx] = { ...cur };
+      } else if (ph === 'code') {
+        attempts[idx] = { ...cur, plan: d.plan || '', language: d.language || '',
+          code: d.code || '', run_command: d.run_command || '',
+          successIndicator: d.success_indicator || '' };
+      } else if (ph === 'awaiting_approval') {
+        attempts[idx] = { ...cur, code: d.code || cur.code,
+          language: d.language || cur.language,
+          run_command: d.run_command || cur.run_command,
+          awaitingApproval: true, approvalId: d.approval_id || '',
+          approvalTimeout: d.timeout_sec || 0 };
+        lab.status = 'awaiting_approval';
+      } else if (ph === 'approval_result') {
+        const dec = d.decision || (d.approved ? 'approve' : 'stop');
+        attempts[idx] = { ...cur, awaitingApproval: false,
+          approved: dec === 'approve', decision: dec };
+        if (lab.status === 'awaiting_approval') {
+          lab.status = (dec === 'approve' || dec === 'retry') ? 'running' : 'failed';
+        }
+      } else if (ph === 'exec_output') {
+        attempts[idx] = { ...cur, output: d.output || '' };
+      } else if (ph === 'verdict') {
+        attempts[idx] = { ...cur, verdict: !!d.success, evidence: d.evidence || '' };
+      } else if (ph === 'complete') {
+        lab.status = d.success ? 'success' : 'failed';
+        lab.active = false;
+      }
+      lab.attempts = attempts;
+      return { ...state, exploitLab: lab };
     }
 
     // ── Red-Team Expert reducers ────────────────────────────────────────
@@ -3170,6 +3235,40 @@ function routeWsEvent(msg, dispatch, shellListeners, sessionId) {
       // was emitted (e.g. fast-path transient classifications).
       if (data.stats) {
         dispatch({ type: 'META_ERROR_ANALYZER_STATS', payload: data.stats });
+      }
+      break;
+    }
+
+    // ── Exploit Lab — Tier-2 LLM exploit-code synthesis (live) ───────────
+    case 'exploit_lab': {
+      dispatch({ type: 'EXPLOIT_LAB_EVENT', payload: data });
+      const ph = data.stage;
+      let msg = '';
+      if (ph === 'started') {
+        msg = `🧪 Exploit Lab: synthesizing custom exploit for ${(data.cves || []).join(', ') || data.target}`;
+      } else if (ph === 'iteration') {
+        msg = `🧪 Exploit Lab: attempt ${data.attempt}/${data.total} — synthesizing`;
+      } else if (ph === 'code') {
+        msg = `🧪 Exploit Lab: generated ${data.language || ''} exploit (attempt ${data.attempt})`;
+      } else if (ph === 'awaiting_approval') {
+        msg = `⏸ Exploit Lab: attempt ${data.attempt} AWAITING YOUR APPROVAL to run`;
+      } else if (ph === 'approval_result') {
+        const dec = data.decision || (data.approved ? 'approve' : 'stop');
+        msg = `🧪 Exploit Lab: attempt ${data.attempt} ` + (
+          dec === 'approve' ? 'approved ▶ running'
+          : dec === 'retry' ? 'rejected ↻ synthesizing a different attempt'
+          : 'rejected ✋ stopped');
+      } else if (ph === 'verdict') {
+        msg = `🧪 Exploit Lab: attempt ${data.attempt} ${data.success ? 'SUCCESS ✅' : 'failed — refining'}`;
+      } else if (ph === 'complete') {
+        msg = data.success
+          ? `🧪 Exploit Lab: shell obtained via synthesized exploit ✅`
+          : `🧪 Exploit Lab: no shell after ${data.attempts || 0} synthesis attempt(s)`;
+      }
+      if (msg) {
+        dispatch({ type: 'FEED_ENTRY', payload: {
+          ts, agent: 'exploit_synth', eventType: 'exploit_lab', message: msg, data,
+        }});
       }
       break;
     }

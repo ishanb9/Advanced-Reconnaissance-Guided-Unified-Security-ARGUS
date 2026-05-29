@@ -1253,16 +1253,39 @@ class EngagementContext:
                 self._entry_point_sigs.add(s)
                 new_entries.append(entry)
 
-        # 5. Known-exploitable CVE present (osint synthesis identified
-        #    a critical/high chain with concrete CVEs)
+        # 5. Known-exploitable CVE present.  Source CVEs from the OSINT
+        #    exploit_chain when available, but ALSO from raw intel['cves']
+        #    and vulnerability findings.  A CVE identified by recon or the
+        #    vuln scan (e.g. a versioned service banner → CVE-2018-15473) is
+        #    exploit-worthy even if OSINT never synthesised a formal chain —
+        #    this guarantees "vulnerability found → exploitation attempt"
+        #    rather than waiting on OSINT synthesis that may never run.
         chain = self.exploit_chain
-        cves = chain.get("critical_cves") if chain else None
-        if cves:
+        cve_candidates: List[str] = []
+        if chain and chain.get("critical_cves"):
+            for c in (chain.get("critical_cves") or []):
+                cu = str(c).strip().upper()
+                if cu and cu not in cve_candidates:
+                    cve_candidates.append(cu)
+        for c in (self.intel.get("cves") or []):
+            cu = str(c).strip().upper()
+            if cu and cu not in cve_candidates:
+                cve_candidates.append(cu)
+        for v in (self.intel.get("vulnerabilities") or []):
+            if not isinstance(v, dict):
+                continue
+            v_cves = v.get("cves") or ([v.get("cve")] if v.get("cve") else [])
+            for c in v_cves:
+                cu = str(c).strip().upper()
+                if cu and cu not in cve_candidates:
+                    cve_candidates.append(cu)
+        if cve_candidates:
+            sev = (chain.get("severity", "high") if chain else "high") or "high"
             entry = {
                 "type":     "exploitable_cve",
-                "key":      f"cves::{','.join(cves[:3])}",
-                "cves":     list(cves),
-                "severity": (chain.get("severity", "high") or "high").lower(),
+                "key":      f"cves::{','.join(cve_candidates[:3])}",
+                "cves":     cve_candidates,
+                "severity": str(sev).lower(),
                 "priority": 9,
             }
             s = _sig(entry)

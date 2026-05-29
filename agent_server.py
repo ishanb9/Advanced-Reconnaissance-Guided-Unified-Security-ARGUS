@@ -2368,6 +2368,28 @@ async def websocket_endpoint(ws: WebSocket, session_id: str):
                     if agent and shell_id:
                         await agent.resize_shell(shell_id, cols, rows)
 
+                elif mtype == "exploit_approval":
+                    # Operator Approve / Reject for a Tier-2 synthesized exploit.
+                    # Resolves the pending approval the ExploitSynthSubagent is
+                    # blocked on before it runs any attacker code.
+                    try:
+                        from agents.exploit.exploit_approval import resolve as _resolve_exploit
+                        approval_id = msg.get("approval_id", "")
+                        # decision may be "approve" | "retry" | "stop" (or a
+                        # legacy bool); resolve() normalizes it.
+                        decision    = msg.get("decision", "stop")
+                        resolved    = _resolve_exploit(approval_id, decision)
+                        await ws.send_text(json.dumps({
+                            "type": "exploit_approval_ack",
+                            "data": {"approval_id": approval_id,
+                                     "decision": decision, "resolved": resolved},
+                        }))
+                    except Exception as _ex:
+                        await ws.send_text(json.dumps({
+                            "type": "exploit_approval_ack",
+                            "data": {"resolved": False, "error": str(_ex)},
+                        }))
+
                 elif mtype == "tool_extend":
                     # Extend a running tool's deadline.
                     # Check both registries: BaseSubagent (v3 subagents) and

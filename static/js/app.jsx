@@ -86,6 +86,7 @@ const HUBS = [
     tabs: [
       { key: 'creds',    label: 'Credentials',         comp: 'CredentialsPage' },
       { key: 'shells',   label: 'Active Shells',       comp: 'ShellManager' },
+      { key: 'exploit_lab', label: 'Exploit Lab',      comp: 'ExploitLabPage' },
       { key: 'lateral',  label: 'Lateral & Post-Ex',   comp: 'LateralPostPage' },
       { key: 'payloads', label: 'Payload Builder',     comp: 'PayloadBuilder' },
     ] },
@@ -188,6 +189,7 @@ const COMP_FOR = {
   AIObservability:     () => window.AIObservability,
   CredentialsPage:     () => window.CredentialsPage,
   ShellManager:        () => window.ShellManager,
+  ExploitLabPage:      () => window.ExploitLabPage,
   LateralPostPage:     () => window.LateralPostPage,
   PayloadBuilder:      () => window.PayloadBuilder,
   TargetConfig:        () => window.TargetConfig,

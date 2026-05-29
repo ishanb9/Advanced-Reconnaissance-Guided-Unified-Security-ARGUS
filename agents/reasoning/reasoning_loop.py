@@ -260,6 +260,14 @@ class ReasoningLoop:
         if not self._intel.get("open_ports"):
             await self._bootstrap_recon()
 
+        # --- SELF-HEAL: ensure recon evidence reached the shared intel ---
+        # Subagents persist findings straight to the DB; if the master's
+        # intel-sync paths are missing or failed, the loop would otherwise
+        # iterate forever on "0 ports".  Rebuild the attack surface from the
+        # findings store before any hypothesis/answer work begins.
+        if not self._intel.get("open_ports"):
+            await self._reconcile_intel_from_findings()
+
         # --- POST-BOOTSTRAP ANSWER EXTRACTION ---
         # Run QuestionEngine against all gathered intel (no raw output yet).
         await self._question_engine.answer_all(self._intel, "")
@@ -1195,8 +1203,142 @@ class ReasoningLoop:
     # Loop steps
     # ------------------------------------------------------------------
 
+    async def _reconcile_intel_from_findings(self) -> int:
+        """Self-healing safety net: rebuild core recon evidence from the
+        authoritative findings store when the in-memory intel dict is empty.
+
+        WHY THIS EXISTS
+        ---------------
+        Subagents (network_scan, service_banner, …) persist every Finding
+        directly to the ``findings`` collection via ``store_finding``, but
+        that helper does NOT touch the shared ``intel`` dict — population of
+        ``intel['open_ports']`` relies entirely on the master's sync paths
+        (``_run_network_scan_and_sync``, ``_await_and_sync_subagents``,
+        ``_phase_recon`` merge).  If ANY of those paths is missing (a stale
+        build) or silently fails, the reasoning loop would observe
+        ``Ports open: 0`` forever — re-requesting a port scan every
+        iteration — even though recon already discovered the full attack
+        surface and wrote it to the database.
+
+        This method closes that gap unconditionally: it reads the findings
+        the scan actually produced and backfills ``open_ports`` /
+        ``services`` / ``cves`` so the loop's evidence ALWAYS reflects
+        reality.  It only fills keys that are currently empty, so it never
+        clobbers richer in-memory state.  Fully defensive — never raises.
+
+        Returns the number of open ports recovered (0 when nothing to do).
+        """
+        # Fast path: intel already has ports → nothing to reconcile.
+        if self._intel.get("open_ports"):
+            return 0
+        try:
+            from db import mongo_client as _db
+            findings = await _db.get_findings(self._session_id, limit=2000)
+        except Exception:
+            return 0
+        if not findings:
+            return 0
+
+        import re as _re
+        ports: list = []
+        services: dict = dict(self._intel.get("services") or {})
+        cve_seen = {str(c).upper() for c in (self._intel.get("cves") or [])}
+        new_cves: list = []
+        vulns: list = []
+
+        for f in findings:
+            # ── Ports ──────────────────────────────────────────────────
+            raw_port = f.get("port")
+            port_i = None
+            if raw_port is not None:
+                try:
+                    port_i = int(str(raw_port).split("/")[0])
+                except (ValueError, TypeError):
+                    port_i = None
+            if port_i is not None and port_i not in ports:
+                ports.append(port_i)
+
+            # ── Service / version (best-effort parse of finding text) ──
+            if port_i is not None and port_i not in services:
+                title = str(f.get("title") or "")
+                desc  = str(f.get("description") or "")
+                svc, ver = "", ""
+                # network_scan style: "Open Port 22/tcp: ssh (OpenSSH 7.2p2 …)"
+                m = _re.search(r"Open Port\s+\d+/\w+:\s*([A-Za-z][\w\-./]*)\s*(?:\(([^)]*)\))?", title)
+                if m:
+                    svc = (m.group(1) or "").strip()
+                    ver = (m.group(2) or "").strip()
+                # service_banner style: "Service: ssh. Version: OpenSSH 7.2p2."
+                if not ver:
+                    mv = _re.search(r"Version:\s*([^.]+)", desc)
+                    if mv:
+                        ver = mv.group(1).strip()
+                if not svc:
+                    ms = _re.search(r"Service:\s*([A-Za-z][\w\-./]*)", desc)
+                    if ms:
+                        svc = ms.group(1).strip()
+                if svc or ver:
+                    services[port_i] = {
+                        "service":  svc,
+                        "version":  ver,
+                        "port":     port_i,
+                        "protocol": "tcp",
+                    }
+
+            # ── CVEs ───────────────────────────────────────────────────
+            f_cves = []
+            for c in (f.get("cves") or []):
+                cu = str(c).strip().upper()
+                if cu:
+                    f_cves.append(cu)
+                    if cu not in cve_seen:
+                        cve_seen.add(cu)
+                        new_cves.append(cu)
+
+            # ── Vulnerabilities ────────────────────────────────────────
+            # A finding that carries a CVE or is rated HIGH/CRITICAL is an
+            # actionable vulnerability — surface it so the hypothesis engine
+            # and the exploit gate (which look at intel['vulnerabilities'])
+            # see exploit evidence, not just raw ports.
+            sev = str(f.get("severity") or "").upper()
+            if f_cves or sev in ("HIGH", "CRITICAL"):
+                vulns.append({
+                    "title":    str(f.get("title") or "")[:160],
+                    "severity": sev or "MEDIUM",
+                    "cve":      f_cves[0] if f_cves else "",
+                    "cves":     f_cves,
+                    "port":     port_i,
+                    "source":   "findings_reconcile",
+                })
+
+        if not ports:
+            return 0
+
+        # Backfill ONLY empty keys — never clobber richer in-memory state.
+        self._intel["open_ports"] = sorted(ports)
+        if services and not self._intel.get("services"):
+            self._intel["services"] = services
+        if new_cves and not self._intel.get("cves"):
+            self._intel["cves"] = new_cves
+        if vulns and not self._intel.get("vulnerabilities"):
+            self._intel["vulnerabilities"] = vulns
+
+        await self._emit_reasoning(
+            f"Recovered {len(ports)} open port(s) "
+            f"({', '.join(str(p) for p in sorted(ports)[:12])}) and "
+            f"{len(services)} service(s) from the findings store — "
+            f"in-memory intel was empty despite a completed recon"
+        )
+        return len(ports)
+
     async def _observe(self) -> dict:
         """Snapshot the current evidence state."""
+        # Self-healing: if recon evidence never reached the shared intel dict
+        # (stale build / failed sync path), rebuild it from the findings the
+        # scan actually produced so the loop never reasons on empty evidence
+        # while the database holds a full attack surface.
+        if not self._intel.get("open_ports"):
+            await self._reconcile_intel_from_findings()
         return {
             "target":          self._intel.get("target", self._target),
             "open_ports":      self._intel.get("open_ports", []),
@@ -2850,9 +2992,22 @@ class ReasoningLoop:
                                          phase_slug="cloud",
                                          target=self._target),
             ))
-            # Exploit — any port + any vuln evidence.
+            # Exploit — open ports + ANY actionable signal.  A fingerprinted
+            # service VERSION (e.g. "OpenSSH 7.2p2", "Apache 2.4.18") or a
+            # known CVE is just as exploitable as a formal vuln entry — a real
+            # tester starts attacking the moment a versioned service is
+            # identified.  Previously only vulnerabilities/technologies
+            # satisfied this gate, so version-only recon left the loop stuck
+            # in endless enumeration instead of attempting exploitation.
+            _svc_has_version = any(
+                (s.get("version") if isinstance(s, dict) else "")
+                for s in (intel.get("services") or {}).values()
+            )
             has_exploit_evidence = bool(intel.get("open_ports")) and (
-                bool(intel.get("vulnerabilities")) or bool(intel.get("technologies"))
+                bool(intel.get("vulnerabilities"))
+                or bool(intel.get("technologies"))
+                or bool(intel.get("cves"))
+                or _svc_has_version
             )
             candidates.append((
                 "exploit",

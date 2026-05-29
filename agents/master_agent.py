@@ -2566,8 +2566,34 @@ class MasterAgent(BaseAgent):
         # Expose QuestionEngine on master for guidance-question routing
         self._question_engine = loop._question_engine
 
+        # ── Start the reactive entry-attempt dispatcher IN PARALLEL ──────
+        # The legacy dispatcher start (in _execute_phases) is bypassed by
+        # the reasoning-loop early-return, so without this the instant-
+        # reaction layer never ran in the DEFAULT engine.  Start it here so
+        # the moment recon/vuln/OSINT identify an entry point — an open
+        # service (pre-staged command), focused endpoint, harvested
+        # credential, or ANY identified CVE — exploitation fires IMMEDIATELY
+        # and IN PARALLEL with the reasoning loop's own iteration pivots,
+        # rather than waiting for the next (slow) decision cycle.  The
+        # dispatcher polls ctx.detect_entry_points() every 30s and also
+        # wakes instantly on new-entry events.
+        _entry_task = None
+        if self._context is not None:
+            try:
+                _entry_task = self._create_task(
+                    self._entry_attempt_dispatcher(target)
+                )
+            except Exception:
+                _entry_task = None
+
         # Run the loop — returns updated intel
-        final_intel = await loop.run()
+        try:
+            final_intel = await loop.run()
+        finally:
+            # Stop the reactive dispatcher once the loop exits (it also
+            # self-terminates when the engagement reaches post_exploit).
+            if _entry_task is not None and not _entry_task.done():
+                _entry_task.cancel()
 
         # Merge final reasoning state back into self._intel
         for key in [
@@ -6238,10 +6264,21 @@ class MasterAgent(BaseAgent):
                     next_action= "Will dispatch evil-winrm / sshpass / crackmapexec auth-probe",
                 )
 
-            elif etype in ("finding_match", "exploitable_cve"):
-                # These are reasoning-only entries — surface them to
-                # the LLM so the next exploit-planning cycle picks them
-                # up.  No direct command execution from this branch.
+            elif etype == "exploitable_cve":
+                # A vulnerability with a concrete CVE was identified.
+                # Exploit it NOW (public exploit from the internet via
+                # searchsploit/Metasploit, or a built payload via the
+                # web/metasploit chains) — in parallel with the rest of
+                # the engagement — instead of merely surfacing it to the
+                # slow LLM planner.
+                await self._attempt_exploit_for_cves(
+                    target, entry.get("cves") or []
+                )
+
+            elif etype == "finding_match":
+                # Reasoning-only entry — surface it to the LLM so the next
+                # exploit-planning cycle picks it up.  (Title-pattern
+                # matches without a concrete CVE/command to fire yet.)
                 await self.emit_reasoning(
                     step       = "entry_finding_surfaced",
                     reasoning  = (
@@ -6257,7 +6294,289 @@ class MasterAgent(BaseAgent):
                 "[entry_attempt] %s failed: %s", etype, exc,
             )
 
+    async def _attempt_exploit_for_cves(self, target: str, cves: list) -> None:
+        """Reactively exploit identified CVEs — in PARALLEL with the rest
+        of the engagement.
+
+        Operator directive: "once a vulnerability is found, it should be
+        exploited by payload from internet or custom payload built through
+        LLM.  Let the other recon/vulnerability processes run in parallel."
+
+        This is the reactive trigger that satisfies it.  The moment a CVE
+        is identified (by recon, the vuln scan, or OSINT synthesis) the
+        entry-attempt dispatcher calls this method from its background task
+        — so exploitation starts IMMEDIATELY without blocking, or being
+        blocked by, ongoing recon/vuln scanning.
+
+        It delegates to ``ExploitOrchestrator`` which races (first-to-win,
+        laggards cancelled) the full set of acquisition strategies:
+          • searchsploit  — public exploit code from the local ExploitDB
+          • metasploit    — MSF module auto-selected from the CVE/service
+                            (built/staged payload delivery)
+          • web_exploit   — web RCE payload chains
+          • credential_spray — service auth attempts
+        A landed shell is promoted via ``register_shell`` so the loot /
+        privesc / lateral pipelines fire and the human gets an interactive
+        session.
+        """
+        if not cves or self._context is None:
+            return
+        # Don't pile on once we've already won.
+        try:
+            if self._context.is_post_exploit_mode():
+                return
+        except Exception:
+            pass
+        try:
+            from agents.exploit.exploit_orchestrator import ExploitOrchestrator
+            import db.mongo_client as _db
+
+            orch = ExploitOrchestrator(broadcast=self._make_sa_broadcast())
+            orch._session_id = self._session_id
+
+            lm    = getattr(self, "listener_manager", None)
+            lhost = (getattr(lm, "lhost", None) if lm else None) or self._auto_detect_lhost()
+            lport = 4444
+            services = list(self._intel.get("services", {}).values())
+            web_urls = [
+                f"http{'s' if int(str(p)) in (443, 8443) else ''}://{target}:{p}"
+                for p, s in self._intel.get("services", {}).items()
+                if any(x in (s.get("service", "") if isinstance(s, dict) else str(s)).lower()
+                       for x in ("http", "https"))
+            ][:3]
+
+            await self.emit_reasoning(
+                step       = "reactive_cve_exploit",
+                reasoning  = (
+                    f"Vulnerability identified ({', '.join(str(c) for c in cves[:3])}) — "
+                    f"launching exploitation NOW: searchsploit/ExploitDB + Metasploit "
+                    f"module + web payload chains race first-to-win, in parallel with "
+                    f"ongoing recon/vuln scanning."
+                ),
+                decision   = "EXPLOIT IDENTIFIED CVE IMMEDIATELY",
+                next_action= "Run parallel exploit chains; a landed shell pivots to post-exploit",
+            )
+
+            res = await orch.run(
+                session_id = self._session_id,
+                target     = target,
+                db         = _db.get_db(),
+                services   = services,
+                cves       = list(cves),
+                open_ports = self._intel.get("open_ports", []),
+                web_urls   = web_urls,
+                lhost      = lhost,
+                lport      = lport,
+            )
+
+            if isinstance(res, dict) and res.get("shell_obtained"):
+                try:
+                    await self.register_shell(
+                        source   = "reactive_cve_exploit",
+                        user     = res.get("user") or "unknown",
+                        host     = target,
+                        method   = res.get("method") or "cve_exploit",
+                        evidence = str(res.get("evidence") or "")[:300],
+                    )
+                except Exception:
+                    pass
+            else:
+                # ── TIER 2: LLM exploit-code synthesis ──────────────────
+                # Tier-1 (public exploits + built payloads) landed nothing.
+                # Escalate to bespoke LLM-synthesized exploit code, streamed
+                # live to the Exploit Lab panel.  Still parallel — we're in
+                # the entry-attempt dispatcher's background task.
+                tier1_out = str((res or {}).get("evidence") or "") if isinstance(res, dict) else ""
+                await self._attempt_synth_exploitation(
+                    target      = target,
+                    cves        = list(cves),
+                    services    = services,
+                    open_ports  = self._intel.get("open_ports", []),
+                    web_urls    = web_urls,
+                    lhost       = lhost,
+                    lport       = lport,
+                    prior_output= tier1_out,
+                )
+        except Exception as exc:                                # noqa: BLE001
+            import logging as _lg
+            _lg.getLogger(__name__).warning(
+                "[reactive_cve_exploit] failed (non-fatal): %s", exc,
+            )
+
+    async def _attempt_synth_exploitation(
+        self,
+        target:      str,
+        cves:        list,
+        services:    list,
+        open_ports:  list,
+        web_urls:    list,
+        lhost:       str = "",
+        lport:       int = 4444,
+        prior_output: str = "",
+    ) -> None:
+        """TIER 2 — LLM exploit-code synthesis fallback.
+
+        Fires only when Tier-1 (public exploits + built payloads) failed to
+        land a shell.  Runs the ``ExploitSynthSubagent`` synthesize → run →
+        observe → refine loop, streaming the whole development to the Exploit
+        Lab panel via ``exploit_lab`` events.  A landed shell is promoted via
+        ``register_shell`` so the post-exploit / loot / privesc pipelines fire
+        and the human gets an interactive session.
+        """
+        if not cves and not services:
+            return
+        try:
+            if self._context is not None and self._context.is_post_exploit_mode():
+                return
+        except Exception:
+            pass
+        try:
+            from agents.exploit.exploit_synth_subagent import ExploitSynthSubagent
+            import db.mongo_client as _db
+
+            await self.emit_reasoning(
+                step       = "tier2_exploit_synth",
+                reasoning  = (
+                    "Tier-1 exploitation (public exploits + built payloads) did "
+                    "not land a shell.  Escalating to Tier-2: LLM exploit-code "
+                    "synthesis — writing, running, observing and refining a "
+                    "bespoke PoC live in the Exploit Lab."
+                ),
+                decision   = "SYNTHESIZE CUSTOM EXPLOIT (Tier-2)",
+                next_action= "Stream synth→run→observe→refine to the Exploit Lab panel",
+            )
+
+            synth = ExploitSynthSubagent(
+                session_id    = self._session_id,
+                target        = target,
+                broadcast     = self._make_sa_broadcast(),
+                db            = _db.get_db(),
+                think_json_fn = self.think_json,
+            )
+            # Track so an operator Stop / teardown cancels in-flight synthesis.
+            try:
+                self._subagents_active = getattr(self, "_subagents_active", [])
+                self._subagents_active.append(synth)
+            except Exception:
+                pass
+
+            res = await synth.run(
+                target     = target,
+                cves       = list(cves),
+                services   = services,
+                open_ports = open_ports,
+                web_urls   = web_urls,
+                lhost      = lhost,
+                lport      = lport,
+                prior_output = prior_output,
+            )
+
+            pd = getattr(res, "parsed_data", {}) or {}
+            if pd.get("shell_obtained"):
+                try:
+                    await self.register_shell(
+                        source   = "exploit_synth",
+                        user     = pd.get("user") or "unknown",
+                        host     = target,
+                        method   = pd.get("method") or "llm_synth_exploit",
+                        evidence = str(pd.get("evidence") or "")[:300],
+                    )
+                except Exception:
+                    pass
+        except Exception as exc:                                # noqa: BLE001
+            import logging as _lg
+            _lg.getLogger(__name__).warning(
+                "[tier2_exploit_synth] failed (non-fatal): %s", exc,
+            )
+
     # ─── PHASE: Exploitation ──────────────────────────────────
+
+    async def _auto_generate_payload(
+        self,
+        platform:     str = "linux",
+        fmt:          str = "elf",
+        payload_type: str = "stageless",
+        lport:        int = 0,
+        start_listener: bool = True,
+    ) -> Optional[Dict]:
+        """Autonomously build a reverse-shell payload + start a listener.
+
+        The user's requirement: "ARGUS should also be able to develop
+        exploits for issues found, hence the payload agents are
+        available."  Previously PayloadAgent was REST-only and never
+        fired during an autonomous engagement (self._payload_agent
+        stayed None).  This helper:
+
+          1. Generates a platform-appropriate reverse-shell payload via
+             msfvenom (PayloadAgent.generate).
+          2. Starts a matching PTY-backed listener via ShellAgent so a
+             caught shell is immediately interactive for the human
+             operator in the GUI Shell Manager.
+
+        Returns the payload metadata dict (with output_path + listener
+        details) or None on failure.  Never raises.
+        """
+        try:
+            from agents.payload_agent import PayloadAgent
+            if getattr(self, "_payload_agent", None) is None:
+                self._payload_agent = PayloadAgent(broadcast=self.broadcast)
+                self._payload_agent._session_id = self._session_id
+            # Pick a port: default to an unused 44xx so multiple payloads
+            # don't collide.
+            if not lport:
+                base = 4444 + (len(getattr(self, "_generated_payloads", []) or []))
+                lport = base
+            lhost = self._auto_detect_lhost() if hasattr(self, "_auto_detect_lhost") else None
+            payload = await self._payload_agent.generate(
+                session_id   = self._session_id,
+                platform     = platform,
+                fmt          = fmt,
+                lport        = lport,
+                lhost        = lhost or None,
+                payload_type = payload_type,
+            )
+            self._generated_payloads = (getattr(self, "_generated_payloads", []) or [])
+            self._generated_payloads.append(payload)
+            await self.emit_reasoning(
+                step       = "payload_developed",
+                reasoning  = (
+                    f"Auto-generated {platform}/{fmt} reverse-shell payload "
+                    f"({payload.get('payload_name','?')}) at "
+                    f"{payload.get('output_path','?')}. "
+                    f"Listener: {payload.get('listener_cmd','?')[:80]}"
+                ),
+                decision   = "PAYLOAD READY for delivery",
+                next_action= "Exploit subagents can upload/execute it for a shell",
+            )
+            # Start a PTY-backed listener so a caught shell is human-usable
+            # in the GUI Shell Manager.  Uses a "reverse_shell" socat PTY
+            # listener (meterpreter payloads still catch fine; the operator
+            # can upgrade in-GUI).
+            if start_listener and payload.get("success"):
+                try:
+                    import uuid as _uuid
+                    from agents.shell_agent import ShellAgent
+                    if getattr(self, "_shell_agent", None) is None:
+                        self._shell_agent = ShellAgent(broadcast=self.broadcast)
+                        self._shell_agent._session_id = self._session_id
+                        self._shell_agent._master = self
+                    await self._shell_agent.create_listener(
+                        session_id = self._session_id,
+                        shell_id   = f"auto-{_uuid.uuid4().hex[:8]}",
+                        shell_type = "reverse_shell",
+                        lport      = lport,
+                        lhost      = lhost or None,
+                    )
+                except Exception as _le:
+                    import logging as _ll
+                    _ll.getLogger(__name__).debug(
+                        "[payload] listener start failed: %s", _le)
+            return payload
+        except Exception as exc:                                     # noqa: BLE001
+            import logging as _ll
+            _ll.getLogger(__name__).warning(
+                "[payload] auto-generate failed (non-fatal): %s", exc)
+            return None
 
     async def _phase_exploit(self, target: str):
         """
@@ -6277,6 +6596,29 @@ class MasterAgent(BaseAgent):
         agent = ExploitAgent(broadcast=self.broadcast)
         agent._session_id = self._session_id
         self._exploit_agent = agent
+
+        # ── Pre-stage a reverse-shell payload + listener ─────────────
+        # When the attack surface includes a file-upload / RCE / WAR /
+        # web-shell primitive, having a payload + listener ready BEFORE
+        # the exploit subagents run means a landed RCE converts to an
+        # interactive shell immediately (and the human can grab it in
+        # the Shell Manager).  Chosen platform follows the target OS.
+        try:
+            _osg = (self._intel.get("os_guess") or "").lower()
+            _web_present = bool(self._intel.get("web_paths")) or any(
+                int(str(p).split("/")[0]) in (80, 443, 8080, 8443, 8000, 8888)
+                for p in (self._intel.get("open_ports") or [])
+                if str(p).split("/")[0].isdigit()
+            )
+            if _web_present and not self._intel.get("shell_access"):
+                if "windows" in _osg:
+                    await self._auto_generate_payload(platform="windows", fmt="exe")
+                else:
+                    # Linux web stacks: also stage a language-appropriate
+                    # web shell format the upload subagent can use.
+                    await self._auto_generate_payload(platform="linux", fmt="elf")
+        except Exception:
+            pass
 
         # ── FIRST-STRIKE LOOP ──────────────────────────────────────
         # When OSINT synthesis identified a concrete kill-chain
