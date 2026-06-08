@@ -200,6 +200,154 @@ class QuestionEngine:
             await self._answer_question(q, intel, raw_output)
         self.save_to_intel(intel)
 
+    # ─────────────────────────────────────────────────────────────────────────
+    # Holistic objective grading (complete / partial / not_complete)
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _build_evidence_summary(self, intel: dict) -> str:
+        """Condense the engagement state into an evidence block the LLM can
+        grade objectives against."""
+        lines: List[str] = []
+        lines.append(f"Open ports: {intel.get('open_ports') or []}")
+        svcs = intel.get("services") or {}
+        if svcs:
+            lines.append("Services: " + "; ".join(
+                f"{p}={(v.get('service') if isinstance(v, dict) else v)} "
+                f"{(v.get('version', '') if isinstance(v, dict) else '')}".strip()
+                for p, v in list(svcs.items())[:12]))
+        lines.append(f"Shell access: {bool(intel.get('shell_access'))} "
+                     f"(current_user={intel.get('current_user') or '?'})")
+        shells = intel.get("shells") or []
+        if shells:
+            lines.append(f"Shells ({len(shells)}): " + "; ".join(
+                f"{(s.get('user') if isinstance(s, dict) else '?')}"
+                f"{'(root/elevated)' if isinstance(s, dict) and s.get('elevated') else ''}"
+                for s in shells[:5]))
+        creds = intel.get("credentials") or []
+        if creds:
+            lines.append(f"Credentials harvested: {len(creds)}")
+        for k in ("user_flag", "root_flag"):
+            if intel.get(k):
+                lines.append(f"{k}: {str(intel.get(k))[:80]}")
+        ca = intel.get("ctf_answers") or {}
+        if ca:
+            lines.append("Captured answers: " + "; ".join(
+                f"#{k}={str(v.get('answer'))[:60]}" for k, v in list(ca.items())[:8]))
+        loot = intel.get("loot_entries") or []
+        if loot:
+            lines.append(f"Loot entries: {len(loot)}")
+        vulns = intel.get("vulnerabilities") or []
+        if vulns:
+            lines.append("Vulnerabilities: " + "; ".join(
+                (v.get("title", "") if isinstance(v, dict) else str(v))[:60] for v in vulns[:6]))
+        return "\n".join(lines) or "(no evidence gathered yet)"
+
+    async def evaluate_objectives(self, intel: dict) -> dict:
+        """Holistically grade EVERY objective against the FULL engagement
+        evidence — complete / partial / not_complete + confidence + evidence +
+        blocker.
+
+        This is the authoritative completion signal.  ``answer_all`` only
+        resolves *literal-answer* objectives (a flag string in tool output);
+        STATE objectives — "obtain a shell", "escalate to root", "find the 3
+        keys" — can never be marked done by string extraction, and a question
+        that went UNANSWERABLE was never revisited.  This grader looks at the
+        whole evidence picture every time it runs, so previously-unmet
+        objectives flip to complete the moment the supporting evidence appears.
+
+        Updates ``intel['objective_status']``, emits per-objective +
+        ``objectives_summary`` events, and returns the summary counts.  Never
+        raises (best-effort).
+        """
+        objectives = (
+            (intel.get("engagement_context") or {}).get("objectives")
+            or intel.get("ctf_objectives") or []
+        )
+        if not objectives:
+            return {}
+        obj_texts: List[str] = []
+        for i, o in enumerate(objectives):
+            t = (o.get("task") or o.get("question") or str(o)) if isinstance(o, dict) else str(o)
+            obj_texts.append(t)
+
+        evidence = self._build_evidence_summary(intel)
+        system = (
+            "You are grading an AUTHORIZED penetration test against its declared "
+            "objectives. For EACH objective decide its status from the EVIDENCE "
+            "ONLY: 'complete' (evidence proves it is done — e.g. a flag captured, "
+            "a shell as the required user, a key found), 'partial' (real progress "
+            "but not done), or 'not_complete' (no real progress). NEVER mark "
+            "complete without concrete supporting evidence in the data."
+        )
+        numbered = "\n".join(f"{i}: {t}" for i, t in enumerate(obj_texts))
+        prompt = (
+            f"OBJECTIVES:\n{numbered}\n\n"
+            f"EVIDENCE GATHERED SO FAR:\n{evidence}\n\n"
+            'Return JSON: {"objectives":[{"index":0,"status":"complete|partial|not_complete",'
+            '"confidence":0.0,"evidence":"why (cite the evidence)","blocker":"what is '
+            'still needed / the next step"}]}'
+        )
+        try:
+            spec = await self._master.think_json(prompt, system)
+        except Exception:
+            spec = {}
+        results = spec.get("objectives") if isinstance(spec, dict) else None
+        if not isinstance(results, list):
+            return {}
+
+        status_map: dict = intel.setdefault("objective_status", {})
+        for r in results:
+            if not isinstance(r, dict):
+                continue
+            try:
+                idx = int(r.get("index"))
+            except Exception:
+                continue
+            if idx < 0 or idx >= len(objectives):
+                continue
+            st = str(r.get("status", "not_complete")).lower().strip()
+            if st not in ("complete", "partial", "not_complete"):
+                st = "not_complete"
+            # Never DOWNGRADE an objective already proven complete.
+            prev = status_map.get(str(idx))
+            if prev and prev.get("status") == "complete" and st != "complete":
+                continue
+            entry = {
+                "objective":  obj_texts[idx],
+                "status":     st,
+                "confidence": float(r.get("confidence") or 0.0),
+                "evidence":   str(r.get("evidence") or "")[:300],
+                "blocker":    str(r.get("blocker") or "")[:200],
+            }
+            status_map[str(idx)] = entry
+            try:
+                await self._emit({
+                    "type":       "objective_status",
+                    "session_id": self._session_id,
+                    "agent":      "master",
+                    "data":       {"index": idx, "total": len(objectives), **entry},
+                })
+            except Exception:
+                pass
+
+        summary = {
+            "complete":     sum(1 for v in status_map.values() if v.get("status") == "complete"),
+            "partial":      sum(1 for v in status_map.values() if v.get("status") == "partial"),
+            "not_complete": sum(1 for v in status_map.values() if v.get("status") == "not_complete"),
+            "total":        len(objectives),
+        }
+        intel["objectives_summary"] = summary
+        try:
+            await self._emit({
+                "type":       "objectives_summary",
+                "session_id": self._session_id,
+                "agent":      "master",
+                "data":       summary,
+            })
+        except Exception:
+            pass
+        return summary
+
     async def answer_single(
         self,
         question_text: str,

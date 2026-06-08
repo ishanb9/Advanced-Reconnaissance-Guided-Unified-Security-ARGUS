@@ -436,10 +436,16 @@ class NetworkScanSubagent(BaseSubagent):
                     for p in open_ports
                 ]
 
-        # ── Step 4: OS detection (root only) ──────────────────────────────
+        # ── Step 4: OS detection ──────────────────────────────────────────
+        # nmap -O needs raw sockets (root).  When ARGUS is not root it never
+        # runs and os_guess stays "unknown" — which mis-routed every
+        # downstream tech-specific stage (a Windows AD DC was handed a Linux
+        # payload and the WinRM shell path was skipped).  So: try -O when
+        # root, then ALWAYS fall back to deriving the OS from the unprivileged
+        # -sV service banners + the open-port fingerprint.
         os_guess = "unknown"
         if root and open_ports:
-            logger.info("[network_scan] Step 4 — OS detection: %s", target)
+            logger.info("[network_scan] Step 4 — OS detection (nmap -O): %s", target)
             try:
                 ports_csv = ",".join(str(p) for p in open_ports[:10])
                 nmap_os_out = await self.collect_tool(
@@ -451,6 +457,26 @@ class NetworkScanSubagent(BaseSubagent):
                 os_guess = _parse_os_guess(nmap_os_out)
             except Exception as exc:
                 logger.warning("[network_scan] OS detection error: %s", exc)
+
+        # Banner/port fallback — runs whenever -O produced nothing usable.
+        if (os_guess or "unknown").strip().lower() in ("", "unknown"):
+            try:
+                from agents.exploit.exploitability import infer_os
+                blob_parts = [str(v) for v in self._tool_outputs.values()]
+                for _pd in port_dicts:
+                    blob_parts.append(
+                        f"{_pd.get('service','')} {_pd.get('version','')} "
+                        f"{_pd.get('banner','')}"
+                    )
+                inferred = infer_os(text=" ".join(blob_parts), open_ports=open_ports)
+                if inferred:
+                    os_guess = inferred.capitalize()
+                    logger.info(
+                        "[network_scan] OS inferred from -sV banners/ports: %s",
+                        os_guess,
+                    )
+            except Exception as exc:
+                logger.warning("[network_scan] OS banner-inference error: %s", exc)
 
         # Attach os_guess to all port dicts
         for pd in port_dicts:

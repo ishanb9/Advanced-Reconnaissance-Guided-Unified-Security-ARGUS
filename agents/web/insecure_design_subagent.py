@@ -157,7 +157,12 @@ class InsecureDesignSubagent(BaseSubagent):
                             "options": (
                                 f"-s -o /dev/null -w '%{{http_code}}\n' "
                                 f"-X POST "
-                                f"-d 'username=admin&password=wrongpassword{i}' "
+                                # NOTE: literal probe value. This first request
+                                # previously interpolated the burst-loop counter,
+                                # which is not defined until the loop below — the
+                                # resulting NameError was silently swallowed and
+                                # killed this whole rate-limit check.
+                                f"-d 'username=admin&password=wrongpassword0' "
                                 f"-m 5 \"{login_url}\""
                             )
                         },

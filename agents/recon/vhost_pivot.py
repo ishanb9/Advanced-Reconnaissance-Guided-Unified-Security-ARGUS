@@ -37,6 +37,7 @@ import logging
 import os
 import re
 import shutil
+import subprocess
 import time
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Iterable, List, Optional, Set, Tuple
@@ -46,6 +47,14 @@ logger = logging.getLogger(__name__)
 
 HOSTS_FILE = os.environ.get("HOSTS_FILE", "/etc/hosts")
 HOSTS_AUTOWRITE = os.environ.get("HOSTS_AUTOWRITE", "0") in ("1", "true", "True", "yes")
+# VHOST_AUTOMAP governs the *redirect-discovered* vhost pivot (distinct from
+# the noisy ffuf brute-force gated by HOSTS_AUTOWRITE).  When the target's own
+# HTTP service redirects to an internal vhost (e.g. bare IP 302→http://cctv.htb/),
+# that hostname IS the target's web app and MUST be mapped to the current
+# target IP or the entire web attack surface is unreachable.  Defaults ON
+# because without it HTB-style vhost boxes can never be compromised.  Set
+# VHOST_AUTOMAP=0 to fall back to dry-run/event-only behaviour.
+VHOST_AUTOMAP = os.environ.get("VHOST_AUTOMAP", "1") in ("1", "true", "True", "yes")
 HOSTS_MANAGED_MARKER = "# argus-managed"
 VHOST_WORDLIST = os.environ.get(
     "VHOST_WORDLIST",
@@ -108,6 +117,29 @@ def extract_hostnames(text: str, scope_hostnames: Optional[Set[str]] = None) -> 
 
 # ── /etc/hosts management ────────────────────────────────────────────────
 
+def _sudo_tee(content: str, append: bool) -> bool:
+    """Write ``content`` to HOSTS_FILE via ``sudo tee`` (no shell).
+
+    Fallback for when the Python process lacks root on the real /etc/hosts
+    (the agent server usually runs unprivileged while tools run via sudo).
+    Passwordless sudo is assumed — standard on the Kali operator box, and the
+    same `sudo tee` the LLM already uses successfully.  Only fires on a real
+    /etc path so tests pointed at a temp HOSTS_FILE never shell out.
+    """
+    if HOSTS_FILE != "/etc/hosts" and not HOSTS_FILE.startswith("/etc/"):
+        return False
+    argv = ["sudo", "tee"] + (["-a"] if append else []) + [HOSTS_FILE]
+    try:
+        cp = subprocess.run(
+            argv, input=content.encode("utf-8"),
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=15, check=False,
+        )
+        return cp.returncode == 0
+    except Exception:
+        return False
+
+
 def hosts_read() -> List[str]:
     try:
         with open(HOSTS_FILE, "r", encoding="utf-8") as f:
@@ -134,36 +166,108 @@ def hosts_currently_mapped(hostname: str) -> Optional[str]:
     return None
 
 
-def hosts_add(ip: str, hostnames: Iterable[str], dry_run: bool = False) -> Tuple[List[str], List[str]]:
+def hosts_remove(hostnames: Iterable[str]) -> List[str]:
+    """Remove any /etc/hosts lines that map *any* of `hostnames`.
+
+    Used to purge a STALE mapping (e.g. cctv.htb left over from a previous
+    engagement, pointing at a now-unreachable IP) before re-mapping it to the
+    current target.  Returns the list of hostnames whose lines were removed.
+    Best-effort; never raises.
+    """
+    wanted = {h.lower().strip() for h in hostnames if h and "." in h}
+    if not wanted:
+        return []
+    try:
+        lines = hosts_read()
+    except Exception:
+        return []
+    removed: List[str] = []
+    kept: List[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            kept.append(line)
+            continue
+        parts = stripped.split()
+        line_hosts = {p.lower() for p in parts[1:] if not p.startswith("#")}
+        if line_hosts & wanted:
+            removed.extend(sorted(line_hosts & wanted))
+            continue  # drop this line
+        kept.append(line)
+    if not removed:
+        return []
+    try:
+        with open(HOSTS_FILE, "w", encoding="utf-8") as f:
+            f.writelines(kept)
+        logger.info("[vhost] removed stale /etc/hosts mapping(s): %s", removed)
+    except PermissionError:
+        if _sudo_tee("".join(kept), append=False):
+            logger.info("[vhost] removed stale /etc/hosts mapping(s) via sudo: %s", removed)
+            return removed
+        logger.warning("[vhost] no permission to rewrite %s (stale removal skipped)", HOSTS_FILE)
+        return []
+    except Exception as exc:
+        logger.warning("[vhost] /etc/hosts stale-removal failed: %s", exc)
+        return []
+    return removed
+
+
+def hosts_add(ip: str, hostnames: Iterable[str], dry_run: bool = False,
+              force: bool = False) -> Tuple[List[str], List[str]]:
     """Add `ip <host1> <host2>...` to /etc/hosts.  Returns (added, skipped).
 
-    Idempotent: if the same (ip, hostname) pair already exists, skip.
-    If dry_run is True OR HOSTS_AUTOWRITE is off, no file changes; the
-    `added` list still reports what WOULD have been written.
+    Idempotent: if the same (ip, hostname) pair already exists, skip.  If a
+    hostname currently maps to a DIFFERENT ip, the stale line is removed first
+    so the new mapping takes effect (otherwise glibc honours the first match
+    and the vhost stays pointed at the wrong/old box).
+
+    Writes when ``force=True`` OR ``HOSTS_AUTOWRITE`` is on.  When neither and
+    not dry_run, returns what WOULD be written without touching the file.
     """
     hostnames = [h.lower().strip() for h in hostnames if h and "." in h]
     added: List[str] = []
     skipped: List[str] = []
+    stale: List[str] = []
     for h in hostnames:
         cur = hosts_currently_mapped(h)
         if cur == ip:
             skipped.append(h)
             continue
+        if cur is not None and cur != ip:
+            stale.append(h)      # mapped elsewhere → must replace
         added.append(h)
-    if not added or dry_run or not HOSTS_AUTOWRITE:
+    if not added or dry_run or not (force or HOSTS_AUTOWRITE):
         return added, skipped
     try:
+        if stale:
+            hosts_remove(stale)   # purge wrong-IP lines before re-mapping
         line = f"{ip} {' '.join(added)} {HOSTS_MANAGED_MARKER}\n"
         with open(HOSTS_FILE, "a", encoding="utf-8") as f:
             f.write(line)
         logger.info("[vhost] wrote /etc/hosts: %s -> %s", ip, added)
     except PermissionError:
+        # Python isn't root — fall back to `sudo tee -a` (passwordless sudo on
+        # the Kali op box).  Without this the auto-map silently no-ops and the
+        # vhost never resolves, so web tools keep hitting the bare IP.
+        if _sudo_tee(line, append=True):
+            logger.info("[vhost] wrote /etc/hosts via sudo: %s -> %s", ip, added)
+            return added, skipped
         logger.warning("[vhost] no permission to write %s (run as root or set HOSTS_FILE=)", HOSTS_FILE)
         return [], hostnames
     except Exception as exc:
         logger.warning("[vhost] /etc/hosts write failed: %s", exc)
         return [], hostnames
     return added, skipped
+
+
+def remap_vhosts(target_ip: str, hostnames: Iterable[str]) -> Tuple[List[str], List[str]]:
+    """Force-(re)map `hostnames` → `target_ip`, replacing any stale mappings.
+
+    This is the redirect-discovery pivot: the hostnames came from the target's
+    OWN HTTP redirect, so they belong to THIS target IP regardless of any
+    leftover /etc/hosts entry from a prior box.  Honours VHOST_AUTOMAP.
+    """
+    return hosts_add(target_ip, hostnames, force=VHOST_AUTOMAP)
 
 
 # ── ffuf-driven vhost brute-force ───────────────────────────────────────
@@ -284,16 +388,24 @@ async def pivot_from_recon_output(
     """
     scope_hostnames = scope_hostnames or set()
     extracted = extract_hostnames(recon_text, scope_hostnames)
-    added, skipped = hosts_add(target_ip, extracted)
+    # Redirect-discovered vhosts belong to THIS target — force-(re)map them to
+    # the current target IP (replacing any stale leftover), so the web attack
+    # surface behind the vhost is actually reachable.
+    added, skipped = remap_vhosts(target_ip, extracted)
     pr = PivotResult(
         extracted_hostnames = extracted,
         added_to_hosts      = added,
         skipped             = skipped,
     )
-    if not HOSTS_AUTOWRITE and added:
+    if not (VHOST_AUTOMAP or HOSTS_AUTOWRITE) and added:
         pr.notes.append(
-            f"DRY-RUN: would add {len(added)} hostnames to {HOSTS_FILE}. "
-            f"Set HOSTS_AUTOWRITE=1 to enable writes (requires root)."
+            f"DRY-RUN: would map {len(added)} hostname(s) to {target_ip} in "
+            f"{HOSTS_FILE}. Set VHOST_AUTOMAP=1 to enable (requires root)."
+        )
+    elif added:
+        pr.notes.append(
+            f"Mapped {len(added)} vhost(s) → {target_ip} in {HOSTS_FILE}: "
+            f"{', '.join(added)}"
         )
 
     if deep_bruteforce and extracted and tool_runner is not None:
@@ -321,8 +433,8 @@ async def pivot_from_recon_output(
 
 
 __all__ = [
-    "extract_hostnames", "hosts_add", "hosts_currently_mapped",
-    "bruteforce_vhosts", "pivot_from_recon_output",
+    "extract_hostnames", "hosts_add", "hosts_remove", "hosts_currently_mapped",
+    "remap_vhosts", "bruteforce_vhosts", "pivot_from_recon_output",
     "VhostResult", "PivotResult",
-    "HOSTS_AUTOWRITE", "INTERNAL_TLDS",
+    "HOSTS_AUTOWRITE", "VHOST_AUTOMAP", "INTERNAL_TLDS",
 ]

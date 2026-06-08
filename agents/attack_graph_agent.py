@@ -38,7 +38,6 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable, Coroutine, Dict, List, Optional
 
-import httpx
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 import db.mongo_client as _db
@@ -46,9 +45,12 @@ import db.mongo_client as _db
 logger = logging.getLogger(__name__)
 
 # ── Config ────────────────────────────────────────────────────────────────────
-OLLAMA_URL   = os.environ.get("OLLAMA_URL",   "http://192.168.0.101:11434")
-MODEL_NAME   = os.environ.get("OLLAMA_MODEL", "deepseek-v3.1:671b-cloud")
-LLM_TIMEOUT  = 180     # seconds
+# Note: the LLM backend (Anthropic / Claude Code / Ollama / OpenAI / etc.)
+# is selected by ``utils.llm_providers.get_provider()`` from the operator's
+# environment at startup.  This agent does NOT hold its own provider URL
+# any more — it routes through the unified provider exactly like every
+# other ARGUS agent so a single configuration drives the whole platform.
+LLM_TIMEOUT  = 180     # seconds — per-call upper bound (any provider)
 POLL_INTERVAL = 35     # seconds between polls
 NEW_FINDINGS_THRESHOLD = 3  # min new findings before re-analysis
 MAX_FINDINGS_PER_PROMPT = 40  # cap to keep prompt manageable
@@ -228,6 +230,11 @@ class AttackGraphAgent:
         self._stop       = False
         self._seen_fids: set[str] = set()   # finding IDs already analyzed
         self._analysis_count = 0
+        # LLM provider state — primary + .env-configured backup (no hardcode).
+        self._active_provider   = None      # lazily built primary (get_provider)
+        self._fallback_provider = None      # lazily built backup (LLM_FALLBACK_*)
+        self._fallback_loaded   = False
+        self._on_fallback       = False
 
     def request_stop(self) -> None:
         self._stop = True
@@ -277,8 +284,78 @@ class AttackGraphAgent:
             except Exception as exc:
                 consecutive_errors += 1
                 logger.warning("[AttackGraphAgent] Analysis error (%d): %s", consecutive_errors, exc)
+                # ── Backup-LLM fallback (configured ENTIRELY via .env) ──────
+                # Fall back to the LLM_FALLBACK_* backup after
+                # ATTACKGRAPH_FALLBACK_AFTER (default 5) consecutive PRIMARY
+                # failures, or immediately on a usage-policy / content refusal
+                # (a refusing model never recovers on retry).  Nothing is
+                # hardcoded — primary and backup both come from .env.
+                _es = str(exc).lower()
+                _is_refusal = any(s in _es for s in ("usage policy", "aup",
+                                  "unable to respond", "violate", "refus"))
+                import os as _os
+                _threshold = int(_os.environ.get("ATTACKGRAPH_FALLBACK_AFTER", "5") or 5)
+                if not self._on_fallback and (consecutive_errors >= _threshold or _is_refusal):
+                    if self._switch_to_fallback():
+                        _fb = self._active_provider
+                        logger.warning("[AttackGraphAgent] primary LLM failed %d× — "
+                                       "switching to .env backup %s/%s",
+                                       consecutive_errors,
+                                       getattr(_fb, "name", "?"), getattr(_fb, "model", "?"))
+                        try:
+                            await self._emit("chain_analysis_status", {
+                                "status":  "degraded",
+                                "message": (f"Primary LLM failed {consecutive_errors}× — "
+                                            f"switched to backup "
+                                            f"{getattr(_fb,'name','?')}/{getattr(_fb,'model','?')} "
+                                            f"(from .env LLM_FALLBACK_*)."),
+                            })
+                        except Exception:
+                            pass
+                        consecutive_errors = 0
+                        await asyncio.sleep(2)
+                        continue
+                    if _is_refusal:
+                        # No backup configured AND a refusal → cannot recover.
+                        logger.error("[AttackGraphAgent] primary refused + no .env backup "
+                                     "configured — disabling chain analysis")
+                        try:
+                            await self._emit("chain_analysis_status", {
+                                "status":  "stopped",
+                                "message": ("Primary LLM refused offensive analysis and no "
+                                            "LLM_FALLBACK_PROVIDER is set in .env — disabled. "
+                                            "Configure LLM_FALLBACK_PROVIDER/_MODEL to enable a backup."),
+                            })
+                        except Exception:
+                            pass
+                        break
+                # Emit a single warning when we've burned half the budget
+                # so the operator knows we're about to give up.
+                if consecutive_errors == 3:
+                    try:
+                        await self._emit("chain_analysis_status", {
+                            "status":  "degraded",
+                            "message": (
+                                f"Attack-chain analysis has failed {consecutive_errors} "
+                                "times in a row.  Will auto-stop after 5 failures.  "
+                                "Check that the configured LLM provider is reachable."
+                            ),
+                        })
+                    except Exception:
+                        pass
                 if consecutive_errors >= 5:
                     logger.error("[AttackGraphAgent] Too many errors, stopping loop")
+                    try:
+                        await self._emit("chain_analysis_status", {
+                            "status":  "stopped",
+                            "message": (
+                                "Attack-chain analysis stopped after 5 consecutive "
+                                "LLM failures.  Restart the scan once the LLM "
+                                "provider is reachable to resume."
+                            ),
+                        })
+                    except Exception:
+                        pass
                     break
                 await asyncio.sleep(30)
 
@@ -318,10 +395,22 @@ class AttackGraphAgent:
                 "status":  "error",
                 "message": f"LLM analysis failed: {exc}",
             })
-            return
+            # Re-raise so the outer loop's consecutive_errors counter
+            # increments and the loop self-terminates after 5 failures
+            # instead of spamming the event feed indefinitely.  Without
+            # this, an LLM that is genuinely down causes a poll-and-fail
+            # cycle every 35 seconds for the entire engagement.
+            raise
 
         if not analysis or analysis.get("parse_error"):
             logger.warning("[AttackGraphAgent] Failed to parse LLM JSON")
+            # A parse failure is a softer issue than a transport failure
+            # — don't count it toward the auto-stop counter, but still
+            # surface it to the UI so the operator can see it happened.
+            await self._emit("chain_analysis_status", {
+                "status":  "parse_error",
+                "message": "LLM returned content but JSON parse failed — analysis skipped this cycle",
+            })
             return
 
         self._analysis_count += 1
@@ -437,19 +526,71 @@ class AttackGraphAgent:
 
     # ── LLM ───────────────────────────────────────────────────────────────────
 
+    def _provider(self):
+        """Return the ACTIVE LLM provider.
+
+        Primary is whatever ``.env`` configures (``LLM_PROVIDER`` /
+        ``OLLAMA_MODEL`` / ``ANTHROPIC_MODEL`` / … via ``get_provider()``) —
+        nothing is hardcoded here.  Once the loop has fallen back, this returns
+        the ``.env``-configured backup instead.
+        """
+        if self._active_provider is None:
+            from utils.llm_providers import get_provider
+            self._active_provider = get_provider()
+        return self._active_provider
+
+    def _load_fallback(self):
+        """Lazily build the backup provider from ``.env`` (LLM_FALLBACK_*).
+        Returns the provider, or None if no backup is configured."""
+        if not self._fallback_loaded:
+            self._fallback_loaded = True
+            try:
+                from utils.llm_providers import get_fallback_provider
+                self._fallback_provider = get_fallback_provider()
+            except Exception:
+                self._fallback_provider = None
+        return self._fallback_provider
+
+    def _switch_to_fallback(self) -> bool:
+        """Switch the active provider to the ``.env`` backup.  Returns True if
+        a backup was configured and we switched (False = no backup → caller
+        decides whether to stop)."""
+        fb = self._load_fallback()
+        if fb is not None and not self._on_fallback:
+            self._active_provider = fb
+            self._on_fallback = True
+            return True
+        return False
+
     async def _llm_call(self, prompt: str) -> str:
-        """Call Ollama API with the chain analysis prompt."""
+        """Route through the ACTIVE LLM provider (primary, or the .env backup
+        after the loop falls back).  The provider is resolved entirely from
+        ``.env`` — nothing is hardcoded.
+        """
         messages = [
             {"role": "system",  "content": _SYSTEM_PROMPT},
             {"role": "user",    "content": prompt},
         ]
-        async with httpx.AsyncClient(timeout=httpx.Timeout(LLM_TIMEOUT)) as client:
-            resp = await client.post(
-                f"{OLLAMA_URL}/api/chat",
-                json={"model": MODEL_NAME, "messages": messages, "stream": False},
+        provider = self._provider()
+        tokens: list[str] = []
+        try:
+            async for tok in provider.stream(messages, timeout=LLM_TIMEOUT):
+                if tok:
+                    tokens.append(tok)
+        except Exception as exc:                                # noqa: BLE001
+            # Bubble up with the provider name so the event-feed message
+            # tells the operator WHICH backend is failing, not just
+            # "All connection attempts failed".
+            raise RuntimeError(
+                f"{provider.name} ({provider.model or '?'}) failed: {exc}"
+            ) from exc
+
+        if not tokens:
+            raise RuntimeError(
+                f"{provider.name} returned no content "
+                "(empty stream — check the provider is reachable and the model exists)"
             )
-            resp.raise_for_status()
-            return resp.json()["message"]["content"]
+        return "".join(tokens)
 
     @staticmethod
     def _parse_json(raw: str) -> dict:

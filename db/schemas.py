@@ -481,11 +481,19 @@ class StartPentestRequest(BaseModel):
     max_threads:        int  = 3
     phases:             List[str] = []
     auto_exploit:       bool = False
+    # Operator-core autonomy for THIS scan (overrides the ARGUS_OPERATOR_AUTONOMY
+    # env default): autonomous | approve_to_exploit | manual.
+    autonomy:           Optional[str] = None
     confirm_web:        bool = False  # Show confirmation gate before web testing starts
     web_phase_timeout:  int  = 600    # Seconds before web phase emits time-extension popup (0 = no limit)
     max_parallel_hosts: int  = 5
     use_reasoning_loop: bool = False  # Enable hypothesis-driven reasoning engine
     mission_brief:      Optional[MissionBrief] = None  # Improvement #1 — formal mission
+    # Domain mode: when target is a domain, hunt its subdomains across the
+    # public network and let the operator pick which to engage before scanning.
+    hunt_subdomains:    bool = False
+    subdomain_passive:  bool = True   # crt.sh + subfinder (OSINT)
+    subdomain_active:   bool = True   # gobuster-dns brute-force
 
 
 # ═══════════════════════════════════════════════════════════

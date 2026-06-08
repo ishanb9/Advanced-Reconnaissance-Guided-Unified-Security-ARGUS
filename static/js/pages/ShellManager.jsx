@@ -19,6 +19,7 @@ function ShellManager() {
   const [lhostForPayloads, setLhostForPayloads] = useState('');
   const [activeTab,    setActiveTab]    = useState('terminal');
   const [upgrading,    setUpgrading]    = useState(false);
+  const [cmdInput,     setCmdInput]     = useState('');   // foolproof command box (xterm-independent)
 
   const termRef   = useRef(null);   // DOM container for xterm
   const xtermRef  = useRef(null);   // Terminal instance
@@ -46,9 +47,27 @@ function ShellManager() {
     setLoading(true);
     try {
       const res = await window.API.shells(sessionId);
-      setShells(res.shells || []);
+      const list = res.shells || [];
+      setShells(list);
+      // Auto-select the most recent live shell so the human can interact
+      // immediately (RCE consoles were listed but never auto-opened, which read
+      // as "I can't interact").
+      if (!activeShellId && list.length) {
+        const live = list.filter(s => s.active);
+        setActiveShellId((live[live.length - 1] || list[list.length - 1]).id);
+      }
     } catch {}
     setLoading(false);
+  }
+
+  // Send a command via the dedicated input box → WS shell_input (works for PTY
+  // shells AND RCE consoles, independent of xterm/focus/browser-cache).
+  function sendCmd() {
+    const cmd = cmdInput.trim();
+    if (!activeShellId || !cmd) return;
+    sendWS({ type: 'shell_input', shell_id: activeShellId, data: cmd + '\r' });
+    if (xtermRef.current) xtermRef.current.write(`\x1b[36m$ ${cmd}\x1b[0m\r\n`);
+    setCmdInput('');
   }
 
   async function loadPayloadSuggestions() {
@@ -297,6 +316,32 @@ function ShellManager() {
               boxShadow: activeShell?.active ? '0 0 20px rgba(0,212,255,0.05)' : 'none'
             }
           }),
+
+          // Command input box — FOOLPROOF interaction that does not depend on
+          // xterm keyboard capture, terminal focus, or the browser cache. Works
+          // for PTY shells and RCE consoles alike (sends WS shell_input).
+          React.createElement('div', {
+            style: { display: 'flex', gap: 8, alignItems: 'center' }
+          },
+            React.createElement('input', {
+              value: cmdInput,
+              onChange: e => setCmdInput(e.target.value),
+              onKeyDown: e => { if (e.key === 'Enter') sendCmd(); },
+              placeholder: activeShell
+                ? `Type a command for ${(activeShell.shell_type || 'shell').replace(/_/g,' ')} and press Enter…`
+                : 'Select a shell to send commands…',
+              disabled: !activeShellId,
+              style: { flex: 1, padding: '9px 12px', borderRadius: 6,
+                       border: '1px solid var(--border)', background: 'var(--bg-panel)',
+                       color: 'var(--text-primary)', fontFamily: 'var(--font-mono)', fontSize: 13 }
+            }),
+            React.createElement('button', {
+              onClick: sendCmd, disabled: !activeShellId,
+              style: { padding: '9px 20px', borderRadius: 6, border: '1px solid var(--accent)',
+                       background: 'var(--accent)', color: '#0D0E14', cursor: 'pointer',
+                       fontWeight: 600, fontSize: 12 }
+            }, 'Send ⏎')
+          ),
 
           // Payload suggestions (compact row under terminal)
           payloads.length > 0 && React.createElement('div', {

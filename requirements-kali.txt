@@ -1,0 +1,221 @@
+# ─────────────────────────────────────────────────────────────────────────────
+#  ARGUS · Kali system-tool requirements  (the OS-level counterpart to
+#  requirements.txt, which only covers the Python packages)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+#  WHY THIS FILE EXISTS
+#    ARGUS does not bundle its attack tools — it shells out to the Kali binaries
+#    listed in the MCP tool registry (mcp-server.js, "TOOL REGISTRY"). Any tool
+#    that registry references MUST exist on the Kali host, or ARGUS returns
+#    "Tool not found in MCP" / classifies it tool_missing and stops using it.
+#    This file is the canonical inventory of every external binary ARGUS can
+#    invoke (356 tools across 23 categories), plus the runtime prerequisites
+#    and the wordlists it hardcodes.
+#
+#  HOW TO INSTALL  (pick one)
+#    1. Simplest (recommended on a real Kali box) — the meta-package pulls ~95%:
+#           sudo apt update && sudo apt install -y kali-linux-everything seclists
+#    2. Granular / minimal-Kali / cloud images — run the bundled installer,
+#       which does apt + go + pipx + git + downloads and then VERIFIES every
+#       binary in the registry and reports what is still missing:
+#           sudo bash install-kali-tools.sh
+#    3. Manual — install the categories you need from the lists below; use the
+#       "NON-APT" section for the tools that are not in the Kali apt repos.
+#
+#  VERIFY what ARGUS can actually run at any time:
+#           bash install-kali-tools.sh --verify
+#
+#  NOTE: ARGUS gracefully degrades — a missing tool is skipped, not fatal. But
+#  coverage (esp. the OWASP Top 10 web vectors) is only complete when the web
+#  tools below are present. Tools flagged ⚠ were observed missing on stock Kali
+#  in real runs (install them explicitly).
+#
+# ═════════════════════════════════════════════════════════════════════════════
+#  RUNTIME PREREQUISITES (not pentest tools, but ARGUS will not start without)
+# ═════════════════════════════════════════════════════════════════════════════
+#   python3        (>= 3.11)                  apt install python3 python3-venv python3-pip pipx
+#   node + npm     (>= 18, runs mcp-server.js) apt install nodejs npm
+#   metasploit-framework (msfconsole/msfvenom) apt install metasploit-framework
+#   seclists       (wordlists, see bottom)     apt install seclists
+#   golang         (>= 1.21, for the Go tools) apt install golang-go
+#   ollama         (LLM client; scan model deepseek-v3.1:671b-cloud)  https://ollama.com/download
+#
+# ═════════════════════════════════════════════════════════════════════════════
+#  TOOL INVENTORY  —  grouped exactly as ARGUS's registry categorises them.
+#  Every name below is a binary ARGUS may exec. ⚠ = not in stock Kali apt
+#  (see the NON-APT install section for the exact command).
+# ═════════════════════════════════════════════════════════════════════════════
+
+# ── network — host discovery & port scanning ────────────────────────────────
+nmap masscan netdiscover arp-scan arping fping hping3 traceroute nbtscan
+unicornscan ndiff zenmap
+
+# ── web — web-application testing / OWASP Top 10 (ARGUS's core surface) ───────
+nikto gobuster droopescan joomscan magescan dirb wfuzz ffuf whatweb wafw00f
+wapiti skipfish sqlmap commix davtest wpscan weevely cutycapt dirbuster curl
+feroxbuster nuclei httpx katana gau waybackurls hakrawler gospider httprobe
+arjun param-miner ssrfmap dalfox⚠ xsstrike⚠ nosqlmap⚠ tplmap⚠ corsy⚠ byp4xx⚠
+403fuzzer⚠ cariddi retire jwt_tool linkfinder
+
+# ── dns — DNS & subdomain enumeration ────────────────────────────────────────
+dnsrecon dnsenum dnsmap dnschef fierce host dig nslookup amass subfinder dnsx
+puredns shuffledns massdns assetfinder altdns dnsvalidator
+
+# ── osint — open-source intelligence / recon ─────────────────────────────────
+theHarvester recon-ng spiderfoot dmitry shodan whois trufflehog gitleaks h8mail
+holehe socialscan sherlock crosslinked emailharvester metagoofil photon
+urlcrazy maltego eyewitness gowitness pwndb base58 bloodhound-python
+
+# ── vuln — vulnerability & TLS scanning ──────────────────────────────────────
+searchsploit sslscan sslyze testssl.sh ncrack openvas-scanner
+
+# ── smb — SMB / LDAP / Windows remoting ──────────────────────────────────────
+smbclient smbmap enum4linux enum4linux-ng crackmapexec netexec nxc evil-winrm
+rpcclient polenum ldapsearch certipy certipy-ad
+
+# ── remote — remote-access clients ───────────────────────────────────────────
+ssh scp sshpass xfreerdp xfreerdp3 rdesktop winrm-cli pth-winexe
+
+# ── exploit — exploitation frameworks & CVE PoCs ─────────────────────────────
+msfconsole msfvenom msfpc setoolkit ysoserial⚠ struts-pwn⚠ spring4shell-scan⚠
+log4shell-scanner⚠ shiro-exploit⚠
+
+# ── password — cracking / spraying / wordlists ───────────────────────────────
+hydra medusa john hashcat hashid hash-identifier patator cewl crunch cupp
+mentalist rsmangler pipal samdump2 chntpw gpp-decrypt ophcrack lazagne ruler
+sprayhound trevorspray o365spray credmaster kwp64 mp64 pp64
+
+# ── privesc — local privilege-escalation enumerators (Linux + Windows) ───────
+linpeas.sh⚠ winpeas.exe⚠ linenum.sh⚠ pspy64⚠ linux-exploit-suggester linux-exploit-suggester-2⚠
+unix-privesc-check beroot privesccheck⚠ powerup⚠ seatbelt⚠ watson⚠ GodPotato⚠
+PrintSpoofer⚠ SweetPotato⚠ mimikatz wce⚠ windows-exploit-suggester⚠ wes⚠
+getcap find id uname sudo whoami pwsh
+
+# ── wireless — Wi-Fi attacks ─────────────────────────────────────────────────
+aircrack-ng airmon-ng airgeddon wifite reaver bully pixiewps eaphammer
+hostapd-wpe kismet macchanger wifiphisher
+
+# ── traffic — sniffing / MITM / relays ───────────────────────────────────────
+tcpdump tshark ngrep tcpick netsniff-ng ettercap bettercap dsniff arpspoof
+net-creds responder mitmproxy mitmdump PCredz hcxdumptool hcxhashtool tcpreplay
+sshdump
+
+# ── snmp ─────────────────────────────────────────────────────────────────────
+onesixtyone snmpcheck snmpget snmpwalk
+
+# ── email ────────────────────────────────────────────────────────────────────
+swaks sendEmail smtp-user-enum
+
+# ── tunnel — pivoting / port-forwarding / C2 transport ───────────────────────
+chisel ligolo-ng revsocks rpivot go-socks5 socat nc cryptcat proxychains4
+sshuttle iodine dns2tcp stunnel4 udptunnel openvpn phuip-fpizda
+
+# ── forensics — RE / binary / disk analysis ──────────────────────────────────
+binwalk file strings xxd readelf objdump strace ltrace gdb pwndbg r2 cutter
+ghidra jadx apktool checksec patchelf exiv2 pdf-parser pdfid bulk_extractor
+scalpel testdisk vol
+
+# ── ad — Active Directory (Impacket suite + Kerberos) ────────────────────────
+impacket-GetADUsers impacket-GetNPUsers impacket-GetUserSPNs impacket-secretsdump
+impacket-psexec impacket-smbexec impacket-wmiexec impacket-dcomexec impacket-atexec
+impacket-ntlmrelayx impacket-smbserver impacket-mssqlclient impacket-lookupsid
+impacket-rpcdump impacket-services impacket-getTGT impacket-getST impacket-getPac
+impacket-getArch impacket-ticketer impacket-addcomputer impacket-owneredit
+impacket-dacledit impacket-rbcd impacket-findDelegation kerbrute kerberoast
+bloodhound-python bloodhound-ce-python ldapdomaindump windapsearch adidnsdump
+coercer mitm6 pypykatz lsassy donpapi pretender
+
+# ── cloud — AWS / Azure / GCP assessment ─────────────────────────────────────
+aws az gcloud gsutil s3scanner cloud_enum cloudbrute lazys3 awsrecon
+gcpbucketbrute enumerate-iam cloudsplaining prowler pacu scout
+
+# ── container — Docker / Kubernetes ──────────────────────────────────────────
+docker kubectl crictl trivy grype kube-hunter kube-bench kubeaudit kubesec
+popeye amicontained deepce botb cdk
+
+# ── c2 — command-and-control frameworks ──────────────────────────────────────
+sliver sliver-server powershell-empire starkiller beef-xss pwncat routersploit
+
+# ── evasion — payload obfuscation / AV bypass ────────────────────────────────
+veil shellter donut scarecrow freeze chameleon invoke-obfuscation
+
+# ── payload — executable packing ─────────────────────────────────────────────
+upx
+
+# ── misc — utilities ARGUS leans on ──────────────────────────────────────────
+python3 jq base64 screen tmux rlwrap proxychains4 yara semgrep bandit graudit
+ike-scan lbd inetsim pwn atk6-alive6 cewl-ng tcpick udptunnel
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  NON-APT INSTALLS  — tools NOT in the Kali apt repos (the ⚠ entries above).
+#  install-kali-tools.sh runs all of these; commands shown here for reference.
+# ═════════════════════════════════════════════════════════════════════════════
+#
+#  Go (need golang-go; binaries land in ~/go/bin or /usr/local/bin):
+#    go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
+#    go install github.com/ffuf/ffuf/v2@latest
+#    go install github.com/projectdiscovery/httpx/cmd/httpx@latest
+#    go install github.com/projectdiscovery/katana/cmd/katana@latest
+#    go install github.com/projectdiscovery/dnsx/cmd/dnsx@latest
+#    go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
+#    go install github.com/hahwul/dalfox/v2@latest          # ⚠ XSS (was missing in runs)
+#    go install github.com/lc/gau/v2/cmd/gau@latest
+#    go install github.com/tomnomnom/waybackurls@latest
+#    go install github.com/tomnomnom/assetfinder@latest
+#    go install github.com/hakluke/hakrawler@latest
+#    go install github.com/jaeles-project/gospider@latest
+#    go install github.com/sensepost/gowitness@latest
+#    (chisel, ligolo-ng, kerbrute also available via apt on current Kali)
+#
+#  pipx / pip (isolated Python tools):
+#    pipx install impacket            # provides every impacket-* binary
+#    pipx install netexec             # nxc / netexec (CrackMapExec successor)
+#    pipx install bloodhound          # bloodhound-python
+#    pipx install certipy-ad          # certipy / certipy-ad
+#    pipx install coercer mitm6 lsassy ldapdomaindump
+#    pipx install trevorspray o365spray
+#    pipx install ssrfmap arjun       # arjun also in apt
+#    pipx install sherlock-project holehe socialscan h8mail
+#    pip install sstimap              # ⚠ SSTI (maintained tplmap successor)
+#
+#  git clone → /opt (legacy / unpackaged):
+#    /opt/tplmap          https://github.com/epinna/tplmap          # ⚠ (Python2, prefer sstimap)
+#    /opt/nosqlmap        https://github.com/codingo/NoSQLMap       # ⚠
+#    /opt/XSStrike        https://github.com/s0md3v/XSStrike        # ⚠
+#    /opt/Corsy           https://github.com/s0md3v/Corsy           # ⚠ CORS
+#    /opt/byp4xx          https://github.com/lobuhi/byp4xx          # ⚠ 403 bypass
+#    /opt/jwt_tool        https://github.com/ticarpi/jwt_tool       # JWT attacks
+#    /opt/struts-pwn      https://github.com/mazen160/struts-pwn    # ⚠ CVE-2017-5638
+#    /opt/spring4shell-scan, /opt/log4shell-scanner, /opt/shiro-exploit  # ⚠ CVE PoCs
+#
+#  Downloads (PEASS-ng, Potato family, ysoserial jar, suggesters):
+#    linpeas.sh / winPEAS.exe  → github.com/peass-ng/PEASS-ng/releases/latest
+#    pspy64                    → github.com/DominicBreuker/pspy/releases/latest
+#    ysoserial.jar             → github.com/frohoff/ysoserial/releases/latest   # ⚠ A08 deserialization
+#    GodPotato/PrintSpoofer/SweetPotato/Watson/Seatbelt → respective GitHub releases
+#    linux-exploit-suggester-2 → github.com/jondonas/linux-exploit-suggester-2
+#
+#  Pending registry wiring (planned for the OWASP-2025 build-out — install now):
+#    git-dumper   →  pipx install git-dumper      # A02: dump exposed /.git
+#    subjack      →  go install github.com/haccer/subjack@latest   # A08: subdomain takeover
+#
+# ═════════════════════════════════════════════════════════════════════════════
+#  WORDLISTS  — hardcoded paths ARGUS expects (install: apt install seclists wordlists;
+#  then `sudo gunzip /usr/share/wordlists/rockyou.txt.gz`)
+# ═════════════════════════════════════════════════════════════════════════════
+#   /usr/share/wordlists/dirb/common.txt
+#   /usr/share/wordlists/dirb/big.txt
+#   /usr/share/wordlists/dirbuster/directory-list-2.3-medium.txt
+#   /usr/share/wordlists/rockyou.txt                       (gunzip rockyou.txt.gz)
+#   /usr/share/wordlists/metasploit/http_default_users.txt
+#   /usr/share/wordlists/metasploit/http_default_pass.txt
+#   /usr/share/wordlists/metasploit/unix_users.txt
+#   /usr/share/seclists/Discovery/Web-Content/raft-medium-directories.txt
+#   /usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt
+#   /usr/share/seclists/Discovery/DNS/subdomains-top1million-20000.txt
+#   /usr/share/seclists/Fuzzing/LFI/LFI-Jhaddix.txt
+#   /usr/share/seclists/Usernames/top-usernames-shortlist.txt
+#   /usr/share/seclists/Usernames/xato-net-10-million-usernames.txt
+#   /usr/share/seclists/Passwords/Common-Credentials/top-passwords-shortlist.txt
+#   /usr/share/seclists/Passwords/Common-Credentials/best110.txt
+#   /usr/share/wfuzz/wordlist/vulns/lfi.txt

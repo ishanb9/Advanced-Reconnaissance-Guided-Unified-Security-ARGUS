@@ -23,9 +23,21 @@
  */
 
 const http      = require('http');
+const os        = require('os');
+const path      = require('path');
+const fs        = require('fs');
 const { spawn } = require('child_process');
 const { execSync } = require('child_process');
 const PORT = 3000;
+
+// Scratch dir for tool subprocesses.  Tools invoked with relative output
+// flags (gobuster -o foo.txt, nikto -output bar.txt, sqlmap session dirs, …)
+// write into their cwd; without this they'd litter the backend folder.  The
+// DB holds the authoritative output (stdout is streamed back + persisted), so
+// these files are throwaway — confine them here, away from the project.
+// Override with ARGUS_TOOL_SCRATCH.
+const TOOL_SCRATCH = process.env.ARGUS_TOOL_SCRATCH || path.join(os.tmpdir(), 'argus-tools');
+try { fs.mkdirSync(TOOL_SCRATCH, { recursive: true }); } catch (_) {}
 
 // ─────────────────────────────────────────────────────────────
 //  TOOL REGISTRY — 134 Kali Linux security tools
@@ -584,6 +596,28 @@ function checkToolAvailable(toolName) {
 //  TOOL EXECUTION
 // ─────────────────────────────────────────────────────────────
 
+// ─────────────────────────────────────────────────────────────
+//  Process-tree kill
+// ─────────────────────────────────────────────────────────────
+// A plain proc.kill() signals ONLY the direct child.  Most pentest tools
+// spawn descendants — `bash -c 'nmap … && curl …'`, rustscan→nmap, nikto
+// (perl), sqlmap/wpscan workers — so killing the leader leaves the real
+// worker orphaned and STILL RUNNING (the "I killed it but it keeps running"
+// bug).  Because we spawn every tool `detached` (its own process group with
+// pgid == pid), a NEGATIVE pid signals the ENTIRE group, taking down the tool
+// and every child it forked.  Falls back to a direct kill if the group is
+// already gone or the proc wasn't a group leader.
+function killTree(proc, signal) {
+  if (!proc) return;
+  // Still-running check: exitCode/signalCode are null until the proc reaps.
+  if (proc.exitCode !== null || proc.signalCode !== null) return;
+  try {
+    process.kill(-proc.pid, signal);    // whole process group
+  } catch (e) {
+    try { proc.kill(signal); } catch (_) {}
+  }
+}
+
 function executeTool(toolName, target, options, res) {
   let tool = TOOLS[toolName];
   const bin  = resolveBin(toolName);
@@ -612,8 +646,12 @@ function executeTool(toolName, target, options, res) {
   let proc;
   try {
     proc = spawn(bin, args, {
-      stdio: ['ignore', 'pipe', 'pipe'],
-      env:   { ...process.env, TERM: 'xterm-256color', HOME: process.env.HOME || '/root' },
+      stdio:    ['ignore', 'pipe', 'pipe'],
+      env:      { ...process.env, TERM: 'xterm-256color', HOME: process.env.HOME || '/root' },
+      detached: true,   // own process group → killTree() can take down the
+                        // whole tree (tool + every child it spawns)
+      cwd:      TOOL_SCRATCH,  // relative-path artifacts land here, not the
+                               // backend folder (DB holds the real output)
     });
   } catch (err) {
     sseMsg(res, 'error', `Failed to spawn ${bin}: ${err.message}`);
@@ -632,8 +670,8 @@ function executeTool(toolName, target, options, res) {
   const timeoutTimer = setTimeout(() => {
     timedOut = true;
     sseMsg(res, 'error', `Tool '${toolName}' exceeded ${Math.round(timeoutMs/1000)}s timeout — killing pid ${proc.pid}`);
-    try { proc.kill('SIGTERM'); } catch (_) {}
-    setTimeout(() => { try { proc.kill('SIGKILL'); } catch (_) {} }, 5000);
+    killTree(proc, 'SIGTERM');
+    setTimeout(() => killTree(proc, 'SIGKILL'), 5000);
   }, timeoutMs);
 
   proc.stdout.on('data', chunk => {
@@ -669,9 +707,12 @@ function executeTool(toolName, target, options, res) {
 
   res.on('close', () => {
     clearTimeout(timeoutTimer);
-    if (proc && !proc.killed) {
-      proc.kill('SIGTERM');
-      setTimeout(() => { try { proc.kill('SIGKILL'); } catch (_) {} }, 2000);
+    // Client (ARGUS) closed the stream — operator hit "kill", a per-tool
+    // deadline fired, or the scan stopped.  Tear down the whole process tree,
+    // not just the leader, so chained/wrapped tools don't keep running.
+    if (proc && proc.exitCode === null && proc.signalCode === null) {
+      killTree(proc, 'SIGTERM');
+      setTimeout(() => killTree(proc, 'SIGKILL'), 2000);
       activeProcs.delete(proc);
       console.log(`[MCP] KILL  tool=${toolName}  pid=${proc.pid} (client disconnected)`);
     }
@@ -752,14 +793,14 @@ const server = http.createServer((req, res) => {
     if (method === 'tools/stop') {
       let killed = 0;
       for (const proc of activeProcs) {
-        try { proc.kill('SIGTERM'); killed++; } catch (_) {}
+        killTree(proc, 'SIGTERM'); killed++;
       }
       setTimeout(() => {
-        for (const proc of activeProcs) { try { proc.kill('SIGKILL'); } catch (_) {} }
+        for (const proc of activeProcs) { killTree(proc, 'SIGKILL'); }
         activeProcs.clear();
       }, 2000);
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ stopped: killed, message: `Sent SIGTERM to ${killed} processes` }));
+      res.end(JSON.stringify({ stopped: killed, message: `Sent SIGTERM to process group of ${killed} tool(s)` }));
       return;
     }
 
@@ -812,6 +853,23 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log('             GET  /health\n');
   console.log('  Note: Run with sudo for tools requiring root (nmap -O, masscan, etc.)\n');
 });
+
+// Graceful shutdown: tools are spawned `detached` (own process group) so they
+// survive node's group — if the server is stopped/restarted we must reap them
+// ourselves, otherwise long-running tools become orphans that "keep running".
+function shutdownActiveTools(signal) {
+  if (activeProcs.size) {
+    console.log(`[MCP] shutdown (${signal}) — killing ${activeProcs.size} active tool group(s)`);
+  }
+  for (const proc of activeProcs) { killTree(proc, 'SIGTERM'); }
+  setTimeout(() => {
+    for (const proc of activeProcs) { killTree(proc, 'SIGKILL'); }
+    activeProcs.clear();
+    process.exit(0);
+  }, 1500);
+}
+process.on('SIGINT',  () => shutdownActiveTools('SIGINT'));
+process.on('SIGTERM', () => shutdownActiveTools('SIGTERM'));
 
 server.on('error', err => {
   if (err.code === 'EADDRINUSE') {

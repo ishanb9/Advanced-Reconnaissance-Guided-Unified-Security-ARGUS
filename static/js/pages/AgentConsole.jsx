@@ -4,22 +4,36 @@
 // ═══════════════════════════════════════════════════════════
 const { useState, useEffect, useRef, useCallback } = React;
 
-const AGENT_ORDER = ['master','recon','vuln','web','osint','exploit','privesc','iot','shell','payload'];
+// Order reflects the operator-driven model: the Operator drives the engagement;
+// the meta-agents advise it live; the classic phase agents are fallback-only
+// (they run when the operator/LLM is unavailable, or when the operator delegates
+// a bulk macro).  Mission Control is the live cockpit — this page lets you
+// inspect each agent's output / reasoning / comms.
+const AGENT_ORDER = ['operator','error_analyzer','red_team','attack_graph',
+                     'master','recon','vuln','web','osint','exploit','privesc','iot','shell','payload'];
 const AGENT_META = {
-  master:  { icon: '⚡', color: 'var(--cyan)',   label: 'Master'  },
-  recon:   { icon: '🔍', color: 'var(--green)',  label: 'Recon'   },
-  vuln:    { icon: '🔬', color: 'var(--amber)',  label: 'Vuln'    },
-  web:     { icon: '🌐', color: '#00cfff',       label: 'Web'     },
-  osint:   { icon: '🕵', color: '#a050ff',       label: 'OSINT'   },
-  exploit: { icon: '💥', color: 'var(--red)',    label: 'Exploit' },
-  privesc: { icon: '🔑', color: '#ff6400',       label: 'Privesc' },
-  iot:     { icon: '📟', color: '#73d13d',       label: 'IoT'     },
-  shell:   { icon: '🐚', color: 'var(--cyan)',   label: 'Shell'   },
-  payload: { icon: '📦', color: 'var(--amber)',  label: 'Payload' },
+  operator:       { icon: '🎯', color: '#7B6CF6',     label: 'Operator', group: 'driver' },
+  error_analyzer: { icon: '🩺', color: 'var(--amber)', label: 'Error Analyzer', group: 'meta' },
+  red_team:       { icon: '🛡', color: 'var(--red)',   label: 'Red-Team Expert', group: 'meta' },
+  attack_graph:   { icon: '🕸', color: '#00cfff',      label: 'Attack Graph', group: 'meta' },
+  master:  { icon: '⚡', color: 'var(--cyan)',   label: 'Master',  group: 'fallback' },
+  recon:   { icon: '🔍', color: 'var(--green)',  label: 'Recon',   group: 'fallback' },
+  vuln:    { icon: '🔬', color: 'var(--amber)',  label: 'Vuln',    group: 'fallback' },
+  web:     { icon: '🌐', color: '#00cfff',       label: 'Web',     group: 'fallback' },
+  osint:   { icon: '🕵', color: '#a050ff',       label: 'OSINT',   group: 'fallback' },
+  exploit: { icon: '💥', color: 'var(--red)',    label: 'Exploit', group: 'fallback' },
+  privesc: { icon: '🔑', color: '#ff6400',       label: 'Privesc', group: 'fallback' },
+  iot:     { icon: '📟', color: '#73d13d',       label: 'IoT',     group: 'fallback' },
+  shell:   { icon: '🐚', color: 'var(--cyan)',   label: 'Shell',   group: 'fallback' },
+  payload: { icon: '📦', color: 'var(--amber)',  label: 'Payload', group: 'fallback' },
 };
 
-// Maps each agent to the subagents it spawns
+// Maps each agent to the subagents/tools it spawns
 const AGENT_SUBAGENTS = {
+  operator:       ['run_tool', 'http', 'shell', 'cve_lookup', 'handover', 'loot_hunt'],
+  error_analyzer: [],
+  red_team:       [],
+  attack_graph:   [],
   master:  [],
   recon:   ['network_scan', 'dns_recon', 'service_banner', 'web_fingerprint'],
   vuln:    ['cve_lookup', 'service_vuln', 'ssl_audit', 'smb_vuln', 'ldap_vuln', 'ftp_vuln', 'ssh_audit'],
@@ -38,6 +52,11 @@ const AGENT_SUBAGENTS = {
 };
 
 const SUBAGENT_META = {
+  // Operator toolbelt (the operator drives tools directly via these)
+  run_tool:           { icon: '🛠', label: 'Run Tool (any)'   },
+  http:               { icon: '🌐', label: 'Stateful HTTP'    },
+  handover:           { icon: '🤝', label: 'Shell Handover'   },
+  loot_hunt:          { icon: '💎', label: 'Loot Hunt'        },
   network_scan:       { icon: '📡', label: 'Network Scan'     },
   dns_recon:          { icon: '🌍', label: 'DNS Recon'        },
   service_banner:     { icon: '🏷',  label: 'Service Banner'  },
@@ -683,7 +702,7 @@ function AgentConsole() {
   const { agents, toolOutputs, reasoningLog, agentComms, subagentStates = {}, sessionId,
           llmThoughts = [] } = state;
 
-  const [selectedAgent, setSelectedAgent] = useState('master');
+  const [selectedAgent, setSelectedAgent] = useState('operator');
   const [tab,           setTab]           = useState('output');   // 'output'|'reasoning'|'comms'|'subagents'|'thoughts'
   const [commsFilter,   setCommsFilter]   = useState('all');
   const outputRef = useRef(null);
@@ -702,8 +721,9 @@ function AgentConsole() {
 
   const meta           = AGENT_META[selectedAgent] || { icon: '◆', color: 'var(--cyan)', label: selectedAgent };
   const agentLines     = toolOutputs[selectedAgent] || [];
+  const _driverView   = selectedAgent === 'master' || selectedAgent === 'operator';
   const agentReasoning = reasoningLog.filter(r =>
-    !selectedAgent || selectedAgent === 'master' || r.agent === selectedAgent
+    !selectedAgent || _driverView || r.agent === selectedAgent
   );
   const rawComms           = agentComms?.[selectedAgent] || [];
   const agentCommsFiltered = commsFilter === 'all' ? rawComms : rawComms.filter(c => c.type === commsFilter);
@@ -719,7 +739,7 @@ function AgentConsole() {
     : '🔩 Subagents';
 
   // LLM Thoughts for selected agent (or all for master)
-  const agentThoughts = selectedAgent === 'master'
+  const agentThoughts = _driverView
     ? llmThoughts
     : llmThoughts.filter(t => t.agent === selectedAgent);
 
@@ -742,11 +762,11 @@ function AgentConsole() {
     // ── Header ──────────────────────────────────────────────
     React.createElement('div', { className: 'page-header', style: { flexShrink: 0 } },
       React.createElement('div', null,
-        React.createElement('div', { className: 'page-title' }, '🤖 Agent Console'),
+        React.createElement('div', { className: 'page-title' }, '🤖 Agent Roster'),
         React.createElement('div', { className: 'page-subtitle' },
           sessionId
-            ? 'Select an agent to inspect output, reasoning, comms and spawned subagents'
-            : 'No active session'
+            ? 'The Operator drives the engagement (Mission Control is the live cockpit). Meta-agents advise it; the classic phase agents are fallback-only. Select any agent to inspect its output, reasoning and comms.'
+            : 'No active session — start a scan from Target Config.'
         )
       )
     ),

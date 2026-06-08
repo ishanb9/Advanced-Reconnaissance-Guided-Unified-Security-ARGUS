@@ -142,8 +142,14 @@ def _resolve_targets(target: str, web_ports: List[int], intel: Dict) -> List[Dic
         except Exception:
             pass
 
-    # Use the cleaned host (strips scheme/path if operator passed a URL)
-    host = (intel or {}).get("target_host") or target
+    # Use the central target resolver so the WSTG battery hits the discovered
+    # vhost (e.g. cctv.htb) instead of the bare IP that only 302-redirects.
+    # Falls back to target_host / the bare target when no vhost is known.
+    try:
+        from agents.recon import target_resolver as _tr
+        host = _tr.web_host(intel) or (intel or {}).get("target_host") or target
+    except Exception:
+        host = (intel or {}).get("target_host") or target
 
     for port in (web_ports or []):
         try:

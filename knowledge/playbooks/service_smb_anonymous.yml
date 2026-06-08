@@ -1,0 +1,51 @@
+id: service_smb_anonymous
+title: "SMB anonymous / null-session enumeration"
+phase: recon
+mitre: ["T1135", "T1018", "T1087.002"]
+trigger:
+  services: ["smb", "microsoft-ds", "netbios-ssn", "samba"]
+  ports:    [139, 445]
+  os_any:   ["windows", "linux"]
+  technologies: []
+  cves: []
+keywords:
+  - "smb anonymous"
+  - "null session"
+  - "enum4linux"
+  - "smbclient -n"
+  - "smbmap"
+  - "rpcclient"
+  - "netbios"
+preconditions:
+  - "TCP/445 reachable from attacker"
+  - "Confirmed SMB (nmap -p445 fingerprinted)"
+steps:
+  - tool: nmap
+    cmd:  "nmap -sV -p139,445 --script=smb-os-discovery,smb-protocols,smb-security-mode,smb-enum-shares.nse,smb-enum-users.nse {target}"
+    why:  "Fingerprint SMB version, list shares + users without creds"
+  - tool: smbclient
+    cmd:  "smbclient -N -L //{target}/"
+    why:  "List shares anonymously"
+  - tool: smbclient
+    cmd:  "smbclient -N //{target}/{share_name}/"
+    why:  "Anonymous mount for each share returned above"
+  - tool: enum4linux-ng
+    cmd:  "enum4linux-ng -A {target}"
+    why:  "Comprehensive null-session enum (users RID 500–1100, groups, password policy)"
+  - tool: rpcclient
+    cmd:  "rpcclient -U '' -N {target} -c 'enumdomusers; enumdomgroups; querydominfo'"
+    why:  "Direct MS-RPC pipes when enum4linux misses anything"
+  - tool: smbmap
+    cmd:  "smbmap -H {target} -u guest -p ''"
+    why:  "Fast share-permission matrix"
+  - tool: nmap
+    cmd:  "nmap -p445 --script=smb-vuln* --script-args=unsafe=1 {target}"
+    why:  "Probe MS17-010 (EternalBlue), MS08-067, SMBGhost, etc."
+expected_outcome: "Share list, RID-cycled user list, version + signing requirement"
+fallbacks:
+  - "If null sessions denied → guess weak creds: guest:'', admin:admin, anonymous:''"
+  - "If SMB signing not required → consider responder + ntlmrelayx relay attack"
+  - "If MS17-010 vuln returned → exploit/windows/smb/ms17_010_eternalblue (Win 7/2008)"
+references:
+  - "https://book.hacktricks.xyz/network-services-pentesting/pentesting-smb"
+  - "https://www.crummie5.club/active-directory-enumeration/"

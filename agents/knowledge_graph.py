@@ -172,9 +172,9 @@ async def infer_and_write(
     """
     import os as _os
     if not llm_url:
-        llm_url = _os.environ.get("OLLAMA_URL", "http://192.168.0.101:11434")
+        llm_url = _os.environ.get("OLLAMA_URL", "http://localhost:11434")
     if not llm_model:
-        llm_model = _os.environ.get("OLLAMA_MODEL", "deepseek-v3.1:671b-cloud")
+        llm_model = _os.environ.get("OLLAMA_MODEL", "")   # no hardcoded model — .env drives it
 
     if not raw_output or len(raw_output.strip()) < 20:
         return 0

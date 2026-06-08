@@ -196,6 +196,12 @@ class ShellAgent(BaseAgent):
         super().__init__(AgentName.SHELL, broadcast)
         self.phase = AttackPhase.POST_EXPLOIT
         self._shells: Dict[str, PtyShell] = {}
+        # RCE-backed pseudo-shells: shell_id → {run_fn, buf, prompt, host, user}.
+        # These have NO PTY — when the foothold is one-shot command execution
+        # (e.g. a deserialization RCE PoC), the operator/human still drives it
+        # from the GUI terminal: each typed line is run through run_fn (the RCE
+        # channel) and the output is streamed back over shell_output.
+        self._rce_consoles: Dict[str, Dict[str, Any]] = {}
         # Recommendation A — ShellAgent gets a back-reference to MasterAgent
         # so manual-capture paths (create_listener, connect_ssh) can flow
         # through register_shell and trip post-ex / privesc / lateral.
@@ -313,10 +319,40 @@ class ShellAgent(BaseAgent):
             return {"success": True, "shell_id": shell_id, "pid": pty_shell.pid}
         return {"success": False, "error": "SSH spawn failed"}
 
+    async def create_rce_console(
+        self, session_id: str, shell_id: str, *, run_fn: Callable,
+        host: str = "", user: str = "", label: str = "RCE",
+    ) -> Dict:
+        """Register an RCE-backed console — a GUI terminal with no PTY whose
+        typed commands run through ``run_fn`` (the foothold's RCE channel) and
+        whose output streams back over ``shell_output``.  Lets the human drive a
+        one-shot RCE foothold from ARGUS just like an interactive shell."""
+        self._session_id = session_id
+        prompt = f"\x1b[92m{user or 'rce'}@{host or 'target'}\x1b[0m$ "
+        self._rce_consoles[shell_id] = {
+            "run_fn": run_fn, "buf": "", "prompt": prompt, "host": host, "user": user}
+        try:
+            await db.update_shell_session(shell_id, {"active": True, "shell_user": user})
+        except Exception:
+            pass
+        await self._emit("shell_status", {
+            "shell_id": shell_id, "active": True,
+            "info": {"host": host, "user": user, "type": "rce_console"}})
+        banner = ("\x1b[96m╔══ ARGUS RCE Console ══╗\x1b[0m\r\n"
+                  f"Commands you type run on \x1b[1m{user or 'target'}@{host or '?'}\x1b[0m "
+                  "through the foothold's RCE channel (request/response, not a live TTY).\r\n"
+                  "Type a command and press Enter. 'exit' closes the console.\r\n\r\n" + prompt)
+        await self._on_pty_output(shell_id, banner)
+        return {"success": True, "shell_id": shell_id, "type": "rce_console"}
+
     # ── Real-time I/O ────────────────────────────────────────────
 
     async def handle_input(self, shell_id: str, data: str):
-        """Route WS shell_input → PTY stdin."""
+        """Route WS shell_input → PTY stdin (or → RCE console runner)."""
+        rce = self._rce_consoles.get(shell_id)
+        if rce is not None:
+            await self._rce_console_input(shell_id, rce, data)
+            return
         shell = self._shells.get(shell_id)
         if shell and shell.active:
             await shell.write(data)
@@ -326,6 +362,38 @@ class ShellAgent(BaseAgent):
                 data={"shell_id": shell_id, "data": "\r\n\x1b[31m[Not connected]\x1b[0m\r\n"}
             )
             await self.broadcast(msg)
+
+    async def _rce_console_input(self, shell_id: str, rce: Dict[str, Any], data: str) -> None:
+        """Echo keystrokes + run the line through the RCE channel on Enter."""
+        for ch in data:
+            if ch in ("\r", "\n"):
+                cmd = rce["buf"].strip()
+                rce["buf"] = ""
+                await self._on_pty_output(shell_id, "\r\n")
+                if not cmd:
+                    await self._on_pty_output(shell_id, rce["prompt"])
+                    continue
+                if cmd in ("exit", "quit"):
+                    self._rce_consoles.pop(shell_id, None)
+                    await self._on_pty_output(shell_id, "\x1b[90m[RCE console closed]\x1b[0m\r\n")
+                    return
+                await self._on_pty_output(shell_id, "\x1b[90m[running…]\x1b[0m\r\n")
+                try:
+                    out = await rce["run_fn"](cmd)
+                except Exception as exc:   # noqa: BLE001
+                    out = f"[console error] {type(exc).__name__}: {exc}"
+                out = (str(out) or "(no output)").replace("\r\n", "\n").replace("\n", "\r\n")
+                await self._on_pty_output(shell_id, out.rstrip("\r\n") + "\r\n" + rce["prompt"])
+            elif ch in ("\x7f", "\b"):
+                if rce["buf"]:
+                    rce["buf"] = rce["buf"][:-1]
+                    await self._on_pty_output(shell_id, "\b \b")
+            elif ch == "\x03":   # Ctrl-C — clear the current line
+                rce["buf"] = ""
+                await self._on_pty_output(shell_id, "^C\r\n" + rce["prompt"])
+            elif ch >= " ":
+                rce["buf"] += ch
+                await self._on_pty_output(shell_id, ch)   # local echo
 
     async def resize_shell(self, shell_id: str, cols: int, rows: int):
         s = self._shells.get(shell_id)
@@ -347,6 +415,7 @@ class ShellAgent(BaseAgent):
         return "Upgrade commands sent"
 
     async def terminate_shell(self, shell_id: str):
+        self._rce_consoles.pop(shell_id, None)
         s = self._shells.pop(shell_id, None)
         if s:
             s.terminate()

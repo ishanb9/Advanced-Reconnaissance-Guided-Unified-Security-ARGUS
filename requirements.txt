@@ -3,12 +3,24 @@
 #  Unified Python requirements (core + auth + RAG + everything)
 # ─────────────────────────────────────────────────────────────────
 #
-#  Install:
+#  Install (RECOMMENDED — isolated venv, one verified command):
+#      bash setup.sh
+#
+#  …or manually into a venv:
+#      python3 -m venv .venv && source .venv/bin/activate
 #      pip install -r requirements.txt
 #
-#  On distros where `pip` is externally-managed (Debian 12+, Ubuntu 23.10+),
-#  add the override flag:
-#      pip install -r requirements.txt --break-system-packages
+#  IMPORTANT — if you delete/rebuild your venv, ALWAYS reinstall from THIS file
+#  (or run setup.sh). Installing packages piecemeal causes the classic breakages:
+#    • newer Starlette than pinned → TemplateResponse 500 ("unhashable type: dict")
+#    • missing python-dotenv        → .env silently ignored (wrong LLM model/URL)
+#    • a stray 'bson' package       → shadows pymongo's bson.errors → server crash
+#  NEVER run `pip install bson` — the standalone 'bson' collides with pymongo's
+#  bundled bson. agent_server.py runs a preflight that detects these on startup.
+#
+#  On distros where `pip` is externally-managed (Debian 12+, Ubuntu 23.10+,
+#  Kali), use a venv as above (no flag needed) — or, only if installing
+#  system-wide on purpose, add:  pip install -r requirements.txt --break-system-packages
 #
 #  Optional native deps for python3-saml (SAML 2.0 SSO):
 #      Debian/Ubuntu  :  sudo apt install libxml2-dev libxmlsec1-dev libxmlsec1-openssl pkg-config

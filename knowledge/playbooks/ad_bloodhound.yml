@@ -1,0 +1,50 @@
+id: ad_bloodhound
+title: "AD — BloodHound collection + path-to-DA Cypher queries"
+phase: recon
+mitre: ["T1087.002", "T1069.002", "T1482"]
+trigger:
+  services: ["ldap", "kerberos", "smb"]
+  ports:    [389, 636, 88, 445]
+  os_any:   ["windows", "windows server"]
+  technologies: ["active directory"]
+keywords: ["bloodhound", "sharphound", "rusthound", "azurehound", "neo4j", "cypher"]
+preconditions:
+  - "Any valid domain account"
+  - "Reachability to a DC on TCP/389 + 88"
+steps:
+  - tool: bloodhound-python
+    cmd:  "bloodhound-python -d {domain} -u {user} -p {password} -ns {dc_ip} -c All --zip"
+    why:  "Linux collection — All collection method (Group, LocalAdmin, Session, Trusts, ACL, Container, RDP, DCOM, PSRemote, ObjectProps, SPNTargets, LoggedOn) zipped for upload"
+  - tool: rusthound
+    cmd:  "rusthound -d {domain} -u {user}@{domain} -p {password} -i {dc_ip} -z"
+    why:  "Faster Rust port — same JSONs, 5-10x speed on large domains"
+  - tool: sharphound
+    cmd:  "SharpHound.exe -c All --zipfilename loot.zip"
+    why:  "From a domain-joined Windows host (no creds needed)"
+  - tool: bloodhound
+    cmd:  "neo4j console &; bloodhound &"
+    why:  "Start Neo4j + BloodHound GUI; import the .zip via drag-drop"
+  - tool: cypher
+    cmd:  "MATCH p=shortestPath((u:User {owned: true})-[*1..]->(g:Group {name: 'DOMAIN ADMINS@{DOMAIN}'})) RETURN p"
+    why:  "Cypher query: shortest path from owned user to Domain Admins"
+  - tool: cypher
+    cmd:  "MATCH (u:User)-[r:GenericAll|GenericWrite|WriteDacl|WriteOwner]->(t) WHERE u.owned=true RETURN u.name,type(r),t.name"
+    why:  "ACL abuse paths — write-rights from owned principals"
+  - tool: cypher
+    cmd:  "MATCH (c:Computer {unconstraineddelegation: true}) WHERE NOT c.name CONTAINS 'DC' RETURN c.name"
+    why:  "Non-DC unconstrained delegation hosts (printer-bug coercion candidates)"
+  - tool: cypher
+    cmd:  "MATCH (u:User) WHERE u.dontreqpreauth=true RETURN u.name"
+    why:  "AS-REPRoastable accounts (no creds needed to roast)"
+  - tool: bloodyad
+    cmd:  "bloodyAD --host {dc_ip} -d {domain} -u {user} -p {password} get writable"
+    why:  "Lighter alternative for ACL discovery without full graph"
+expected_outcome: "Full domain attack graph + concrete actionable paths to Domain Admin"
+fallbacks:
+  - "AzureHound for Azure AD / Entra ID enumeration — separate graph, same UI"
+  - "Old BloodHound (v3/v4) vs new BloodHound CE — JSON formats differ; collect with matching version"
+  - "Neo4j needs 4GB RAM minimum on large domains — use APOC plugin for performance"
+references:
+  - "https://github.com/SpecterOps/BloodHound"
+  - "https://github.com/dirkjanm/BloodHound.py"
+  - "https://github.com/CravateRouge/bloodyAD"

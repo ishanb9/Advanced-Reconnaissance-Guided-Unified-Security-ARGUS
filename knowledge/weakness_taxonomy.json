@@ -1,0 +1,194 @@
+[
+  {
+    "id": "known_cve",
+    "name": "Known CVE for fingerprinted component",
+    "triggering_capabilities": ["version_known"],
+    "generic_test_strategy": "Look up CVEs and public PoCs for the exact fingerprinted product+version; fetch the highest-signal public PoC and run it as-is before hand-rolling.",
+    "confirm_signal": "The PoC yields its documented effect (code exec, auth bypass, data read).",
+    "objective_relevance": ["access", "data", "flag"]
+  },
+  {
+    "id": "ssrf",
+    "name": "Server-Side Request Forgery",
+    "triggering_capabilities": ["fetches_remote", "takes_input"],
+    "generic_test_strategy": "Aim the resource reference at loopback/internal/metadata addresses and at alternate URI schemes; watch for differential responses or out-of-band hits.",
+    "confirm_signal": "Server reaches an address the client cannot, or an out-of-band callback fires.",
+    "objective_relevance": ["access", "data"]
+  },
+  {
+    "id": "sqli",
+    "name": "SQL Injection",
+    "triggering_capabilities": ["takes_input", "parses_format"],
+    "generic_test_strategy": "Probe each input that reaches a query with boolean/time/error differentials; escalate to data extraction or auth bypass on a confirmed differential.",
+    "confirm_signal": "Boolean/time/error oracle proves query manipulation.",
+    "objective_relevance": ["data", "access", "flag"]
+  },
+  {
+    "id": "auth_bypass",
+    "name": "Authentication / Authorization Bypass",
+    "triggering_capabilities": ["authenticates", "takes_input"],
+    "generic_test_strategy": "Test for missing checks, forced browsing, parameter/role tampering, token forgery, and header-trust assumptions on protected functionality.",
+    "confirm_signal": "Protected functionality is reached without valid credentials.",
+    "objective_relevance": ["access", "data", "flag"]
+  },
+  {
+    "id": "idor",
+    "name": "Insecure Direct Object Reference / BOLA",
+    "triggering_capabilities": ["takes_input", "authenticates"],
+    "generic_test_strategy": "Enumerate/mutate object identifiers across a privilege or tenancy boundary and observe whether other principals' objects are returned.",
+    "confirm_signal": "Another principal's object is returned without authorization.",
+    "objective_relevance": ["data", "flag"]
+  },
+  {
+    "id": "path_traversal",
+    "name": "Path Traversal / Local File Read",
+    "triggering_capabilities": ["file_access", "takes_input"],
+    "generic_test_strategy": "Supply traversal sequences and absolute paths to any file-referencing input; target sensitive system/app files; try encodings to defeat filters.",
+    "confirm_signal": "Contents of a file outside the intended directory are returned.",
+    "objective_relevance": ["data", "access", "flag"]
+  },
+  {
+    "id": "command_injection",
+    "name": "OS Command Injection",
+    "triggering_capabilities": ["takes_input", "executes"],
+    "generic_test_strategy": "Append shell metacharacters/separators to inputs that may reach a system command; confirm with a benign, observable side effect (timing or output).",
+    "confirm_signal": "A benign injected command demonstrably executes on the host.",
+    "objective_relevance": ["access", "flag", "data"]
+  },
+  {
+    "id": "code_injection",
+    "name": "Server-Side Code / Template Injection",
+    "triggering_capabilities": ["takes_input", "templated", "executes"],
+    "generic_test_strategy": "Submit framework/template expressions to inputs rendered server-side; start with arithmetic/echo markers, escalate to runtime evaluation on a hit.",
+    "confirm_signal": "A server-evaluated expression returns a computed/echoed marker.",
+    "objective_relevance": ["access", "flag"]
+  },
+  {
+    "id": "insecure_deserialization",
+    "name": "Insecure Object Deserialization",
+    "triggering_capabilities": ["deserializes", "takes_input"],
+    "generic_test_strategy": "Identify serialized blobs accepted from the client; craft type-confusion or gadget-chain inputs appropriate to the runtime to trigger execution.",
+    "confirm_signal": "A crafted serialized input produces an observable side effect.",
+    "objective_relevance": ["access", "flag"]
+  },
+  {
+    "id": "file_upload",
+    "name": "Unrestricted / Dangerous File Upload",
+    "triggering_capabilities": ["uploads", "takes_input"],
+    "generic_test_strategy": "Upload content whose type/extension is mishandled and reach it via a path where the server interprets it; chain to execution or stored injection.",
+    "confirm_signal": "Uploaded content is served/executed in a damaging context.",
+    "objective_relevance": ["access", "flag"]
+  },
+  {
+    "id": "xxe",
+    "name": "XML External Entity",
+    "triggering_capabilities": ["parses_format", "takes_input"],
+    "generic_test_strategy": "Submit XML declaring external entities to any XML-parsing input; attempt local file read and out-of-band retrieval.",
+    "confirm_signal": "An external entity resolves to file contents or an out-of-band hit.",
+    "objective_relevance": ["data", "access"]
+  },
+  {
+    "id": "default_creds",
+    "name": "Default / Weak Credentials",
+    "triggering_capabilities": ["authenticates"],
+    "generic_test_strategy": "Try documented default and common credentials for the identified service, rate-limited; prefer one curated list over blind brute force.",
+    "confirm_signal": "A default/weak credential authenticates successfully.",
+    "objective_relevance": ["access", "data", "flag"]
+  },
+  {
+    "id": "exposed_secrets",
+    "name": "Exposed Secrets / Sensitive Data",
+    "triggering_capabilities": ["stores_secrets", "file_access", "renders_output"],
+    "generic_test_strategy": "Hunt config/backup/VCS/debug artifacts and verbose responses for keys, tokens, and credentials; validate any secret found.",
+    "confirm_signal": "A usable secret/credential is recovered and validated.",
+    "objective_relevance": ["data", "access", "flag"]
+  },
+  {
+    "id": "ssti_to_rce",
+    "name": "Template Injection escalation to execution",
+    "triggering_capabilities": ["templated", "executes", "takes_input"],
+    "generic_test_strategy": "On a confirmed template-evaluation primitive, escalate to runtime/command execution via the engine's documented escape to host functions.",
+    "confirm_signal": "Host command output is returned via the template primitive.",
+    "objective_relevance": ["access", "flag"]
+  },
+  {
+    "id": "open_redirect",
+    "name": "Open Redirect",
+    "triggering_capabilities": ["redirects", "takes_input"],
+    "generic_test_strategy": "Supply external/encoded destinations to redirect parameters; observe whether the server issues a redirect to an attacker-chosen location.",
+    "confirm_signal": "Server redirects to an attacker-controlled destination.",
+    "objective_relevance": ["access"]
+  },
+  {
+    "id": "misconfiguration",
+    "name": "Security Misconfiguration",
+    "triggering_capabilities": ["renders_output", "file_access"],
+    "generic_test_strategy": "Check for directory listing, debug endpoints, permissive CORS, default pages, and management interfaces exposed without controls.",
+    "confirm_signal": "A misconfiguration exposes data or functionality it should not.",
+    "objective_relevance": ["data", "access"]
+  },
+  {
+    "id": "known_service_exploit",
+    "name": "Known Network-Service Exploit",
+    "triggering_capabilities": ["version_known", "executes"],
+    "generic_test_strategy": "For a versioned network service, match it to a known remote exploit/PoC and run it; confirm code execution or the documented effect.",
+    "confirm_signal": "The service exploit yields code execution or its documented effect.",
+    "objective_relevance": ["access", "flag"]
+  },
+  {
+    "id": "weak_crypto_session",
+    "name": "Weak Session / Token Handling",
+    "triggering_capabilities": ["authenticates", "takes_input"],
+    "generic_test_strategy": "Analyze tokens/cookies for predictability, missing signature verification, or algorithm confusion; forge a higher-privilege session.",
+    "confirm_signal": "A forged/predicted token grants unauthorized access.",
+    "objective_relevance": ["access", "data", "flag"]
+  },
+  {
+    "id": "business_logic",
+    "name": "Business-Logic / Workflow Abuse",
+    "triggering_capabilities": ["takes_input", "authenticates"],
+    "generic_test_strategy": "Model the app's intended workflow and abuse it: skipped steps, negative/overflow quantities, race conditions, replay, and state confusion.",
+    "confirm_signal": "The app grants value/access it should not, via logic abuse.",
+    "objective_relevance": ["data", "access", "flag"]
+  },
+  {
+    "id": "info_disclosure",
+    "name": "Information Disclosure",
+    "triggering_capabilities": ["renders_output"],
+    "generic_test_strategy": "Mine responses, errors, headers, and client bundles for versions, routes, identifiers, and internal details that expand the attack surface.",
+    "confirm_signal": "Non-public information that enables further attack is revealed.",
+    "objective_relevance": ["data"]
+  },
+  {
+    "id": "privilege_escalation",
+    "name": "Local Privilege Escalation (post-foothold)",
+    "triggering_capabilities": ["executes", "file_access"],
+    "generic_test_strategy": "With a foothold, enumerate sudo rights, setuid binaries, capabilities, cron, writable paths, and kernel/service exploits to reach higher privilege.",
+    "confirm_signal": "A higher-privilege context (e.g. root/admin) is obtained.",
+    "objective_relevance": ["access", "flag"]
+  },
+  {
+    "id": "credential_reuse",
+    "name": "Credential Reuse / Lateral Movement",
+    "triggering_capabilities": ["authenticates", "stores_secrets"],
+    "generic_test_strategy": "Reuse recovered credentials/keys across services and hosts; pivot along trust edges to new systems.",
+    "confirm_signal": "Recovered credentials authenticate to a different service/host.",
+    "objective_relevance": ["access", "data", "flag"]
+  },
+  {
+    "id": "data_exfiltration",
+    "name": "Targeted Data Exfiltration (objective)",
+    "triggering_capabilities": ["file_access", "stores_secrets", "renders_output"],
+    "generic_test_strategy": "When the objective is specific data, locate and retrieve exactly that data set via the most reliable confirmed access path.",
+    "confirm_signal": "The objective data is retrieved and verified.",
+    "objective_relevance": ["data"]
+  },
+  {
+    "id": "supply_chain",
+    "name": "Supply-Chain / Dependency Weakness",
+    "triggering_capabilities": ["version_known", "executes"],
+    "generic_test_strategy": "Check dependencies/integrations for known-vulnerable components and trust of external inputs; exploit the weakest trusted dependency.",
+    "confirm_signal": "A vulnerable dependency/integration yields impact.",
+    "objective_relevance": ["access", "data"]
+  }
+]

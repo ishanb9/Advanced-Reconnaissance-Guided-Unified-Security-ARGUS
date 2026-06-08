@@ -504,6 +504,69 @@ class BaseSubagent(ABC):
             self._http_client = httpx.AsyncClient(timeout=httpx.Timeout(None))
         return self._http_client
 
+    # ------------------------------------------------------------------
+    #  LLM reasoning — gives subagents a brain, not just tools
+    # ------------------------------------------------------------------
+    async def think(self, prompt: str, system: str = "", *, timeout: int = 600) -> str:
+        """Reason via the ``.env``-configured LLM (``get_provider()``).
+
+        Subagents previously had NO LLM access (deterministic tool-runners),
+        so the Exploit / Privesc / IoT clusters never appeared to "interact"
+        with the model.  This routes through the SAME ``.env`` provider the
+        main agents use and logs to ``llm_calls.jsonl`` + a
+        ``subagent_reasoning`` event so the interaction is visible.  Returns
+        "" on any failure (never raises — reasoning is best-effort).
+        """
+        import time as _t
+        msgs = [
+            {"role": "system",
+             "content": system or ("You are an expert penetration-testing "
+                                    "subagent. Be concise, concrete and "
+                                    "evidence-driven.")},
+            {"role": "user", "content": prompt},
+        ]
+        t0, out, model = _t.monotonic(), "", ""
+        try:
+            from utils.llm_providers import get_provider
+            prov  = get_provider()
+            model = getattr(prov, "model", "") or getattr(prov, "name", "")
+            toks: list[str] = []
+            async for tok in prov.stream(msgs, timeout=timeout):
+                if tok:
+                    toks.append(tok)
+            out = "".join(toks)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[%s] think() failed: %s", self.SUBAGENT_NAME, exc)
+            out = ""
+        try:
+            from utils.scan_logger import log_llm as _log_llm
+            _log_llm(self.session_id,
+                     (prompt.strip().splitlines() or [""])[0][:60],
+                     prompt_chars=len(prompt), response_chars=len(out),
+                     latency=_t.monotonic() - t0, model=model,
+                     agent=f"subagent:{self.SUBAGENT_NAME}")
+        except Exception:
+            pass
+        try:
+            await self._emit("subagent_reasoning",
+                             {"subagent": self.SUBAGENT_NAME,
+                              "prompt": prompt[:200], "response": out[:400]})
+        except Exception:
+            pass
+        return out
+
+    async def think_json(self, prompt: str, system: str = "", *, timeout: int = 600) -> dict:
+        """Reason via the LLM and parse a JSON object out of the response."""
+        raw = await self.think(prompt + "\n\nRespond ONLY with valid JSON — no prose.",
+                               system, timeout=timeout)
+        try:
+            import json as _json
+            import re as _re
+            m = _re.search(r"\{.*\}", raw, _re.DOTALL)
+            return _json.loads(m.group(0)) if m else {}
+        except Exception:
+            return {}
+
     async def run_tool(
         self,
         tool_name: str,
@@ -542,24 +605,43 @@ class BaseSubagent(ABC):
         # embedded inside the options string, so we must NOT prepend it again.
         # e.g. tool="nmap", options={"options": "-sV -p 80 10.0.0.1"}
         # → "nmap -sV -p 80 10.0.0.1"
+        def _inject_tls_skip(tn: str, cmd: str) -> str:
+            """Append a TLS-verification-skip flag when the command targets
+            https and the tool supports one.  Prevents the 'certificate has
+            expired / failed to verify certificate' failures that killed
+            gobuster on 443 in the field (the cert was expired)."""
+            flags = {"curl": "-k", "gobuster": "-k", "wget": "--no-check-certificate",
+                     "wpscan": "--disable-tls-checks", "feroxbuster": "-k"}
+            flag = flags.get((tn or "").lower().strip())
+            low = cmd.lower()
+            if not flag or "https://" not in low:
+                return cmd
+            toks = cmd.split()
+            if flag in toks or (tn.lower() == "curl" and ("-k" in toks or "--insecure" in toks
+                                or any(t.startswith("-") and "k" in t and not t.startswith("--") for t in toks))):
+                return cmd
+            return f"{cmd} {flag}"
+
         def _build_cmd() -> str:
             _opts = options or {}
             # Full command override (bash/sh/python calls)
             if "command" in _opts:
-                return str(_opts["command"])
+                cmd = str(_opts["command"])
             # Standard pattern: options key holds full flag string with target embedded
-            if "options" in _opts:
+            elif "options" in _opts:
                 raw = str(_opts["options"]).strip()
-                return f"{tool_name} {raw}".strip() if raw else tool_name
-            # Fallback: build from parts; target appended last
-            parts = [tool_name]
-            for k, v in _opts.items():
-                if v and k not in ("target", "stdin"):
-                    flag = k if k.startswith("-") else f"--{k}"
-                    parts.extend([flag, str(v)])
-            if target:
-                parts.append(target)
-            return " ".join(parts)
+                cmd = f"{tool_name} {raw}".strip() if raw else tool_name
+            else:
+                # Fallback: build from parts; target appended last
+                parts = [tool_name]
+                for k, v in _opts.items():
+                    if v and k not in ("target", "stdin"):
+                        flag = k if k.startswith("-") else f"--{k}"
+                        parts.extend([flag, str(v)])
+                if target:
+                    parts.append(target)
+                cmd = " ".join(parts)
+            return _inject_tls_skip(tool_name, cmd)
 
         async def _run_local_gen():
             """Yield output lines from a local subprocess."""

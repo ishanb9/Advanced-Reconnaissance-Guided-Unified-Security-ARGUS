@@ -84,6 +84,20 @@ MAX_CLASSIFICATIONS_PER_ENGAGEMENT: int = int(
     os.environ.get("ARGUS_ERROR_MAX_CLASSIFICATIONS", "40")
 )
 
+# F7 — coarse throttle: once the SAME (tool, classification) advice has been
+# emitted, suppress it for this long.  Stops the "retry with a longer timeout"
+# storm (the old 180 s same-signature window let identical advice re-fire ~12×).
+ADVICE_DEDUP_SEC: float = float(
+    os.environ.get("ARGUS_ERROR_ADVICE_DEDUP_SEC", "600")
+)
+
+# Core executors / shells must NEVER be classified "tool_missing" + hard-blocked
+# — a single `bash` exit 1 (e.g. an awk subcommand emitting "No such file or
+# directory") previously force-blocked bash for the whole engagement.
+_CORE_EXECUTORS: frozenset = frozenset({
+    "bash", "sh", "zsh", "dash", "cat", "echo", "env", "timeout", "sudo", "true",
+})
+
 
 # Error signatures we always treat as transient with no LLM call.
 # (saves token budget on noise that doesn't need reasoning)
@@ -146,6 +160,8 @@ class ErrorAnalyzerAgent(BaseMetaAgent):
         )
         # Dedup memory: signature → (last_seen_ts, classification)
         self._seen: Dict[str, Tuple[float, str]] = {}
+        # F7 — coarse (tool|classification) → last-emitted-ts throttle
+        self._advice_seen: Dict[str, float] = {}
         self._classifications_done: int = 0
         # Async queue of incoming ErrorEvents
         self._queue: asyncio.Queue = asyncio.Queue(maxsize=200)
@@ -175,6 +191,17 @@ class ErrorAnalyzerAgent(BaseMetaAgent):
             "classify the error and recommend a SPECIFIC, ACTIONABLE "
             "course correction so the engagement can move forward "
             "instead of looping on the same dead end.\n\n"
+            "CRITICAL VHOST RULE: a redirect or Host-header reference to an "
+            "internal-looking hostname (*.htb, *.local, *.lan, *.corp, "
+            "*.internal, *.thm) is NOT scope_drift — that hostname is a "
+            "VIRTUAL HOST of the CURRENT target and IS in scope.  The fix is "
+            "to (re)map it to the current target IP in /etc/hosts and re-run "
+            "the tool with that vhost (curl --resolve / -H 'Host: <vhost>' or "
+            "an /etc/hosts entry), NOT to delete it.  NEVER recommend "
+            "`sed -i .../etc/hosts` deletions, `> /etc/hosts`, or purging a "
+            "vhost entry — doing so destroys the only path to the web app. "
+            "If the vhost currently resolves to a stale/old IP, recommend "
+            "REPLACING that mapping with the current target IP.\n\n"
             "Respond ONLY with strict JSON, no markdown fences, no "
             "commentary outside the JSON object.  Required shape:\n"
             "{\n"
@@ -206,6 +233,13 @@ class ErrorAnalyzerAgent(BaseMetaAgent):
                        exit_code: int, stderr: str, phase: str) -> None:
         """Non-blocking — drop into queue.  Safe to call from any code path."""
         if not self._enabled:
+            return
+        # F3 — operator cancellations are NOT errors.  Exit -2 / "stopped by
+        # operator" means the human killed the tool on purpose; analysing it
+        # (and telling MASTER to "retry") actively fights the cancel button and
+        # was a prime driver of the cancel-then-refire loop.  Drop it.
+        _slc = (stderr or "").lower()
+        if exit_code == -2 or "stopped by operator" in _slc or "[cancelled]" in _slc:
             return
         try:
             evt = ErrorEvent(
@@ -265,8 +299,39 @@ class ErrorAnalyzerAgent(BaseMetaAgent):
             return
         stderr_lc = evt.stderr.lower()
 
-        # Fast-path: known patterns that don't need LLM input
-        if any(p in stderr_lc for p in _TOOL_MISSING_PATTERNS):
+        # F7 — once the host is flagged unreachable, the liveness breaker owns
+        # the situation.  Stop emitting per-tool "retry with a longer timeout"
+        # advice: it can't help a dead host and floods the prompt window (this
+        # was the ~12× repeated-advice storm against the black-holed target).
+        try:
+            from agents.reasoning.tool_blacklist import get_blacklist as _gb
+            if _gb().host_unreachable(evt.target) and (
+                evt.exit_code in (28, 124, -1)
+                or any(k in stderr_lc for k in (
+                    "timeout", "timed out", "readtimeout",
+                    "appears to be down", "max retries", "execution expired"))
+            ):
+                return
+        except Exception:
+            pass
+
+        _tool0 = (evt.tool or "").strip().lower().split()[0] if evt.tool else ""
+
+        # Fast-path: a tool is genuinely MISSING only on a REAL not-found signal
+        # (exit 127 / "command not found" / MCP "Tool not found: 'x'" / explicit
+        # install hint), AND it is not a core executor.  F6: a bare "no such file
+        # or directory" from a bash subcommand is NOT a missing tool — that false
+        # positive previously force-blocked `bash` (the universal executor) for
+        # the whole engagement at confidence 0.99.
+        _real_missing = (
+            evt.exit_code == 127
+            or "command not found" in stderr_lc
+            or "tool not found" in stderr_lc
+            or "cannot execute binary file" in stderr_lc
+            or "is not installed" in stderr_lc
+            or (bool(_tool0) and f"apt install {_tool0}" in stderr_lc)
+        )
+        if _real_missing and _tool0 not in _CORE_EXECUTORS:
             await self._apply_classification(
                 evt, sig,
                 classification    = "tool_missing",
@@ -334,12 +399,48 @@ class ErrorAnalyzerAgent(BaseMetaAgent):
         """Pin the result onto the EngagementContext + emit event."""
         self._seen[sig] = (evt.ts, classification)
 
+        # F7 — coarse (tool|classification) throttle: if we already emitted this
+        # exact advice for this tool recently, skip it.  Stops the same guidance
+        # (e.g. "retry with a longer timeout") from re-pinning every few minutes
+        # and evicting useful insights from the prompt window.
+        _akey = f"{(evt.tool or '').lower()}|{classification}"
+        if (evt.ts - self._advice_seen.get(_akey, 0.0)) < ADVICE_DEDUP_SEC:
+            return
+        self._advice_seen[_akey] = evt.ts
+
         try:
             from agents.engagement_context import get_context
             ctx = (get_context(self._session_id)
                      if self._session_id else None)
         except Exception:
             ctx = None
+
+        # ── C8 arbitration: don't fight forward progress ──────────────────
+        # Once recon has mapped the attack surface, a "wrong_target / dead
+        # endpoint → run a full TCP nmap scan" correction directly contradicts
+        # the Expert's push to exploit and historically looped the planner on
+        # redundant re-scans.  When ports are already known, downgrade such
+        # advice and strip any "full scan" replacement so it can't re-queue one.
+        try:
+            _ports_known = bool(ctx and ctx.intel.get("open_ports"))
+        except Exception:
+            _ports_known = False
+        if _ports_known and classification in ("wrong_target", "dead_endpoint"):
+            _cc = (course_correction or "").lower()
+            if any(k in _cc for k in (
+                "full tcp", "full nmap", "full port", "port scan", "nmap scan",
+                "re-scan", "rescan", "discover the actual", "actual web port",
+                "actual listening",
+            )):
+                classification    = "other"   # no longer a critical re-scan signal
+                course_correction = (
+                    "Attack surface is already mapped (ports known) — do NOT "
+                    "re-scan.  Pivot to the discovered service / vhost and "
+                    "exploit it."
+                )
+                replacement_cmd = ""           # don't re-queue a scan
+                block_tool      = False
+                block_target    = False
 
         # Pin the course correction so every subsequent LLM prompt sees it
         if ctx is not None:

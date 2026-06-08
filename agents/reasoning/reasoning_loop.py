@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable, Coroutine, Dict, List, Optional, TYPE_CHECKING
@@ -36,6 +37,20 @@ from typing import Any, Callable, Coroutine, Dict, List, Optional, TYPE_CHECKING
 # them to a very large number (e.g. 99999) effectively disables the cap.
 _META_PRE_TIMEOUT  = int(os.environ.get("EXPERT_PREREVIEW_TIMEOUT_SEC",  "120"))
 _META_POST_TIMEOUT = int(os.environ.get("EXPERT_POSTREVIEW_TIMEOUT_SEC", "120"))
+# F8 — hard backstop on the number of distinct phase meta-review passes per
+# engagement (each pass = up to 4 meta-LLM calls).  Generous so a normal run
+# (recon/osint/vuln/web/exploit/privesc/lateral/post ≈ 8) is never starved,
+# but a pathological loop can't spin out ~65 corrections.
+_MAX_META_REVIEW_PASSES = int(os.environ.get("ARGUS_MAX_META_REVIEW_PASSES", "12"))
+
+# ── Hard wall-clock backstop for the reasoning loop ─────────────────────────
+# The stall-convergence logic ends a *stuck* engagement within ~10 cheap
+# iterations, but this is the ultimate ceiling for pathological cases where
+# evidence keeps shifting slightly without ever advancing toward a foothold
+# (so the stall counter never trips) — e.g. the 2h42m / 266-LLM-call / 0-shell
+# spin observed against the Go/IPFS/InfluxDB target.  Generous by default;
+# override with the env var.  Set very large (e.g. 999999) to disable.
+_MAX_LOOP_SECONDS = int(os.environ.get("ARGUS_MAX_LOOP_SECONDS", "3600"))
 
 
 async def _meta_review_with_timeout(coro, *, label: str, timeout: int,
@@ -91,6 +106,17 @@ class ReasoningLoop:
     MAX_ITERATIONS:         int   = 50     # Safety cap — stops infinite loops
     CONVERGENCE_THRESHOLD:  float = 0.95   # Stop early if top path confidence ≥ this
     CHECKPOINT_EVERY:       int   = 5      # Save checkpoint every N iterations
+    # ── Stall / convergence control ──────────────────────────────────────
+    # The two planning LLM calls (hypothesize → "TARGET STATE", prioritize →
+    # "CURRENT EVIDENCE") cost ~40–55s EACH and ran every iteration regardless
+    # of whether anything changed — turning a stuck engagement into a 2h+
+    # spin of identical web enumeration.  These thresholds make the loop:
+    #   * skip those calls (reuse cache) while evidence is unchanged,
+    #   * force ONE genuine exploitation push when stuck,
+    #   * then converge so the testing cycle actually completes.
+    STALL_ESCALATE_AT:      int   = 5      # No compromise-progress iters → force exploit escalation
+    STALL_BREAK_AT:         int   = 10     # No compromise-progress iters (post-escalation) → converge + finish
+    MAX_LOOP_SECONDS:       int   = _MAX_LOOP_SECONDS  # Hard wall-clock ceiling (env: ARGUS_MAX_LOOP_SECONDS)
 
     def __init__(
         self,
@@ -152,6 +178,30 @@ class ReasoningLoop:
         # "privesc", "lateral_movement", etc.).  Values are the iteration
         # number when dispatch happened.
         self._phases_dispatched: Dict[str, int] = {}
+
+        # ── Meta-agent review budget (F8) ──────────────────────────────────
+        # Each distinct phase is meta-reviewed ONCE; forced re-runs (e.g. the
+        # stall-escalation exploit re-dispatch) skip the 4-call review storm.
+        # A hard cap backstops a pathological loop.  Keeps meta-agents informing
+        # instead of flooding ~65 corrections / engagement.
+        self._meta_reviewed_phases: set = set()
+        self._meta_review_passes:   int = 0
+
+        # ── Loop-convergence / stall detection ────────────────────────────
+        # ``_full_fp``        — fingerprint of ALL meaningful evidence; when it
+        #                       is unchanged the loop is spinning and the two
+        #                       expensive planning LLM calls are skipped
+        #                       (cached hypotheses / paths reused instead).
+        # ``_breakthrough_fp``— fingerprint of COMPROMISE progress only (shell,
+        #                       creds, vulns, flags, cves, loot).  Drives
+        #                       escalation + convergence: pure web-path growth
+        #                       does NOT reset it, so a fuzzer that keeps
+        #                       finding 404s can no longer keep the loop alive
+        #                       forever without advancing toward a foothold.
+        self._full_fp:            Optional[str] = None
+        self._breakthrough_fp:    Optional[str] = None
+        self._no_breakthrough:    int           = 0
+        self._stall_escalated:    bool          = False
 
         # ── Question Engine (3-layer extraction + discovery pass) ─────────
         self._question_engine = QuestionEngine(
@@ -272,8 +322,25 @@ class ReasoningLoop:
         # Run QuestionEngine against all gathered intel (no raw output yet).
         await self._question_engine.answer_all(self._intel, "")
 
+        # Wall-clock backstop — see MAX_LOOP_SECONDS.  Bounds total reasoning
+        # time so a pathological "evidence keeps shifting slightly" engagement
+        # can never grind for hours; the stall counter handles the common case
+        # much sooner.
+        loop_start = time.monotonic()
+
         for iteration in range(self.MAX_ITERATIONS):
             self._iteration = iteration
+
+            # ── WALL-CLOCK BACKSTOP ──────────────────────────────────────
+            _elapsed = time.monotonic() - loop_start
+            if _elapsed >= self.MAX_LOOP_SECONDS and not self._intel.get("shell_access"):
+                await self._emit_status(
+                    f"Reasoning loop hit the {self.MAX_LOOP_SECONDS}s wall-clock "
+                    f"ceiling (no shell) — converging and completing the testing "
+                    f"cycle. Raise ARGUS_MAX_LOOP_SECONDS to allow longer runs.",
+                    "DONE",
+                )
+                break
 
             # ── PLAYBOOK DISPATCH (E1 wiring) ──────────────────────────────
             # Match current intel against the playbook library; dispatch any
@@ -355,6 +422,59 @@ class ReasoningLoop:
                 await self._emit_status("Stop requested — exiting loop", "DONE")
                 break
 
+            # ── HOST-LIVENESS + OPERATOR-CANCEL CIRCUIT BREAKERS ─────────
+            # The two failure modes that turned a 38-min run into 44 timeouts
+            # and a "RECON keeps re-triggering after I cancel it" loop:
+            #   (F2) the operator kills tools but the web-primer ladder just
+            #        fires the next rung — so stop the auto-sweep after a
+            #        cancel streak; one tool-kill must not spawn the next.
+            #   (F5) the target goes dark (timeouts/unreachable) yet ARGUS
+            #        keeps flailing on stale "port open" intel — detect it,
+            #        alert the operator, and converge instead of wasting 35 min.
+            try:
+                from agents.reasoning.tool_blacklist import get_blacklist as _get_bl
+                _bl  = _get_bl()
+                _tgt = self._target
+                if (not self._intel.get("_web_primer_halted")
+                        and _bl.cancel_streak_tripped(_tgt)):
+                    self._intel["_web_primer_halted"] = True
+                    _ncancel = _bl.consecutive_cancels(_tgt)
+                    try:
+                        await self._emit("web_primer_halted", {
+                            "session_id": self._session_id,
+                            "target":     _tgt,
+                            "cancels":    _ncancel,
+                            "reason":     "operator cancelled multiple tools in a row",
+                        })
+                    except Exception:
+                        pass
+                    await self._emit_reasoning(
+                        f"🛑 Operator cancelled {_ncancel} tools in a row — halting "
+                        f"the automated web-primer sweep against {_tgt}. ARGUS will "
+                        f"stop re-dispatching web tools you keep killing and await "
+                        f"guidance / pursue non-web vectors."
+                    )
+                if _bl.host_unreachable(_tgt) and not self._intel.get("shell_access"):
+                    _nfail = _bl.consecutive_host_failures(_tgt)
+                    try:
+                        await self._emit("host_unreachable", {
+                            "session_id":            self._session_id,
+                            "target":                _tgt,
+                            "consecutive_failures":  _nfail,
+                        })
+                    except Exception:
+                        pass
+                    await self._emit_status(
+                        f"Target {_tgt} stopped responding — {_nfail} consecutive "
+                        f"timeouts/unreachable with no success in between. The host is "
+                        f"down, firewalled, or rate-limiting; halting active testing "
+                        f"instead of flailing. Re-run once it is reachable again.",
+                        "DONE",
+                    )
+                    break
+            except Exception:
+                pass
+
             await self._emit_loop_event("iteration_start", {"iteration": iteration})
 
             # ── OBSERVE ──────────────────────────────────────────────────
@@ -366,13 +486,89 @@ class ReasoningLoop:
                 self._journal.append(f"[{iteration}] {assessment}")
                 self._intel["reasoning_journal"] = self._journal
 
+            # ── OBJECTIVE GRADING (periodic) ─────────────────────────────
+            # Holistically re-grade EVERY objective (complete/partial/
+            # not_complete) against the full evidence every few iterations, so
+            # the status tracks progress as evidence accrues — not just whatever
+            # literal answers were extracted from tool output.
+            if iteration and iteration % 3 == 0:
+                try:
+                    await self._question_engine.evaluate_objectives(self._intel)
+                except Exception:
+                    pass
+
             # ── OBJECTIVE CHECK ──────────────────────────────────────────
             if self._is_objective_achieved():
                 await self._emit_status("Objective achieved — loop complete", "DONE")
                 break
 
+            # ── STALL DETECTION / CONVERGENCE GATE ───────────────────────
+            # Compute two fingerprints of the current state.  When the FULL
+            # fingerprint is unchanged the loop is spinning, so the two
+            # expensive planning LLM calls (hypothesize + prioritize) are
+            # skipped and cached results reused.  The COMPROMISE fingerprint
+            # drives escalation + convergence so the testing cycle finishes
+            # instead of grinding to MAX_ITERATIONS doing identical web probes.
+            full_fp  = self._evidence_fingerprint(full=True)
+            brk_fp   = self._evidence_fingerprint(full=False)
+            evidence_changed = (full_fp != self._full_fp) or not self._hypotheses
+            if brk_fp != self._breakthrough_fp:
+                self._no_breakthrough = 0
+            else:
+                self._no_breakthrough += 1
+            self._full_fp         = full_fp
+            self._breakthrough_fp = brk_fp
+            await self._emit_loop_event("stall_status", {
+                "iteration":        iteration,
+                "evidence_changed": evidence_changed,
+                "no_breakthrough":  self._no_breakthrough,
+                "escalated":        self._stall_escalated,
+            })
+
+            # Converge & finish: clearly stuck AND we already tried to escalate
+            # to genuine exploitation — stop instead of spinning to iter 50.
+            if (self._no_breakthrough >= self.STALL_BREAK_AT
+                    and self._stall_escalated
+                    and not self._intel.get("shell_access")):
+                await self._emit_status(
+                    f"No compromise progress after {self._no_breakthrough} "
+                    f"stagnant iterations (exploitation already attempted) — "
+                    f"converging and completing the testing cycle",
+                    "DONE",
+                )
+                break
+
+            # First time we cross the escalate threshold: force ONE genuine
+            # exploitation push (re-run the exploit phase + orchestrator) even
+            # though the decision engine keeps proposing recon/web steps.  This
+            # is the "actually try to compromise before giving up" gate.
+            if (self._no_breakthrough >= self.STALL_ESCALATE_AT
+                    and not self._stall_escalated
+                    and not self._intel.get("shell_access")):
+                self._stall_escalated = True
+                await self._emit_reasoning(
+                    f"⛏️  Stalled {self._no_breakthrough} iterations with no "
+                    f"compromise progress — forcing exploitation escalation "
+                    f"(exploit phase + orchestrator, then Tier-2 synth path)"
+                )
+                try:
+                    await self._escalate_to_exploitation()
+                except Exception as exc:
+                    await self._emit_reasoning(f"[stall] escalation error: {exc}")
+                # Escalation may have produced fresh evidence — re-snapshot so
+                # the planning calls below run against the new state.
+                full_fp  = self._evidence_fingerprint(full=True)
+                evidence_changed = (full_fp != self._full_fp) or not self._hypotheses
+                self._full_fp = full_fp
+
             # ── HYPOTHESIZE ──────────────────────────────────────────────
-            self._hypotheses = await self._hypothesize(evidence)
+            if evidence_changed:
+                self._hypotheses = await self._hypothesize(evidence)
+            else:
+                await self._emit_reasoning(
+                    "[loop] evidence unchanged — reusing cached hypotheses "
+                    "(skipping the TARGET-STATE planning call to converge faster)"
+                )
             if not self._hypotheses:
                 await self._emit_reasoning("No hypotheses generated — gathering more evidence")
                 await self._gather_more_evidence()
@@ -420,7 +616,10 @@ class ReasoningLoop:
             await self._refresh_goal_timeline()
 
             # ── PRIORITIZE ───────────────────────────────────────────────
-            self._ranked_paths = await self._prioritize()
+            # Skip the expensive CURRENT-EVIDENCE ranking call when nothing
+            # changed since last iteration — reuse the cached ranked paths.
+            if evidence_changed or not self._ranked_paths:
+                self._ranked_paths = await self._prioritize()
             if self._ranked_paths:
                 self._intel["ranked_attack_paths"] = [
                     p.to_dict() for p in self._ranked_paths
@@ -508,10 +707,17 @@ class ReasoningLoop:
                                 f"hypothesis branches — resuming loop"
                             )
                             # Re-rank attack paths so the new hypotheses
-                            # compete fairly with surviving ones
+                            # compete fairly with surviving ones.  Use keyword
+                            # args matching _prioritize() — the positional form
+                            # here silently raised TypeError (swapped intel/
+                            # hypotheses + missing negative_memory) so this
+                            # re-rank never actually ran.
                             try:
                                 self._ranked_paths = await self._attack_planner.rank_paths(
-                                    self._hypotheses, self._intel,
+                                    intel           = self._intel,
+                                    hypotheses      = self._hypotheses,
+                                    negative_memory = self._neg_memory,
+                                    iteration       = self._iteration,
                                 )
                             except Exception:
                                 pass
@@ -1025,6 +1231,20 @@ class ReasoningLoop:
             f"Final score: {self._decision_eng.get_score():+d} | {len(validated_hyps)} confirmed hypotheses",
             "exploit", found=bool(validated_hyps),
         )
+        # ── Final objective grading ──────────────────────────────────────
+        # Authoritative complete/non-complete verdict over ALL evidence, so the
+        # operator + report get a clear per-objective status at scan end rather
+        # than "we don't know what was achieved".
+        try:
+            _summ = await self._question_engine.evaluate_objectives(self._intel)
+            if _summ:
+                await self._emit_reasoning(
+                    f"Objective status: {_summ.get('complete', 0)}/{_summ.get('total', 0)} "
+                    f"complete, {_summ.get('partial', 0)} partial, "
+                    f"{_summ.get('not_complete', 0)} not complete")
+        except Exception:
+            pass
+
         # Transition to reporting
         await self._emit_plan_step("reporting", "📄 Report Generation", "active", "Generating report", "reporting")
 
@@ -1203,7 +1423,7 @@ class ReasoningLoop:
     # Loop steps
     # ------------------------------------------------------------------
 
-    async def _reconcile_intel_from_findings(self) -> int:
+    async def _reconcile_intel_from_findings(self, union: bool = False) -> int:
         """Self-healing safety net: rebuild core recon evidence from the
         authoritative findings store when the in-memory intel dict is empty.
 
@@ -1228,8 +1448,11 @@ class ReasoningLoop:
 
         Returns the number of open ports recovered (0 when nothing to do).
         """
-        # Fast path: intel already has ports → nothing to reconcile.
-        if self._intel.get("open_ports"):
+        # Fast path: intel already has ports → nothing to reconcile, UNLESS we
+        # are explicitly union-merging to catch a PARTIAL port list (e.g. intel
+        # has [80] but recon actually found [22,80] — the gap that kept the
+        # loop reporting "Ports open: 1" and re-requesting a full scan).
+        if self._intel.get("open_ports") and not union:
             return 0
         try:
             from db import mongo_client as _db
@@ -1314,7 +1537,35 @@ class ReasoningLoop:
         if not ports:
             return 0
 
-        # Backfill ONLY empty keys — never clobber richer in-memory state.
+        # ── UNION mode: merge findings ports into a PARTIAL in-memory list ──
+        if union:
+            existing = []
+            for p in (self._intel.get("open_ports") or []):
+                try:
+                    existing.append(int(str(p).split("/")[0]))
+                except (ValueError, TypeError):
+                    continue
+            new_ports = [p for p in ports if p not in existing]
+            if not new_ports:
+                return 0   # nothing new — avoid churn/log spam every iteration
+            self._intel["open_ports"] = sorted(set(existing) | set(ports))
+            cur_svcs = dict(self._intel.get("services") or {})
+            for k, v in services.items():
+                cur_svcs.setdefault(k, v)   # never clobber existing service entry
+            if cur_svcs:
+                self._intel["services"] = cur_svcs
+            if new_cves:
+                cur_cves = list(self._intel.get("cves") or [])
+                self._intel["cves"] = list(dict.fromkeys(cur_cves + new_cves))
+            await self._emit_reasoning(
+                f"Reconciled {len(new_ports)} additional open port(s) from the "
+                f"findings store — in-memory list was partial (now "
+                f"{len(self._intel['open_ports'])} total: "
+                f"{', '.join(str(p) for p in self._intel['open_ports'][:12])})"
+            )
+            return len(new_ports)
+
+        # ── Empty-fill mode: backfill ONLY empty keys (never clobber) ──────
         self._intel["open_ports"] = sorted(ports)
         if services and not self._intel.get("services"):
             self._intel["services"] = services
@@ -1339,6 +1590,11 @@ class ReasoningLoop:
         # while the database holds a full attack surface.
         if not self._intel.get("open_ports"):
             await self._reconcile_intel_from_findings()
+        elif (self._iteration % 3) == 0:
+            # Partial-list guard: even with SOME ports, periodically union-merge
+            # from the findings store so a truncated open_ports (e.g. [80] when
+            # recon found [22,80]) can't keep the loop stuck on "Ports open: 1".
+            await self._reconcile_intel_from_findings(union=True)
         return {
             "target":          self._intel.get("target", self._target),
             "open_ports":      self._intel.get("open_ports", []),
@@ -1363,7 +1619,16 @@ class ReasoningLoop:
         LLM produces a one-sentence situation assessment.
         Appended to reasoning_journal for audit trail.
         """
-        ports   = len(evidence.get("open_ports", []))
+        # Normalise the port count: dedupe by integer port number so mixed
+        # shapes (80 vs "80/tcp") and duplicates can't under/over-count and make
+        # the assessment claim "Ports open: 1" when several are actually open.
+        _pset = set()
+        for _p in (evidence.get("open_ports") or []):
+            try:
+                _pset.add(int(str(_p).split("/")[0]))
+            except (ValueError, TypeError):
+                _pset.add(str(_p))
+        ports   = len(_pset)
         shell   = evidence.get("shell_access", False)
         vulns   = len(evidence.get("vulnerabilities", []))
         creds   = len(evidence.get("credentials", []))
@@ -1430,6 +1695,95 @@ class ReasoningLoop:
                 )
 
         return hypotheses
+
+    def _evidence_fingerprint(self, *, full: bool) -> str:
+        """Stable hash of the current progress state.
+
+        ``full=False`` → COMPROMISE progress only (shell, elevated, flags,
+        creds, vulns, web_vulns, cves, loot, graded objectives).  Used to
+        decide escalation + convergence: discovering yet another 404 path does
+        NOT count as progress, so a fuzzer cannot keep the loop alive forever.
+
+        ``full=True`` → the above PLUS the cheap recon surface (open ports,
+        web paths / params / tech tags).  Used to decide whether the two
+        expensive planning LLM calls can be skipped (state genuinely static).
+        """
+        it = self._intel
+
+        def _n(key: str) -> int:
+            v = it.get(key)
+            if isinstance(v, (list, dict, set, tuple, str)):
+                return len(v)
+            return 1 if v else 0
+
+        parts = [
+            "sh:%d"  % (1 if it.get("shell_access")   else 0),
+            "es:%d"  % (1 if it.get("elevated_shell") else 0),
+            "uf:%d"  % (1 if it.get("user_flag")      else 0),
+            "rf:%d"  % (1 if it.get("root_flag")      else 0),
+            "cr:%d"  % _n("credentials"),
+            "v:%d"   % _n("vulnerabilities"),
+            "wv:%d"  % _n("web_vulns"),
+            "cve:%d" % _n("cves"),
+            "loot:%d" % _n("loot"),
+        ]
+        # Graded-objective completion count (holistic grader output).
+        try:
+            st = it.get("objective_status") or {}
+            done = sum(1 for s in st.values()
+                       if str(s).lower() in ("complete", "completed", "done", "achieved"))
+            parts.append("obj:%d" % done)
+        except Exception:
+            pass
+
+        if full:
+            try:
+                ports = sorted(
+                    str(p.get("port") if isinstance(p, dict) else p)
+                    for p in (it.get("open_ports") or [])
+                )
+            except Exception:
+                ports = []
+            parts.extend([
+                "p:" + ",".join(ports),
+                "wp:%d"  % _n("web_paths"),
+                "wpu:%d" % _n("web_param_urls"),
+                "tag:%d" % _n("web_tech_tags"),
+            ])
+        return "|".join(parts)
+
+    async def _escalate_to_exploitation(self) -> None:
+        """Forced exploitation push when the loop stalls.
+
+        Fires ONCE, after the loop has demonstrably stopped making compromise
+        progress, before the convergence break.  Re-runs the exploit phase
+        (which launches the ExploitOrchestrator — searchsploit / metasploit /
+        web_exploit / credential_spray — and, on Tier-1 failure, the Tier-2
+        LLM synth path that writes a bespoke PoC for service-specific targets
+        like an IPFS / InfluxDB API that have no off-the-shelf exploit).
+
+        Heavily guarded — never raises into the loop.  ``_phase_exploit`` was
+        already run earlier in the engagement without hanging, so re-running it
+        here is safe with respect to the mandatory human-approval gate.
+        """
+        m = self._master
+        try:
+            await self._emit_loop_event("exploitation_escalation", {
+                "iteration": self._iteration,
+                "reason":    "stall",
+            })
+        except Exception:
+            pass
+        # Re-dispatch the full exploit phase, overriding the per-phase
+        # idempotency guard so the orchestrator + synth fallback run again
+        # against the latest intel.
+        try:
+            phase_fn = getattr(m, "_phase_exploit", None)
+            if phase_fn is not None:
+                await self._safe_phase(phase_fn, phase_slug="exploit",
+                                       force=True, target=self._target)
+        except Exception as exc:
+            await self._emit_reasoning(f"[stall] exploit re-dispatch error: {exc}")
 
     async def _prioritize(self) -> List[RankedAttackPath]:
         """Delegate to AttackPlanner."""
@@ -2203,8 +2557,28 @@ class ReasoningLoop:
         mc  = getattr(self._master, "_master_checker", None)
         iv  = getattr(self._master, "_issue_validator", None)
         ex  = getattr(self._master, "_expert",          None)
-        mc_enabled = getattr(self._master, "_meta_agents_enabled", False) and mc is not None
-        ex_enabled = getattr(self._master, "_meta_agents_enabled", False) and ex is not None
+        _meta_on = getattr(self._master, "_meta_agents_enabled", False)
+
+        # F8 — meta-review budget: review each distinct phase ONCE, and cap the
+        # total number of 4-call review passes per engagement.  A forced
+        # re-dispatch (e.g. the stall-escalation exploit re-run) no longer
+        # re-fires the whole pre/post review storm, and a pathological loop
+        # can't spin out ~65 corrections.  Meta-agents inform, not flood.
+        _meta_budget_ok = (
+            phase_slug not in self._meta_reviewed_phases
+            and self._meta_review_passes < _MAX_META_REVIEW_PASSES
+        )
+        if _meta_on and _meta_budget_ok:
+            self._meta_reviewed_phases.add(phase_slug)
+            self._meta_review_passes += 1
+        elif _meta_on and not _meta_budget_ok:
+            await self._emit_reasoning(
+                f"[meta] skipping duplicate/over-budget review for '{phase_slug}' "
+                f"(passes {self._meta_review_passes}/{_MAX_META_REVIEW_PASSES})"
+            )
+
+        mc_enabled = _meta_on and _meta_budget_ok and mc is not None
+        ex_enabled = _meta_on and _meta_budget_ok and ex is not None
 
         # Collect pre-phase peer corrections so the Expert can grade them.
         pre_peer_corrections = []
@@ -2279,7 +2653,7 @@ class ReasoningLoop:
                     timeout        = _META_POST_TIMEOUT,
                     emit_reasoning = self._emit_reasoning,
                 )
-                if iv:
+                if iv and phase_findings:   # F8 — nothing to validate if no findings
                     try:
                         _val_c = await _meta_review_with_timeout(
                             iv.validate_phase_findings(
@@ -3152,7 +3526,8 @@ class ReasoningLoop:
     # ------------------------------------------------------------------
 
     def _is_objective_achieved(self) -> bool:
-        """True if root/SYSTEM shell or both flags captured."""
+        """True if root/SYSTEM shell, both flags captured, OR the objective
+        grader has marked every declared objective complete."""
         intel = self._intel
         if intel.get("root_flag") and intel.get("user_flag"):
             return True
@@ -3160,6 +3535,20 @@ class ReasoningLoop:
         for sh in shells:
             if isinstance(sh, dict) and sh.get("elevated"):
                 return True
+        # All declared objectives graded complete by the holistic evaluator.
+        objs = ((intel.get("engagement_context") or {}).get("objectives")
+                or intel.get("ctf_objectives") or [])
+        st = intel.get("objective_status") or {}
+        # objective_status values are MIXED: the holistic evaluator writes dicts
+        # ({"status": "complete", …}) while the operator's _mark_objective writes
+        # plain strings ("complete").  Read both shapes so a string value never
+        # raises 'str object has no attribute get' (which crashed the legacy
+        # fallback right after the operator handed off).
+        def _st(v):
+            return v.get("status") if isinstance(v, dict) else v
+        if objs and len(st) >= len(objs) and st and \
+                all(_st(v) == "complete" for v in st.values()):
+            return True
         return False
 
     @staticmethod

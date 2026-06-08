@@ -473,6 +473,19 @@ class EngagementContext:
         survive across phases — e.g. "the attack chain is X" or
         "service Y is the entry point."
         """
+        # ── Content de-dup (anti-flood) ──────────────────────────────────
+        # Identical advice from the same source is REFRESHED in place, never
+        # re-appended.  Without this the Error-Analyzer pins 30 copies of
+        # "run a full nmap scan" (one per distinct dead endpoint), which both
+        # spams the planner prompt and EVICTS genuinely useful insights out of
+        # the newest-N prompt window.
+        _norm = (text or "").strip().lower()[:160]
+        for _p in self.pinned:
+            if _p.source == source and (_p.text or "").strip().lower()[:160] == _norm:
+                _p.ts = time.monotonic()          # bump recency
+                if severity == "critical":
+                    _p.severity = "critical"
+                return _p
         ins = PinnedInsight(
             ts=time.monotonic(), phase=phase, severity=severity,
             text=text[:600], source=source,

@@ -1051,6 +1051,46 @@ function PentestProgressBar({ planSteps, sessionId, activeSession }) {
     });
   }, [planSteps]);
 
+  // ── Smart ETA (rolling average of actual step durations) ───────────────────
+  // MUST be declared BEFORE the early returns below.  This hook previously sat
+  // AFTER `return null` / the loading placeholder, so the first render (empty
+  // plan) ran one FEWER hook than later renders (plan present) → React error
+  // #310 "rendered more hooks than during the previous render", which crashed
+  // the whole Mission Control page the instant a plan/foothold arrived.
+  // Self-contained so it never depends on values computed after the returns.
+  const estRemaining = React.useMemo(() => {
+    const steps    = (planSteps || []).filter(s => !s.is_substep);
+    const _done    = steps.filter(s => s.status === 'done').length;
+    const _failed  = steps.filter(s => s.status === 'failed').length;
+    const _active  = steps.filter(s => s.status === 'active').length;
+    const _pending = steps.length - _done - _failed - _active;
+    if (_done + _failed < 2 || _pending === 0) return null;
+    const durations = [];
+    steps.forEach(step => {
+      const t = stepTimingsRef.current[step.id];
+      if (t?.startedAt && t?.completedAt && t.completedAt > t.startedAt) {
+        durations.push(t.completedAt - t.startedAt);
+      }
+    });
+    let avgMs;
+    if (durations.length >= 1) {
+      const recent = durations.slice(-3);
+      avgMs = recent.reduce((a, b) => a + b, 0) / recent.length;
+    } else {
+      if (!_done) return null;
+      avgMs = (elapsed * 1000) / _done;
+    }
+    const activeSpent = steps
+      .filter(s => s.status === 'active')
+      .reduce((sum, s) => {
+        const t = stepTimingsRef.current[s.id];
+        return sum + (t?.startedAt ? Date.now() - t.startedAt : 0);
+      }, 0);
+    const remainingMs = Math.max(0, _pending * avgMs - activeSpent);
+    return Math.round(remainingMs / 1000);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [planSteps, elapsed]);
+
   if (!sessionId || !activeSession) return null;
 
   // Show loading placeholder while plan is being generated
@@ -1082,44 +1122,7 @@ function PentestProgressBar({ planSteps, sessionId, activeSession }) {
     : pct >= 40 ? 'var(--cyan)'
     : 'var(--violet)';
 
-  // ── Smart ETA via rolling average of actual step durations ─────────────
-  // Only kicks in once ≥2 steps have completed; uses the last 3 durations
-  // so the estimate tracks recent pace rather than overall session time.
-  const estRemaining = React.useMemo(() => {
-    if (done + failed < 2 || pending === 0) return null;
-
-    // Collect measured durations for finished main steps
-    const durations = [];
-    mainSteps.forEach(step => {
-      const t = stepTimingsRef.current[step.id];
-      if (t?.startedAt && t?.completedAt && t.completedAt > t.startedAt) {
-        durations.push(t.completedAt - t.startedAt);
-      }
-    });
-
-    let avgMs;
-    if (durations.length >= 1) {
-      // Rolling average of last 3 completed steps
-      const recent = durations.slice(-3);
-      avgMs = recent.reduce((a, b) => a + b, 0) / recent.length;
-    } else {
-      // No timing data yet — fall back to session-elapsed / done
-      if (!done) return null;
-      avgMs = (elapsed * 1000) / done;
-    }
-
-    // Subtract time already spent on currently active steps
-    const activeSpent = mainSteps
-      .filter(s => s.status === 'active')
-      .reduce((sum, s) => {
-        const t = stepTimingsRef.current[s.id];
-        return sum + (t?.startedAt ? Date.now() - t.startedAt : 0);
-      }, 0);
-
-    const remainingMs = Math.max(0, pending * avgMs - activeSpent);
-    return Math.round(remainingMs / 1000);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [planSteps, done, failed, pending, elapsed]);
+  // (estRemaining is computed above, before the early returns — see note there.)
 
   return React.createElement('div', {
     style: {

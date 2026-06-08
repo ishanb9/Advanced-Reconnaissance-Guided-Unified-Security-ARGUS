@@ -18,13 +18,91 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-# Load .env file at startup so NEO4J_URI / NEO4J_USER / NEO4J_PASSWORD
-# and any other env vars are available before any module reads os.environ.
+# ── Environment preflight ────────────────────────────────────────────────────
+# A freshly rebuilt venv is the #1 source of confusing startup failures. Catch
+# the common ones HERE — loudly, with the EXACT fix — instead of letting them
+# surface later as cryptic tracebacks (a missing python-dotenv silently ignoring
+# .env → wrong LLM model/URL; a stray 'bson' package shadowing pymongo's
+# bson.errors → server crash; a half-installed venv missing core deps).
+# See setup.sh and requirements.txt.
+def _preflight_env() -> None:
+    import importlib.util as _ilu
+    fatal = []   # server cannot run            (symptom, fix)
+    warn  = []   # server runs but degraded/UI broken
+
+    # ── FATAL: a stray 'bson' shadowing pymongo ──
+    try:
+        if _ilu.find_spec("bson") is not None and _ilu.find_spec("bson.errors") is None:
+            fatal.append((
+                "the standalone 'bson' PyPI package is shadowing pymongo's bundled "
+                "bson (no bson.errors) — db.mongo_client will crash on import",
+                "pip uninstall -y bson pymongo gridfs && pip install pymongo==4.7.2"))
+    except Exception:
+        fatal.append((
+            "'bson' fails to import — likely the standalone 'bson' package colliding with pymongo",
+            "pip uninstall -y bson pymongo gridfs && pip install pymongo==4.7.2"))
+
+    # ── FATAL: core runtime deps ──
+    for _mod in ("pymongo", "motor", "fastapi", "starlette", "uvicorn",
+                 "jinja2", "httpx", "pydantic"):
+        if _ilu.find_spec(_mod) is None:
+            fatal.append((f"required package '{_mod}' is not installed in this venv",
+                          "pip install -r requirements.txt"))
+
+    # ── DEGRADED: WebSocket library (uvicorn[standard] extra). Without it EVERY
+    #    /ws/* upgrade 404s and the entire live UI shows nothing. ──
+    if _ilu.find_spec("websockets") is None and _ilu.find_spec("wsproto") is None:
+        warn.append((
+            "NO WebSocket library (uvicorn[standard] extra) — every /ws/* upgrade will "
+            "404 and the live UI (events, scan progress, shell) will show NOTHING",
+            "pip install 'uvicorn[standard]'   (or: pip install websockets)"))
+
+    # ── DEGRADED: silently-ignored .env ──
+    if _ilu.find_spec("dotenv") is None:
+        warn.append((
+            "python-dotenv MISSING — your .env is NOT loaded; LLM model/provider, "
+            "Ollama URL and Neo4j creds silently fall back to in-code defaults",
+            "pip install python-dotenv==1.0.1"))
+
+    # ── DEGRADED: optional feature modules ──
+    for _mod, _feat in (("neo4j", "attack-graph (Neo4j) features"),
+                        ("chromadb", "RAG knowledge base"),
+                        ("sentence_transformers", "RAG embeddings/reranker")):
+        if _ilu.find_spec(_mod) is None:
+            warn.append((f"{_feat} disabled — '{_mod}' not installed",
+                         "pip install -r requirements.txt"))
+
+    if not fatal and not warn:
+        return
+
+    import sys as _sys
+    bar = "=" * 74
+    out = ["", bar, "  ARGUS preflight — environment problems detected", bar,
+           f"  python: {_sys.executable}", ""]
+    for sev, items in (("FATAL", fatal), ("WARN ", warn)):
+        for what, fix in items:
+            out += [f"  [{sev}] {what}", f"          fix:  {fix}", ""]
+    out += ["  A CLEAN reinstall inside your venv fixes all of these at once",
+            "  (never pip-install packages ad-hoc; never 'pip install bson'):", "",
+            "      python3 -m pip install -r requirements.txt      (or: bash setup.sh)",
+            bar, ""]
+    print("\n".join(out), file=_sys.stderr, flush=True)
+
+    # Only HARD-exit on FATAL — warnings (WS/dotenv/optional features) let the
+    # server boot, but the operator now sees exactly what's broken and how to fix it.
+    if fatal:
+        _sys.exit(1)
+
+_preflight_env()
+
+# Load .env so NEO4J_URI / LLM_PROVIDER / CLAUDE_CODE_MODEL / OLLAMA_URL etc. are
+# available before any module reads os.environ. (preflight above already warns
+# loudly if python-dotenv is absent.)
 try:
     from dotenv import load_dotenv
     load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
 except ImportError:
-    pass  # python-dotenv not installed — rely on system env vars
+    pass  # already reported by _preflight_env()
 
 import httpx, netifaces, psutil
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
@@ -52,8 +130,8 @@ from db.cache import (
 # Environment variables always take precedence over these defaults.
 
 MCP_URL    = os.environ.get("MCP_URL",      "http://localhost:3000")
-OLLAMA_URL = os.environ.get("OLLAMA_URL",   "http://192.168.0.101:11434")
-MODEL_NAME = os.environ.get("OLLAMA_MODEL", "deepseek-v3.1:671b-cloud")
+OLLAMA_URL = os.environ.get("OLLAMA_URL",   "http://localhost:11434")
+MODEL_NAME = os.environ.get("OLLAMA_MODEL", "")   # no hardcoded model — .env drives it
 MONGO_URI  = os.environ.get("MONGO_URI",    "mongodb://localhost:27017")
 
 # Write resolved values back into os.environ so every agent module that
@@ -71,6 +149,8 @@ from agents.master_agent       import MasterAgent
 from agents.shell_agent        import ShellAgent
 from agents.payload_agent      import PayloadAgent
 from agents.cidr_orchestrator  import CIDROrchestrator
+from agents.domain_recon_orchestrator import DomainReconOrchestrator
+from agents import target_selection as target_selection
 from report.generator          import ReportGenerator
 
 
@@ -198,6 +278,25 @@ def _detect_session_mode(target_ip: str) -> SessionMode:
     return SessionMode.SINGLE
 
 
+def _looks_like_domain(target: str) -> bool:
+    """True if target is a bare domain name (not an IP, CIDR, list, or URL).
+
+    Used to gate the subdomain-hunt flow — we only hunt subdomains for an
+    actual domain, never an IP/CIDR.
+    """
+    import ipaddress as _ipa
+    t = (target or "").strip().lower().strip(".")
+    if not t or "/" in t or "," in t or " " in t:
+        return False
+    t = t.split("://", 1)[-1].split("/", 1)[0].split(":", 1)[0]  # strip scheme/path/port
+    try:
+        _ipa.ip_address(t)
+        return False          # it's an IP, not a domain
+    except ValueError:
+        pass
+    return "." in t and re.match(r"^(?:[a-z0-9_](?:[a-z0-9_\-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$", t) is not None
+
+
 def _resolve_agent_or_subagent(identifier: str):
     """Resolve a `tool_extend` / `tool_stop` target identifier to a live agent.
 
@@ -316,7 +415,11 @@ templates = Jinja2Templates(directory=template_dir) if os.path.exists(template_d
 @app.get("/")
 async def index(request: Request):
     if templates:
-        return templates.TemplateResponse("index.html", {"request": request})
+        # Starlette >=0.29 signature is (request, name, context). Passing the
+        # old (name, context) form makes it treat the context dict as the
+        # template name → "unhashable type: 'dict'". request is auto-injected
+        # into the context by the new API.
+        return templates.TemplateResponse(request, "index.html")
     return HTMLResponse("<h2>ARGUS — Backend Running</h2>")
 
 
@@ -364,6 +467,7 @@ async def create_session(body: StartPentestRequest):
         scope              = getattr(body, "scope", "")  or "",
         use_reasoning_loop = True,  # Always enabled — reasoning-driven approach
         mission_brief      = mission_brief.dict() if hasattr(mission_brief, "dict") else mission_brief,
+        autonomy           = getattr(body, "autonomy", None) or "",
     )
 
     # ── Crash-logger for fire-and-forget scan tasks ─────────────────────────
@@ -397,7 +501,20 @@ async def create_session(body: StartPentestRequest):
                 pass
         return _cb
 
-    if session_mode == SessionMode.SINGLE:
+    if getattr(body, "hunt_subdomains", False) and _looks_like_domain(body.target_ip):
+        # ── Domain mode: hunt subdomains → human selects → scan selected ───
+        domain_orch = DomainReconOrchestrator(
+            session_id         = session_id,
+            domain             = body.target_ip,
+            broadcast          = broadcast,
+            session_kwargs     = master_kwargs,
+            max_parallel_hosts = getattr(body, "max_parallel_hosts", 5),
+            passive            = getattr(body, "subdomain_passive", True),
+            active             = getattr(body, "subdomain_active",  True),
+        )
+        active_agents[session_id] = domain_orch
+        task = asyncio.create_task(domain_orch.run())
+    elif session_mode == SessionMode.SINGLE:
         # ── Original single-host path — zero behaviour change ──────────────
         master = MasterAgent(broadcast=broadcast)
         active_agents[session_id] = master
@@ -430,6 +547,14 @@ async def create_session(body: StartPentestRequest):
     # its own MasterAgent inside CIDROrchestrator).
     shell_agent._master = master if session_mode == SessionMode.SINGLE else None
     active_shell_agents[session_id] = shell_agent
+    # SHARED SESSION: the master must drive post-exploitation through the SAME
+    # ShellAgent the operator's WebSocket terminal (shell_input/shell_output)
+    # talks to — otherwise ARGUS's PTYs live in a separate registry the operator
+    # can never see or take over.  master._execute_shell_command reuses this
+    # instance (its construct is guarded by `if self._shell_agent is None`), so
+    # operator and ARGUS share one interactive session + its live output.
+    if session_mode == SessionMode.SINGLE:
+        master._shell_agent = shell_agent
 
     return {"session": session, "message": f"Pentest started on {body.target_ip}",
             "ws_url": f"/ws/{session_id}", "session_mode": session_mode.value}
@@ -2390,6 +2515,26 @@ async def websocket_endpoint(ws: WebSocket, session_id: str):
                             "data": {"resolved": False, "error": str(_ex)},
                         }))
 
+                elif mtype == "target_selection":
+                    # Operator picked which discovered subdomains to engage.
+                    # Resolves the pending selection the DomainReconOrchestrator
+                    # is blocked on; fail-closed (empty → scan nothing).
+                    try:
+                        selection_id = msg.get("selection_id") or msg.get("session_id") or ""
+                        selected     = msg.get("selected") or msg.get("targets") or []
+                        resolved     = target_selection.resolve(selection_id, selected)
+                        await ws.send_text(json.dumps({
+                            "type": "target_selection_ack",
+                            "data": {"selection_id": selection_id,
+                                     "resolved": resolved,
+                                     "count": len(selected) if isinstance(selected, list) else 0},
+                        }))
+                    except Exception as _ex:
+                        await ws.send_text(json.dumps({
+                            "type": "target_selection_ack",
+                            "data": {"resolved": False, "error": str(_ex)},
+                        }))
+
                 elif mtype == "tool_extend":
                     # Extend a running tool's deadline.
                     # Check both registries: BaseSubagent (v3 subagents) and
@@ -2465,6 +2610,29 @@ async def extend_phase(session_id: str, phase: str):
     raise HTTPException(status_code=400, detail="Agent does not support phase extension")
 
 
+@app.post("/sessions/{session_id}/select-targets")
+async def select_targets(session_id: str, body: dict):
+    """Submit the operator's chosen targets for a subdomain-hunt session.
+
+    Resolves the pending selection gate the DomainReconOrchestrator is blocked
+    on.  ``body`` = {"selected": ["a.example.com", ...]}.  Fail-closed: an empty
+    list means scan nothing.  Usable from the GUI panel or via curl/API.
+    """
+    selected = (body or {}).get("selected") or (body or {}).get("targets") or []
+    resolved = target_selection.resolve(session_id, selected)
+    await ws_manager.broadcast_raw(session_id, "target_selection_ack", {
+        "selection_id": session_id, "resolved": resolved,
+        "count": len(selected) if isinstance(selected, list) else 0,
+    })
+    if not resolved:
+        raise HTTPException(
+            status_code=404,
+            detail="No pending target selection for this session (hunt not running or already resolved).",
+        )
+    return {"status": "selected", "session_id": session_id,
+            "count": len(selected) if isinstance(selected, list) else 0}
+
+
 @app.post("/sessions/{session_id}/pause")
 async def pause_session(session_id: str):
     """
@@ -2526,9 +2694,12 @@ async def resume_session(session_id: str):
     master = MasterAgent(broadcast=broadcast)
     active_agents[session_id] = master
 
-    # Re-create ShellAgent for this session
+    # Re-create ShellAgent for this session — SHARED with the master so the
+    # operator's terminal and ARGUS's post-exploitation drive the same PTYs.
     shell_agent = ShellAgent(broadcast=broadcast)
     shell_agent._session_id = session_id
+    shell_agent._master = master
+    master._shell_agent = shell_agent
     active_shell_agents[session_id] = shell_agent
 
     # Restore run-config from checkpoint
@@ -2545,6 +2716,7 @@ async def resume_session(session_id: str):
         scope              = mc.get("scope", ""),
         checkpoint_id      = cp.get("id"),
         use_reasoning_loop = True,  # Always enabled
+        autonomy           = mc.get("autonomy", ""),
     ))
     active_tasks[session_id] = task
     await db.update_session(session_id, {"status": "active"})

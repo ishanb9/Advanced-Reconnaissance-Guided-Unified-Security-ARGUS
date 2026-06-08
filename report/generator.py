@@ -1151,17 +1151,47 @@ class ReportGenerator:
 
     async def generate_pdf(self, session_id: str) -> Optional[bytes]:
         """
-        Generate PDF via wkhtmltopdf.
-        Returns bytes or None if wkhtmltopdf unavailable.
-        """
-        html = await self.generate_html(session_id)
+        Generate a REAL PDF, always.
 
+        Order of attempts (best fidelity first), with a guaranteed fallback so we
+        NEVER return HTML masquerading as a PDF (the old behaviour: when
+        wkhtmltopdf was absent this returned None, the endpoint served HTML, and
+        the browser saved it as `.pdf` → a file that opened as a "corrupted PDF"):
+          1. wkhtmltopdf   — renders the full styled HTML (if the binary exists)
+          2. weasyprint    — pure-python HTML→PDF (if importable)
+          3. pdf_writer    — stdlib-only structured PDF built from the SAME
+                             context that feeds the HTML; always succeeds.
+        """
+        ctx  = await self._build_context(session_id)
+        html = self._template.render(**ctx)
+
+        pdf = await self._wkhtmltopdf_bytes(html)
+        if pdf:
+            return pdf
+
+        # 2) weasyprint — renders the styled HTML without any system binary.
+        try:
+            import weasyprint  # type: ignore
+            return weasyprint.HTML(string=html).write_pdf()
+        except Exception:
+            pass
+
+        # 3) Guaranteed, dependency-free structured PDF from the context.
+        try:
+            from report.pdf_writer import lines_to_pdf, report_lines_from_context
+            target = (ctx.get("session") or {}).get("target", "target")
+            return lines_to_pdf(report_lines_from_context(ctx),
+                                title=f"ARGUS Report — {target}")
+        except Exception as exc:                       # noqa: BLE001
+            print(f"[REPORT] stdlib PDF fallback failed: {exc}")
+            return None
+
+    async def _wkhtmltopdf_bytes(self, html: str) -> Optional[bytes]:
+        """Render HTML→PDF via wkhtmltopdf; None if the binary is missing/fails."""
         with tempfile.NamedTemporaryFile(suffix=".html", delete=False, mode="w", encoding="utf-8") as hf:
             hf.write(html)
             html_path = hf.name
-
         pdf_path = html_path.replace(".html", ".pdf")
-
         try:
             loop = asyncio.get_event_loop()
             result = await loop.run_in_executor(
@@ -1182,14 +1212,13 @@ class ReportGenerator:
             if result.returncode == 0 and os.path.exists(pdf_path):
                 with open(pdf_path, "rb") as f:
                     return f.read()
-            else:
-                print(f"[REPORT] wkhtmltopdf error: {result.stderr.decode()[:500]}")
-                return None
+            print(f"[REPORT] wkhtmltopdf error: {result.stderr.decode()[:500]}")
+            return None
         except FileNotFoundError:
-            print("[REPORT] wkhtmltopdf not found. Install: apt install wkhtmltopdf")
+            print("[REPORT] wkhtmltopdf not found — using pure-python PDF fallback.")
             return None
         except subprocess.TimeoutExpired:
-            print("[REPORT] wkhtmltopdf timed out")
+            print("[REPORT] wkhtmltopdf timed out — using pure-python PDF fallback.")
             return None
         finally:
             for p in (html_path, pdf_path):
@@ -1392,17 +1421,30 @@ class ReportGenerator:
         # report safety — operator can find full creds in the loot dir).
         creds_summary: list = []
         for c in (intel_snapshot.get("credentials") or []):
-            if not isinstance(c, dict):
-                continue
-            user = c.get("user", "")
-            pwd  = c.get("password") or c.get("pass") or ""
-            dom  = c.get("domain", "")
-            if user:
+            if isinstance(c, dict) and c.get("user"):
+                pwd = c.get("password") or c.get("pass") or ""
                 creds_summary.append({
-                    "user":     user,
-                    "domain":   dom,
+                    "user":     c.get("user", ""),
+                    "domain":   c.get("domain", ""),
                     "password": ("•" * min(len(pwd), 8)) if pwd else "(none)",
                     "source":   c.get("source", "unknown"),
+                })
+            elif isinstance(c, dict) and c.get("note"):
+                # Harvested secret / API key / hardcoded credential recorded as a
+                # note (no user/pass pair) — this is a real finding and MUST appear
+                # in the report (it was silently dropped before, e.g. the leaked
+                # SENSOR_API_KEY on the Reactor run).
+                creds_summary.append({
+                    "user":     "(secret / key)",
+                    "domain":   "",
+                    "password": "(see note)",
+                    "source":   "harvested",
+                    "note":     str(c.get("note"))[:500],
+                })
+            elif isinstance(c, str) and c.strip():
+                creds_summary.append({
+                    "user": "(credential)", "domain": "", "password": "",
+                    "source": "harvested", "note": c[:500],
                 })
 
         return {
@@ -1434,6 +1476,11 @@ class ReportGenerator:
             "primer_rows":       primer_rows,
             "attack_path":       attack_path,
             "creds_summary":     creds_summary,
+            # ── Objective outcomes + exploit selection (for the comprehensive
+            #    PDF and the objectives section) ──────────────────────────────
+            "win_conditions":    intel_snapshot.get("win_conditions") or {},
+            "mission_brief":     intel_snapshot.get("mission_brief") or {},
+            "exploit_modules":   list(intel_snapshot.get("exploit_modules") or [])[:25],
         }
 
     # ------------------------------------------------------------------

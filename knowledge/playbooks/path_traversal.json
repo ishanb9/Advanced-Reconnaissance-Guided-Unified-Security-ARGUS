@@ -1,0 +1,11 @@
+{
+  "weakness_class": "path_traversal",
+  "name": "Path Traversal / Local File Read",
+  "steps": [
+    "Find every input that selects a file or path (download, include, template, attachment, export).",
+    "Inject traversal sequences and absolute paths; vary the depth and the encoding to defeat filters.",
+    "Target sensitive, predictable files appropriate to the detected OS and application.",
+    "Confirm by retrieving the contents of a file outside the intended directory.",
+    "Chain to source/config disclosure, then to recovered secrets or to code execution."
+  ]
+}

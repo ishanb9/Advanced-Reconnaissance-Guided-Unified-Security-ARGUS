@@ -54,6 +54,27 @@ logger = logging.getLogger(__name__)
 BLACKLIST_TTL_SEC      = int(os.environ.get("TOOL_BLACKLIST_TTL_SEC", "1800"))
 BLACKLIST_FAIL_THRESH  = int(os.environ.get("TOOL_BLACKLIST_FAIL_THRESH", "3"))
 
+# Per-HOST liveness: after this many CONSECUTIVE "host not responding" tool
+# runs (timeout / unreachable / connect-failed) with no success in between,
+# the host is treated as down (gone, firewalled, or rate-limiting us).  The
+# reasoning loop uses this to STOP flailing against a black-holed target.
+HOST_UNREACHABLE_THRESH = int(os.environ.get("ARGUS_HOST_UNREACHABLE_THRESH", "5"))
+
+# Operator-cancel circuit breaker: this many tool kills in a row (within the
+# TTL, with no successful tool in between) means "stop auto-firing tools the
+# operator keeps killing."
+CANCEL_STREAK_THRESH = int(os.environ.get("ARGUS_CANCEL_STREAK_THRESH", "2"))
+CANCEL_STREAK_TTL    = float(os.environ.get("ARGUS_CANCEL_STREAK_TTL", "300"))
+
+# curl's timeout exit code is 28; GNU `timeout` / the MCP watchdog use 124.
+# These have NO matching stderr text (curl -s -m exits silently), so they must
+# be recognised by exit code, not regex.
+_TIMEOUT_EXIT_CODES = {28, 124}
+
+# Reasons that mean "the host did not answer" (vs. refused/reset, which prove
+# the host IS up).  Only these advance the per-host liveness counter.
+_LIVENESS_DOWN_REASONS = {"timeout", "unreachable", "no_route", "connect_failed"}
+
 
 # Failure patterns - if any match the stderr or stdout, count as
 # hard-network failure.  Each entry: (regex, normalised_reason).
@@ -72,6 +93,17 @@ _HARD_FAILURE_PATTERNS: List[Tuple[re.Pattern, str]] = [
     (re.compile(r"network is unreachable",    re.I), "unreachable"),
     (re.compile(r"failed to connect",         re.I), "connect_failed"),
     (re.compile(r"socket\.error.*errno\s*(111|110|113)", re.I), "connection_refused"),
+    # ── Timeout / unreachable text ARGUS actually emits (was previously
+    #    UNMATCHED, so a black-holed host never got marked dead) ──
+    (re.compile(r"\bread ?timeout\b",         re.I), "timeout"),
+    (re.compile(r"\[timeout\]",               re.I), "timeout"),
+    (re.compile(r"\btimed out\b",             re.I), "timeout"),
+    (re.compile(r"execution expired",         re.I), "timeout"),
+    (re.compile(r"max retries exceeded",      re.I), "timeout"),
+    (re.compile(r"connecttimeout",            re.I), "timeout"),
+    (re.compile(r"\[agent error\][^\n]*timeout", re.I), "timeout"),
+    (re.compile(r"failed to establish a new connection", re.I), "connect_failed"),
+    (re.compile(r"appears to be down",        re.I), "unreachable"),
 ]
 
 
@@ -125,12 +157,29 @@ class _FailRec:
     reasons:      Dict[str, int] = field(default_factory=lambda: defaultdict(int))
 
 
+@dataclass
+class _HostLive:
+    """Per-host liveness: consecutive 'host did not answer' runs."""
+    consec_fail:  int   = 0
+    last_fail_ts: float = 0.0
+    last_ok_ts:   float = 0.0
+
+
+@dataclass
+class _CancelRec:
+    """Per-host operator-cancel streak."""
+    streak:  int   = 0
+    last_ts: float = 0.0
+
+
 class ToolBlacklist:
-    """Per-(host, service_class) failure tracker."""
+    """Per-(host, service_class) failure tracker + per-host liveness/cancel."""
 
     def __init__(self) -> None:
         self._recs: Dict[Tuple[str, str], _FailRec] = {}
         self._sticky: Dict[Tuple[str, str], str] = {}  # explicit "this is closed"
+        self._host_live: Dict[str, _HostLive] = {}      # per-host liveness
+        self._cancels:   Dict[str, _CancelRec] = {}      # per-host cancel streak
 
     def record_run(
         self,
@@ -147,28 +196,101 @@ class ToolBlacklist:
         """
         if not host:
             return None
-        # Successful runs reset the failure counter for that surface
+        # Operator cancellation (-2) is NEITHER success NOR host failure — it is
+        # an operator action.  It must not reset liveness or inflate failures;
+        # cancels are tracked separately via record_cancel().
+        if exit_code == -2:
+            return None
         haystack = (stderr or "") + "\n" + (stdout or "")
         svc = _classify_service(tool, port)
         key = (host, svc)
-        if exit_code == 0 and not any(p.search(haystack) for p, _ in _HARD_FAILURE_PATTERNS):
-            # Clean success - clear any prior failure record for this surface
+
+        # Determine failure reason: timeout exit codes first (curl 28 / timeout
+        # 124 emit NO matching text), then the text patterns.
+        reason: Optional[str] = None
+        if exit_code in _TIMEOUT_EXIT_CODES:
+            reason = "timeout"
+        else:
+            for pat, name in _HARD_FAILURE_PATTERNS:
+                if pat.search(haystack):
+                    reason = name
+                    break
+
+        if exit_code == 0 and reason is None:
+            # Clean success — clear failure record for this surface AND reset
+            # the per-host liveness + cancel streak (the host is demonstrably up).
             self._recs.pop(key, None)
+            live = self._host_live.get(host)
+            if live:
+                live.consec_fail = 0
+                live.last_ok_ts  = time.time()
+            self._cancels.pop(host, None)
             return None
 
-        reason: Optional[str] = None
-        for pat, name in _HARD_FAILURE_PATTERNS:
-            if pat.search(haystack):
-                reason = name
-                break
         if reason is None:
             return None
+
         rec = self._recs.setdefault(key, _FailRec())
         rec.count += 1
         rec.last_ts = time.time()
         rec.reasons[reason] += 1
+
+        # Per-host liveness: only "host did not answer" reasons count toward the
+        # unreachable verdict (a refused/reset connection proves the host IS up).
+        if reason in _LIVENESS_DOWN_REASONS:
+            live = self._host_live.setdefault(host, _HostLive())
+            live.consec_fail += 1
+            live.last_fail_ts = time.time()
+
         logger.debug("[blacklist] %s/%s fail (%s) count=%d", host, svc, reason, rec.count)
         return reason
+
+    # ── Per-host liveness ────────────────────────────────────────────
+    def host_unreachable(self, host: str, thresh: Optional[int] = None) -> bool:
+        """True when `host` has gone dark — N consecutive no-answer runs with no
+        success in between, within the TTL."""
+        live = self._host_live.get(host)
+        if not live or live.consec_fail <= 0:
+            return False
+        if time.time() - live.last_fail_ts > BLACKLIST_TTL_SEC:
+            return False
+        return live.consec_fail >= (thresh if thresh is not None else HOST_UNREACHABLE_THRESH)
+
+    def consecutive_host_failures(self, host: str) -> int:
+        live = self._host_live.get(host)
+        if not live:
+            return 0
+        if time.time() - live.last_fail_ts > BLACKLIST_TTL_SEC:
+            return 0
+        return live.consec_fail
+
+    # ── Operator-cancel streak ───────────────────────────────────────
+    def record_cancel(self, host: str) -> int:
+        """Record an operator tool-kill against `host`; returns the streak."""
+        if not host:
+            return 0
+        c = self._cancels.get(host)
+        now = time.time()
+        if c is None or (now - c.last_ts) > CANCEL_STREAK_TTL:
+            c = _CancelRec()
+            self._cancels[host] = c
+        c.streak += 1
+        c.last_ts = now
+        return c.streak
+
+    def consecutive_cancels(self, host: str) -> int:
+        c = self._cancels.get(host)
+        if not c:
+            return 0
+        if (time.time() - c.last_ts) > CANCEL_STREAK_TTL:
+            return 0
+        return c.streak
+
+    def cancel_streak_tripped(self, host: str) -> bool:
+        return self.consecutive_cancels(host) >= CANCEL_STREAK_THRESH
+
+    def reset_cancels(self, host: str) -> None:
+        self._cancels.pop(host, None)
 
     def mark_closed(self, host: str, port: int, service: str = "") -> None:
         """Explicit "this port is closed/filtered" from an nmap rescan."""
@@ -215,6 +337,8 @@ class ToolBlacklist:
             n = len(self._recs) + len(self._sticky)
             self._recs.clear()
             self._sticky.clear()
+            self._host_live.clear()
+            self._cancels.clear()
             return n
         keys = [k for k in self._recs if k[0] == host]
         for k in keys:
@@ -222,6 +346,8 @@ class ToolBlacklist:
         sticky_keys = [k for k in self._sticky if k[0] == host]
         for k in sticky_keys:
             self._sticky.pop(k, None)
+        self._host_live.pop(host, None)
+        self._cancels.pop(host, None)
         return len(keys) + len(sticky_keys)
 
 

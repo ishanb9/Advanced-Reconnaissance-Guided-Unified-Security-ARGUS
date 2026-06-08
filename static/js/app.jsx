@@ -826,6 +826,134 @@ function ToolTimeoutModal() {
   );
 }
 
+// ─── Target Selection Modal ──────────────────────────────────
+// Blocking gate: after ARGUS hunts a domain's subdomains it BLOCKS until the
+// operator picks which to engage.  Mirrors ToolTimeoutModal — always mounted,
+// renders only when state.targetSelection.active.
+function TargetSelectionModal() {
+  const { state, dispatch, sendWS } = window.useStore();
+  const ts = state.targetSelection;
+  const [picked, setPicked] = React.useState({});
+
+  const selId = (ts && ts.selectionId) || '';
+  const active = !!(ts && ts.active);
+  React.useEffect(() => {
+    if (active && ts && Array.isArray(ts.candidates)) {
+      const init = {};
+      ts.candidates.forEach(c => { init[c.host] = !!c.in_apex_network; });
+      setPicked(init);
+    }
+  }, [selId, active]);
+
+  if (!active) return null;
+  const cands = (ts.candidates || []);
+  const chosen = cands.filter(c => picked[c.host]).map(c => c.host);
+
+  function toggle(host) { setPicked(p => ({ ...p, [host]: !p[host] })); }
+  function setAll(val, filterFn) {
+    const next = {};
+    cands.forEach(c => { next[c.host] = filterFn ? (filterFn(c) ? val : !!picked[c.host]) : val; });
+    setPicked(next);
+  }
+  function submit() {
+    sendWS({ type: 'target_selection', selection_id: selId, selected: chosen });
+    dispatch({ type: 'TARGET_SELECTION_RESOLVE', payload: {} });
+  }
+  function cancel() {  // explicit "scan nothing"
+    sendWS({ type: 'target_selection', selection_id: selId, selected: [] });
+    dispatch({ type: 'TARGET_SELECTION_RESOLVE', payload: {} });
+  }
+
+  const flag = (c) => c.in_apex_network
+    ? { t: 'in-network', col: 'var(--success, #73d13d)' }
+    : (c.ips && c.ips.length)
+      ? { t: 'third-party', col: 'var(--warning, #faad14)' }
+      : { t: 'dangling', col: 'var(--text-muted)' };
+
+  const btn = (label, onClick, primary, disabled) => React.createElement('button', {
+    onClick: disabled ? undefined : onClick,
+    style: {
+      padding: '9px 16px', borderRadius: 8, cursor: disabled ? 'not-allowed' : 'pointer',
+      fontSize: 12, fontWeight: 700, fontFamily: 'var(--font-mono)', letterSpacing: 0.4,
+      opacity: disabled ? 0.45 : 1,
+      border: `1px solid ${primary ? '#7B6CF6' : 'var(--border-light)'}`,
+      background: primary ? '#7B6CF6' : 'transparent',
+      color: primary ? '#fff' : 'var(--text-secondary)',
+    }
+  }, label);
+
+  return React.createElement('div', {
+    style: {
+      position: 'fixed', inset: 0, zIndex: 9999,
+      background: 'rgba(0,0,0,0.68)', backdropFilter: 'blur(5px)',
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+    }
+  },
+    React.createElement('div', {
+      style: {
+        background: 'var(--bg-surface)', border: '1px solid #7B6CF6', borderRadius: 14,
+        padding: '22px 26px', minWidth: 560, maxWidth: 760, maxHeight: '82vh',
+        display: 'flex', flexDirection: 'column',
+        boxShadow: '0 0 60px rgba(123,108,246,0.20), 0 12px 40px rgba(0,0,0,0.65)',
+        fontFamily: 'var(--font-ui)',
+      }
+    },
+      React.createElement('div', { style: { fontSize: 15, fontWeight: 700, color: '#7B6CF6', marginBottom: 4 } },
+        `◆ Select Targets — ${ts.domain || ''}`),
+      React.createElement('div', { style: { fontSize: 11, color: 'var(--text-secondary)', marginBottom: 12, lineHeight: 1.5 } },
+        `${cands.length} candidate(s) discovered. Pick which to engage — nothing is attacked until you confirm. ` +
+        'Hosts resolving outside the apex network are flagged as likely third-party/CDN — only select what you are authorized to test.'),
+
+      // Candidate list
+      React.createElement('div', {
+        style: { overflowY: 'auto', flex: 1, border: '1px solid var(--border-light)', borderRadius: 8, marginBottom: 12 }
+      },
+        cands.map((c, i) => {
+          const f = flag(c);
+          return React.createElement('div', {
+            key: c.host, onClick: () => toggle(c.host),
+            style: {
+              display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px', cursor: 'pointer',
+              borderBottom: i < cands.length - 1 ? '1px solid var(--border-light)' : 'none',
+              background: picked[c.host] ? 'rgba(123,108,246,0.08)' : 'transparent',
+            }
+          },
+            React.createElement('input', {
+              type: 'checkbox', checked: !!picked[c.host], readOnly: true,
+              style: { width: 15, height: 15, accentColor: '#7B6CF6', pointerEvents: 'none' }
+            }),
+            React.createElement('div', { style: { flex: 1, minWidth: 0 } },
+              React.createElement('div', { style: { fontSize: 12, fontWeight: 600, color: 'var(--text-primary)', fontFamily: 'var(--font-mono)' } }, c.host),
+              React.createElement('div', { style: { fontSize: 9.5, color: 'var(--text-muted)' } },
+                `${(c.ips || []).join(', ') || 'unresolved'}${c.sources && c.sources.length ? '  ·  ' + c.sources.join('/') : ''}`)
+            ),
+            React.createElement('span', {
+              style: { fontSize: 9, fontWeight: 700, color: f.col, border: `1px solid ${f.col}`,
+                       borderRadius: 5, padding: '2px 7px', whiteSpace: 'nowrap' }
+            }, f.t)
+          );
+        })
+      ),
+
+      // Quick-select row
+      React.createElement('div', { style: { display: 'flex', gap: 8, marginBottom: 12, flexWrap: 'wrap' } },
+        btn('All', () => setAll(true)),
+        btn('None', () => setAll(false)),
+        btn('In-network only', () => { setAll(false); setTimeout(() => setAll(true, c => c.in_apex_network), 0); }),
+      ),
+
+      // Action row
+      React.createElement('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10 } },
+        React.createElement('div', { style: { fontSize: 11, color: 'var(--text-muted)' } }, `${chosen.length} selected`),
+        React.createElement('div', { style: { display: 'flex', gap: 8 } },
+          btn('Scan nothing', cancel, false),
+          btn(`▶ Engage ${chosen.length} target(s)`, submit, true, chosen.length === 0),
+        )
+      )
+    )
+  );
+}
+
 // ─── Command Palette (Ctrl/Cmd-K) ─────────────────────────────
 function CommandPalette({ open, onClose, onNavigate }) {
   const [query, setQuery] = useState('');
@@ -1501,6 +1629,7 @@ function App() {
     React.createElement('div', { className: 'stellar-beam' }),
 
     React.createElement(ToolTimeoutModal),
+    React.createElement(TargetSelectionModal),
     React.createElement(CommandPalette, {
       open: paletteOpen,
       onClose: () => setPaletteOpen(false),

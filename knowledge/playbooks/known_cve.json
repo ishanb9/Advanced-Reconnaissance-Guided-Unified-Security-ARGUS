@@ -1,0 +1,11 @@
+{
+  "weakness_class": "known_cve",
+  "name": "Known CVE / public PoC",
+  "steps": [
+    "Confirm the exact product and version, then look up CVEs and public PoCs (cve_lookup).",
+    "Prefer a maintained PoC that matches the version; clone it locally.",
+    "Read its usage; adapt target / listener / callback parameters; run it the way its authors intend.",
+    "Confirm the documented effect (code execution, auth bypass, data read) before declaring success.",
+    "If it fails after a few honest attempts, abandon it and pivot to another hypothesis."
+  ]
+}

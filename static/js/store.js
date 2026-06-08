@@ -40,6 +40,23 @@ function normalizePhase(raw) {
   return key.toLowerCase();
 }
 
+// Canonical phase ordering — used to mark attack-plan steps done/active as the
+// engagement advances.  The operator drives phases via phase_change but never
+// marked the individual plan steps, so the Mission Control tracker stayed
+// all-"pending" even after a full compromise.  A step whose phase precedes the
+// current phase is done; the current phase's steps are active.
+const _PHASE_RANK = {
+  recon: 0, scan: 1, osint: 1, vuln_id: 2, vuln_identification: 2,
+  web_testing: 3, web: 3, exploit: 4, exploitation: 4,
+  post_exploit: 5, post_exploitation: 5, privesc: 6, privilege_escalation: 6,
+  persistence: 7, lateral: 8, lateral_movement: 8, c2: 8,
+  reporting: 9, report_generation: 9,
+};
+function _phaseRank(p) {
+  const k = normalizePhase(p);
+  return (k && k in _PHASE_RANK) ? _PHASE_RANK[k] : -1;
+}
+
 // ─── Initial state ─────────────────────────────────────────
 const INIT = {
   sessions:       [],
@@ -223,6 +240,16 @@ const INIT = {
     maxIterations:  0,
     attempts:       [],       // [{ attempt, plan, language, code, run_command,
                               //    output, verdict, evidence }]
+  },
+
+  // Target Selection — domain subdomain hunt → human picks which to engage
+  targetSelection: {
+    active:       false,      // a selection is pending operator action
+    selectionId:  '',
+    domain:       '',
+    candidates:   [],         // [{host, ips, sources, in_apex_network, third_party, note}]
+    progress:     [],         // hunt progress lines
+    resolved:     false,      // operator submitted
   },
 
   // ── Red-Team Expert (senior tactician / oversight) ──────────────────────────
@@ -423,7 +450,24 @@ function reducer(state, action) {
 
     case 'PHASE_CHANGE': {
       const phase = normalizePhase(action.payload.phase);
-      return { ...state, currentPhase: phase || state.currentPhase };
+      if (!phase) return state;
+      // Mark plan steps by phase progression so the tracker reflects the
+      // operator's real progress (it used to stay all-"pending").  Only promote
+      // pending steps — never override a step the engine explicitly set to
+      // done/failed, so legacy phase-pipeline behaviour is unchanged.
+      const curRank = _phaseRank(phase);
+      let planSteps = state.planSteps;
+      if (curRank >= 0 && Array.isArray(planSteps) && planSteps.length) {
+        planSteps = planSteps.map(s => {
+          if (!s || s.status === 'done' || s.status === 'failed') return s;
+          const r = _phaseRank(s.phase);
+          if (r < 0) return s;                       // unknown phase → leave as-is
+          if (r < curRank)  return { ...s, status: 'done' };
+          if (r === curRank) return { ...s, status: s.status === 'pending' ? 'active' : s.status };
+          return s;
+        });
+      }
+      return { ...state, currentPhase: phase || state.currentPhase, planSteps };
     }
 
     case 'PHASE_DONE': {
@@ -1452,6 +1496,29 @@ function reducer(state, action) {
     case 'TOGGLE_PRESENT_AUTO':
       return { ...state, present: { ...(state.present || {}), autoAdvance: !(state.present?.autoAdvance) } };
 
+    case 'TARGET_SELECTION_SET': {
+      const p = action.payload || {};
+      return { ...state, targetSelection: {
+        active:      true,
+        selectionId: p.selection_id || '',
+        domain:      p.domain || '',
+        candidates:  Array.isArray(p.candidates) ? p.candidates : [],
+        progress:    (state.targetSelection?.progress) || [],
+        resolved:    false,
+      }};
+    }
+
+    case 'TARGET_SELECTION_PROGRESS': {
+      const prog = [ ...((state.targetSelection?.progress) || []),
+                     (action.payload && action.payload.message) || '' ].filter(Boolean).slice(-50);
+      return { ...state, targetSelection: { ...(state.targetSelection || {}), progress: prog } };
+    }
+
+    case 'TARGET_SELECTION_RESOLVE':
+      return { ...state, targetSelection: {
+        ...(state.targetSelection || {}), active: false, resolved: true,
+      }};
+
     default:
       return state;
   }
@@ -1762,6 +1829,51 @@ function routeWsEvent(msg, dispatch, shellListeners, sessionId) {
       }
       break;
 
+    // ── Operator core (persistent ReAct driver) ──────────
+    case 'operator_start':
+    case 'operator_core_start':
+      dispatch({ type: 'AGENT_STATUS', payload: {
+        agent: 'operator', status: 'running',
+        message: 'Driving the engagement' }});
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'operator', eventType: 'operator',
+        message: `Operator core engaged — driving end-to-end (autonomy: ${data.autonomy || 'approve_to_exploit'})`,
+        data }});
+      break;
+    case 'operator_end':
+    case 'operator_core_done':
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'operator', eventType: 'operator',
+        message: `Operator finished${data.reason ? ' (' + data.reason + ')' : ''}`, data }});
+      break;
+    case 'operator_core_fallback':
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'operator', eventType: 'operator',
+        message: `Operator unavailable (${data.reason}) — falling back to the legacy reasoning loop`,
+        data }});
+      break;
+    case 'operator_http':
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'operator', eventType: 'operator_http',
+        message: `HTTP ${data.method} ${data.url} → ${data.status}`, data }});
+      break;
+    case 'operator_note':
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'operator', eventType: 'operator_note',
+        message: `note [${data.kind}] ${data.text}`, data }});
+      break;
+    case 'operator_flag':
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'operator', eventType: 'flag',
+        message: `${(data.which || '').toUpperCase()} FLAG: ${data.flag}` +
+                 (data.file ? `  (from ${data.file})` : ''), data }});
+      break;
+    case 'operator_compact':
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'operator', eventType: 'operator',
+        message: `context compacted (kept ${data.kept_recent} recent turns)`, data }});
+      break;
+
     // ── Tools ────────────────────────────────────────────
     case 'tool_start':
       dispatch({ type: 'AGENT_STATUS', payload: {
@@ -2032,6 +2144,18 @@ function routeWsEvent(msg, dispatch, shellListeners, sessionId) {
     }
     case 'shell_status':
       dispatch({ type: 'SHELL_STATUS_UPDATE', payload: { shellId: data.shell_id, active: data.active } });
+      break;
+
+    case 'agent_shell_command':
+      // Operator visibility: ARGUS just ran a post-exploit command in the
+      // shared session. Surface it in the feed so the human sees (and can take
+      // over) post-foothold activity; the live output streams to the terminal
+      // via the shared ShellAgent's shell_output broadcast.
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'argus', eventType: 'agent_shell_command',
+        message: `⚡ post-ex on ${data.shell_id || 'shell'}: ${(data.command || '').slice(0, 160)}`,
+        data
+      }});
       break;
 
     case 'payload_generated':
@@ -3211,6 +3335,21 @@ function routeWsEvent(msg, dispatch, shellListeners, sessionId) {
       }});
       break;
     }
+
+    // ── Domain subdomain-hunt → human target selection ──────────────
+    case 'target_selection_request':
+      dispatch({ type: 'TARGET_SELECTION_SET', payload: data });
+      break;
+
+    case 'subdomain_hunt_start':
+    case 'subdomain_hunt_progress':
+      dispatch({ type: 'TARGET_SELECTION_PROGRESS', payload: data });
+      break;
+
+    case 'target_selection_confirmed':
+    case 'target_selection_empty':
+      dispatch({ type: 'TARGET_SELECTION_RESOLVE', payload: data });
+      break;
 
     case 'meta_checker_pre_phase':
       dispatch({ type: 'FEED_ENTRY', payload: {

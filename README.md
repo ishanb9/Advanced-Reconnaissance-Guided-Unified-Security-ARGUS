@@ -220,11 +220,18 @@ cockpit.
 ### Quickest path (development)
 
 ```bash
-pip install -r requirements.txt
+pip install -r requirements.txt                 # Python deps
+sudo bash install-kali-tools.sh                 # Kali attack tools (see requirements-kali.txt)
 python -m auth.bootstrap quickstart --email admin@yourdomain.com
 set -a; source .env.local; set +a
 uvicorn agent_server:app --host 0.0.0.0 --port 8000
 ```
+
+> **Kali tooling.** ARGUS shells out to ~356 external binaries (the MCP registry in
+> `mcp-server.js`). `requirements-kali.txt` is the canonical inventory; run
+> `sudo bash install-kali-tools.sh` to install them (apt + go + pipx + git + downloads),
+> or `bash install-kali-tools.sh --verify` to list exactly which tools are still missing.
+> On a stock Kali box, `sudo apt install -y kali-linux-everything seclists` covers most of it.
 
 ### Production
 

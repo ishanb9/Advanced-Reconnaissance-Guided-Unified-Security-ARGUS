@@ -2038,9 +2038,9 @@ class DecisionEngine:
         # ── SQLi sweep on every discovered URL with parameters ──────────
         {"chain": "web_sqlmap_sweep", "ports": ["80", "443", "8080", "8443"],
          "tool": "sqlmap",
-         "args": "-m /tmp/argus.urls.{target}.txt --batch --random-agent --level=3 --risk=2 --threads=5 --output-dir=/tmp/sqlmap.{target} --crawl=2",
+         "args": "-u {scheme}://{target}{port_suffix}/ --crawl=2 --forms --batch --random-agent --level=3 --risk=2 --threads=5 --output-dir=/tmp/sqlmap.{target}",
          "service_label": "http:{port}",
-         "rationale": "SQLi against discovered parameter URLs — auto-DBMS detect, dump on hit",
+         "rationale": "SQLi sweep — sqlmap self-crawls the app (no external URL file) + tests forms",
          "needs_urls": True},
         # ── SSTI probe on input forms ───────────────────────────────────
         {"chain": "web_tplmap", "ports": ["80", "443", "8080", "8443"],
@@ -2137,13 +2137,52 @@ class DecisionEngine:
             except Exception:
                 pass
 
+        # Operator-cancel circuit breaker (F2): once the reasoning loop halts
+        # the web-primer sweep (operator killed several tools in a row), stop
+        # offering its rungs entirely — otherwise cancelling one tool just
+        # advances the ladder and fires the next, which reads as a stuck loop.
+        if intel.get("_web_primer_halted"):
+            return None
+
         fired = intel.setdefault("_web_exploit_fired", set())
         if isinstance(fired, list):
             fired = set(fired); intel["_web_exploit_fired"] = fired
 
-        # Tags from whatweb / wappalyzer scrape — populated by web_whatweb step
-        cms_tags = {t.lower() for t in (intel.get("web_tech_tags") or [])}
-        urls_known = bool(intel.get("web_param_urls"))
+        # CMS/tech tags — derive from EVERYTHING recon actually populated
+        # (whatweb technologies, service-version strings, banners), not just
+        # intel['web_tech_tags'] which nothing reliably writes.  Previously the
+        # CMS-gated rungs (wpscan / droopescan / joomscan) NEVER fired because
+        # web_tech_tags stayed empty — whole CMS attack classes went untested.
+        cms_tags = {str(t).lower() for t in (intel.get("web_tech_tags") or [])}
+        cms_tags |= {str(t).lower() for t in (intel.get("technologies") or [])}
+        try:
+            _tag_blob = " ".join([
+                " ".join(str(v) for v in (intel.get("service_versions") or {}).values()),
+                " ".join(
+                    (str(d.get("server", "")) + " " + str(d.get("banner", "")))
+                    if isinstance(d, dict) else str(d)
+                    for d in (intel.get("banners") or {}).values()
+                ),
+            ]).lower()
+            for _kw in ("wordpress", "drupal", "joomla", "tomcat", "jenkins"):
+                if _kw in _tag_blob:
+                    cms_tags.add(_kw)
+        except Exception:
+            pass
+        # A URL surface exists once param discovery ran OR content discovery
+        # found paths — both satisfy the parameter-fed rungs.
+        urls_known = bool(intel.get("web_param_urls") or intel.get("web_paths"))
+
+        # Virtual-host pivot via the central resolver: when the target redirects
+        # to an internal vhost (bare IP 302→http://cctv.htb/), that hostname IS
+        # the web app.  web_host() applies the full fallback chain (web_host →
+        # vhosts[0] → target_url host → IP) so the primer agrees with every
+        # other web tool instead of building its own host string.
+        try:
+            from agents.recon import target_resolver as _tr
+            url_host = _tr.web_host(intel) or target
+        except Exception:
+            url_host = (intel.get("web_host") or "").strip() or target
 
         for primer in self._WEB_EXPLOIT_PRIMERS:
             if not (set(primer["ports"]) & web_ports):
@@ -2154,9 +2193,10 @@ class DecisionEngine:
             tool = primer["tool"]
             svc  = primer["service_label"].format(port=port)
 
-            # CMS-tagged steps wait until the CMS is detected
+            # CMS-tagged steps wait until the CMS is detected (substring match
+            # so "wordpress" fires against a tag like "WordPress 6.1").
             need_tag = primer.get("needs_tag")
-            if need_tag and need_tag.lower() not in cms_tags:
+            if need_tag and not any(need_tag.lower() in t for t in cms_tags):
                 continue
             # URL-list-fed steps wait until parameter discovery has output
             if primer.get("needs_urls") and not urls_known:
@@ -2164,7 +2204,7 @@ class DecisionEngine:
 
             try:
                 args_filled = primer["args"].format(
-                    target=target, port=port, port_suffix=port_suffix, scheme=scheme,
+                    target=url_host, port=port, port_suffix=port_suffix, scheme=scheme,
                 )
             except Exception:
                 continue

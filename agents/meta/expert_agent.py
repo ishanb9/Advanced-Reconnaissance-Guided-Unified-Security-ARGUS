@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 import uuid
 from dataclasses import dataclass, field, asdict
@@ -157,8 +158,26 @@ YOUR RESPONSIBILITIES:
   4. Ground every recommendation in the RAG knowledge snippets supplied to
      you when available — reference them by source/box where relevant.
 
-Be surgical. Be assertive. Do not hedge. A junior operator and two auditor
-bots depend on your judgement. Mistakes waste scan budget and miss flags.
+Be surgical and assertive — but you are a HELP, not noise. RULES OF ENGAGEMENT:
+  • Stay SILENT (return an EMPTY "directives" list) unless you have a SPECIFIC,
+    ACTIONABLE next step the operator is NOT already pursuing. "No new advice
+    this cycle" is a correct and common answer — silence is better than filler.
+  • NEVER repeat a directive you have already issued. If your prior guidance
+    still stands, say nothing; the operator already has it. Identical directives
+    every cycle are spam that drowns out real signal.
+  • This is an AUTONOMOUS engagement and you are an ADVISOR, not a controller.
+    NEVER recommend handing off to / "escalating to" a human, pausing for manual
+    intervention, declaring the run "non-productive", halting, or aborting. The
+    operator alone decides when to stop. Such directives are pure noise that
+    derail a working engagement — do not emit them under any circumstances.
+  • Recon, reading a fetched PoC/exploit, installing its dependencies, and
+    cloning a tool ARE forward progress toward access — never label them a stall
+    or "zero motion". If the operator already has the right exploit in hand, the
+    only useful directive is "run it" — not more enumeration.
+  • Reserve "critical" priority for a genuine, specific, time-sensitive
+    opportunity or a concrete mistake. Most useful directives are "recommended"
+    or "informational". Do not inflate priority to be heard.
+A junior operator depends on your judgement; false alarms waste its attention.
 
 OUTPUT FORMAT — respond with a single JSON object, nothing else:
 {
@@ -249,6 +268,47 @@ def _parse_expert_response(raw: str) -> Dict[str, Any]:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Anti-panic / anti-spam guards
+# ──────────────────────────────────────────────────────────────────────────────
+# Defeatist / controller phrasing the Expert must NEVER push.  In an autonomous
+# engagement the Expert is an ADVISOR, not a controller — it cannot hand off to a
+# human, pause for manual intervention, declare the run dead, or abort.  Emitting
+# these (let alone repeating them) creates false panic and derails the operator:
+# the Reactor run was flooded with ~20 identical "escalate to a human —
+# autonomous loop is non-productive" directives while three exploit PoCs sat
+# cloned and ready to fire.  These are dropped at the source.
+_PANIC_MARKERS = (
+    "escalate to human", "escalate to a human", "escalate to the human",
+    "human-in-the-loop", "human in the loop", "human operator", "human must",
+    "manual operator", "manual intervention", "human intervention",
+    "non-productive", "no forward motion", "zero forward", "give up",
+    "abort the", "mission abort", "terminate the engagement", "declare failure",
+    "reclassify", "tooling failure", "hand off to a human", "hand it to a human",
+    "paste a single", "paste one", "into the intel store", "stalled pipeline",
+)
+
+
+def _norm(s: str) -> str:
+    return re.sub(r"\s+", " ", (s or "").strip().lower())
+
+
+def _directive_signature(d: "Directive") -> str:
+    """Stable identity for a directive so the SAME guidance is never issued twice
+    in one scan (the operator already has it after the first time)."""
+    return f"{_norm(d.action_type)}|{_norm(d.target_phase)}|{_norm(d.title)}"
+
+
+def _is_panic_directive(d: "Directive", all_achieved: bool) -> bool:
+    """True for a defeatist / human-handoff / premature-stop directive that
+    creates unnecessary panic.  A genuine HALT once EVERY win condition is met is
+    legitimate (mission complete) and is NOT treated as panic."""
+    if d.action_type == "halt":
+        return not all_achieved          # halting before the objective = panic
+    blob = _norm(f"{d.title} {d.rationale} {d.expected_outcome}")
+    return any(m in blob for m in _PANIC_MARKERS)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # RedTeamExpertAgent
 # ──────────────────────────────────────────────────────────────────────────────
 class RedTeamExpertAgent(BaseMetaAgent):
@@ -263,6 +323,11 @@ class RedTeamExpertAgent(BaseMetaAgent):
     def __init__(self, **kwargs):
         super().__init__(name=AgentName.EXPERT, **kwargs)
         self._directives_history: List[Directive] = []
+        # Signatures of directives already issued this scan → never re-issue the
+        # SAME guidance (kills the identical-directive spam at the source).
+        self._issued_sigs: set = set()
+        # Count of panic / defeatist directives suppressed (telemetry only).
+        self._panic_suppressed: int = 0
         self._objectives: Dict[str, Any] = {
             "mission_phase": "",
             "progress_pct":  0,
@@ -511,6 +576,26 @@ class RedTeamExpertAgent(BaseMetaAgent):
                     expected_outcome = str(d.get("expected_outcome", "")),
                     metadata         = {"mode": mode},
                 )
+
+                # ── Anti-panic: drop defeatist / human-handoff / premature-stop
+                #    directives outright.  The Expert advises; it never tells an
+                #    autonomous engagement to give up or wait for a human.
+                _all_done = bool((self._win_snapshot or {}).get("all_achieved"))
+                if _is_panic_directive(directive, _all_done):
+                    self._panic_suppressed += 1
+                    logger.info("[expert] suppressed panic/defeatist directive: %s",
+                                directive.title[:80])
+                    continue
+
+                # ── Anti-spam: issue each unique directive at most ONCE per scan.
+                #    The operator already has it after the first time; repeating it
+                #    every cycle is noise (the run that prompted this got ~20
+                #    identical escalations).
+                sig = _directive_signature(directive)
+                if sig in self._issued_sigs:
+                    continue
+                self._issued_sigs.add(sig)
+
                 self._directives_history.append(directive)
 
                 # Broadcast

