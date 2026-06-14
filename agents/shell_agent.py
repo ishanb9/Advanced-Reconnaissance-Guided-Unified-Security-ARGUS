@@ -9,7 +9,7 @@ WS protocol:
   S→C: { type:"shell_status", shell_id, active, info }
 """
 
-import asyncio, fcntl, os, pty, signal, struct, termios, time
+import asyncio, fcntl, os, pty, re, signal, struct, termios, time
 from typing import Optional, Dict, List, Callable, Awaitable, Any
 from datetime import datetime
 import netifaces
@@ -19,6 +19,29 @@ from db.schemas import AgentName, AgentStatus, AttackPhase, WebSocketMessage
 import db.mongo_client as db
 
 OutputCallback = Callable[[str, str], Awaitable[None]]
+
+# ── Reverse-shell callback signatures ──────────────────────────────────────
+# When a *pending* (optimistic) listener's PTY output starts showing any of
+# these, a real foothold has landed: the listener must flip from confirmed=
+# False → True so the post-exploit / privesc / lateral phases fire.  These are
+# generic shell-output markers (an `id` line, an interactive prompt, an msf
+# session banner) — NOT vulnerability content — so they live in the engine.
+_LISTENER_CALLBACK_RE = re.compile(
+    r"(?:uid=\d+\("
+    r"|[\w.-]+@[\w.-]+:[^\n]{0,40}[#$]"
+    r"|PS\s+[A-Z]:\\"
+    r"|Meterpreter session\s+\d+\s+opened"
+    r"|Command shell session\s+\d+\s+opened)",
+    re.I,
+)
+# Best-effort remote-peer IP from an nc/ncat verbose connect banner, e.g.
+#   "connect to [10.10.14.5] from (UNKNOWN) [10.129.21.9] 54321"
+#   "Ncat: Connection from 10.129.21.9:54321."
+_LISTENER_PEER_RE = re.compile(
+    r"(?:from|connection from)\s+(?:\(UNKNOWN\)\s+)?\[?"
+    r"(\d{1,3}(?:\.\d{1,3}){3})\]?",
+    re.I,
+)
 
 
 class PtyShell:
@@ -202,6 +225,16 @@ class ShellAgent(BaseAgent):
         # from the GUI terminal: each typed line is run through run_fn (the RCE
         # channel) and the output is streamed back over shell_output.
         self._rce_consoles: Dict[str, Dict[str, Any]] = {}
+        # Pending reverse-shell listeners awaiting their first callback.
+        #   shell_id → {rhost, rport, shell_type, lhost, buf, flipped}
+        # create_listener registers a fresh listener confirmed=False
+        # (optimistic — no callback yet).  _on_pty_output watches each
+        # pending listener's output and, on the first real shell signature
+        # (_LISTENER_CALLBACK_RE), re-registers it confirmed=True so the
+        # foothold-gated post-ex / privesc / lateral phases finally fire.
+        # Without this, listeners stayed "pending" forever and a landed
+        # reverse shell never progressed the engagement.
+        self._pending_listeners: Dict[str, Dict[str, Any]] = {}
         # Recommendation A — ShellAgent gets a back-reference to MasterAgent
         # so manual-capture paths (create_listener, connect_ssh) can flow
         # through register_shell and trip post-ex / privesc / lateral.
@@ -251,9 +284,15 @@ class ShellAgent(BaseAgent):
             })
             # Listener spawn is OPTIMISTIC — we have no callback yet, so
             # post-ex / privesc / lateral must NOT fire on this call.  When
-            # the callback actually arrives, ListenerManager.wait_for_session
-            # calls register_shell with confirmed=True + real `uid=`/prompt
-            # evidence and that's what flips shell_access.
+            # the callback actually arrives the listener's PTY output starts
+            # showing real shell evidence; _on_pty_output detects that and
+            # re-registers confirmed=True (see _maybe_flip_listener), which
+            # is what finally flips shell_access.  We track the pending
+            # listener here so that detector knows which shells to watch.
+            self._pending_listeners[shell_id] = {
+                "rhost": rhost, "rport": lport, "shell_type": shell_type,
+                "lhost": lhost, "buf": "", "flipped": False,
+            }
             if self._master is not None:
                 try:
                     await self._master.register_shell(
@@ -416,6 +455,7 @@ class ShellAgent(BaseAgent):
 
     async def terminate_shell(self, shell_id: str):
         self._rce_consoles.pop(shell_id, None)
+        self._pending_listeners.pop(shell_id, None)
         s = self._shells.pop(shell_id, None)
         if s:
             s.terminate()
@@ -431,6 +471,18 @@ class ShellAgent(BaseAgent):
     # ── Internal ─────────────────────────────────────────────────
 
     async def _on_pty_output(self, shell_id: str, data: str):
+        # ── Listener callback detection (foothold flip) ──────────────
+        # A pending (optimistic) listener becomes a CONFIRMED foothold the
+        # moment its output shows real shell evidence.  Runs BEFORE the
+        # broadcast so a flaky WS send can't swallow the detection.  This
+        # is the missing link that lets the post-ex / privesc / lateral
+        # phases fire when a reverse shell actually lands.
+        pend = self._pending_listeners.get(shell_id)
+        if pend is not None and not pend.get("flipped") and data:
+            try:
+                await self._maybe_flip_listener(shell_id, pend, data)
+            except Exception as e:
+                print(f"[SHELL] listener-flip err: {e}")
         if self.broadcast and self._session_id:
             msg = WebSocketMessage(
                 type="shell_output", session_id=self._session_id, agent=self.name,
@@ -440,6 +492,69 @@ class ShellAgent(BaseAgent):
                 await self.broadcast(msg)
             except Exception as e:
                 print(f"[SHELL] broadcast err: {e}")
+
+    async def _maybe_flip_listener(
+        self, shell_id: str, pend: Dict[str, Any], data: str
+    ) -> None:
+        """Watch a pending listener's PTY output; on the first real shell
+        signature, re-register the listener confirmed=True so shell_access
+        flips and the foothold-gated phases fire.
+
+        Purely additive: until a genuine reverse shell lands, the output
+        never matches and the listener stays exactly as optimistic as
+        before.  The accumulated buffer is bounded so a long-lived shell
+        can't grow it without limit.
+        """
+        buf = (pend.get("buf", "") + data)[-4000:]
+        pend["buf"] = buf
+        if not _LISTENER_CALLBACK_RE.search(buf):
+            return
+        pend["flipped"] = True
+
+        # Best-effort user from `uid=N(name)` or `user@host:~$`.
+        user = "unknown"
+        m = re.search(r"uid=\d+\(([\w.$-]+)\)", buf)
+        if m:
+            user = m.group(1)
+        else:
+            m = re.search(r"([\w.$-]+)@[\w.-]+:[^\n]{0,40}[#$]", buf)
+            if m:
+                user = m.group(1)
+
+        # Best-effort real peer IP from an nc/ncat connect banner — the
+        # listener was bound to 0.0.0.0, so the stored rhost is the bind
+        # address, not the victim.  An empty remote lets register_shell
+        # fall back to the engagement target.
+        remote = ""
+        mh = _LISTENER_PEER_RE.search(buf)
+        if mh:
+            remote = mh.group(1)
+        elif pend.get("rhost") and pend["rhost"] not in ("0.0.0.0", ""):
+            remote = pend["rhost"]
+
+        if self._master is not None:
+            try:
+                await self._master.register_shell(
+                    source     = "shell_agent:listener",
+                    user       = user,
+                    host       = remote,
+                    method     = f"reverse_shell:{pend.get('shell_type')}",
+                    evidence   = buf[-1500:],
+                    session_id = shell_id,
+                    rhost      = remote or None,
+                    rport      = pend.get("rport"),
+                    confirmed  = True,
+                )
+            except Exception as e:
+                print(f"[SHELL] listener flip register_shell err: {e}")
+        try:
+            await self._emit("shell_callback_confirmed", {
+                "shell_id": shell_id, "user": user,
+                "rhost": remote or pend.get("rhost"),
+                "rport": pend.get("rport"),
+            })
+        except Exception:
+            pass
 
     def _get_lhost(self) -> str:
         try:

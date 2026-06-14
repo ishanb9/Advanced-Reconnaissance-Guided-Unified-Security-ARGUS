@@ -808,6 +808,31 @@ class MasterAgent(BaseAgent):
         self._intel["target_resolved_ip"] = getattr(_norm, "resolved_ip", None)
         self._phases_to_run  = phases or [p.value for p in AttackPhase]
 
+        # ── Proactive /etc/hosts hygiene (stale-vhost reconcile) ───────
+        # A leftover `<old-ip> <vhost> # argus-managed` line from a PRIOR
+        # engagement wins glibc's first-match rule and silently misdirects
+        # every web tool to the old box.  In the reviewed run this wasted
+        # ~6-7 min of recon before the reactive remap caught it.  Purge any
+        # argus-managed mapping whose IP != this target ONCE, here at scan
+        # start (only argus-managed lines — never the operator's own).
+        try:
+            _recon_ip = (self._intel.get("target_resolved_ip")
+                         or self._target_host or target)
+            if _recon_ip:
+                from agents.recon.vhost_pivot import reconcile_stale_vhosts_for_target
+                _reconciled = reconcile_stale_vhosts_for_target(str(_recon_ip))
+                if _reconciled:
+                    try:
+                        await self._emit("vhost_reconciled", {
+                            "session_id": session_id,
+                            "target_ip": str(_recon_ip),
+                            "removed": _reconciled,
+                        })
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
         # ── Create the EngagementContext (the architectural core) ──────
         # Shared by reference with self._intel so EVERY existing code
         # path that mutates intel keeps working unchanged.  All NEW

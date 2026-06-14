@@ -14,6 +14,7 @@ Key improvements over v2:
 
 import asyncio
 import json
+import logging
 import os
 import re
 import signal as _signal
@@ -32,6 +33,15 @@ from db.schemas import (
     FindingSeverity, WebSocketMessage
 )
 import db.mongo_client as db
+
+# Module-level logger.  Previously the entropy-abandonment path referenced a
+# bare `logger` that was never defined at module scope (the file otherwise
+# does local `import logging as _log`), so the moment a tool was abandoned for
+# low output entropy the log call raised `NameError: name 'logger' is not
+# defined` — surfacing as a spurious tool failure (the field run's ffuf
+# NameError).  Defining it here makes that path safe and gives the module a
+# conventional logger like the rest of the agents.
+logger = logging.getLogger(__name__)
 
 def _tool_scratch_dir() -> str:
     """Working directory for tool subprocesses so any relative-path artifacts
@@ -594,6 +604,27 @@ class BaseAgent(ABC):
     def extend_tool(self, extra_sec: float) -> None:
         """Extend the running tool's deadline by *extra_sec* seconds."""
         self._tool_deadline_sec += extra_sec
+
+    @staticmethod
+    def _install_hint(tool: str) -> str:
+        """Best-effort 'how to install this' hint for a missing Kali tool/file,
+        shown to the human so the box is better-provisioned next time."""
+        t = (tool or "").lower().strip()
+        special = {
+            "seclists":    "apt install -y seclists",
+            "wordlists":   "apt install -y wordlists",
+            "feroxbuster": "apt install -y feroxbuster   (or: cargo install feroxbuster)",
+            "nuclei":      "apt install -y nuclei   (or: go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest)",
+            "subfinder":   "apt install -y subfinder",
+            "httpx":       "apt install -y httpx-toolkit",
+            "rustscan":    "apt install -y rustscan",
+        }
+        if t in special:
+            return special[t]
+        pipx = {"droopescan", "wafw00f", "commix", "dalfox", "arjun", "name-that-hash"}
+        if t in pipx:
+            return f"pipx install {t}   (or: apt install -y {t})"
+        return f"apt install -y {t}"
 
     async def _tool_watchdog(self, tool_name: str) -> None:
         """Emit tool_timeout_warning when tool exceeds its 10-min deadline.
@@ -1207,17 +1238,28 @@ Return JSON:
         except Exception:
             pass
 
-        # ── Command-substitution reroute ──────────────────────────────────
-        # MCP tools run argv-style (no shell), so an LLM-planned arg like
+        # ── Command-substitution + shell-metacharacter reroute ─────────────
+        # MCP tools run argv-style (NO shell), so an LLM-planned arg like
         # `-p $(grep … | paste …)` is passed LITERALLY → nmap "Scantype d not
-        # supported".  When a non-shell tool's args contain $(…) or backticks,
-        # run the WHOLE command through `bash -c` so the substitution evaluates
-        # (bash is a local tool, so this executes with a real shell).
+        # supported".  The same gap broke pipes/redirects: `smbclient … | head
+        # -40` made smbclient parse `-40` as a flag, and `curl … | grep | head`
+        # parsed `-80` as a flag — both failed silently in the field.  When a
+        # non-shell tool's args contain command substitution ($(…)/backticks)
+        # OR an UNQUOTED shell metacharacter (pipe, redirect, &&/||/;), run the
+        # WHOLE command through `bash -c` so the shell evaluates it (bash is a
+        # local tool, so this executes with a real shell).
+        #
+        # Quote-aware: metacharacters INSIDE single/double quotes (injection
+        # payloads like --data "<x>", a Cookie header's `;`, a URL's `&`) are
+        # stripped before the test so a legitimately-quoted arg is NEVER
+        # needlessly wrapped — only genuine shell-operator intent triggers it.
         try:
             _ns = {"bash", "sh", "zsh", "cmd", "powershell", "python",
                    "python3", "perl", "ruby"}
-            if (tool_name or "").lower().strip() not in _ns \
-                    and re.search(r"\$\(|`", args or ""):
+            _unq = re.sub(r"'[^']*'|\"[^\"]*\"", "", args or "")
+            _needs_shell = bool(re.search(r"\$\(|`", args or "")) \
+                or bool(re.search(r"\||&&|>>|>|<<|<|;", _unq))
+            if (tool_name or "").lower().strip() not in _ns and _needs_shell:
                 _whole = f"{tool_name} {args}".strip().replace("'", "'\"'\"'")
                 tool_name = "bash"
                 args = f"-c '{_whole}'"
@@ -1298,7 +1340,12 @@ Return JSON:
         self._kill_current_tool_flag = False   # clear one-shot kill from previous tool
         self._current_tool_name = tool_name
         self._tool_run_start    = time.monotonic()
-        self._tool_deadline_sec = 600.0   # reset fresh for each tool call
+        # The watchdog's human "extend / kill" prompt fires when a tool exceeds
+        # its EXPECTED runtime (with a grace floor) — not a fixed 10 min — so the
+        # operator is asked promptly, and a genuinely slow-but-working tool keeps
+        # running until they decide.  The deadline is ADVISORY (it triggers a
+        # prompt); only the human, a real error, or completion stops the tool.
+        self._tool_deadline_sec = max(float(timeout or 300), 120.0)
         watchdog = asyncio.create_task(self._tool_watchdog(tool_name))
 
         # Improvement #6 — information-entropy abandonment.
@@ -1427,7 +1474,15 @@ Return JSON:
                 },
             }
             not_in_registry = False
-            async with httpx.AsyncClient(timeout=httpx.Timeout(timeout)) as client:
+            # The READ timeout is deliberately DISABLED (read=None).  A slow but
+            # still-streaming tool (ffuf / feroxbuster / nmap / nuclei) must NOT be
+            # killed just for taking time — deciding to stop a long tool is the
+            # watchdog's job (it prompts the HUMAN to extend or kill), never a
+            # silent transport timeout that lands as "[AGENT ERROR] ReadTimeout".
+            # Only connect/write are bounded so a genuinely dead MCP server still
+            # fails fast.  Taking time != failing.
+            _mcp_timeout = httpx.Timeout(connect=30.0, read=None, write=30.0, pool=None)
+            async with httpx.AsyncClient(timeout=_mcp_timeout) as client:
                 async with client.stream(
                     "POST", mcp_endpoint, json=payload,
                     headers={"Accept": "text/event-stream"},
@@ -1537,6 +1592,33 @@ Return JSON:
 
         # Persist full output
         await db.finalize_tool_output(output_id, stdout, stderr, exit_code)
+
+        # ── Missing-tool / missing-file surfacing ─────────────────────────────
+        # When a tool (or a wordlist/file it needs) is absent on the Kali host,
+        # tell the HUMAN to install it — that is a setup gap, not a target
+        # finding, and installing it makes the NEXT engagement stronger.  Fires
+        # only on a real "not found" signal (never on a slow/working tool, never
+        # on an operator-cancel/-2), so taking time is never mistaken for missing.
+        try:
+            if exit_code not in (0, -2):
+                _blob = f"{stderr}\n{stdout}".lower()
+                _t = (tool_name or "").lower()
+                _missing_tool = any(p in _blob for p in (
+                    "command not found", f"{_t}: not found", "executable file not found",
+                    "is not installed", "unknown tool", "not found in mcp"))
+                _missing_file = ("no such file or directory" in _blob and any(
+                    p in _blob for p in ("/usr/share/", "wordlist", "seclists", ".txt")))
+                if _missing_tool or _missing_file:
+                    await self._emit("tool_missing", {
+                        "tool":    tool_name,
+                        "kind":    "file" if (_missing_file and not _missing_tool) else "tool",
+                        "install": self._install_hint(tool_name),
+                        "detail":  (stderr or stdout)[:200],
+                        "note":    (f"{tool_name} (or a file it needs) is missing on this "
+                                    "host — install it for better performance next time."),
+                    })
+        except Exception:
+            pass
 
         # ── Tool-failure feedback loop ────────────────────────────────────
         # Every tool run feeds the per-(host, service-class) blacklist so

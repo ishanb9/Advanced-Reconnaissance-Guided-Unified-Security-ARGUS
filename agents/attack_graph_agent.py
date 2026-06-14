@@ -44,6 +44,32 @@ import db.mongo_client as _db
 
 logger = logging.getLogger(__name__)
 
+
+def _safe_port(value: Any) -> Optional[int]:
+    """Coerce an LLM-supplied port to a valid int, or None.
+
+    The model sometimes labels a node's port with a SERVICE NAME ("DNS",
+    "http", "smb") instead of a number.  ``int("DNS")`` raised
+    ``ValueError`` and aborted the WHOLE graph update — every chain node and
+    edge from that analysis was silently dropped ("Graph update failed:
+    invalid literal for int()").  This guard returns a port only when it is
+    a real number in range, else None (which the DB layer accepts), so one
+    bad field can never sink the rest of the graph."""
+    if value is None:
+        return None
+    if isinstance(value, bool):          # bool is an int subclass — reject
+        return None
+    if isinstance(value, int):
+        return value if 0 < value <= 65535 else None
+    s = str(value).strip()
+    if not s.isdigit():
+        return None
+    try:
+        p = int(s)
+    except (TypeError, ValueError):
+        return None
+    return p if 0 < p <= 65535 else None
+
 # ── Config ────────────────────────────────────────────────────────────────────
 # Note: the LLM backend (Anthropic / Claude Code / Ollama / OpenAI / etc.)
 # is selected by ``utils.llm_providers.get_provider()`` from the operator's
@@ -454,7 +480,7 @@ class AttackGraphAgent:
                     node_type  = node.get("type", "vulnerability"),
                     label      = node.get("label", nid),
                     host       = self.target,
-                    port       = int(node.get("metadata", {}).get("port", 0) or 0) or None,
+                    port       = _safe_port((node.get("metadata") or {}).get("port")),
                     severity   = node.get("severity", "medium"),
                     phase      = "chain_analysis",
                     metadata   = {**(node.get("metadata") or {}), "from_chain_agent": True},

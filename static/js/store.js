@@ -2665,6 +2665,18 @@ function routeWsEvent(msg, dispatch, shellListeners, sessionId) {
       break;
     }
 
+    // A tool or a file it needs is missing on the host — surface an install hint
+    // to the human so the box is better-provisioned next time (not a target finding).
+    case 'tool_missing': {
+      const md = data || msg;
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: (md.subagent || 'master'), eventType: 'tool_missing',
+        message: `🧩 Missing ${md.kind || 'tool'}: ${md.tool} — install for better performance: ${md.install || ('apt install -y ' + md.tool)}`,
+        data: md,
+      }});
+      break;
+    }
+
     // ── Neo4j-inferred attack paths (#10) ─────────────────
     case 'inferred_paths_updated': {
       const pd = data || msg;

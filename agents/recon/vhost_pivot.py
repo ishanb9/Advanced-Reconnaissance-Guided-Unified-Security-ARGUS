@@ -270,6 +270,80 @@ def remap_vhosts(target_ip: str, hostnames: Iterable[str]) -> Tuple[List[str], L
     return hosts_add(target_ip, hostnames, force=VHOST_AUTOMAP)
 
 
+def reconcile_stale_vhosts_for_target(
+    target_ip: str, *, force: Optional[bool] = None
+) -> List[str]:
+    """PROACTIVELY purge STALE argus-managed /etc/hosts entries at scan start.
+
+    Across engagements ARGUS leaves ``<ip> <vhost> # argus-managed`` lines in
+    /etc/hosts.  When the NEXT target reuses the same vhost name on a new IP
+    (the norm for HTB-style boxes — e.g. a hostname that was 10.129.17.70 last
+    run and 10.129.21.9 this run), the leftover line wins glibc's first-match
+    rule and every web tool silently hits the OLD box.  In the reviewed run
+    this misdirected ~6-7 min of recon before the *reactive* ``remap_vhosts``
+    caught it mid-web-testing.
+
+    Run ONCE at scan start, this removes any argus-managed hostname mapped to
+    an IP other than ``target_ip`` so it re-resolves cleanly when the redirect
+    pivot later re-maps it to the live target.
+
+    Safety: ONLY lines bearing :data:`HOSTS_MANAGED_MARKER` are candidates —
+    an operator's own manual /etc/hosts entries are never touched.  Honours
+    :data:`VHOST_AUTOMAP` as the write gate (when off, reports what WOULD be
+    reconciled without modifying the file).  Returns the reconciled hostnames.
+    Best-effort; never raises.
+    """
+    if not target_ip:
+        return []
+    do_write = VHOST_AUTOMAP if force is None else force
+    try:
+        lines = hosts_read()
+    except Exception:
+        return []
+    reconciled: List[str] = []
+    kept: List[str] = []
+    for line in lines:
+        stripped = line.strip()
+        # Only argus-managed mapping lines are candidates for removal.
+        if (not stripped or stripped.startswith("#")
+                or HOSTS_MANAGED_MARKER not in line):
+            kept.append(line)
+            continue
+        parts = stripped.split()
+        if len(parts) < 2:
+            kept.append(line)
+            continue
+        ip = parts[0]
+        line_hosts = [p for p in parts[1:] if not p.startswith("#")]
+        if ip != target_ip and line_hosts:
+            reconciled.extend(h.lower() for h in line_hosts)
+            continue                       # drop the stale managed line
+        kept.append(line)
+    if not reconciled:
+        return []
+    if not do_write:
+        logger.info("[vhost] stale managed mapping(s) detected (automap off, "
+                    "not rewriting): %s", reconciled)
+        return reconciled
+    try:
+        with open(HOSTS_FILE, "w", encoding="utf-8") as f:
+            f.writelines(kept)
+        logger.info("[vhost] reconciled stale /etc/hosts mapping(s) at scan "
+                    "start: %s", reconciled)
+    except PermissionError:
+        if _sudo_tee("".join(kept), append=False):
+            logger.info("[vhost] reconciled stale /etc/hosts mapping(s) via "
+                        "sudo: %s", reconciled)
+            return reconciled
+        logger.warning("[vhost] no permission to rewrite %s (stale reconcile "
+                       "skipped)", HOSTS_FILE)
+        return []
+    except Exception as exc:
+        logger.warning("[vhost] /etc/hosts stale reconcile failed: %s", exc)
+        return []
+    return reconciled
+
+
 # ── ffuf-driven vhost brute-force ───────────────────────────────────────
 
 ToolRunner = Callable[[str, List[str], int], Awaitable[Tuple[int, str, str]]]

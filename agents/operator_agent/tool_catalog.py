@@ -125,6 +125,18 @@ TOOLS: List[Dict[str, Any]] = [
         "doc": "Record a captured flag (user.txt / root.txt) — a primary objective.",
     },
     {
+        "name": "listener",
+        "args": {"port": "int(optional, default 4444)", "lhost": "str(optional)"},
+        "doc": ("Open a PERSISTENT reverse-shell / callback listener managed by the "
+                "platform — it SURVIVES across actions and auto-registers the shell "
+                "that connects back. This is how you CATCH a callback from a blind "
+                "RCE: call `listener`, then fire a reverse-shell payload through "
+                "your RCE primitive (web injection / command-exec). NEVER hand-roll "
+                "`nc -lvnp` inside a bash/run_tool call — the harness kills a "
+                "backgrounded listener the instant the call returns, so the shell "
+                "is never caught. Returns LHOST/LPORT + a ready-to-fire payload."),
+    },
+    {
         "name": "handover",
         "args": {"method": "str(optional: ssh|revshell|info)", "note": "str(optional)"},
         "doc": ("Hand the live foothold to the HUMAN operator. Registers the "
@@ -190,6 +202,14 @@ Rules:
   `python3 /tmp/<poc>/exploit.py -u http://TARGET:PORT -c id`) instead of wrapping
   it in a multi-line bash heredoc. If a command errors on quoting twice, simplify
   it — do not keep escalating the escaping.
+- TO CATCH A REVERSE SHELL OR ANY CALLBACK, use the `listener` tool — NEVER
+  `nc -lvnp` (or socat) inside a bash/run_tool call. A backgrounded listener
+  started in a tool call is KILLED the instant the call returns (exit -15), so
+  the shell never connects. The `listener` tool opens a PERSISTENT listener that
+  survives across actions and auto-registers the caught shell. Pattern: (1) call
+  `listener`, (2) fire the reverse-shell payload it returns through your RCE,
+  (3) the shell registers on its own. If your RCE returns command output inline,
+  you often do not need a reverse shell at all — just read the flag through it.
 - Call done ONLY when objectives are met or all realistic avenues are exhausted.
 """
 

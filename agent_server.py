@@ -212,7 +212,23 @@ class WebSocketManager:
         """Return buffered events for replay on WS connect."""
         return list(self._event_buffer.get(session_id, []))
 
-    async def broadcast(self, message: WebSocketMessage):
+    async def broadcast(self, message: "WebSocketMessage | dict"):
+        # ── Defensive dict adapter ────────────────────────────────────────────
+        # A BaseSubagent._emit() flat dict can reach here when a subagent was
+        # wired with the RAW broadcast callable instead of the dict→message
+        # adapter.  Without this guard, `message.session_id` raised
+        # "'dict' object has no attribute 'session_id'" — which fired 4,763× in a
+        # single run, silently dropping the ENTIRE subagent event stream (tool
+        # output, findings, lifecycle) from the UI.  Re-route dicts through the
+        # normaliser (which re-enters this method with a real WebSocketMessage,
+        # so there is no recursion).
+        if isinstance(message, dict):
+            await self.broadcast_raw(
+                message.get("session_id", ""),
+                message.get("type", "subagent_event"),
+                message,
+            )
+            return
         session_id = message.session_id
         payload = message.model_dump()
         if hasattr(payload.get("timestamp"), "isoformat"):
