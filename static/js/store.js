@@ -809,10 +809,17 @@ function reducer(state, action) {
       return { ...state, planSteps: action.payload || [] };
 
     case 'AGENT_COMM_LLM': {
-      const { agent, phase, prompt, response, model, ts } = action.payload;
+      const { agent, phase, prompt, response, model, ts,
+              prompt_tokens, completion_tokens, total_tokens, tokens_estimated } = action.payload;
       const key = agent || 'master';
       const prev = state.agentComms[key] || [];
-      const entry = { type: 'llm', phase, prompt, response, model, ts };
+      // Carry real token usage when the provider exposed it so panels can show
+      // actual tokens with an "(est)" flag only when truly estimated.
+      const entry = { type: 'llm', phase, prompt, response, model, ts,
+                      prompt_tokens: prompt_tokens || 0,
+                      completion_tokens: completion_tokens || 0,
+                      total_tokens: total_tokens || 0,
+                      tokens_estimated: tokens_estimated !== false ? !total_tokens : false };
       return { ...state, agentComms: {
         ...state.agentComms,
         [key]: [entry, ...prev].slice(0, 100)  // newest first, cap at 100 per agent
@@ -1787,6 +1794,28 @@ function routeWsEvent(msg, dispatch, shellListeners, sessionId) {
         thought:   data.response,
         phase:     normalizePhase(data.phase) || '',
         timestamp: new Date().toISOString(),
+      }});
+      // Route EVERY LLM response into agentComms + the event feed too.  The
+      // backend emits ~13× more llm_response than llm_comm, so MissionControl's
+      // feed (fed by agentComms) was starved and looked far poorer than the AI
+      // Observability reasoning log.  Carry the REAL token usage when present so
+      // the UI can show actual tokens (not a chars÷4 estimate).
+      dispatch({ type: 'AGENT_COMM_LLM', payload: {
+        agent:    normalizeAgent(data.agent) || agent,
+        phase:    normalizePhase(data.phase) || '',
+        prompt:   data.prompt || '',
+        response: data.response || '',
+        model:    data.model || '',
+        prompt_tokens:     data.prompt_tokens || 0,
+        completion_tokens: data.completion_tokens || 0,
+        total_tokens:      data.total_tokens || 0,
+        tokens_estimated:  data.tokens_estimated !== false ? !data.total_tokens : false,
+        ts,
+      }});
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: normalizeAgent(data.agent) || agent, eventType: 'llm',
+        message: `💬 ${(data.response || '').replace(/\s+/g, ' ').slice(0, 140)}`,
+        data: { total_tokens: data.total_tokens || 0 },
       }});
       break;
 

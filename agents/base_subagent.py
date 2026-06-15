@@ -654,6 +654,13 @@ class BaseSubagent(ABC):
             """Yield output lines from a local subprocess."""
             import asyncio as _asyncio
             cmd = _build_cmd()
+            # Detach un-redirected backgrounded jobs (`cmd &`) so a child can't
+            # hold our stdout pipe open and block the reader for minutes.
+            try:
+                from agents.base_agent import _detach_background_jobs as _dbg
+                cmd = _dbg(cmd)
+            except Exception:
+                pass
             logger.debug("run_tool LOCAL: %s", cmd)
             proc = await _asyncio.create_subprocess_shell(
                 cmd,

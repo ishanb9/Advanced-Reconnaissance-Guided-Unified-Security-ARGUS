@@ -1386,7 +1386,7 @@ function MissionControl(props) {
     webConfirmPending, phaseTimeExtension,
     reasoningEngineActive, reasoningIteration, hypotheses, actionScore,
     operatorQuestions, engagementContext,
-    agentComms,
+    agentComms, reasoningLog,
   } = state;
   const vm = (props && props.viewMode) || 'OPERATOR';
   const fontScale = vm === 'BRIEFING' ? 16 : 14;
@@ -1537,24 +1537,42 @@ function MissionControl(props) {
     return { line: `${ts} ${msg}`, type: 'event' };
   }
 
-  // Compose the visible stream — prefer real tool output when it exists,
-  // otherwise stitch LLM/RAG comms + feed activity in chronological order.
+  // Compose the visible stream.  agentComms is newest-first → reverse to
+  // chronological so the comm tail reads top-to-bottom.
+  const _commChrono = [];
+  for (let i = focusedComms.length - 1; i >= 0; i--) {
+    const item = _commToLine(focusedComms[i]);
+    if (item) _commChrono.push(item);
+  }
+  // Keep REASONING ALWAYS VISIBLE: previously LLM/RAG comms were shown only as
+  // a fallback when no tool output existed, so the feed went dark the instant a
+  // tool ran (why MissionControl felt far poorer than the AI-Observability
+  // reasoning log).  Now tool output is followed by a tail of the most recent
+  // LLM/RAG reasoning, so the operator always sees what the agent is thinking.
   let visibleLines;
   if (focusedLines.length > 0) {
-    visibleLines = focusedLines;
+    visibleLines = focusedLines.concat(_commChrono.slice(-12));
   } else {
-    const stitched = [];
-    // agentComms is newest-first; reverse for chronological top-to-bottom
-    for (let i = focusedComms.length - 1; i >= 0; i--) {
-      const item = _commToLine(focusedComms[i]);
-      if (item) stitched.push(item);
-    }
+    const stitched = _commChrono.slice();
     focusedFeed.forEach(e => {
       const item = _feedToLine(e);
       if (item) stitched.push(item);
     });
     visibleLines = stitched;
   }
+
+  // RAG hit/miss + LLM-call tile (read-only) so the operator can see at a glance
+  // whether the knowledge base is being consulted and how often — the reviewed
+  // runs barely used RAG and nothing surfaced it.
+  const ragStats = useMemo(() => {
+    let hits = 0, misses = 0, llm = 0;
+    Object.values(agentComms || {}).forEach(arr => (arr || []).forEach(c => {
+      if (!c) return;
+      if (c.type === 'rag') { c.found ? hits++ : misses++; }
+      else if (c.type === 'llm') { llm++; }
+    }));
+    return { hits, misses, llm, ragTotal: hits + misses };
+  }, [agentComms]);
 
   return React.createElement('div', {
     'data-view-mode': vm,
@@ -1957,7 +1975,19 @@ function MissionControl(props) {
           React.createElement('span', { style: { fontSize: 10, fontWeight: 700, color: agentColor(focusedAgent), fontFamily: 'var(--font-mono)', letterSpacing: 0.5 } },
             focusedAgent?.toUpperCase()
           ),
-          React.createElement('span', { style: { fontSize: 9, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' } }, '— click agent to focus')
+          React.createElement('span', { style: { fontSize: 9, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' } }, '— click agent to focus'),
+          // LLM / RAG activity tile — at-a-glance reasoning + knowledge-base use.
+          (ragStats.llm > 0 || ragStats.ragTotal > 0) && React.createElement('span', {
+            style: { marginLeft: 'auto', display: 'flex', gap: 10, fontSize: 9,
+                     fontFamily: 'var(--font-mono)', alignItems: 'center' }
+          },
+            React.createElement('span', { style: { color: 'var(--cyan)' }, title: 'LLM calls (this session)' },
+              '💬 ' + ragStats.llm),
+            React.createElement('span', {
+              style: { color: ragStats.ragTotal === 0 ? 'var(--text-muted)' : 'var(--amber)' },
+              title: 'RAG knowledge-base hits / misses'
+            }, '📚 ' + ragStats.hits + '/' + ragStats.ragTotal)
+          )
         ),
         React.createElement('div', {
           style: { flex: 1, overflowY: 'auto', fontFamily: 'var(--font-mono)', fontSize: 10.5, lineHeight: 1.65, maxHeight: 280, padding: '10px 14px' }

@@ -1119,6 +1119,118 @@ REPORT_TEMPLATE = """
 </table>
 {% endif %}
 
+<!-- ═══════════ ENGAGEMENT TIMELINE ═══════════ -->
+{% if engagement_timeline %}
+<div class="section-header" id="engagement-timeline">
+  <span class="section-num">{{ '%02d' % (sec_offset + 10) }}</span>
+  <span class="section-title">
+    Engagement Timeline
+    <span style="font-size: 13px; color: var(--text-dim); font-weight: 400; letter-spacing: 0; text-transform: none; margin-left: 8px;">
+      (chronological milestones — what happened, when)
+    </span>
+  </span>
+</div>
+<p style="color: var(--text-dim); font-size: 12px; margin-bottom: 8px;">
+  Reconstructed from phase transitions and registered attack-path steps so a reader can follow the
+  engagement from first contact to final outcome.
+</p>
+<table style="width:100%; margin-top:10px; border-collapse:collapse;">
+  <thead><tr style="background: var(--bg-soft);">
+    <th style="text-align:left; padding:8px;">When</th>
+    <th style="text-align:left; padding:8px;">Milestone</th>
+    <th style="text-align:left; padding:8px;">Detail</th>
+  </tr></thead>
+  <tbody>
+  {% for ev in engagement_timeline %}
+    <tr style="border-bottom:1px solid var(--bg-soft);">
+      <td style="padding:8px; font-size:11px; color:var(--text-dim); white-space:nowrap;">{{ (ev.ts or '')[:19] }}</td>
+      <td style="padding:8px;"><strong>{{ ev.label or '—' }}</strong></td>
+      <td style="padding:8px; font-size:12px;">{{ ev.detail or '' }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+<!-- ═══════════ TESTS CONDUCTED (COVERAGE MATRIX) ═══════════ -->
+{% if coverage_tests %}
+<div class="section-header" id="coverage-matrix">
+  <span class="section-num">{{ '%02d' % (sec_offset + 11) }}</span>
+  <span class="section-title">
+    Tests Conducted
+    <span style="font-size: 13px; color: var(--text-dim); font-weight: 400; letter-spacing: 0; text-transform: none; margin-left: 8px;">
+      (coverage matrix — including avenues tested and ruled out)
+    </span>
+  </span>
+</div>
+<p style="color: var(--text-dim); font-size: 12px; margin-bottom: 8px;">
+  Every probe ARGUS executed and its outcome. Negative results are reported deliberately — they show
+  the breadth of testing and document where the target's controls held.
+  {% if coverage_counts %}
+  <br><strong>Totals:</strong>
+  {% for k, v in coverage_counts.items() %}<span style="margin-right:12px;">{{ k }}: {{ v }}</span>{% endfor %}
+  {% endif %}
+</p>
+<table style="width:100%; margin-top:10px; border-collapse:collapse;">
+  <thead><tr style="background: var(--bg-soft);">
+    <th style="text-align:left; padding:8px;">Tool</th>
+    <th style="text-align:left; padding:8px;">Outcome</th>
+    <th style="text-align:left; padding:8px;">Command / Target</th>
+    <th style="text-align:left; padding:8px;">Note</th>
+  </tr></thead>
+  <tbody>
+  {% for t in coverage_tests %}
+    <tr style="border-bottom:1px solid var(--bg-soft);">
+      <td style="padding:8px; font-family:monospace; font-size:11px;">{{ t.tool or '—' }}</td>
+      <td style="padding:8px;">
+        {% if t.outcome == 'success' %}<strong style="color:#3bd16f;">success</strong>
+        {% elif t.outcome == 'blocked' %}<strong style="color:#ff8a3d;">blocked</strong>
+        {% elif t.outcome == 'error' %}<strong style="color:#ff5d6c;">error</strong>
+        {% else %}<span style="color:var(--text-dim);">negative</span>{% endif %}
+      </td>
+      <td style="padding:8px; font-family:monospace; font-size:10px; color:var(--text-dim);">{{ (t.command or '')[:90] }}</td>
+      <td style="padding:8px; font-size:11px;">{{ (t.note or '')[:90] }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+<!-- ═══════════ OTHER DISCOVERED ISSUES ═══════════ -->
+{% if discovered_issues %}
+<div class="section-header" id="discovered-issues">
+  <span class="section-num">{{ '%02d' % (sec_offset + 12) }}</span>
+  <span class="section-title">
+    Other Discovered Issues
+    <span style="font-size: 13px; color: var(--text-dim); font-weight: 400; letter-spacing: 0; text-transform: none; margin-left: 8px;">
+      (observed weaknesses not (yet) weaponised)
+    </span>
+  </span>
+</div>
+<p style="color: var(--text-dim); font-size: 12px; margin-bottom: 8px;">
+  Additional weaknesses ARGUS observed while testing. These are reported for completeness even
+  where they were not exploited, so remediation can address the full attack surface.
+</p>
+<table style="width:100%; margin-top:10px; border-collapse:collapse;">
+  <thead><tr style="background: var(--bg-soft);">
+    <th style="text-align:left; padding:8px;">Severity</th>
+    <th style="text-align:left; padding:8px;">Issue</th>
+    <th style="text-align:left; padding:8px;">Host</th>
+    <th style="text-align:left; padding:8px;">Observed via</th>
+  </tr></thead>
+  <tbody>
+  {% for d in discovered_issues %}
+    <tr style="border-bottom:1px solid var(--bg-soft);">
+      <td style="padding:8px;"><strong>{{ (d.severity or 'INFO') | upper }}</strong></td>
+      <td style="padding:8px;">{{ d.title or '—' }}</td>
+      <td style="padding:8px; font-family:monospace; font-size:11px;">{{ d.host or '—' }}</td>
+      <td style="padding:8px; font-family:monospace; font-size:11px; color:var(--text-dim);">{{ d.tool or '—' }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
 <!-- ═══════════ FOOTER ═══════════ -->
 <div class="report-footer">
   <div class="footer-brand">
@@ -1447,6 +1559,65 @@ class ReportGenerator:
                     "source": "harvested", "note": c[:500],
                 })
 
+        # ── Coverage matrix + discovered-issue storyline (concern: rich report) ─
+        # The operator now records EVERY probe it ran (with negative results) and
+        # every issue it observed, so the report can tell the full storyline —
+        # what was attempted, what was ruled out, what was found — not just wins.
+        coverage_tests: list = []
+        for tr in (intel_snapshot.get("test_results") or [])[:200]:
+            if isinstance(tr, dict):
+                coverage_tests.append({
+                    "tool":    tr.get("tool", ""),
+                    "target":  tr.get("target", ""),
+                    "command": tr.get("command", ""),
+                    "outcome": tr.get("outcome", "negative"),
+                    "note":    tr.get("note", ""),
+                })
+        coverage_counts: dict = {}
+        for _t in coverage_tests:
+            coverage_counts[_t["outcome"]] = coverage_counts.get(_t["outcome"], 0) + 1
+        discovered_issues: list = []
+        _seen_di = set()
+        for di in (intel_snapshot.get("discovered_issues") or [])[:120]:
+            if isinstance(di, dict) and di.get("title"):
+                _k = (di.get("title"), di.get("host"))
+                if _k in _seen_di:
+                    continue
+                _seen_di.add(_k)
+                discovered_issues.append({
+                    "title":    di.get("title", ""),
+                    "severity": di.get("severity", "INFO"),
+                    "tool":     di.get("tool", ""),
+                    "status":   di.get("status", "observed"),
+                    "host":     di.get("host", ""),
+                })
+
+        # ── Engagement timeline — chronological milestones from phase history
+        #    and registered attack-path steps, so a reader can follow the run
+        #    from first contact to outcome.
+        engagement_timeline: list = []
+        _ph_src = (intel_snapshot.get("phase_history")
+                   or session.get("phase_history")
+                   or (summary or {}).get("phase_history") or [])
+        for ph in _ph_src:
+            if isinstance(ph, dict) and ph.get("ts"):
+                engagement_timeline.append({
+                    "ts":     ph.get("ts", ""),
+                    "label":  str(ph.get("phase", "")).replace("AttackPhase.", "") or "phase",
+                    "detail": ph.get("detail", "") or ph.get("status", ""),
+                })
+        for step in attack_path:
+            if isinstance(step, dict) and (step.get("ts") or step.get("timestamp")):
+                engagement_timeline.append({
+                    "ts":     step.get("ts") or step.get("timestamp", ""),
+                    "label":  step.get("phase") or step.get("technique") or "step",
+                    "detail": (step.get("result") or step.get("description")
+                               or step.get("source") or "")[:160],
+                })
+        engagement_timeline = [e for e in engagement_timeline if e.get("ts")]
+        engagement_timeline.sort(key=lambda e: str(e.get("ts")))
+        engagement_timeline = engagement_timeline[:60]
+
         return {
             "session":           session,
             "findings":          findings,
@@ -1454,6 +1625,10 @@ class ReportGenerator:
             "flags":             flags,
             "graph":             graph,
             "intel":             intel,
+            "coverage_tests":    coverage_tests,
+            "coverage_counts":   coverage_counts,
+            "discovered_issues": discovered_issues,
+            "engagement_timeline": engagement_timeline,
             "mitre_mappings":    mitre_mappings,
             "duration":          duration,
             "phases_completed":  session.get("phases_completed", []),

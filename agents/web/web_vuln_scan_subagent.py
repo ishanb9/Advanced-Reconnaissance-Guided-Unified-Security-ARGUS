@@ -154,18 +154,24 @@ class WebVulnScanSubagent(BaseSubagent):
                     if sev == "INFO":
                         continue  # skip pure-info nikto noise
                     cve = nf.get("cve")
-                    await self.store_finding(Finding(
-                        title=f"Nikto: {nf['title']}",
-                        description=nf["description"],
-                        severity=sev,
-                        evidence=nf.get("raw", "")[:500],
-                        tool="nikto",
-                        host=target,
-                        port=port,
-                        cve=cve,
-                        mitre_technique="T1190",
-                        exploit_suggestion=_nikto_exploit_hint(nf),
-                    ))
+                    # Per-finding guard: a malformed finding N must NOT abort
+                    # N+1..M (the single outer try/except used to swallow the
+                    # whole remaining batch on one bad store_finding).
+                    try:
+                        await self.store_finding(Finding(
+                            title=f"Nikto: {nf['title']}",
+                            description=nf["description"],
+                            severity=sev,
+                            evidence=nf.get("raw", "")[:500],
+                            tool="nikto",
+                            host=target,
+                            port=port,
+                            cve=cve,
+                            mitre_technique="T1190",
+                            exploit_suggestion=_nikto_exploit_hint(nf),
+                        ))
+                    except Exception as _fexc:
+                        logger.warning("[web_vuln_scan] nikto finding store skipped: %s", _fexc)
 
             except Exception as exc:
                 logger.warning("[web_vuln_scan] nikto error for %s: %s", url, exc)
@@ -191,22 +197,27 @@ class WebVulnScanSubagent(BaseSubagent):
                 for nuc in parsed_n:
                     sev = nuc.get("severity", "INFO")
                     cve = nuc.get("cve")
-                    await self.store_finding(Finding(
-                        title=f"Nuclei [{nuc['template_id']}]: {nuc.get('matcher', '')}",
-                        description=(
-                            f"Nuclei template {nuc['template_id']} matched on {nuc['url']}. "
-                            f"Protocol: {nuc.get('protocol', 'http')}. "
-                            f"Matcher: {nuc.get('matcher', 'unknown')}."
-                        ),
-                        severity=sev,
-                        evidence=nuc.get("raw", "")[:600],
-                        tool="nuclei",
-                        host=target,
-                        port=port,
-                        cve=cve,
-                        mitre_technique="T1190",
-                        exploit_suggestion=_nuclei_exploit_hint(nuc),
-                    ))
+                    # Per-finding guard (see nikto note above): isolate each store
+                    # so one malformed nuclei match can't drop the rest.
+                    try:
+                        await self.store_finding(Finding(
+                            title=f"Nuclei [{nuc['template_id']}]: {nuc.get('matcher', '')}",
+                            description=(
+                                f"Nuclei template {nuc['template_id']} matched on {nuc['url']}. "
+                                f"Protocol: {nuc.get('protocol', 'http')}. "
+                                f"Matcher: {nuc.get('matcher', 'unknown')}."
+                            ),
+                            severity=sev,
+                            evidence=nuc.get("raw", "")[:600],
+                            tool="nuclei",
+                            host=target,
+                            port=port,
+                            cve=cve,
+                            mitre_technique="T1190",
+                            exploit_suggestion=_nuclei_exploit_hint(nuc),
+                        ))
+                    except Exception as _fexc:
+                        logger.warning("[web_vuln_scan] nuclei finding store skipped: %s", _fexc)
 
             except Exception as exc:
                 logger.warning("[web_vuln_scan] nuclei error for %s: %s", url, exc)

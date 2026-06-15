@@ -202,6 +202,19 @@ class OperatorCore:
         self._banned_endpoints: set = set()
         self._endpoint_max_repeats = max(2, min(6, int(
             os.environ.get("ARGUS_OPERATOR_ENDPOINT_MAX_REPEATS", "3"))))
+        # Findings-recording reflex: dedup keys for DISCOVERED-but-not-exploited
+        # issues so every issue ARGUS observes is recorded ONCE (concern #1 — the
+        # operator used to record only the final win, leaving an empty findings
+        # page and a thin report).  Coverage/test-result log feeds the report's
+        # 'tests conducted' + negative-results matrix.
+        self._recorded_vuln_keys: set = set()
+        self._intel.setdefault("discovered_issues", [])
+        self._intel.setdefault("test_results", [])
+        # Out-of-band exploit verification: identical (vector,target,payload)
+        # attempts that already FAILED verification are not re-fired (concern #4
+        # root cause — both runs spun re-attacking dead vectors until the human
+        # cancelled).  Key = sha1(tool|target|payload); value = attempt count.
+        self._failed_exploits: Dict[str, int] = {}
         # Holistic engine spine: surface model + objective-aware hypothesis
         # backlog (built lazily once intel + objective are known).
         self._surface = None
@@ -534,6 +547,12 @@ class OperatorCore:
             # Parallelism nudge — a real operator fans INDEPENDENT work out at once.
             await self._maybe_parallel_nudge(tool)
             self._track_progress()
+            # Coverage log — record what was tried and its outcome (incl. negative
+            # results) so the report shows a 'tests conducted' matrix, not just wins.
+            try:
+                self._record_coverage(tool, action.get("args"), observation)
+            except Exception:
+                pass
             # Tally this method's attempt.  A productive round (new shell / flag /
             # cred / vuln) clears the strike count — a working method is never
             # penalised.  A non-productive round adds a strike; at the cap the
@@ -1517,6 +1536,135 @@ class OperatorCore:
             if mm.group(1) not in users:
                 users.append(mm.group(1))
 
+        # 5) DISCOVERED-but-not-(yet)-exploited issues — record EVERY issue ARGUS
+        #    observes, not only the final win (concern #1).  Never sets a
+        #    foothold/verified flag, so a low-confidence discovery cannot be
+        #    mistaken for a confirmed exploit or falsely defer the time budget.
+        try:
+            await self._extract_generic_vulns(clean, tool, args, host)
+        except Exception:
+            pass
+
+    async def _extract_generic_vulns(self, clean: str, tool: str, args: Any, host: str) -> None:
+        """Record DISCOVERED issues from tool output as findings so the report
+        documents the full storyline — what was seen, not just what was won.
+
+        Detectors are GENERIC and content-agnostic (database-error / stack-trace /
+        directory-listing / verbose-banner / access-control signatures — never a
+        CVE id, product name, or payload literal), so the engine stays free of
+        hardcoded attack knowledge.  Each issue is deduped per session and
+        recorded at INFO/LOW/MEDIUM with status 'observed' — it is a *discovery*,
+        not a confirmed exploit, so it does NOT flip shell_access / rce_confirmed
+        and does NOT count toward verified progress.  Best-effort; never raises."""
+        import re as _re
+        low = (clean or "").lower()
+        if len(low) < 12:
+            return
+        target = host or self._target
+        keys = self._recorded_vuln_keys
+
+        async def _rec(key: str, sev: str, title: str, desc: str) -> None:
+            if key in keys:
+                return
+            keys.add(key)
+            self._intel.setdefault("discovered_issues", []).append({
+                "title": title, "severity": sev, "tool": tool,
+                "status": "observed", "host": target})
+            await self._store_finding_safe(sev, title, desc, target, tool)
+
+        # (regex, severity, title, description) — high-signal, generic only.
+        _DETECTORS = [
+            (r"sql syntax|sqlstate\[|ora-\d{5}|mysql_fetch|unclosed quotation|"
+             r"psql:|pg_query|sqlite3?\.operationalerror|you have an error in your sql",
+             "MEDIUM", "Possible SQL injection — database error reflected",
+             "A database engine error was reflected in the response, indicating "
+             "unsanitised input may reach a SQL query. Confirm with a controlled "
+             "injection probe before exploiting."),
+            (r"traceback \(most recent call last\)|werkzeug debugger|"
+             r"stack trace|exception in thread|fatal error:|<b>warning</b>:|"
+             r"undefined index|notice: undefined",
+             "LOW", "Verbose error / stack trace disclosure",
+             "The application returned a stack trace or verbose error, leaking "
+             "internal paths, framework details, or source context that aids an "
+             "attacker. Disable debug mode and return generic errors."),
+            (r"<title>index of /|directory listing for|\[to parent directory\]",
+             "LOW", "Directory listing enabled",
+             "A web directory returned an automatic file index, exposing files "
+             "that were not meant to be browsable. Disable autoindex."),
+            (r"x-powered-by:|server:\s*(?:apache|nginx|microsoft-iis|gunicorn|werkzeug)/",
+             "INFO", "Service / framework version disclosure",
+             "Response headers disclose precise server/framework versions, "
+             "accelerating attacker fingerprinting and exploit selection."),
+            (r"\b401 unauthorized\b|\b403 forbidden\b|www-authenticate:",
+             "INFO", "Access-controlled surface discovered",
+             "An endpoint responded with an authentication/authorisation "
+             "challenge, revealing a protected surface worth targeting with "
+             "default-credential and auth-bypass checks."),
+            (r"phpinfo\(\)|<title>phpinfo|allow_url_include",
+             "MEDIUM", "Information disclosure — phpinfo / config exposed",
+             "A diagnostic/configuration page was reachable, disclosing "
+             "environment, paths, and enabled modules."),
+        ]
+        for pat, sev, title, desc in _DETECTORS:
+            if _re.search(pat, low):
+                await _rec(f"{title}|{target}", sev, title, desc)
+
+    def _record_coverage(self, tool: str, args: Any, observation: str,
+                         exit_code: Any = None) -> None:
+        """Append a one-line coverage/test-result record so the report can show a
+        'tests conducted' matrix WITH negative results (what was tried and ruled
+        out), like a professional report.  Outcome is classified generically from
+        the observation; never raises, capped so it can't grow unbounded."""
+        try:
+            tr = self._intel.setdefault("test_results", [])
+            if len(tr) >= 400:
+                return
+            obs = (observation or "")
+            low = obs.lower()
+            if exit_code in (28,) or "timed out" in low or "timeout" in low:
+                outcome = "blocked"
+            elif "[fail]" in low or "error" in low[:80] or "refused" in low or "no route" in low:
+                outcome = "error"
+            elif any(k in low for k in ("uid=", "200 ok", "found", "discovered",
+                                        "vulnerable", "success")):
+                outcome = "success"
+            else:
+                outcome = "negative"
+            _args = args
+            if isinstance(args, dict):
+                _args = args.get("args") or args.get("url") or args.get("cmd") or ""
+            tr.append({
+                "tool": tool, "target": self._target,
+                "command": str(_args)[:200], "outcome": outcome,
+                "note": obs.strip().replace("\n", " ")[:160],
+            })
+        except Exception:
+            pass
+
+    def _has_verified_progress(self) -> bool:
+        """STRICT progress: only a confirmed foothold/flag/credential/loot or a
+        backlog hypothesis the engine actually CONFIRMED counts.  Unlike
+        _has_progress_signal (which also counts speculative leads such as
+        version-matched CVE seeds and 'observed' discoveries), this is what a
+        global-stall wind-down keys off, so the operator can't spin forever on
+        unverified leads until a human gives up (the real cause of both
+        cancelled runs)."""
+        it = self._intel
+        if (it.get("shell_access") or it.get("rce_confirmed")
+                or it.get("user_flag") or it.get("root_flag")):
+            return True
+        for k in ("credentials", "loot"):
+            v = it.get(k)
+            if isinstance(v, (list, dict)) and len(v) > 0:
+                return True
+        if self._backlog is not None:
+            try:
+                if any(h.status == "confirmed" for h in self._backlog.all()):
+                    return True
+            except Exception:
+                pass
+        return False
+
     async def _maybe_parallel_nudge(self, tool: str) -> None:
         """`dispatch` resets the single-action streak; a run of single actions
         earns a reminder (once per streak) to batch the next INDEPENDENT steps so
@@ -2241,6 +2389,25 @@ class OperatorCore:
                 if txt:
                     notes.append("• " + txt)
 
+        # 1b) Drain REAL-TIME advisories from PARALLEL support agents (attack-graph
+        #     chain analysis, RAG advisor, lateral analyzer) that run alongside the
+        #     operator and feed it WITHOUT blocking the ReAct loop.  This is how
+        #     "other agents support the operator in parallel" lands in its
+        #     reasoning — the operator stays the sole exploitation driver; these
+        #     are advisory only.  Non-blocking: whatever is ready is consumed.
+        aq = getattr(self.master, "_advisor_queue", None)
+        if aq is not None:
+            for _ in range(8):
+                try:
+                    adv = aq.get_nowait()
+                except Exception:
+                    break
+                if isinstance(adv, dict):
+                    _src = adv.get("source", "advisor")
+                    _txt = str(adv.get("text", "")).strip()
+                    if _txt:
+                        notes.append(f"• [{_src}] {_txt[:600]}")
+
         # 2) Red-team Expert critique of the current engagement state.  SKIP it
         #    once a foothold exists: post-foothold the Expert's web-surface
         #    critique is noise, and its "identical intel between consultations"
@@ -2687,6 +2854,22 @@ class OperatorCore:
             parts.append("[stderr] " + err)
         if res.get("blocked"):
             parts.append("[note] circuit-breaker blocked this (tool,target) — pivot.")
+        # Connection-timeout guidance — a curl/HTTP exit 28 (or a 'timed out'
+        # body) means the endpoint did not respond, NOT that the host is dead.
+        # Steer the operator away from re-firing the identical request (the loop
+        # that burned both cancelled runs) toward a fast connectivity re-test,
+        # an alternate port/endpoint, or out-of-band verification.  Generic hint.
+        _low = (out + " " + err).lower()
+        if code == 28 or "timed out" in _low or "connection timed out" in _low:
+            parts.append("[timeout] endpoint did not respond in time — do NOT "
+                         "re-fire the same request. Re-test reachability with a "
+                         "short --connect-timeout, try an alternate port/path, or "
+                         "verify out-of-band; pivot if it stays unreachable.")
+        # Backgrounding hint — a long-running '&' job with no redirect blocks the
+        # reader (one run lost ~16 min this way). Remind to detach child fds.
+        if " & " in f" {args} " and ">/dev/null" not in str(args):
+            parts.append("[note] background a job with `… >/dev/null 2>&1 &` so it "
+                         "does not hold the command open and stall the loop.")
         return "\n".join(parts)
 
     def _intel_surface_snapshot(self) -> Dict[str, int]:

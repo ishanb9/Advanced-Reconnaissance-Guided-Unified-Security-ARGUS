@@ -1452,6 +1452,7 @@ class MasterAgent(BaseAgent):
                     broadcast  = self.broadcast,
                     db         = _db_mod.get_db(),
                     services   = self._intel.get("services", {}),
+                    master     = self,   # parallel chain analysis → operator advisories
                 )
                 self._create_task(_aga.run_analysis_loop())
                 # Keep reference so we can push updated services later
@@ -2565,7 +2566,14 @@ class MasterAgent(BaseAgent):
                       "domain", "dc_ip", "interesting_files", "banners",
                       "service_versions", "shells"}
         LIST_KEYS  = {"cves", "vulnerabilities", "exploits", "web_vulns",
-                      "login_pages", "subdomains", "web_targets"}
+                      "login_pages", "subdomains", "web_targets",
+                      # Web subagents emit tool-specific finding lists in
+                      # parsed_data; without these keys the merge SILENTLY DROPPED
+                      # nikto/nuclei/dirb/whatweb discoveries, so they never
+                      # reached intel/findings/the report (a confirmed cause of the
+                      # near-empty findings page).  Additive — extends coverage only.
+                      "nikto_findings", "nuclei_findings", "dirb_findings",
+                      "whatweb_findings", "discovered_issues"}
 
         for res in results:
             if res is None or isinstance(res, Exception):
@@ -4122,6 +4130,31 @@ class MasterAgent(BaseAgent):
             _l.getLogger(__name__).warning(
                 "[ingest_loot] failed: %s", exc)
             return 0
+
+    def notify_advisor(self, source: str, text: str, meta: Optional[dict] = None) -> None:
+        """Push a NON-BLOCKING advisory from a PARALLEL support agent into the
+        operator's advisor queue.
+
+        Support agents (attack-graph chain analysis, a RAG advisor, a lateral
+        analyzer) run alongside the operator and use the LLM/KB on their own; this
+        is the channel that lets their conclusions reach the operator's reasoning
+        WITHOUT blocking its ReAct loop and WITHOUT making them exploitation
+        drivers (the operator stays the sole gatekeeper).  The operator drains
+        this queue on its advisor cadence (``_consult_advisors``).  The queue is
+        created lazily and bounded so a chatty advisor can't grow it without
+        limit.  Best-effort — never raises into the caller."""
+        try:
+            q = getattr(self, "_advisor_queue", None)
+            if q is None:
+                import asyncio as _aio
+                q = _aio.Queue(maxsize=200)
+                self._advisor_queue = q
+            try:
+                q.put_nowait({"source": source, "text": text, "meta": meta or {}})
+            except Exception:
+                pass   # full queue → drop oldest-style: just skip (advisory only)
+        except Exception:
+            pass
 
     async def register_shell(
         self,
@@ -5767,7 +5800,15 @@ class MasterAgent(BaseAgent):
                 web_ports = sorted(int(str(p).split("/")[0]) for p in (web_ports or []))
             except Exception:
                 web_ports = list(web_ports or [])
-        await self._advance_phase(AttackPhase.VULN_ID)
+        # Web testing is a PARALLEL sub-phase that shares the VULN_ID state-machine
+        # slot (exactly like _phase_cloud / _phase_container / _phase_traffic, which
+        # deliberately do NOT call _advance_phase).  The previous
+        # `_advance_phase(AttackPhase.VULN_ID)` here RE-STAMPED VULN_ID every time
+        # web testing began — producing the cosmetic second "VULN_ID start" seen in
+        # the run timeline and resetting phase-progress.  (Renaming to
+        # AttackPhase.WEB_TESTING is NOT an option — that enum value does not exist
+        # and would raise AttributeError.)  The phase_start emit below already
+        # announces WEB_TESTING to the UI; no state-machine advance is needed.
         await self._emit("phase_start", {
             "phase":   "WEB_TESTING",
             "message": f"Adaptive web testing starting on {len(web_ports)} port(s): {web_ports[:5]}"
@@ -8698,9 +8739,48 @@ Return JSON:
             self._intel["engagement_outcome"] = assess["level"]
             self._intel["compromised"]        = assess["compromised"]
 
+            # Observability: ALWAYS surface the honest verdict (level + the
+            # signals behind it) on EVERY path — including the early returns
+            # below.  Previously the gate emitted nothing when it returned early,
+            # so the log/UI/report could show an outcome with no visible basis
+            # (the cancelled run's outcome looked opaque).  forced_push=False here;
+            # the forced-push branch re-emits with forced_push=True if it fires.
+            try:
+                await self._emit("compromise_gate", {
+                    "session_id":       session_id,
+                    "outcome":          assess["level"],
+                    "compromised":      assess["compromised"],
+                    "shell":            assess["shell"],
+                    "flags":            assess["flags"],
+                    "harvested_creds":  assess["harvested_creds"],
+                    "verified_exploit": assess["verified_exploit"],
+                    "forced_push":      False,
+                })
+            except Exception:
+                pass
+
             if assess["foothold_progress"] or getattr(self, "_final_push_done", False):
                 # Either we made genuine progress, or we already spent our one
                 # forced push — reporting is now warranted.
+                return
+
+            # User-cancel: do NOT fire a forced exploitation pass.  It would be
+            # SIGKILLed mid-flight and burn the teardown window for nothing (a
+            # cancelled run wasted time here, then reported an outcome that didn't
+            # match the assessment).  Keep the honest recon_only outcome already
+            # recorded above so the report label matches reality.
+            if getattr(self, "_stop_requested", False):
+                try:
+                    await self.emit_reasoning(
+                        step       = "compromise_gate",
+                        reasoning  = ("Engagement was cancelled before a foothold. "
+                                      "Skipping the forced exploitation pass and "
+                                      "reporting the honest recon-only outcome."),
+                        decision   = "gate skipped: user stop",
+                        next_action= "Generate report (no-compromise)",
+                    )
+                except Exception:
+                    pass
                 return
 
             self._final_push_done = True

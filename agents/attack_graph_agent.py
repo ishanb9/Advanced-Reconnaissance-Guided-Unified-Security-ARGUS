@@ -247,12 +247,18 @@ class AttackGraphAgent:
         broadcast:   Callable[[dict], Coroutine[Any, Any, None]],
         db:          AsyncIOMotorDatabase,
         services:    Optional[dict] = None,
+        master:      Optional[Any] = None,
     ) -> None:
         self.session_id  = session_id
         self.target      = target
         self.broadcast   = broadcast
         self.db          = db
         self.services    = services or {}
+        # Optional back-reference to the master so chain analysis (which already
+        # runs in PARALLEL and uses the LLM/KB) can feed advisories to the
+        # operator via master.notify_advisor — supporting the operator without
+        # blocking it.  None when run standalone; advisory push is then skipped.
+        self._master     = master
         self._stop       = False
         self._seen_fids: set[str] = set()   # finding IDs already analyzed
         self._analysis_count = 0
@@ -465,6 +471,29 @@ class AttackGraphAgent:
 
         logger.info("[AttackGraphAgent] Analysis #%d complete: %d chains",
                     self._analysis_count, len(analysis.get("chains", [])))
+
+        # PARALLEL SUPPORT — feed the operator the single most valuable next step
+        # this analysis surfaced (advisory only; never blocks the operator loop).
+        try:
+            if self._master is not None and hasattr(self._master, "notify_advisor"):
+                _acts = analysis.get("immediate_actions") or []
+                _chains = analysis.get("chains") or []
+                _hint = ""
+                if _acts:
+                    _first = _acts[0]
+                    _hint = (_first.get("description") or _first.get("action") or str(_first)
+                             if isinstance(_first, dict) else str(_first))
+                elif _chains:
+                    _c0 = _chains[0]
+                    _hint = (_c0.get("name") or _c0.get("description") or str(_c0)
+                             if isinstance(_c0, dict) else str(_c0))
+                if _hint:
+                    self._master.notify_advisor(
+                        "attack-graph",
+                        f"Highest-value next step from chain analysis "
+                        f"({len(_chains)} chain(s) mapped): {str(_hint)[:300]}")
+        except Exception:
+            pass
 
     # ── Graph updates ─────────────────────────────────────────────────────────
 

@@ -43,6 +43,42 @@ import db.mongo_client as db
 # conventional logger like the rest of the agents.
 logger = logging.getLogger(__name__)
 
+
+def _detach_background_jobs(cmd: str) -> str:
+    """Redirect the fds of un-redirected backgrounded jobs so a `cmd &` child
+    can't hold this subprocess's stdout pipe open.
+
+    A backgrounded job (`X &`) inherits the parent shell's stdout; because we
+    read that pipe line-by-line, the async reader blocks until the child dies —
+    a field run wasted ~16 min (≈25% of the whole window) on
+    ``python3 -m http.server 8000 & ... ; sleep 1`` for exactly this reason
+    (bash's foreground finished in ~1s but the read blocked ~998s on the
+    backgrounded server).  When a single `&` backgrounds a segment that does
+    NOT already redirect stdout, we append ``>/dev/null 2>&1`` to that segment
+    so the foreground command returns promptly.
+
+    Conservative + content-agnostic: only a real backgrounding `&` matches
+    (``&&`` / ``&>`` / ``2>&1`` / a URL's ``a=1&b=2`` never match, since those
+    have no whitespace before the ``&`` or are followed by ``&``).  Set
+    ``ARGUS_DETACH_BG=0`` to disable.  Never raises — returns the input on any
+    error."""
+    if os.environ.get("ARGUS_DETACH_BG", "1") == "0" or not cmd or "&" not in cmd:
+        return cmd
+    try:
+        def _fix(m):
+            seg = m.group(1)
+            # Already redirects stdout, or the captured segment is not a real
+            # command (e.g. the trailing `1` of a `… 2>&1 &` whose `&` the
+            # non-greedy capture can't see past) → leave it untouched.
+            if ">" in seg or not re.search(r"[A-Za-z]", seg):
+                return m.group(0)
+            return seg + " >/dev/null 2>&1 &"
+        # `<segment> &` where & backgrounds (preceded by whitespace, NOT part of
+        # && / &> / >&) and is at a command boundary (space, ; , |, &, or end).
+        return re.sub(r"([^&;|\n]+?)\s+&(?!&)(?=\s|;|\||&|$)", _fix, cmd)
+    except Exception:
+        return cmd
+
 def _tool_scratch_dir() -> str:
     """Working directory for tool subprocesses so any relative-path artifacts
     they emit (``-o gobuster.txt``, ``-oN scan``, ``--output-dir``, sqlmap
@@ -1393,8 +1429,11 @@ Return JSON:
 
         async def _run_local() -> int:
             """Run full_cmd in a local subprocess and stream output."""
+            # Detach un-redirected backgrounded jobs so a `cmd &` child can't
+            # hold our stdout pipe open and block the reader for minutes.
+            _exec_cmd = _detach_background_jobs(full_cmd)
             proc = await asyncio.create_subprocess_shell(
-                full_cmd,
+                _exec_cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 limit=1024 * 1024,  # 1 MB read buffer
@@ -2242,16 +2281,23 @@ Return JSON:
 
         async def _run_chain(_tier):
             tokens: List[str] = []
-            prov_info: Dict[str, Any] = {"name": "", "model": "", "fellback": False}
+            prov_info: Dict[str, Any] = {"name": "", "model": "", "fellback": False,
+                                         "usage": None}
 
             def _on_prov(name, model, fellback):
                 prov_info.update(name=name, model=model, fellback=fellback)
+
+            def _on_usage(usage):
+                # Real provider token usage (Anthropic streamed usage block etc.),
+                # or None when the backend does not expose it.
+                prov_info["usage"] = usage
 
             _hb_t0 = time.monotonic()
             _hb_last = _hb_t0
             _hb_interval = float(os.environ.get("LLM_PROGRESS_INTERVAL_SEC", "30"))
             async for tok in _llp.stream_tiered(messages, tier=_tier,
-                                                timeout=timeout, on_provider=_on_prov):
+                                                timeout=timeout, on_provider=_on_prov,
+                                                on_usage=_on_usage):
                 if getattr(self, "_stop_requested", False):
                     break
                 now = time.monotonic()
@@ -2306,10 +2352,21 @@ Return JSON:
             except Exception:
                 pass
 
+        _usage = prov_info.get("usage") or {}
+        _ptok = int(_usage.get("prompt_tokens") or 0)
+        _ctok = int(_usage.get("completion_tokens") or 0)
+        _ttok = int(_usage.get("total_tokens") or (_ptok + _ctok))
         try:
             await self._emit("llm_response", {
                 "agent":    str(self.name),
                 "response": content,
+                # Real token usage when the provider exposed it; 0 + estimated=True
+                # otherwise so the UI can label "(est)" instead of showing a wrong
+                # char-derived number as if it were tokens.
+                "prompt_tokens":     _ptok,
+                "completion_tokens": _ctok,
+                "total_tokens":      _ttok,
+                "tokens_estimated":  not bool(_ttok),
                 "ts":       datetime.utcnow().isoformat(),
             })
             if not _skip_slog:
@@ -2326,6 +2383,9 @@ Return JSON:
                     parse_error    = False,
                     prompt_tail    = _first_user,
                     raw_tail       = content,
+                    prompt_tokens     = _ptok,
+                    completion_tokens = _ctok,
+                    total_tokens      = _ttok,
                 )
         except Exception:
             pass

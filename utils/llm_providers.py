@@ -103,6 +103,16 @@ class LLMProvider:
     """Abstract base for an LLM backend."""
     name:  str = "abstract"
     model: str = ""
+    # Usage from the MOST RECENT stream() call, or None if the provider does not
+    # expose it.  Shape: {"prompt_tokens", "completion_tokens", "total_tokens"}.
+    # Callers read it via get_last_usage() AFTER stream() drains, so real token
+    # counts can be logged/aggregated instead of the chars÷4 estimate (concern:
+    # the displayed token count was wrong because only characters were counted).
+    last_usage: Optional[Dict[str, int]] = None
+
+    def get_last_usage(self) -> Optional[Dict[str, int]]:
+        """Return token usage from the last stream(), or None if unavailable."""
+        return getattr(self, "last_usage", None)
 
     async def check_available(self) -> Tuple[bool, str, List[str]]:
         """Return (ok, status_message, available_models).
@@ -332,6 +342,9 @@ class AnthropicProvider(LLMProvider):
         }
         if system_text:
             body["system"] = system_text
+        self.last_usage = None
+        _in_tok = 0
+        _out_tok = 0
         async with httpx.AsyncClient(
             timeout=httpx.Timeout(connect=15, read=timeout, write=30, pool=10)
         ) as client:
@@ -342,8 +355,10 @@ class AnthropicProvider(LLMProvider):
                 json=body,
             ) as resp:
                 resp.raise_for_status()
-                # Anthropic SSE: "event: <type>\ndata: {…}\n\n" — we just
-                # read data: lines and look at delta.text where present.
+                # Anthropic SSE: "event: <type>\ndata: {…}\n\n" — we read data:
+                # lines for delta.text AND for the usage block.  Input tokens
+                # arrive on message_start; output tokens accumulate on
+                # message_delta (cumulative); we publish the real total at stop.
                 async for raw_line in resp.aiter_lines():
                     if not raw_line:
                         continue
@@ -363,8 +378,29 @@ class AnthropicProvider(LLMProvider):
                         tok = delta.get("text") or ""
                         if tok:
                             yield tok
+                    elif typ == "message_start":
+                        try:
+                            _in_tok = int(((chunk.get("message") or {}).get("usage")
+                                           or {}).get("input_tokens") or 0)
+                        except Exception:
+                            pass
+                    elif typ == "message_delta":
+                        try:
+                            _u = chunk.get("usage") or {}
+                            if _u.get("output_tokens") is not None:
+                                _out_tok = int(_u.get("output_tokens") or 0)
+                            if _u.get("input_tokens"):
+                                _in_tok = int(_u.get("input_tokens") or _in_tok)
+                        except Exception:
+                            pass
                     elif typ == "message_stop":
                         break
+        if _in_tok or _out_tok:
+            self.last_usage = {
+                "prompt_tokens":     _in_tok,
+                "completion_tokens": _out_tok,
+                "total_tokens":      _in_tok + _out_tok,
+            }
 
 
 # ── Google Gemini ──────────────────────────────────────────────────────────
@@ -910,13 +946,16 @@ def has_fallback(tier: str = "reason") -> bool:
 
 
 async def stream_tiered(messages: List[Dict[str, str]], *, tier: str = "reason",
-                        timeout: int = 600, on_provider=None):
+                        timeout: int = 600, on_provider=None, on_usage=None):
     """Async generator: stream tokens from the tier's provider chain.
 
     ``on_provider(name, model, is_fallback)`` (optional) is invoked once per
     provider attempt, before its first token, so the caller can surface which
-    backend answered.  Raises the last exception only if EVERY provider failed
-    before yielding a token.
+    backend answered.  ``on_usage(usage_dict)`` (optional) is invoked once after
+    the answering provider's stream drains, with its real token usage
+    ({"prompt_tokens","completion_tokens","total_tokens"}) or None — so callers
+    can log/aggregate ACTUAL tokens instead of the chars÷4 estimate.  Raises the
+    last exception only if EVERY provider failed before yielding a token.
     """
     chain = provider_chain(tier)
     last_exc: Optional[Exception] = None
@@ -932,6 +971,11 @@ async def stream_tiered(messages: List[Dict[str, str]], *, tier: str = "reason",
                 streamed_any = True
                 yield tok
             if streamed_any:
+                if on_usage:
+                    try:
+                        on_usage(prov.get_last_usage())
+                    except Exception:
+                        pass
                 return                      # clean success
             # Zero-token clean completion → try the next provider (if any).
             continue
@@ -939,6 +983,11 @@ async def stream_tiered(messages: List[Dict[str, str]], *, tier: str = "reason",
             last_exc = exc
             logger.warning("[llm] tier=%s provider=%s failed: %s", tier, prov.name, exc)
             if streamed_any:
+                if on_usage:
+                    try:
+                        on_usage(prov.get_last_usage())
+                    except Exception:
+                        pass
                 # Already emitted partial content — can't cleanly switch.
                 return
             continue                        # safe to try the next provider
@@ -948,10 +997,11 @@ async def stream_tiered(messages: List[Dict[str, str]], *, tier: str = "reason",
         raise last_exc
 
 
-async def stream_with_fallback(messages, timeout: int = 600, on_provider=None):
+async def stream_with_fallback(messages, timeout: int = 600, on_provider=None,
+                               on_usage=None):
     """Reason-tier convenience wrapper (primary → backup)."""
     async for tok in stream_tiered(messages, tier="reason", timeout=timeout,
-                                   on_provider=on_provider):
+                                   on_provider=on_provider, on_usage=on_usage):
         yield tok
 
 

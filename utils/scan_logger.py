@@ -450,6 +450,9 @@ class ScanLogger:
         raw_tail:        str = "",
         prompt_tail:     str = "",
         agent:           str = "",
+        prompt_tokens:   int = 0,
+        completion_tokens: int = 0,
+        total_tokens:    int = 0,
     ) -> None:
         """Record one LLM invocation (planner / extractor / evaluator).
 
@@ -457,12 +460,32 @@ class ScanLogger:
         ``events.jsonl`` (so the unified event stream stays complete).
         On parse-error, persists the raw response tail so we can debug
         what the model actually said.
+
+        ``prompt_tokens`` / ``completion_tokens`` / ``total_tokens`` carry the
+        provider's REAL usage when available (e.g. Anthropic's streamed usage
+        block) — these are the authoritative token counts.  The ``*_chars``
+        fields are retained for backward compatibility / debugging; they are
+        CHARACTER counts, NOT tokens, and must never be presented as tokens
+        (that conflation was the wrong token count the user observed).  When a
+        provider does not expose usage the token fields stay 0 and consumers may
+        fall back to an estimate, clearly labelled as such.
         """
         self.counters["llm_calls"] += 1
+        # Aggregate real token usage across the session (0 when unavailable).
+        if total_tokens or prompt_tokens or completion_tokens:
+            self.counters["prompt_tokens"] = (
+                self.counters.get("prompt_tokens", 0) + int(prompt_tokens or 0))
+            self.counters["completion_tokens"] = (
+                self.counters.get("completion_tokens", 0) + int(completion_tokens or 0))
+            self.counters["total_tokens"] = (
+                self.counters.get("total_tokens", 0)
+                + int(total_tokens or (int(prompt_tokens or 0) + int(completion_tokens or 0))))
         err_flag = " !" if parse_error else ""
+        _tok_str = (f" tok={total_tokens or (prompt_tokens + completion_tokens)}"
+                    if (total_tokens or prompt_tokens or completion_tokens) else "")
         self._append_text(
             f"[LLM]   {step:<24} {latency:>6.2f}s  "
-            f"in={prompt_chars}ch out={response_chars}ch {model}{err_flag}"
+            f"in={prompt_chars}ch out={response_chars}ch{_tok_str} {model}{err_flag}"
             + (f" agent={agent}" if agent else "")
         )
         if decision:
@@ -477,6 +500,11 @@ class ScanLogger:
             "agent":          agent,
             "prompt_chars":   prompt_chars,
             "response_chars": response_chars,
+            "prompt_tokens":     int(prompt_tokens or 0),
+            "completion_tokens": int(completion_tokens or 0),
+            "total_tokens":      int(total_tokens or (int(prompt_tokens or 0)
+                                                      + int(completion_tokens or 0))),
+            "tokens_estimated":  not bool(total_tokens or prompt_tokens or completion_tokens),
             "latency_sec":    round(latency, 3),
             "parse_error":    parse_error,
             "decision":       (decision or "")[:600],
