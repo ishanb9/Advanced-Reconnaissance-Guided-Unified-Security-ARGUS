@@ -2554,8 +2554,9 @@ class ReasoningLoop:
         except Exception:
             pass
 
-        mc  = getattr(self._master, "_master_checker", None)
-        iv  = getattr(self._master, "_issue_validator", None)
+        # MasterChecker was removed; the IssueValidator now runs as a real
+        # finding GATE at the store_finding choke-point (covers this legacy path
+        # too), so _safe_phase keeps only the live Expert advisor.
         ex  = getattr(self._master, "_expert",          None)
         _meta_on = getattr(self._master, "_meta_agents_enabled", False)
 
@@ -2577,7 +2578,6 @@ class ReasoningLoop:
                 f"(passes {self._meta_review_passes}/{_MAX_META_REVIEW_PASSES})"
             )
 
-        mc_enabled = _meta_on and _meta_budget_ok and mc is not None
         ex_enabled = _meta_on and _meta_budget_ok and ex is not None
 
         # Collect pre-phase peer corrections so the Expert can grade them.
@@ -2600,28 +2600,6 @@ class ReasoningLoop:
             except Exception as e:
                 await self._emit_reasoning(f"[expert] pre_phase_directive({phase_slug}) error: {e}")
 
-        # ── META: pre-phase review (Master Checker) ───────────────
-        if mc_enabled:
-            try:
-                _pre_c = await _meta_review_with_timeout(
-                    mc.pre_phase_review(
-                        phase          = phase_slug,
-                        instructions   = [],
-                        intel_snapshot = dict(self._intel),
-                    ),
-                    label          = f"master_checker.pre_phase_review({phase_slug})",
-                    timeout        = _META_PRE_TIMEOUT,
-                    emit_reasoning = self._emit_reasoning,
-                )
-                pre_peer_corrections = _pre_c or []
-                if _pre_c and hasattr(self._master, "_handle_corrections"):
-                    try:
-                        await self._master._handle_corrections(_pre_c, phase_slug, allow_replan=False)
-                    except Exception:
-                        pass
-            except Exception as e:
-                await self._emit_reasoning(f"[meta] pre_phase_review({phase_slug}) error: {e}")
-
         # ── Actual phase ──────────────────────────────────────────
         try:
             result = await phase_fn(**kwargs)
@@ -2630,58 +2608,10 @@ class ReasoningLoop:
             await self._emit_reasoning(f"{name} error: {e}")
             result = {}
 
-        # ── META: post-phase review + validator ───────────────────
-        if mc_enabled:
-            try:
-                phase_findings = []
-                try:
-                    from db import mongo_client as _db
-                    phase_findings = await _db.get_findings_by_phase(
-                        self._master._session_id, phase_slug
-                    ) or []
-                except Exception:
-                    pass
-
-                _post_c = await _meta_review_with_timeout(
-                    mc.post_phase_review(
-                        phase          = phase_slug,
-                        executed_tools = list(self._intel.get("raw_outputs", {}).keys()),
-                        findings       = phase_findings,
-                        intel_delta    = {},
-                    ),
-                    label          = f"master_checker.post_phase_review({phase_slug})",
-                    timeout        = _META_POST_TIMEOUT,
-                    emit_reasoning = self._emit_reasoning,
-                )
-                if iv and phase_findings:   # F8 — nothing to validate if no findings
-                    try:
-                        _val_c = await _meta_review_with_timeout(
-                            iv.validate_phase_findings(
-                                phase           = phase_slug,
-                                all_findings    = phase_findings,
-                                scan_objectives = self._intel.get("ctf_objectives", []),
-                            ),
-                            label          = f"validator.validate_phase_findings({phase_slug})",
-                            timeout        = _META_POST_TIMEOUT,
-                            emit_reasoning = self._emit_reasoning,
-                        )
-                        _post_c = (_post_c or []) + (_val_c or [])
-                    except Exception as e:
-                        await self._emit_reasoning(f"[meta] validate_phase_findings({phase_slug}) error: {e}")
-
-                if _post_c and hasattr(self._master, "_handle_corrections"):
-                    try:
-                        await self._master._handle_corrections(_post_c, phase_slug, allow_replan=False)
-                    except Exception:
-                        pass
-            except Exception as e:
-                await self._emit_reasoning(f"[meta] post_phase_review({phase_slug}) error: {e}")
-
-        # ── EXPERT: post-phase directive + peer-review MC/IV ──────
+        # ── EXPERT: post-phase directive ──────────────────────────
         if ex_enabled:
             try:
-                # Pull this phase's findings (already fetched above if mc_enabled,
-                # otherwise fetch fresh).
+                # Pull this phase's findings for the Expert directive.
                 phase_findings_ex = []
                 try:
                     from db import mongo_client as _db2
@@ -2691,12 +2621,9 @@ class ReasoningLoop:
                 except Exception:
                     pass
 
-                # Combine all peer corrections this phase produced (pre + post)
+                # No MasterChecker/IssueValidator peer corrections any more; the
+                # Expert reviews only what the pre-phase produced (currently none).
                 peer_all = list(pre_peer_corrections)
-                try:
-                    peer_all.extend(_post_c or [])
-                except Exception:
-                    pass
 
                 expert_corrs = await _meta_review_with_timeout(
                     ex.post_phase_directive(

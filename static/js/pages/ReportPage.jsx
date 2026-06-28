@@ -11,33 +11,82 @@ function ReportPage(props) {
 
   const [loading, setLoading]   = useState(false);
   const [previewing, setPreviewing] = useState(false);
+  const [themes, setThemes] = useState([]);
+  const [theme, setThemeState] = useState(
+    (window.localStorage && localStorage.getItem('argus_report_theme')) || 'executive');
   const iframeRef = useRef(null);
 
-  // Auto-preview when session changes
-  useEffect(() => { if (sessionId) preview(); }, [sessionId]);
+  // Load the selectable report themes for the picker (default: executive).
+  useEffect(() => {
+    if (window.API && window.API.reportThemes) {
+      window.API.reportThemes()
+        .then(list => { if (Array.isArray(list) && list.length) setThemes(list); })
+        .catch(() => {});
+    }
+  }, []);
+
+  // Auto-preview when the session OR the chosen theme changes.
+  useEffect(() => { if (sessionId) preview(); }, [sessionId, theme]);
+
+  // Report URL for the CURRENT theme (reportUrl already carries ?format=).
+  function reportUrlT(fmt) {
+    return window.API.reportUrl(sessionId, fmt) + '&theme=' + encodeURIComponent(theme);
+  }
+
+  function setTheme(key) {
+    setThemeState(key);
+    try { localStorage.setItem('argus_report_theme', key); } catch (e) {}
+  }
 
   async function preview() {
     if (!sessionId) return;
     setPreviewing(true);
-    // We use iframe src pointing at the server-rendered report
-    // The iframe fetches /sessions/{id}/report?format=html
     if (iframeRef.current) {
-      iframeRef.current.src = window.API.reportUrl(sessionId, 'html') + '&_t=' + Date.now();
+      iframeRef.current.src = reportUrlT('html') + '&_t=' + Date.now();
     }
   }
 
   function openInNewTab() {
     if (!sessionId) return;
-    window.open(window.API.reportUrl(sessionId, 'html'), '_blank');
+    window.open(reportUrlT('html'), '_blank');
   }
 
-  function downloadPDF() {
+  // Browser print-to-PDF fallback (zero-dependency, pixel-perfect) — used when
+  // the server has no styled PDF engine (weasyprint absent). Opens the styled
+  // themed report and triggers the print dialog ("Save as PDF").
+  function printToPdf() {
     if (!sessionId) return;
-    const url = window.API.reportUrl(sessionId, 'pdf');
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `pentest_report_${sessionId.slice(-8)}.pdf`;
-    a.click();
+    const w = window.open(reportUrlT('html'), '_blank');
+    if (!w) return;
+    const t = setInterval(() => {
+      try {
+        if (w.document && w.document.readyState === 'complete') {
+          clearInterval(t); w.focus(); w.print();
+        }
+      } catch (e) { clearInterval(t); }
+    }, 400);
+    setTimeout(() => { try { clearInterval(t); } catch (e) {} }, 8000);
+  }
+
+  async function downloadPDF() {
+    if (!sessionId) return;
+    try {
+      const res = await fetch(reportUrlT('pdf'));
+      const ct = (res.headers.get('content-type') || '');
+      if (res.ok && ct.indexOf('pdf') >= 0) {
+        const blob = await res.blob();
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = `pentest_report_${sessionId.slice(-8)}.pdf`;
+        a.click();
+        setTimeout(() => { try { URL.revokeObjectURL(a.href); } catch (e) {} }, 4000);
+        return;
+      }
+      // 503 / X-PDF-Engine: none → browser print-to-PDF of the styled report.
+      printToPdf();
+    } catch (e) {
+      printToPdf();
+    }
   }
 
   const canExport = sessionId && activeSession;
@@ -59,7 +108,18 @@ function ReportPage(props) {
         activeSession && React.createElement('div', { className: 'page-subtitle' },
           `Target: ${activeSession.target_ip} · Session: ${sessionId?.slice(-8)}`)
       ),
-      React.createElement('div', { style: { display: 'flex', gap: 8 } },
+      React.createElement('div', { style: { display: 'flex', gap: 8, alignItems: 'center' } },
+        // Report theme picker (5 selectable styles; remembered per browser)
+        React.createElement('select', {
+          value: theme, onChange: (e) => setTheme(e.target.value), disabled: !canExport,
+          title: 'Report theme',
+          style: { padding: '6px 10px', borderRadius: 6, border: '1px solid var(--border-light)',
+                   background: 'rgba(255,255,255,0.04)', color: 'var(--text-secondary)', fontSize: 12,
+                   cursor: canExport ? 'pointer' : 'not-allowed' }
+        },
+          (themes.length ? themes : [{ key: 'executive', name: 'Executive Consultancy' }]).map(t =>
+            React.createElement('option', { key: t.key, value: t.key }, t.name))
+        ),
         React.createElement('button', {
           style: { padding: '6px 14px', borderRadius: 6, border: '1px solid var(--border-light)',
                    background: 'rgba(255,255,255,0.04)', color: canExport ? 'var(--text-secondary)' : 'var(--text-muted)',
@@ -81,7 +141,15 @@ function ReportPage(props) {
                    cursor: canExport ? 'pointer' : 'not-allowed', fontSize: 12, fontWeight: 600,
                    boxShadow: canExport ? '0 0 10px var(--accent-glow)' : 'none' },
           onClick: downloadPDF, disabled: !canExport
-        }, '⬇ Export PDF')
+        }, '⬇ Export PDF'),
+        React.createElement('button', {
+          style: { padding: '6px 14px', borderRadius: 6, border: '1px solid var(--border-light)',
+                   background: 'rgba(255,255,255,0.04)',
+                   color: canExport ? 'var(--text-secondary)' : 'var(--text-muted)',
+                   cursor: canExport ? 'pointer' : 'not-allowed', fontSize: 12 },
+          onClick: printToPdf, disabled: !canExport,
+          title: 'Open the styled report and Save as PDF via the browser (works without weasyprint)'
+        }, '🖨 Print / Save as PDF')
       )
     ),
 

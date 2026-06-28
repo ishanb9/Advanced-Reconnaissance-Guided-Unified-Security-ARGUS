@@ -1,0 +1,2442 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ARGUS Security Assessment — {{ target_display }}</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;700&family=Barlow+Condensed:wght@600;700;800;900&display=swap" rel="stylesheet">
+<style>
+/* ============================================================
+   ARGUS THREAT-INTEL / KILL-CHAIN REPORT — COMPLETE STYLESHEET
+   Option 5 · threat_intel.html.j2
+   ============================================================ */
+
+/* ---------- CSS Reset & Base ---------- */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html { font-size: 10pt; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+body {
+  font-family: 'Inter', system-ui, sans-serif;
+  background: #f0f2f5;
+  color: #111827;
+  line-height: 1.6;
+}
+
+/* ---------- Color System ---------- */
+:root {
+  --ink:        #0a0e1a;
+  --ink-2:      #1e293b;
+  --ink-3:      #334155;
+  --ink-4:      #64748b;
+  --ink-5:      #94a3b8;
+  --surface:    #ffffff;
+  --surface-2:  #f8fafc;
+  --surface-3:  #f0f2f5;
+  --border:     #e2e8f0;
+  --border-2:   #cbd5e1;
+
+  /* Severity palette */
+  --crit:       #dc2626;
+  --crit-bg:    #fef2f2;
+  --crit-mid:   #f87171;
+  --high:       #ea580c;
+  --high-bg:    #fff7ed;
+  --high-mid:   #fb923c;
+  --med:        #d97706;
+  --med-bg:     #fffbeb;
+  --med-mid:    #fbbf24;
+  --low:        #2563eb;
+  --low-bg:     #eff6ff;
+  --low-mid:    #60a5fa;
+  --info:       #0891b2;
+  --info-bg:    #ecfeff;
+  --info-mid:   #22d3ee;
+
+  /* Brand & accent */
+  --amber:      #f59e0b;
+  --amber-dark: #b45309;
+  --amber-bg:   #fffbeb;
+  --red-brand:  #dc2626;
+  --navy:       #0f172a;
+  --navy-2:     #1e293b;
+  --teal:       #0f766e;
+
+  /* MITRE tactic colors */
+  --m-init:     #7c3aed;
+  --m-exec:     #dc2626;
+  --m-persist:  #059669;
+  --m-privesc:  #d97706;
+  --m-cred:     #0891b2;
+  --m-disco:    #2563eb;
+  --m-lateral:  #be185d;
+
+  /* Shadow system */
+  --shadow-sm:  0 1px 3px rgba(0,0,0,.08), 0 1px 2px rgba(0,0,0,.06);
+  --shadow-md:  0 4px 12px rgba(0,0,0,.10), 0 2px 4px rgba(0,0,0,.06);
+  --shadow-lg:  0 10px 30px rgba(0,0,0,.12), 0 4px 8px rgba(0,0,0,.08);
+  --shadow-xl:  0 20px 50px rgba(0,0,0,.15), 0 8px 16px rgba(0,0,0,.10);
+}
+
+/* ---------- Print Setup ---------- */
+@page {
+  size: A4;
+  margin: 15mm 12mm 18mm 12mm;
+  @bottom-center {
+    content: "CONFIDENTIAL — CLIENT PRIVILEGED · Page " counter(page) " of " counter(pages);
+    font-family: 'Inter', sans-serif;
+    font-size: 7pt;
+    color: #94a3b8;
+    border-top: 1px solid #e2e8f0;
+    padding-top: 4pt;
+  }
+}
+@page :first { @bottom-center { content: none; } }
+
+@media print {
+  body { background: #fff; font-size: 9pt; }
+  .page-break { page-break-before: always; break-before: page; }
+  .no-break { break-inside: avoid; page-break-inside: avoid; }
+  .cover-page { page-break-after: always; }
+  section { break-inside: auto; }
+  .finding-card, .register-row, .stat-tile, .timeline-event,
+  .attempt-row, .detection-row, .evidence-row { break-inside: avoid; }
+  .no-print { display: none !important; }
+  a { color: inherit; text-decoration: none; }
+}
+
+/* ---------- Layout ---------- */
+.report-wrap {
+  max-width: 900px;
+  margin: 0 auto;
+  background: var(--surface);
+  box-shadow: var(--shadow-xl);
+}
+@media screen { .report-wrap { margin: 24px auto; border-radius: 4px; overflow: hidden; } }
+
+section { padding: 40px 52px; border-bottom: 1px solid var(--border); }
+section:last-child { border-bottom: none; }
+
+/* ---------- Cover Page ---------- */
+.cover-page {
+  background: var(--navy);
+  color: #fff;
+  padding: 0;
+  min-height: 297mm;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  overflow: hidden;
+}
+.cover-bg-pattern {
+  position: absolute; inset: 0;
+  background-image:
+    linear-gradient(135deg, rgba(245,158,11,.06) 0%, transparent 50%),
+    repeating-linear-gradient(0deg, transparent, transparent 39px, rgba(255,255,255,.03) 40px),
+    repeating-linear-gradient(90deg, transparent, transparent 39px, rgba(255,255,255,.03) 40px);
+  z-index: 0;
+}
+.cover-accent-bar {
+  height: 5px;
+  background: linear-gradient(90deg, var(--amber) 0%, var(--red-brand) 60%, #7c3aed 100%);
+  position: relative; z-index: 1;
+}
+.cover-content { position: relative; z-index: 1; padding: 52px 56px; flex: 1; display: flex; flex-direction: column; }
+.cover-badge-row { display: flex; align-items: center; gap: 12px; margin-bottom: 60px; }
+.argus-logo-text {
+  font-family: 'Barlow Condensed', sans-serif;
+  font-size: 22pt;
+  font-weight: 900;
+  letter-spacing: .08em;
+  color: var(--amber);
+}
+.argus-logo-sub { font-size: 8pt; color: rgba(255,255,255,.5); letter-spacing: .2em; text-transform: uppercase; margin-top: -4px; }
+.cover-sep { width: 1px; height: 48px; background: rgba(255,255,255,.15); }
+.confidential-badge {
+  background: rgba(220,38,38,.15);
+  border: 1px solid rgba(220,38,38,.4);
+  color: #fca5a5;
+  font-size: 7.5pt;
+  font-weight: 700;
+  letter-spacing: .15em;
+  text-transform: uppercase;
+  padding: 4px 12px;
+  border-radius: 3px;
+}
+.cover-main { flex: 1; display: flex; flex-direction: column; justify-content: center; }
+.cover-target-label {
+  font-size: 8pt;
+  font-weight: 600;
+  letter-spacing: .25em;
+  text-transform: uppercase;
+  color: var(--amber);
+  margin-bottom: 8px;
+}
+.cover-hostname {
+  font-family: 'Barlow Condensed', sans-serif;
+  font-size: 68pt;
+  font-weight: 900;
+  line-height: .9;
+  color: #fff;
+  letter-spacing: -.02em;
+  margin-bottom: 4px;
+}
+.cover-ip {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 14pt;
+  color: rgba(255,255,255,.45);
+  margin-bottom: 32px;
+}
+.cover-title {
+  font-size: 18pt;
+  font-weight: 700;
+  color: rgba(255,255,255,.9);
+  margin-bottom: 6px;
+}
+.cover-subtitle { font-size: 11pt; color: rgba(255,255,255,.5); margin-bottom: 40px; }
+.cover-risk-outcome {
+  display: flex; gap: 16px; align-items: center; margin-bottom: 48px; flex-wrap: wrap;
+}
+.risk-badge-cover {
+  background: var(--red-brand);
+  color: #fff;
+  font-family: 'Barlow Condensed', sans-serif;
+  font-size: 15pt;
+  font-weight: 800;
+  letter-spacing: .06em;
+  padding: 8px 20px;
+  border-radius: 4px;
+  text-transform: uppercase;
+}
+.outcome-badge-cover {
+  background: rgba(245,158,11,.15);
+  border: 1.5px solid var(--amber);
+  color: var(--amber);
+  font-family: 'Barlow Condensed', sans-serif;
+  font-size: 13pt;
+  font-weight: 700;
+  letter-spacing: .06em;
+  padding: 8px 20px;
+  border-radius: 4px;
+  text-transform: uppercase;
+}
+.cover-meta-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0;
+  border: 1px solid rgba(255,255,255,.1);
+  border-radius: 6px;
+  overflow: hidden;
+  margin-bottom: 40px;
+}
+.cover-meta-item {
+  padding: 14px 18px;
+  border-right: 1px solid rgba(255,255,255,.1);
+  border-bottom: 1px solid rgba(255,255,255,.1);
+}
+.cover-meta-item:nth-child(3n) { border-right: none; }
+.cover-meta-item:nth-child(n+4) { border-bottom: none; }
+.cover-meta-label { font-size: 7pt; color: rgba(255,255,255,.4); letter-spacing: .15em; text-transform: uppercase; margin-bottom: 3px; }
+.cover-meta-val { font-size: 9.5pt; font-weight: 600; color: rgba(255,255,255,.9); }
+.cover-meta-val.mono { font-family: 'JetBrains Mono', monospace; font-size: 8.5pt; }
+.cover-footer-bar {
+  border-top: 1px solid rgba(255,255,255,.1);
+  padding-top: 20px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 7.5pt;
+  color: rgba(255,255,255,.3);
+}
+
+/* ---------- Section Headers ---------- */
+.section-header {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 28px;
+  padding-bottom: 14px;
+  border-bottom: 2px solid var(--border);
+}
+.section-num {
+  font-family: 'Barlow Condensed', sans-serif;
+  font-size: 28pt;
+  font-weight: 900;
+  color: var(--amber);
+  line-height: 1;
+  min-width: 44px;
+}
+.section-title {
+  font-family: 'Barlow Condensed', sans-serif;
+  font-size: 18pt;
+  font-weight: 800;
+  color: var(--ink);
+  text-transform: uppercase;
+  letter-spacing: .02em;
+  line-height: 1.1;
+}
+.section-sub { font-size: 8.5pt; color: var(--ink-4); letter-spacing: .1em; text-transform: uppercase; margin-top: 2px; }
+.section-tag {
+  margin-left: auto;
+  font-size: 7pt;
+  font-weight: 700;
+  letter-spacing: .15em;
+  text-transform: uppercase;
+  background: var(--amber-bg);
+  color: var(--amber-dark);
+  border: 1px solid var(--amber);
+  padding: 3px 10px;
+  border-radius: 3px;
+}
+
+/* ---------- Document Control ---------- */
+.doc-table { width: 100%; border-collapse: collapse; margin-bottom: 24px; }
+.doc-table th {
+  background: var(--navy);
+  color: #fff;
+  font-size: 7.5pt;
+  font-weight: 700;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  padding: 8px 12px;
+  text-align: left;
+}
+.doc-table td {
+  padding: 9px 12px;
+  font-size: 9pt;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+.doc-table tr:last-child td { border-bottom: none; }
+.doc-table tr:nth-child(even) td { background: var(--surface-2); }
+.doc-table td.label { font-weight: 600; color: var(--ink-3); width: 32%; }
+
+/* ---------- TOC ---------- */
+.toc-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px 32px;
+}
+.toc-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 6px 0;
+  border-bottom: 1px dotted var(--border-2);
+  font-size: 9pt;
+}
+.toc-num { font-weight: 700; color: var(--amber-dark); min-width: 22px; font-size: 8.5pt; }
+.toc-title { flex: 1; color: var(--ink-2); }
+.toc-page { font-size: 7.5pt; color: var(--ink-4); font-family: 'JetBrains Mono', monospace; }
+
+/* ---------- Executive Summary ---------- */
+.exec-headline {
+  background: linear-gradient(135deg, var(--navy) 0%, #1e3a5f 100%);
+  border-radius: 8px;
+  padding: 24px 28px;
+  margin-bottom: 28px;
+  position: relative;
+  overflow: hidden;
+}
+.exec-headline::before {
+  content: '';
+  position: absolute;
+  left: 0; top: 0; bottom: 0;
+  width: 5px;
+  background: linear-gradient(180deg, var(--amber), var(--red-brand));
+}
+.exec-headline-label { font-size: 7.5pt; font-weight: 700; letter-spacing: .2em; color: var(--amber); text-transform: uppercase; margin-bottom: 8px; }
+.exec-headline-text { font-size: 11.5pt; color: rgba(255,255,255,.92); line-height: 1.65; font-weight: 400; }
+.exec-headline-text strong { color: var(--amber); font-weight: 700; }
+
+.stat-tiles { display: grid; grid-template-columns: repeat(7, 1fr); gap: 10px; margin-bottom: 28px; }
+.stat-tile {
+  border-radius: 6px;
+  padding: 14px 10px;
+  text-align: center;
+  border: 1.5px solid;
+  break-inside: avoid;
+}
+.stat-tile .tile-num {
+  font-family: 'Barlow Condensed', sans-serif;
+  font-size: 28pt;
+  font-weight: 900;
+  line-height: 1;
+  display: block;
+  margin-bottom: 4px;
+}
+.stat-tile .tile-label { font-size: 7pt; font-weight: 700; letter-spacing: .1em; text-transform: uppercase; }
+.st-crit  { background: var(--crit-bg); border-color: var(--crit); color: var(--crit); }
+.st-high  { background: var(--high-bg); border-color: var(--high); color: var(--high); }
+.st-med   { background: var(--med-bg);  border-color: var(--med);  color: var(--med); }
+.st-low   { background: var(--low-bg);  border-color: var(--low);  color: var(--low); }
+.st-info  { background: var(--info-bg); border-color: var(--info); color: var(--info); }
+.st-total { background: var(--surface-2); border-color: var(--border-2); color: var(--ink-2); }
+.st-access { background: linear-gradient(135deg, #4c0519, #7f1d1d); border-color: var(--red-brand); color: #fca5a5; }
+.st-access .tile-num { font-size: 14pt; color: #fca5a5; }
+
+.priority-actions { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+.pa-card {
+  border-radius: 6px;
+  padding: 16px;
+  border-left: 4px solid;
+  break-inside: avoid;
+}
+.pa-p1 { background: var(--crit-bg); border-color: var(--crit); }
+.pa-p2 { background: var(--high-bg); border-color: var(--high); }
+.pa-p3 { background: var(--low-bg);  border-color: var(--low); }
+.pa-label { font-size: 7pt; font-weight: 800; letter-spacing: .18em; text-transform: uppercase; margin-bottom: 6px; }
+.pa-p1 .pa-label { color: var(--crit); }
+.pa-p2 .pa-label { color: var(--high); }
+.pa-p3 .pa-label { color: var(--low); }
+.pa-text { font-size: 8.5pt; color: var(--ink-2); line-height: 1.55; }
+
+/* ---------- Severity Badges ---------- */
+.badge {
+  display: inline-block;
+  font-size: 7pt;
+  font-weight: 800;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  padding: 2px 8px;
+  border-radius: 3px;
+  white-space: nowrap;
+}
+.badge-crit  { background: var(--crit);  color: #fff; }
+.badge-high  { background: var(--high);  color: #fff; }
+.badge-med   { background: var(--med);   color: #fff; }
+.badge-low   { background: var(--low);   color: #fff; }
+.badge-info  { background: var(--info);  color: #fff; }
+
+/* ---------- Severity Legend ---------- */
+.sev-legend {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  flex-wrap: wrap;
+  padding: 10px 14px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  margin-bottom: 20px;
+}
+.sev-legend-label { font-size: 7pt; font-weight: 700; color: var(--ink-4); letter-spacing: .12em; text-transform: uppercase; margin-right: 4px; }
+.sev-legend-item { display: flex; align-items: center; gap: 5px; }
+.sev-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+.sd-crit { background: var(--crit); }
+.sd-high { background: var(--high); }
+.sd-med  { background: var(--med); }
+.sd-low  { background: var(--low); }
+.sd-info { background: var(--info); }
+.sev-legend-item span { font-size: 7.5pt; color: var(--ink-3); font-weight: 500; }
+
+/* ---------- System & Scope ---------- */
+.scope-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 24px; }
+.scope-card {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 18px 20px;
+  break-inside: avoid;
+}
+.scope-card-title { font-size: 8pt; font-weight: 700; letter-spacing: .15em; text-transform: uppercase; color: var(--ink-4); margin-bottom: 12px; }
+.scope-card-item { display: flex; gap: 10px; margin-bottom: 7px; font-size: 9pt; }
+.scope-card-item .k { color: var(--ink-4); min-width: 100px; font-size: 8pt; font-weight: 600; }
+.scope-card-item .v { color: var(--ink-2); font-family: 'JetBrains Mono', monospace; font-size: 8pt; }
+.trust-banner {
+  background: linear-gradient(135deg, #431407, #7c2d12);
+  border-radius: 6px;
+  padding: 14px 20px;
+  color: #fdba74;
+  font-size: 9pt;
+  line-height: 1.6;
+  margin-bottom: 20px;
+}
+.trust-banner strong { color: #fb923c; }
+.ports-table { width: 100%; border-collapse: collapse; }
+.ports-table th {
+  background: var(--navy-2);
+  color: rgba(255,255,255,.8);
+  font-size: 7pt;
+  font-weight: 700;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  padding: 7px 10px;
+  text-align: left;
+}
+.ports-table td { padding: 8px 10px; font-size: 8.5pt; border-bottom: 1px solid var(--border); }
+.ports-table tr:last-child td { border-bottom: none; }
+.ports-table tr:nth-child(even) td { background: var(--surface-2); }
+.port-num { font-family: 'JetBrains Mono', monospace; font-weight: 700; color: var(--amber-dark); }
+
+/* ---------- Methodology ---------- */
+.method-steps { display: flex; gap: 0; margin-bottom: 24px; }
+.method-step {
+  flex: 1;
+  padding: 16px 14px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-right: none;
+  position: relative;
+  break-inside: avoid;
+}
+.method-step:first-child { border-radius: 6px 0 0 6px; }
+.method-step:last-child  { border-radius: 0 6px 6px 0; border-right: 1px solid var(--border); }
+.method-step-arrow {
+  position: absolute;
+  right: -12px; top: 50%;
+  transform: translateY(-50%);
+  width: 24px; height: 24px;
+  background: var(--amber);
+  clip-path: polygon(0 20%, 75% 20%, 75% 0%, 100% 50%, 75% 100%, 75% 80%, 0 80%);
+  z-index: 2;
+}
+.method-step:last-child .method-step-arrow { display: none; }
+.method-step-num { font-family: 'Barlow Condensed', sans-serif; font-size: 18pt; font-weight: 900; color: var(--amber); line-height: 1; }
+.method-step-title { font-size: 8pt; font-weight: 700; color: var(--ink); margin: 2px 0 4px; }
+.method-step-desc { font-size: 7.5pt; color: var(--ink-4); line-height: 1.45; }
+
+.cvss-table { width: 100%; border-collapse: collapse; }
+.cvss-table th {
+  background: var(--navy-2);
+  color: rgba(255,255,255,.8);
+  font-size: 7pt; font-weight: 700;
+  letter-spacing: .12em; text-transform: uppercase;
+  padding: 7px 12px; text-align: left;
+}
+.cvss-table td { padding: 8px 12px; font-size: 8.5pt; border-bottom: 1px solid var(--border); }
+.cvss-table tr:last-child td { border-bottom: none; }
+
+/* ---------- Attack Path Graph ---------- */
+.killchain-section { background: var(--navy); padding: 40px 52px; }
+.killchain-section .section-header { border-color: rgba(255,255,255,.15); }
+.killchain-section .section-num { color: var(--amber); }
+.killchain-section .section-title { color: #fff; }
+.killchain-section .section-sub { color: rgba(255,255,255,.4); }
+.killchain-section .section-tag { background: rgba(245,158,11,.1); color: var(--amber); border-color: rgba(245,158,11,.4); }
+
+.mitre-legend {
+  display: flex; gap: 12px; flex-wrap: wrap;
+  margin-bottom: 20px;
+}
+.ml-item { display: flex; align-items: center; gap: 6px; }
+.ml-dot { width: 10px; height: 10px; border-radius: 2px; flex-shrink: 0; }
+.ml-label { font-size: 7.5pt; color: rgba(255,255,255,.6); font-weight: 500; }
+
+.attack-graph-wrap {
+  background: rgba(255,255,255,.04);
+  border: 1px solid rgba(255,255,255,.1);
+  border-radius: 8px;
+  padding: 20px;
+  overflow-x: auto;
+}
+
+/* ---------- Attempts Table ---------- */
+.attempts-table { width: 100%; border-collapse: collapse; }
+.attempts-table th {
+  background: var(--navy);
+  color: rgba(255,255,255,.8);
+  font-size: 7pt; font-weight: 700;
+  letter-spacing: .12em; text-transform: uppercase;
+  padding: 9px 10px; text-align: left;
+}
+.attempts-table td { padding: 8px 10px; font-size: 8.5pt; border-bottom: 1px solid var(--border); vertical-align: middle; }
+.attempts-table tr:nth-child(even) td { background: var(--surface-2); }
+.attempts-table tr:last-child td { border-bottom: none; }
+.outcome-success-exp {
+  background: #dcfce7; color: #166534;
+  font-size: 6.5pt; font-weight: 800; letter-spacing: .1em;
+  text-transform: uppercase; padding: 2px 7px; border-radius: 3px; white-space: nowrap;
+}
+.outcome-success {
+  background: #e0f2fe; color: #0c4a6e;
+  font-size: 6.5pt; font-weight: 800; letter-spacing: .1em;
+  text-transform: uppercase; padding: 2px 7px; border-radius: 3px; white-space: nowrap;
+}
+.outcome-neg {
+  background: var(--surface-2); color: var(--ink-4);
+  font-size: 6.5pt; font-weight: 700; letter-spacing: .1em;
+  text-transform: uppercase; padding: 2px 7px; border-radius: 3px; white-space: nowrap;
+  border: 1px solid var(--border);
+}
+.tool-mono { font-family: 'JetBrains Mono', monospace; font-size: 8pt; color: var(--amber-dark); font-weight: 500; }
+
+/* ---------- Findings Register ---------- */
+.register-table { width: 100%; border-collapse: collapse; }
+.register-table th {
+  background: var(--navy);
+  color: rgba(255,255,255,.8);
+  font-size: 7pt; font-weight: 700;
+  letter-spacing: .1em; text-transform: uppercase;
+  padding: 9px 10px; text-align: left;
+}
+.register-table td {
+  padding: 9px 10px; font-size: 8.5pt;
+  border-bottom: 1px solid var(--border); vertical-align: middle;
+}
+.register-table tr:nth-child(even) td { background: var(--surface-2); }
+.register-table tr:last-child td { border-bottom: none; }
+.finding-id { font-family: 'JetBrains Mono', monospace; font-weight: 700; font-size: 8pt; color: var(--ink-3); }
+.cvss-score { font-family: 'JetBrains Mono', monospace; font-weight: 700; font-size: 9pt; }
+.cs-crit { color: var(--crit); }
+.cs-high { color: var(--high); }
+.cs-med  { color: var(--med); }
+.cs-low  { color: var(--low); }
+.mitre-tag {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 7pt; color: #7c3aed;
+  background: #f3e8ff; padding: 2px 6px; border-radius: 3px;
+  display: inline-block; white-space: nowrap;
+}
+.retest-verified { color: #16a34a; font-size: 7.5pt; font-weight: 700; }
+.retest-open     { color: var(--med); font-size: 7.5pt; font-weight: 700; }
+
+/* ---------- Finding Cards ---------- */
+.finding-card {
+  border: 1.5px solid var(--border);
+  border-radius: 8px;
+  margin-bottom: 20px;
+  overflow: hidden;
+  break-inside: avoid;
+  box-shadow: var(--shadow-sm);
+}
+.finding-card-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--border);
+}
+.fc-id { font-family: 'JetBrains Mono', monospace; font-weight: 700; font-size: 9pt; color: var(--ink-4); }
+.fc-title { flex: 1; font-size: 11pt; font-weight: 700; color: var(--ink); }
+.fc-cvss { font-family: 'JetBrains Mono', monospace; font-size: 12pt; font-weight: 800; }
+.finding-card-body { padding: 18px 20px; }
+.fc-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; }
+.fc-field-label { font-size: 7pt; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; color: var(--ink-4); margin-bottom: 4px; }
+.fc-field-val { font-size: 9pt; color: var(--ink-2); line-height: 1.55; }
+.fc-field-val.mono { font-family: 'JetBrains Mono', monospace; font-size: 8pt; }
+.fc-desc { font-size: 9.5pt; color: var(--ink-2); line-height: 1.65; margin-bottom: 14px; }
+.evidence-box {
+  background: var(--navy);
+  border-radius: 5px;
+  padding: 14px 16px;
+  margin-bottom: 12px;
+  break-inside: avoid;
+}
+.evidence-box-label { font-size: 7pt; font-weight: 700; letter-spacing: .15em; text-transform: uppercase; color: var(--amber); margin-bottom: 8px; }
+.evidence-code {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 8pt;
+  color: #86efac;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.evidence-hash { font-family: 'JetBrains Mono', monospace; font-size: 7pt; color: rgba(255,255,255,.35); margin-top: 8px; }
+.loot-box {
+  background: linear-gradient(135deg, #1c1917, #292524);
+  border: 1px solid rgba(245,158,11,.3);
+  border-radius: 5px;
+  padding: 14px 16px;
+  margin-bottom: 12px;
+  break-inside: avoid;
+}
+.loot-box-label { font-size: 7pt; font-weight: 700; letter-spacing: .15em; text-transform: uppercase; color: #f59e0b; margin-bottom: 8px; }
+.loot-code { font-family: 'JetBrains Mono', monospace; font-size: 8pt; color: #fde68a; line-height: 1.6; white-space: pre-wrap; word-break: break-all; }
+.loot-hash { font-family: 'JetBrains Mono', monospace; font-size: 7pt; color: rgba(255,255,255,.3); margin-top: 8px; }
+.redact-note {
+  background: #fef3c7; border: 1px solid #fbbf24;
+  border-radius: 4px; padding: 8px 12px;
+  font-size: 8pt; color: #92400e;
+  margin-bottom: 12px;
+}
+.remediation-box {
+  background: #f0fdf4; border: 1px solid #86efac;
+  border-left: 4px solid #16a34a;
+  border-radius: 4px; padding: 12px 16px;
+  break-inside: avoid;
+}
+.remediation-box-label { font-size: 7pt; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; color: #15803d; margin-bottom: 6px; }
+.remediation-box-text { font-size: 9pt; color: #166534; line-height: 1.55; }
+
+/* ---------- Not-exploitable ---------- */
+.ne-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.ne-card {
+  background: var(--surface-2); border: 1.5px solid var(--border-2);
+  border-radius: 6px; padding: 14px 16px; break-inside: avoid;
+  display: flex; gap: 12px; align-items: flex-start;
+}
+.ne-icon { font-size: 18pt; line-height: 1; flex-shrink: 0; }
+.ne-title { font-size: 9pt; font-weight: 700; color: var(--ink-2); margin-bottom: 4px; }
+.ne-desc  { font-size: 8pt; color: var(--ink-4); line-height: 1.5; }
+
+/* ---------- Detection Table ---------- */
+.detection-table { width: 100%; border-collapse: collapse; }
+.detection-table th {
+  background: var(--teal);
+  color: #fff;
+  font-size: 7pt; font-weight: 700;
+  letter-spacing: .1em; text-transform: uppercase;
+  padding: 9px 12px; text-align: left;
+}
+.detection-table td { padding: 9px 12px; font-size: 8.5pt; border-bottom: 1px solid var(--border); vertical-align: top; }
+.detection-table tr:nth-child(even) td { background: var(--surface-2); }
+.detection-table tr:last-child td { border-bottom: none; }
+.det-open { color: var(--red-brand); font-size: 7.5pt; font-weight: 700; }
+
+/* ---------- Evidence Appendix ---------- */
+.evidence-table { width: 100%; border-collapse: collapse; }
+.evidence-table th {
+  background: var(--navy-2);
+  color: rgba(255,255,255,.8);
+  font-size: 7pt; font-weight: 700;
+  letter-spacing: .1em; text-transform: uppercase;
+  padding: 8px 10px; text-align: left;
+}
+.evidence-table td { padding: 8px 10px; font-size: 8.5pt; border-bottom: 1px solid var(--border); }
+.evidence-table tr:last-child td { border-bottom: none; }
+.ev-id { font-family: 'JetBrains Mono', monospace; font-weight: 700; font-size: 8pt; color: var(--ink-3); }
+.ev-hash { font-family: 'JetBrains Mono', monospace; font-size: 7.5pt; color: var(--ink-5); word-break: break-all; }
+
+/* ---------- MITRE Map ---------- */
+.mitre-map-grid {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 10px;
+  margin-bottom: 20px;
+}
+.mitre-col { border-radius: 5px; overflow: hidden; break-inside: avoid; }
+.mitre-col-header {
+  padding: 8px 10px;
+  font-size: 7pt; font-weight: 800;
+  letter-spacing: .08em; text-transform: uppercase;
+  color: #fff; text-align: center;
+  line-height: 1.3;
+}
+.mitre-col-body { padding: 8px; background: var(--surface-2); border: 1px solid var(--border); border-top: none; border-radius: 0 0 5px 5px; }
+.mitre-technique {
+  background: #fff; border: 1px solid var(--border);
+  border-radius: 3px; padding: 5px 8px;
+  margin-bottom: 6px; break-inside: avoid;
+}
+.mitre-technique:last-child { margin-bottom: 0; }
+.mt-id { font-family: 'JetBrains Mono', monospace; font-size: 7pt; font-weight: 700; }
+.mt-name { font-size: 7.5pt; color: var(--ink-3); line-height: 1.35; margin-top: 1px; }
+.mt-active { border-left: 3px solid; }
+
+/* ---------- Remediation Roadmap ---------- */
+.rr-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+.rr-col { border-radius: 6px; overflow: hidden; break-inside: avoid; }
+.rr-col-header {
+  padding: 12px 16px;
+  color: #fff;
+  font-family: 'Barlow Condensed', sans-serif;
+  font-size: 13pt; font-weight: 800;
+  letter-spacing: .05em; text-transform: uppercase;
+}
+.rr-p1 .rr-col-header { background: var(--crit); }
+.rr-p2 .rr-col-header { background: var(--high); }
+.rr-p3 .rr-col-header { background: var(--low); }
+.rr-col-body { background: var(--surface-2); border: 1px solid var(--border); border-top: none; padding: 12px 14px; }
+.rr-item {
+  display: flex; gap: 8px; align-items: flex-start;
+  padding: 7px 0; border-bottom: 1px solid var(--border);
+  font-size: 8.5pt; color: var(--ink-2); line-height: 1.5;
+}
+.rr-item:last-child { border-bottom: none; }
+.rr-bullet {
+  width: 18px; height: 18px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 7pt; font-weight: 800; color: #fff; flex-shrink: 0; margin-top: 1px;
+}
+.rr-p1 .rr-bullet { background: var(--crit); }
+.rr-p2 .rr-bullet { background: var(--high); }
+.rr-p3 .rr-bullet { background: var(--low); }
+
+/* ---------- Timeline ---------- */
+.timeline-wrap { position: relative; padding-left: 32px; }
+.timeline-line {
+  position: absolute;
+  left: 10px; top: 0; bottom: 0;
+  width: 2px;
+  background: linear-gradient(180deg, var(--amber) 0%, var(--red-brand) 60%, var(--low) 100%);
+}
+.timeline-event {
+  position: relative;
+  margin-bottom: 16px;
+  break-inside: avoid;
+  padding: 14px 18px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: var(--shadow-sm);
+}
+.timeline-event::before {
+  content: '';
+  position: absolute;
+  left: -26px; top: 50%;
+  transform: translateY(-50%);
+  width: 12px; height: 12px;
+  border-radius: 50%;
+  border: 2px solid var(--amber);
+  background: var(--amber);
+  z-index: 2;
+}
+.timeline-event.phase-recon::before   { background: var(--m-disco); border-color: var(--m-disco); }
+.timeline-event.phase-exploit::before { background: var(--red-brand); border-color: var(--red-brand); }
+.timeline-event.phase-privesc::before { background: var(--amber); border-color: var(--amber); }
+.timeline-event.phase-loot::before    { background: var(--crit); border-color: var(--crit); }
+.timeline-event.phase-retest::before  { background: var(--teal); border-color: var(--teal); }
+.te-time { font-family: 'JetBrains Mono', monospace; font-size: 8pt; font-weight: 700; color: var(--amber-dark); margin-bottom: 3px; }
+.te-title { font-size: 10pt; font-weight: 700; color: var(--ink); margin-bottom: 3px; }
+.te-desc  { font-size: 8.5pt; color: var(--ink-4); line-height: 1.5; }
+.te-tag   {
+  display: inline-block; font-size: 6.5pt; font-weight: 700;
+  letter-spacing: .12em; text-transform: uppercase;
+  padding: 2px 7px; border-radius: 3px; margin-top: 5px;
+}
+.te-tag-recon   { background: #ede9fe; color: #5b21b6; }
+.te-tag-exploit { background: var(--crit-bg); color: var(--crit); }
+.te-tag-privesc { background: var(--med-bg); color: var(--amber-dark); }
+.te-tag-loot    { background: #fdf2f8; color: #9d174d; }
+.te-tag-retest  { background: #d1fae5; color: #065f46; }
+
+/* ---------- Data-Viz Charts ---------- */
+.charts-row { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+.chart-wrap {
+  background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: 8px; padding: 20px; break-inside: avoid;
+}
+.chart-title { font-size: 9.5pt; font-weight: 700; color: var(--ink); margin-bottom: 4px; }
+.chart-subtitle { font-size: 7.5pt; color: var(--ink-4); margin-bottom: 16px; }
+
+/* ---------- Retest Section ---------- */
+.retest-table { width: 100%; border-collapse: collapse; }
+.retest-table th {
+  background: var(--teal);
+  color: #fff;
+  font-size: 7pt; font-weight: 700;
+  letter-spacing: .1em; text-transform: uppercase;
+  padding: 8px 10px; text-align: left;
+}
+.retest-table td { padding: 8px 10px; font-size: 8.5pt; border-bottom: 1px solid var(--border); }
+.retest-table tr:last-child td { border-bottom: none; }
+.retest-table tr:nth-child(even) td { background: var(--surface-2); }
+.status-reconfirm { color: var(--red-brand); font-weight: 700; font-size: 8pt; }
+.status-open      { color: var(--med);       font-weight: 700; font-size: 8pt; }
+.status-fixed     { color: #16a34a;          font-weight: 700; font-size: 8pt; }
+
+/* ---------- Footer ---------- */
+.report-footer {
+  background: var(--navy);
+  color: rgba(255,255,255,.35);
+  padding: 20px 52px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 7.5pt;
+}
+.footer-conf { color: rgba(255,255,255,.5); font-weight: 600; }
+.footer-mono { font-family: 'JetBrains Mono', monospace; }
+
+/* ---------- Utilities ---------- */
+.mb-0  { margin-bottom: 0; }
+.mb-8  { margin-bottom: 8px; }
+.mb-12 { margin-bottom: 12px; }
+.mb-16 { margin-bottom: 16px; }
+.mb-20 { margin-bottom: 20px; }
+.mb-24 { margin-bottom: 24px; }
+.text-sm { font-size: 8.5pt; }
+.text-xs { font-size: 7.5pt; }
+.text-muted { color: var(--ink-4); }
+.mono { font-family: 'JetBrains Mono', monospace; }
+.fw-700 { font-weight: 700; }
+.stage-num {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 28px; height: 28px;
+  background: var(--amber); color: var(--navy);
+  font-family: 'Barlow Condensed', sans-serif;
+  font-size: 14pt; font-weight: 900;
+  border-radius: 50%; flex-shrink: 0;
+}
+.info-note {
+  background: var(--info-bg); border: 1px solid var(--info-mid);
+  border-radius: 4px; padding: 10px 14px;
+  font-size: 8.5pt; color: #0e7490; line-height: 1.55;
+  margin-bottom: 16px;
+}
+</style>
+</head>
+<body>
+<div class="report-wrap">
+
+<!-- ============================================================
+     COVER PAGE
+     ============================================================ -->
+<section class="cover-page" style="border-bottom:none;">
+  <div class="cover-bg-pattern"></div>
+  <div class="cover-accent-bar"></div>
+  <div class="cover-content">
+    <div class="cover-badge-row">
+      <div>
+        <div class="argus-logo-text">ARGUS</div>
+        <div class="argus-logo-sub">Autonomous Security Engine</div>
+      </div>
+      <div class="cover-sep"></div>
+      <div class="confidential-badge">Confidential — Client Privileged</div>
+    </div>
+    <div class="cover-main">
+      <div class="cover-target-label">Target System</div>
+      {% if session.target_hostname %}
+      <div class="cover-hostname">{{ session.target_hostname }}</div>
+      {% elif session.target %}
+      <div class="cover-hostname">{{ session.target }}</div>
+      {% endif %}
+      <div class="cover-ip">
+        {% if session.target_ip %}{{ session.target_ip }}{% endif %}
+        {% if intel.os_guess %} · {{ intel.os_guess }}{% endif %}
+      </div>
+      <div class="cover-title">{{ engagement_type }}</div>
+      {% if session.scope %}
+      <div class="cover-subtitle">{{ session.scope }}</div>
+      {% endif %}
+      <div class="cover-risk-outcome">
+        {% if final_rating is defined and final_rating and final_rating != 'none' %}
+        <div class="risk-badge-cover">&#9888; Overall Risk: {{ final_rating | capitalize }}</div>
+        {% endif %}
+        {% if outcome.label %}
+        <div class="outcome-badge-cover">&#9873; Outcome: {{ outcome.label }}</div>
+        {% endif %}
+      </div>
+      <div class="cover-meta-grid">
+        <div class="cover-meta-item">
+          <div class="cover-meta-label">Target</div>
+          <div class="cover-meta-val mono">{{ target_display }}</div>
+        </div>
+        <div class="cover-meta-item">
+          <div class="cover-meta-label">Assessment Window</div>
+          <div class="cover-meta-val">
+            {% if session.started_at %}{{ session.started_at }}{% endif %}
+            {% if session.completed_at %} – {{ session.completed_at }}{% endif %}
+          </div>
+        </div>
+        <div class="cover-meta-item">
+          <div class="cover-meta-label">Classification</div>
+          <div class="cover-meta-val">CONFIDENTIAL</div>
+        </div>
+        <div class="cover-meta-item">
+          <div class="cover-meta-label">Scope</div>
+          <div class="cover-meta-val">{{ session.scope if session.scope else 'N/A' }}</div>
+        </div>
+        <div class="cover-meta-item">
+          <div class="cover-meta-label">Analyst / Engine</div>
+          <div class="cover-meta-val">ARGUS Autonomous Engine<br><span style="font-size:7.5pt;color:rgba(255,255,255,.4);">(Operator-reviewed)</span></div>
+        </div>
+        <div class="cover-meta-item">
+          <div class="cover-meta-label">Report Generated</div>
+          <div class="cover-meta-val">{{ generated_at }}</div>
+        </div>
+      </div>
+    </div>
+    <div class="cover-footer-bar">
+      <span>ARGUS Security Assessment &nbsp;·&nbsp; <span class="mono">{{ target_display }}</span></span>
+      <span>This document contains privileged and confidential information. Unauthorized disclosure is prohibited.</span>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================
+     DOCUMENT CONTROL & TABLE OF CONTENTS
+     ============================================================ -->
+<section>
+  <div class="section-header">
+    <div class="section-num">0</div>
+    <div>
+      <div class="section-title">Document Control</div>
+      <div class="section-sub">Version history · distribution · contents</div>
+    </div>
+    <div class="section-tag">Administrative</div>
+  </div>
+
+  <table class="doc-table mb-24">
+    <tr>
+      <td class="label">Report Title</td>
+      <td>ARGUS Security Assessment — {{ target_display }}</td>
+    </tr>
+    <tr>
+      <td class="label">Classification</td>
+      <td><strong>CONFIDENTIAL — CLIENT PRIVILEGED</strong></td>
+    </tr>
+    <tr>
+      <td class="label">Version</td>
+      <td>1.0 — Final</td>
+    </tr>
+    <tr>
+      <td class="label">Assessment Dates</td>
+      <td>
+        {% if session.started_at %}{{ session.started_at }}{% endif %}
+        {% if session.completed_at %} · {{ session.completed_at }} (report){% endif %}
+      </td>
+    </tr>
+    <tr>
+      <td class="label">Analyst / Engine</td>
+      <td>ARGUS Autonomous Pentest Engine · Operator-reviewed</td>
+    </tr>
+    <tr>
+      <td class="label">Target</td>
+      <td>
+        {% if session.target_ip %}{{ session.target_ip }}{% endif %}
+        {% if session.target_hostname %} ("{{ session.target_hostname }}"){% endif %}
+        {% if intel.os_guess %} · {{ intel.os_guess }}{% endif %}
+      </td>
+    </tr>
+    <tr>
+      <td class="label">Engagement Type</td>
+      <td>{{ engagement_type }}</td>
+    </tr>
+    {% if outcome.label %}
+    <tr>
+      <td class="label">Outcome</td>
+      <td><strong style="color:var(--red-brand);">{{ outcome.label }}</strong></td>
+    </tr>
+    {% endif %}
+    <tr>
+      <td class="label">Distribution</td>
+      <td>Client Security Team · Authorized Recipients Only</td>
+    </tr>
+    <tr>
+      <td class="label">Handling</td>
+      <td>Do not reproduce or forward without written authorization. Evidence artifacts are integrity-hashed and redacted.</td>
+    </tr>
+  </table>
+
+  <div style="margin-bottom:16px;">
+    <div class="section-sub" style="margin-bottom:12px;font-size:9pt;font-weight:700;color:var(--ink-2);">TABLE OF CONTENTS</div>
+  </div>
+  <div class="toc-grid">
+    <div class="toc-item"><span class="toc-num">1</span><span class="toc-title">Executive Summary</span></div>
+    <div class="toc-item"><span class="toc-num">2</span><span class="toc-title">System &amp; Scope</span></div>
+    <div class="toc-item"><span class="toc-num">3</span><span class="toc-title">Methodology &amp; CVSS Rubric</span></div>
+    <div class="toc-item"><span class="toc-num">4</span><span class="toc-title">Attack Path / Kill-Chain Graph</span></div>
+    <div class="toc-item"><span class="toc-num">5</span><span class="toc-title">Attacks Attempted — Coverage Log</span></div>
+    <div class="toc-item"><span class="toc-num">6</span><span class="toc-title">Findings Register</span></div>
+    <div class="toc-item"><span class="toc-num">7</span><span class="toc-title">Detailed Finding Cards</span></div>
+    <div class="toc-item"><span class="toc-num">8</span><span class="toc-title">Tested — Not Exploitable</span></div>
+    <div class="toc-item"><span class="toc-num">9</span><span class="toc-title">Detection / Purple-Team Mapping</span></div>
+    <div class="toc-item"><span class="toc-num">10</span><span class="toc-title">Evidence Appendix</span></div>
+    <div class="toc-item"><span class="toc-num">11</span><span class="toc-title">MITRE ATT&amp;CK Map</span></div>
+    <div class="toc-item"><span class="toc-num">12</span><span class="toc-title">Remediation Roadmap</span></div>
+    <div class="toc-item"><span class="toc-num">13</span><span class="toc-title">Engagement Timeline</span></div>
+    <div class="toc-item"><span class="toc-num">14</span><span class="toc-title">Data Visualization</span></div>
+  </div>
+</section>
+
+<!-- ============================================================
+     SECTION 1 — EXECUTIVE SUMMARY
+     ============================================================ -->
+<section>
+  <div class="section-header">
+    <div class="section-num">1</div>
+    <div>
+      <div class="section-title">Executive Summary</div>
+      <div class="section-sub">Headline · severity distribution · priority actions</div>
+    </div>
+    <div class="section-tag">Leadership Brief</div>
+  </div>
+
+  {% if executive_summary %}
+  <div class="exec-headline mb-24">
+    <div class="exec-headline-label">Engagement Outcome</div>
+    <div class="exec-headline-text">{{ executive_summary }}</div>
+  </div>
+  {% endif %}
+
+  <!-- Severity stat tiles -->
+  <div class="stat-tiles">
+    <div class="stat-tile st-crit no-break">
+      <span class="tile-num">{{ summary.critical }}</span>
+      <span class="tile-label">Critical</span>
+    </div>
+    <div class="stat-tile st-high no-break">
+      <span class="tile-num">{{ summary.high }}</span>
+      <span class="tile-label">High</span>
+    </div>
+    <div class="stat-tile st-med no-break">
+      <span class="tile-num">{{ summary.medium }}</span>
+      <span class="tile-label">Medium</span>
+    </div>
+    <div class="stat-tile st-low no-break">
+      <span class="tile-num">{{ summary.low }}</span>
+      <span class="tile-label">Low</span>
+    </div>
+    <div class="stat-tile st-info no-break">
+      <span class="tile-num">{{ summary.info }}</span>
+      <span class="tile-label">Info</span>
+    </div>
+    <div class="stat-tile st-total no-break">
+      <span class="tile-num">{{ summary.total }}</span>
+      <span class="tile-label">Total</span>
+    </div>
+    <div class="stat-tile st-access no-break">
+      {% if outcome.root %}
+      <span class="tile-num">ROOT</span>
+      <span class="tile-label">Access Achieved</span>
+      {% elif outcome.compromised %}
+      <span class="tile-num">YES</span>
+      <span class="tile-label">Compromised</span>
+      {% else %}
+      <span class="tile-num">—</span>
+      <span class="tile-label">Access Level</span>
+      {% endif %}
+    </div>
+  </div>
+
+  <!-- Severity legend -->
+  <div class="sev-legend">
+    <span class="sev-legend-label">Severity Scale:</span>
+    <div class="sev-legend-item"><div class="sev-dot sd-crit"></div><span>Critical (CVSS 9.0–10.0)</span></div>
+    <div class="sev-legend-item"><div class="sev-dot sd-high"></div><span>High (7.0–8.9)</span></div>
+    <div class="sev-legend-item"><div class="sev-dot sd-med"></div><span>Medium (4.0–6.9)</span></div>
+    <div class="sev-legend-item"><div class="sev-dot sd-low"></div><span>Low (0.1–3.9)</span></div>
+    <div class="sev-legend-item"><div class="sev-dot sd-info"></div><span>Informational (0)</span></div>
+  </div>
+
+  <!-- Priority Actions derived from findings -->
+  {% set crit_findings = findings | selectattr('severity', 'equalto', 'Critical') | list %}
+  {% set high_findings = findings | selectattr('severity', 'equalto', 'High') | list %}
+  {% set med_findings  = findings | selectattr('severity', 'equalto', 'Medium') | list %}
+  {% if crit_findings or high_findings or med_findings %}
+  <div style="font-size:9pt;font-weight:700;color:var(--ink-2);margin-bottom:12px;letter-spacing:.05em;">
+    PRIORITY REMEDIATION ACTIONS
+  </div>
+  <div class="priority-actions">
+    {% if crit_findings %}
+    <div class="pa-card pa-p1 no-break">
+      <div class="pa-label">P1 — Immediate (Critical)</div>
+      <div class="pa-text">
+        {% for f in crit_findings %}
+        <strong>{{ f.title }}:</strong> {{ f.remediation }}<br>
+        {% endfor %}
+      </div>
+    </div>
+    {% endif %}
+    {% if high_findings %}
+    <div class="pa-card pa-p2 no-break">
+      <div class="pa-label">P2 — Short-term (High)</div>
+      <div class="pa-text">
+        {% for f in high_findings %}
+        <strong>{{ f.title }}:</strong> {{ f.remediation }}<br>
+        {% endfor %}
+      </div>
+    </div>
+    {% endif %}
+    {% if med_findings %}
+    <div class="pa-card pa-p3 no-break">
+      <div class="pa-label">P3 — Planned (Medium / Low)</div>
+      <div class="pa-text">
+        {% for f in med_findings %}
+        <strong>{{ f.title }}:</strong> {{ f.remediation }}<br>
+        {% endfor %}
+      </div>
+    </div>
+    {% endif %}
+  </div>
+  {% endif %}
+</section>
+
+<!-- ============================================================
+     SECTION 2 — SYSTEM & SCOPE
+     ============================================================ -->
+<section>
+  <div class="section-header">
+    <div class="section-num">2</div>
+    <div>
+      <div class="section-title">System &amp; Scope</div>
+      <div class="section-sub">Target profile · services · trust boundary · engagement parameters</div>
+    </div>
+    <div class="section-tag">Scope</div>
+  </div>
+
+  {% if intel.shell_access %}
+  <div class="trust-banner mb-24">
+    <strong>Shell Access Achieved:</strong> {{ intel.shell_access }}.
+    {% if session.scope %} Engagement scope: {{ session.scope }}.{% endif %}
+  </div>
+  {% endif %}
+
+  <div class="scope-grid mb-24">
+    <div class="scope-card">
+      <div class="scope-card-title">Target Profile</div>
+      {% if session.target_hostname %}
+      <div class="scope-card-item"><span class="k">Hostname</span><span class="v">{{ session.target_hostname }}</span></div>
+      {% endif %}
+      {% if session.target_ip %}
+      <div class="scope-card-item"><span class="k">IP Address</span><span class="v">{{ session.target_ip }}</span></div>
+      {% endif %}
+      {% if intel.os_guess %}
+      <div class="scope-card-item"><span class="k">Operating System</span><span class="v">{{ intel.os_guess }}</span></div>
+      {% endif %}
+      <div class="scope-card-item"><span class="k">Engagement Type</span><span class="v">{{ engagement_type }}</span></div>
+      {% if session.scope %}
+      <div class="scope-card-item"><span class="k">Scope</span><span class="v">{{ session.scope }}</span></div>
+      {% endif %}
+      {% if session.started_at %}
+      <div class="scope-card-item"><span class="k">Started</span><span class="v">{{ session.started_at }}</span></div>
+      {% endif %}
+      {% if session.completed_at %}
+      <div class="scope-card-item"><span class="k">Completed</span><span class="v">{{ session.completed_at }}</span></div>
+      {% endif %}
+      <div class="scope-card-item"><span class="k">Analyst Engine</span><span class="v">ARGUS Autonomous (op-reviewed)</span></div>
+    </div>
+    <div class="scope-card">
+      <div class="scope-card-title">Discovered Ports &amp; Services</div>
+      {% if intel.open_ports %}
+      <div class="scope-card-item"><span class="k">Open Ports</span><span class="v">{% for p in intel.open_ports %}{{ p }}{% if not loop.last %}, {% endif %}{% endfor %}</span></div>
+      {% endif %}
+      {% if intel.services %}
+      {% for port, svc in intel.services.items() %}
+      <div class="scope-card-item">
+        <span class="k">:{{ port }}</span>
+        <span class="v">{{ svc.service }}{% if svc.version %} {{ svc.version }}{% endif %}</span>
+      </div>
+      {% endfor %}
+      {% endif %}
+      {% if intel.shell_access %}
+      <div class="scope-card-item"><span class="k">Shell Access</span><span class="v">{{ intel.shell_access }}</span></div>
+      {% endif %}
+    </div>
+  </div>
+
+  {% if intel.services %}
+  <div style="font-size:8pt;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-4);margin-bottom:10px;">
+    Discovered Services
+  </div>
+  <table class="ports-table mb-16">
+    <thead>
+      <tr>
+        <th>Port</th>
+        <th>Service</th>
+        <th>Version / Banner</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for port, svc in intel.services.items() %}
+      <tr>
+        <td><span class="port-num">{{ port }}</span></td>
+        <td>{{ svc.service }}</td>
+        <td><span class="mono">{{ svc.version if svc.version else '—' }}</span></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</section>
+
+<!-- ============================================================
+     SECTION 3 — METHODOLOGY & CVSS RUBRIC
+     ============================================================ -->
+<section>
+  <div class="section-header">
+    <div class="section-num">3</div>
+    <div>
+      <div class="section-title">Methodology &amp; CVSS Rubric</div>
+      <div class="section-sub">Hypothesis-driven assessment · evidence-gated findings · MITRE annotation</div>
+    </div>
+    <div class="section-tag">Process</div>
+  </div>
+
+  <div class="method-steps mb-24">
+    <div class="method-step">
+      <div class="method-step-num">01</div>
+      <div class="method-step-title">Plan</div>
+      <div class="method-step-desc">Hypothesis tree built from scope; attack surface enumerated; MITRE tactics mapped to surface areas.</div>
+      <div class="method-step-arrow"></div>
+    </div>
+    <div class="method-step">
+      <div class="method-step-num">02</div>
+      <div class="method-step-title">Recon</div>
+      <div class="method-step-desc">Port scan, service fingerprint, web directory enum, banner grab, TLS assessment.</div>
+      <div class="method-step-arrow"></div>
+    </div>
+    <div class="method-step">
+      <div class="method-step-num">03</div>
+      <div class="method-step-title">Execute</div>
+      <div class="method-step-desc">Targeted exploit attempts across web, auth, and infra vectors. Every action MITRE-annotated in real time.</div>
+      <div class="method-step-arrow"></div>
+    </div>
+    <div class="method-step">
+      <div class="method-step-num">04</div>
+      <div class="method-step-title">Validate</div>
+      <div class="method-step-desc">ARGUS Issue-Validator gate: findings ship only when grounded in concrete tool evidence. No assumed impact.</div>
+      <div class="method-step-arrow"></div>
+    </div>
+    <div class="method-step">
+      <div class="method-step-num">05</div>
+      <div class="method-step-title">Report</div>
+      <div class="method-step-desc">All exploitable findings retested. Residual status recorded per finding. Report issued post operator review.</div>
+    </div>
+  </div>
+
+  <div style="font-size:8pt;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-4);margin-bottom:10px;">
+    CVSS v3.1 Severity Bands
+  </div>
+  <table class="cvss-table mb-16">
+    <thead>
+      <tr>
+        <th>Severity</th>
+        <th>CVSS Range</th>
+        <th>Description</th>
+        <th>SLA (Remediate Within)</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><span class="badge badge-crit">Critical</span></td>
+        <td><span class="mono fw-700 cs-crit">9.0 – 10.0</span></td>
+        <td>Unauthenticated RCE, full system compromise, immediate business impact.</td>
+        <td>24 – 48 hours</td>
+      </tr>
+      <tr>
+        <td><span class="badge badge-high">High</span></td>
+        <td><span class="mono fw-700 cs-high">7.0 – 8.9</span></td>
+        <td>Significant privilege escalation or data exposure; exploit chains feasible.</td>
+        <td>7 days</td>
+      </tr>
+      <tr>
+        <td><span class="badge badge-med">Medium</span></td>
+        <td><span class="mono fw-700 cs-med">4.0 – 6.9</span></td>
+        <td>Limited exploitation scope; requires user interaction or chaining.</td>
+        <td>30 days</td>
+      </tr>
+      <tr>
+        <td><span class="badge badge-low">Low</span></td>
+        <td><span class="mono fw-700 cs-low">0.1 – 3.9</span></td>
+        <td>Minimal direct impact; informational risk or defence-in-depth weakness.</td>
+        <td>90 days</td>
+      </tr>
+      <tr>
+        <td><span class="badge badge-info">Info</span></td>
+        <td><span class="mono fw-700" style="color:var(--info);">0.0</span></td>
+        <td>No direct exploitability; hygiene, hardening or visibility observations.</td>
+        <td>Next planned cycle</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="info-note mb-0">
+    <strong>Evidence Gate:</strong> The ARGUS Issue-Validator requires that every finding be grounded in concrete,
+    reproducible tool output before it is promoted to the findings register. Theoretical or assumed impact
+    findings are discarded. All findings in this report have passed the validator gate and are linked to
+    at least one integrity-hashed evidence artifact in the Evidence Appendix (§10).
+  </div>
+</section>
+
+<!-- ============================================================
+     SECTION 4 — ATTACK PATH / KILL-CHAIN GRAPH
+     ============================================================ -->
+{% if attack_path %}
+<section class="killchain-section page-break">
+  <div class="section-header">
+    <div class="section-num" style="color:var(--amber);">4</div>
+    <div>
+      <div class="section-title" style="color:#fff;">Attack Path / Kill-Chain Graph</div>
+      <div class="section-sub" style="color:rgba(255,255,255,.4);">Full compromise chain · color-coded by MITRE tactic · annotated stages</div>
+    </div>
+    <div class="section-tag">Hero Visual</div>
+  </div>
+
+  <!-- MITRE tactic legend -->
+  <div class="mitre-legend mb-20">
+    <div class="ml-item"><div class="ml-dot" style="background:var(--m-init);"></div><span class="ml-label">Initial Access</span></div>
+    <div class="ml-item"><div class="ml-dot" style="background:var(--m-exec);"></div><span class="ml-label">Execution</span></div>
+    <div class="ml-item"><div class="ml-dot" style="background:var(--m-persist);"></div><span class="ml-label">Persistence</span></div>
+    <div class="ml-item"><div class="ml-dot" style="background:var(--m-privesc);"></div><span class="ml-label">Privilege Escalation</span></div>
+    <div class="ml-item"><div class="ml-dot" style="background:var(--m-cred);"></div><span class="ml-label">Credential Access</span></div>
+    <div class="ml-item"><div class="ml-dot" style="background:var(--m-disco);"></div><span class="ml-label">Discovery</span></div>
+  </div>
+
+  <div class="attack-graph-wrap">
+    {%- set ns = namespace(node_count = attack_path | length, spacing = 140) -%}
+    {%- set svg_width = [820, ns.node_count * ns.spacing + 80] | max -%}
+    <svg viewBox="0 0 {{ svg_width }} 320" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:{{ svg_width }}px;display:block;margin:0 auto;">
+      <defs>
+        <marker id="arrowW" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+          <polygon points="0 0, 10 3.5, 0 7" fill="rgba(255,255,255,0.4)"/>
+        </marker>
+        <marker id="arrowA" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+          <polygon points="0 0, 10 3.5, 0 7" fill="#f59e0b"/>
+        </marker>
+        <marker id="arrowR" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+          <polygon points="0 0, 10 3.5, 0 7" fill="#dc2626"/>
+        </marker>
+        <filter id="glow">
+          <feGaussianBlur stdDeviation="3" result="blur"/>
+          <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+        </filter>
+        <linearGradient id="nodeGradCrit" x1="0%" y1="0%" x2="0%" y2="100%">
+          <stop offset="0%" stop-color="#dc2626"/>
+          <stop offset="100%" stop-color="#991b1b"/>
+        </linearGradient>
+        <linearGradient id="nodeGradAmb" x1="0%" y1="0%" x2="0%" y2="100%">
+          <stop offset="0%" stop-color="#f59e0b"/>
+          <stop offset="100%" stop-color="#b45309"/>
+        </linearGradient>
+        <linearGradient id="nodeGradInit" x1="0%" y1="0%" x2="0%" y2="100%">
+          <stop offset="0%" stop-color="#7c3aed"/>
+          <stop offset="100%" stop-color="#4c1d95"/>
+        </linearGradient>
+        <linearGradient id="nodeGradTeal" x1="0%" y1="0%" x2="0%" y2="100%">
+          <stop offset="0%" stop-color="#0f766e"/>
+          <stop offset="100%" stop-color="#134e4a"/>
+        </linearGradient>
+        <linearGradient id="nodeGradBlue" x1="0%" y1="0%" x2="0%" y2="100%">
+          <stop offset="0%" stop-color="#1d4ed8"/>
+          <stop offset="100%" stop-color="#1e3a8a"/>
+        </linearGradient>
+        <linearGradient id="rootGlow" x1="0%" y1="0%" x2="0%" y2="100%">
+          <stop offset="0%" stop-color="#fbbf24"/>
+          <stop offset="100%" stop-color="#dc2626"/>
+        </linearGradient>
+      </defs>
+
+      <rect width="{{ svg_width }}" height="320" fill="rgba(255,255,255,0.02)" rx="6"/>
+
+      <!-- Stage labels -->
+      {% for step in attack_path %}
+      {%- set cx = loop.index0 * ns.spacing + 70 -%}
+      <text x="{{ cx }}" y="20" fill="rgba(255,255,255,0.3)" font-family="Inter,sans-serif" font-size="7" font-weight="700" letter-spacing="1.2" text-anchor="middle">{{ step.phase | upper }}</text>
+      {% if not loop.last %}
+      <line x1="{{ cx + ns.spacing / 2 }}" y1="25" x2="{{ cx + ns.spacing / 2 }}" y2="300" stroke="rgba(255,255,255,0.05)" stroke-width="1" stroke-dasharray="4,6"/>
+      {% endif %}
+      {% endfor %}
+
+      <!-- Nodes -->
+      {% for step in attack_path %}
+      {%- set cx = loop.index0 * ns.spacing + 70 -%}
+      {%- set cy = 160 -%}
+      {%- set grad = "nodeGradCrit" if step.phase in ['exploit','execution','privesc','privilege escalation'] else ("nodeGradInit" if step.phase in ['initial access','recon','reconnaissance'] else ("nodeGradAmb" if step.phase in ['escalation','credential'] else "nodeGradTeal")) -%}
+      <g transform="translate({{ cx }},{{ cy }})">
+        <rect x="-60" y="-36" width="120" height="72" rx="6" fill="url(#{{ grad }})" stroke="rgba(255,255,255,0.2)" stroke-width="1.5"{% if step.phase in ['exploit','execution'] %} filter="url(#glow)"{% endif %}/>
+        <text y="-16" text-anchor="middle" fill="white" font-family="Inter,sans-serif" font-size="9" font-weight="800">{{ step.phase | title }}</text>
+        <text y="-2" text-anchor="middle" fill="rgba(255,255,255,0.85)" font-family="JetBrains Mono,monospace" font-size="7.5">{{ step.result | truncate(22, true, '…') }}</text>
+        {% if step.source %}
+        <text y="12" text-anchor="middle" fill="rgba(255,255,255,0.5)" font-family="Inter,sans-serif" font-size="7">{{ step.source | truncate(20, true, '…') }}</text>
+        {% endif %}
+        <text y="26" text-anchor="middle" fill="rgba(255,255,255,0.35)" font-family="Inter,sans-serif" font-size="14" font-weight="900">{{ loop.index | int }}</text>
+      </g>
+      <!-- Arrow to next node -->
+      {% if not loop.last %}
+      {%- set nx = (loop.index) * ns.spacing + 70 -%}
+      <line x1="{{ cx + 60 }}" y1="{{ cy }}" x2="{{ nx - 60 }}" y2="{{ cy }}" stroke="#f59e0b" stroke-width="2" marker-end="url(#arrowA)"/>
+      {% endif %}
+      {% endfor %}
+
+      <!-- Legend at bottom -->
+      <text x="{{ svg_width / 2 }}" y="310" text-anchor="middle" fill="rgba(255,255,255,0.2)" font-family="Inter,sans-serif" font-size="7" letter-spacing="1">
+        {% for step in attack_path %}{{ loop.index }} {{ step.phase | title }}{% if not loop.last %}  ·  {% endif %}{% endfor %}
+      </text>
+    </svg>
+  </div>
+
+  {% if attack_path %}
+  <div style="margin-top:16px;padding:12px 16px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);border-radius:5px;font-size:8pt;color:rgba(255,255,255,.5);line-height:1.6;">
+    <strong style="color:var(--amber);">Chain Summary:</strong>
+    {% for step in attack_path %}
+    <span class="mono" style="color:rgba(255,255,255,.7);">{{ step.phase | title }}</span>
+    {% if step.result %} → {{ step.result }}{% endif %}
+    {% if not loop.last %} → {% endif %}
+    {% endfor %}
+  </div>
+  {% endif %}
+</section>
+{% else %}
+<section class="page-break">
+  <div class="section-header">
+    <div class="section-num">4</div>
+    <div>
+      <div class="section-title">Attack Path / Kill-Chain Graph</div>
+      <div class="section-sub">No attack path data recorded for this engagement</div>
+    </div>
+    <div class="section-tag">Hero Visual</div>
+  </div>
+  <div class="info-note">No attack path steps were recorded for this engagement.</div>
+</section>
+{% endif %}
+
+<!-- ============================================================
+     SECTION 5 — ATTACKS ATTEMPTED / COVERAGE LOG
+     ============================================================ -->
+{% if coverage_tests %}
+<section class="page-break">
+  <div class="section-header">
+    <div class="section-num">5</div>
+    <div>
+      <div class="section-title">Attacks Attempted — Coverage Log</div>
+      <div class="section-sub">Full-spectrum coverage · exploitable + non-exploitable outcomes · operator-reviewed</div>
+    </div>
+    <div class="section-tag">Coverage</div>
+  </div>
+
+  <div class="sev-legend mb-20">
+    <span class="sev-legend-label">Outcome Key:</span>
+    <div class="sev-legend-item"><span class="outcome-success-exp">Exploitable</span><span style="font-size:8pt;color:var(--ink-4);margin-left:4px;">Successfully exploited — contributed to chain</span></div>
+    <div class="sev-legend-item"><span class="outcome-success">Success</span><span style="font-size:8pt;color:var(--ink-4);margin-left:4px;">Succeeded (recon/enum, not exploitation)</span></div>
+    <div class="sev-legend-item"><span class="outcome-neg">Non-Exploitable</span><span style="font-size:8pt;color:var(--ink-4);margin-left:4px;">Attempted — not exploitable / blocked</span></div>
+  </div>
+
+  <table class="attempts-table">
+    <thead>
+      <tr>
+        <th style="width:32px;">#</th>
+        <th style="width:160px;">Tool / Technique</th>
+        <th style="width:110px;">Outcome</th>
+        <th>Result / Notes</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for c in coverage_tests %}
+      <tr{% if c.outcome == 'success' %} style="background:rgba(220,38,38,0.04);"{% elif c.outcome == 'blocked' or c.outcome == 'error' %} style="background:rgba(217,119,6,0.04);"{% endif %}>
+        <td style="font-weight:700;color:var(--ink-4);">{{ loop.index }}</td>
+        <td><span class="tool-mono">{{ c.tool }}</span>{% if c.command %}<br><span style="font-size:7pt;color:var(--ink-5);">{{ c.command | truncate(40, true, '…') }}</span>{% endif %}</td>
+        <td>
+          {% if c.outcome == 'success' %}<span class="outcome-success-exp">Exploitable &#9733;</span>
+          {% elif c.outcome == 'negative' or c.outcome == 'blocked' %}<span class="outcome-neg">Non-Exploitable</span>
+          {% elif c.outcome == 'error' %}<span class="outcome-neg">Error</span>
+          {% else %}<span class="outcome-success">{{ c.outcome | title }}</span>
+          {% endif %}
+        </td>
+        <td style="font-size:8.5pt;">{{ c.note }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
+
+<!-- ============================================================
+     SECTION 6 — FINDINGS REGISTER
+     ============================================================ -->
+{% if findings %}
+<section class="page-break">
+  <div class="section-header">
+    <div class="section-num">6</div>
+    <div>
+      <div class="section-title">Findings Register</div>
+      <div class="section-sub">Complete vulnerability inventory · severity · CVSS · MITRE · retest status</div>
+    </div>
+    <div class="section-tag">All Findings</div>
+  </div>
+
+  <div class="sev-legend mb-16">
+    <span class="sev-legend-label">Severity:</span>
+    <div class="sev-legend-item"><div class="sev-dot sd-crit"></div><span>Critical</span></div>
+    <div class="sev-legend-item"><div class="sev-dot sd-high"></div><span>High</span></div>
+    <div class="sev-legend-item"><div class="sev-dot sd-med"></div><span>Medium</span></div>
+    <div class="sev-legend-item"><div class="sev-dot sd-low"></div><span>Low</span></div>
+    <div class="sev-legend-item"><div class="sev-dot sd-info"></div><span>Info</span></div>
+    <span class="sev-legend-label" style="margin-left:16px;">Retest:</span>
+    <span style="font-size:7.5pt;color:#16a34a;font-weight:700;">&#10003; Verified</span>
+    <span style="font-size:7.5pt;color:var(--med);font-weight:700;margin-left:12px;">&#9679; Open</span>
+  </div>
+
+  <table class="register-table">
+    <thead>
+      <tr>
+        <th>ID</th>
+        <th>Finding</th>
+        <th>Severity</th>
+        <th>CVSS</th>
+        <th>Host:Port</th>
+        <th>MITRE</th>
+        <th>Retest</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for f in findings %}
+      <tr class="register-row">
+        <td><span class="finding-id">F-{{ '%02d' % loop.index }}</span></td>
+        <td style="font-weight:600;font-size:9pt;">{{ f.title }}</td>
+        <td><span class="badge badge-{{ f.severity | lower }}">{{ f.severity }}</span></td>
+        <td>
+          {% if f.extra and f.extra.cvss_base %}
+          <span class="cvss-score cs-{{ f.severity | lower }}">{{ f.extra.cvss_base }}</span>
+          {% else %}
+          <span class="cvss-score" style="color:var(--ink-4);">—</span>
+          {% endif %}
+        </td>
+        <td>
+          <span class="mono" style="font-size:8pt;">
+            {{ f.host }}{% if f.port %}:{{ f.port }}{% endif %}
+          </span>
+        </td>
+        <td>
+          {% if f.mitre %}
+          <span class="mitre-tag">{{ f.mitre }}</span>
+          {% else %}
+          <span class="mono" style="font-size:8pt;color:var(--ink-4);">—</span>
+          {% endif %}
+        </td>
+        <td>
+          {% if f.retest_status == 'Verified' %}
+          <span class="retest-verified">&#10003; Verified</span>
+          {% elif f.retest_status == 'Gated' %}
+          <span class="retest-verified" style="color:#0891b2;">&#9632; Gated</span>
+          {% else %}
+          <span class="retest-open">&#9679; {{ f.retest_status if f.retest_status else 'Open' }}</span>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
+
+<!-- ============================================================
+     SECTION 7 — DETAILED FINDING CARDS
+     ============================================================ -->
+{% if findings %}
+<section class="page-break">
+  <div class="section-header">
+    <div class="section-num">7</div>
+    <div>
+      <div class="section-title">Detailed Finding Cards</div>
+      <div class="section-sub">Description · impact · evidence · captured loot · remediation</div>
+    </div>
+    <div class="section-tag">Technical Detail</div>
+  </div>
+
+  <div class="redact-note">
+    <strong>REDACTION NOTICE:</strong> All captured credentials, key material, and flag values in this section are partially redacted.
+    Full artifacts are integrity-hashed (SHA-256) and available to authorized personnel via secure handoff. Hash values shown are real
+    and can be used to verify artifact authenticity. This document is classified CONFIDENTIAL — CLIENT PRIVILEGED.
+  </div>
+
+  {% for f in findings %}
+  <div style="display:flex;align-items:center;gap:14px;margin-bottom:14px;margin-top:{% if loop.first %}8{% else %}24{% endif %}px;">
+    <div class="stage-num" style="background:var(--{{ f.severity | lower }});color:#fff;">{{ loop.index }}</div>
+    <div style="font-family:'Barlow Condensed',sans-serif;font-size:14pt;font-weight:800;color:var(--ink);text-transform:uppercase;letter-spacing:.04em;">
+      {{ f.title }}
+    </div>
+  </div>
+
+  <div class="finding-card no-break">
+    <div class="finding-card-header" style="background:var(--{{ f.severity | lower }}-bg);border-color:var(--{{ f.severity | lower }}-mid);">
+      <span class="fc-id">F-{{ '%02d' % loop.index }}</span>
+      <span class="fc-title">{{ f.title }}</span>
+      {%- set _basis = f.severity_rationale if f.severity_rationale else (f.extra.severity_rationale if f.extra and f.extra.severity_rationale else '') -%}
+      {% if _basis %}<div style="font-size:7pt;opacity:.68;margin-top:2px;">Severity basis: {{ _basis }}</div>{% endif %}
+      <span class="badge badge-{{ f.severity | lower }}">{{ f.severity }}</span>
+      {%- set _etag = f.evidence_tag if f.evidence_tag else (f.extra.evidence_tag if f.extra and f.extra.evidence_tag else '') -%}
+      {% if _etag %}<span style="padding:1px 6px;border-radius:4px;font-size:7pt;font-weight:700;background:rgba(128,128,150,0.16);border:1px solid rgba(128,128,150,0.42);">{{ _etag }}</span>{% endif %}
+      {% if f.extra and f.extra.cvss_base %}
+      <span class="fc-cvss cs-{{ f.severity | lower }}">{{ f.extra.cvss_base }}</span>
+      {% endif %}
+    </div>
+    <div class="finding-card-body">
+      <div class="fc-grid">
+        <div>
+          <div class="fc-field-label">Host / Endpoint</div>
+          <div class="fc-field-val mono">{{ f.host }}{% if f.port %}:{{ f.port }}{% endif %}</div>
+        </div>
+        {% if f.mitre %}
+        <div>
+          <div class="fc-field-label">MITRE ATT&amp;CK</div>
+          <div class="fc-field-val"><span class="mitre-tag">{{ f.mitre }}</span></div>
+        </div>
+        {% endif %}
+        {% if f.extra and f.extra.cvss_vector %}
+        <div>
+          <div class="fc-field-label">CVSS Vector</div>
+          <div class="fc-field-val mono" style="font-size:7.5pt;">{{ f.extra.cvss_vector }}</div>
+        </div>
+        {% endif %}
+        <div>
+          <div class="fc-field-label">Retest Status</div>
+          <div class="fc-field-val" style="color:{% if f.retest_status == 'Verified' %}#16a34a{% else %}var(--med){% endif %};font-weight:700;">
+            {% if f.retest_status == 'Verified' %}&#10003; Re-confirmed exploitable{% else %}&#9679; {{ f.retest_status if f.retest_status else 'Open' }}{% endif %}
+          </div>
+        </div>
+      </div>
+
+      {% if f.description %}
+      <div class="fc-field-label mb-8">Description</div>
+      <p class="fc-desc">{{ f.description }}</p>
+      {% endif %}
+
+      {% if f.evidence %}
+      <div class="evidence-box">
+        <div class="evidence-box-label">Evidence</div>
+        <div class="evidence-code">{{ f.evidence }}</div>
+      </div>
+      {% endif %}
+
+      {% if f.cves %}
+      <div class="fc-field-label mb-8">CVEs</div>
+      <p class="fc-desc mb-12">
+        {% for cve in f.cves %}<span class="mitre-tag" style="background:#fee2e2;color:#991b1b;">{{ cve }}</span> {% endfor %}
+      </p>
+      {% endif %}
+
+      {% if f.remediation %}
+      <div class="remediation-box">
+        <div class="remediation-box-label">Remediation</div>
+        <div class="remediation-box-text">{{ f.remediation }}</div>
+      </div>
+      {% endif %}
+    </div>
+  </div>
+  {% endfor %}
+</section>
+{% endif %}
+
+<!-- ============================================================
+     SECTION 8 — TESTED — NOT EXPLOITABLE
+     ============================================================ -->
+{% set non_exploitable = coverage_tests | selectattr('outcome', 'in', ['negative', 'blocked', 'error']) | list %}
+{% if non_exploitable %}
+<section class="page-break">
+  <div class="section-header">
+    <div class="section-num">8</div>
+    <div>
+      <div class="section-title">Tested — Not Exploitable</div>
+      <div class="section-sub">Attack vectors attempted and confirmed non-exploitable — full coverage transparency</div>
+    </div>
+    <div class="section-tag">Coverage Assurance</div>
+  </div>
+
+  <div class="info-note mb-20">
+    The following attack vectors were actively tested during the engagement and confirmed to be <strong>not exploitable</strong>
+    in their current configuration. These are recorded for full coverage transparency and as positive security signals.
+    They do not represent findings but demonstrate the breadth of the ARGUS assessment surface.
+  </div>
+
+  <div class="ne-grid">
+    {% for c in non_exploitable %}
+    <div class="ne-card no-break">
+      <div class="ne-icon">
+        {% if c.outcome == 'blocked' %}&#x1F512;
+        {% elif c.outcome == 'error' %}&#x1F6D1;
+        {% else %}&#x1F6AB;
+        {% endif %}
+      </div>
+      <div>
+        <div class="ne-title"><span class="mono">{{ c.tool }}</span>{% if c.command %} — {{ c.command | truncate(30, true, '…') }}{% endif %}</div>
+        <div class="ne-desc">{{ c.note }}</div>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+</section>
+{% endif %}
+
+<!-- ============================================================
+     SECTION 9 — DETECTION / PURPLE-TEAM MAPPING
+     ============================================================ -->
+{% if detection_map %}
+<section>
+  <div class="section-header">
+    <div class="section-num">9</div>
+    <div>
+      <div class="section-title">Detection / Purple-Team Mapping</div>
+      <div class="section-sub">Each attack stage · detection opportunity · telemetry source · current coverage gap</div>
+    </div>
+    <div class="section-tag">Purple Team</div>
+  </div>
+
+  <div class="info-note mb-20">
+    This table maps each major attack stage to the defensive telemetry that <em>should</em> detect it,
+    and records whether that detection capability was present during the engagement.
+  </div>
+
+  <table class="detection-table">
+    <thead>
+      <tr>
+        <th>Finding</th>
+        <th>Attack Technique</th>
+        <th>Detection Opportunity</th>
+        <th>Recommended Telemetry</th>
+        <th>Status</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for d in detection_map %}
+      <tr class="detection-row">
+        <td>
+          {% if d.technique %}
+          <span class="mitre-tag">{{ d.technique }}</span><br>
+          {% endif %}
+          <span style="font-size:8pt;color:var(--ink-4);margin-top:3px;display:block;">{{ d.finding }}</span>
+        </td>
+        <td style="font-size:8.5pt;font-weight:600;">{{ d.finding }}</td>
+        <td style="font-size:8.5pt;">{{ d.opportunity }}</td>
+        <td style="font-size:8.5pt;">{{ d.telemetry }}</td>
+        <td>
+          {% if d.caught %}
+          <span style="color:#16a34a;font-size:7.5pt;font-weight:700;">&#10003; Detected</span>
+          {% else %}
+          <span class="det-open">&#9888; OPEN — not detected</span>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
+
+<!-- ============================================================
+     SECTION 10 — EVIDENCE APPENDIX
+     ============================================================ -->
+{% if loot_entries or creds_summary %}
+<section>
+  <div class="section-header">
+    <div class="section-num">10</div>
+    <div>
+      <div class="section-title">Evidence Appendix</div>
+      <div class="section-sub">Integrity-hashed artifacts · redacted · finding cross-reference</div>
+    </div>
+    <div class="section-tag">Artifacts</div>
+  </div>
+
+  <div class="redact-note mb-16">
+    All artifacts listed below are integrity-hashed using SHA-256. Raw artifact content has been partially redacted in this
+    document. Full unredacted artifacts are available to authorized personnel via secure handoff only.
+    Hash values can be used to verify artifact authenticity against the ARGUS evidence vault.
+  </div>
+
+  {% if creds_summary %}
+  <div style="font-size:8pt;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-4);margin-bottom:10px;">
+    Captured Credentials
+  </div>
+  <table class="evidence-table mb-16">
+    <thead>
+      <tr>
+        <th>User</th>
+        <th>Domain / Host</th>
+        <th>Password</th>
+        <th>Source</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for cr in creds_summary %}
+      <tr>
+        <td><span class="mono">{{ cr.user }}</span></td>
+        <td><span class="mono">{{ cr.domain if cr.domain else '—' }}</span></td>
+        <td><span class="mono" style="color:var(--ink-4);">{{ cr.password if cr.password else '(redacted)' }}</span></td>
+        <td style="font-size:8pt;">{{ cr.source if cr.source else '—' }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+
+  {% if loot_entries %}
+  <div style="font-size:8pt;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-4);margin-bottom:10px;">
+    Captured Loot &amp; Evidence Artifacts
+  </div>
+  <table class="evidence-table">
+    <thead>
+      <tr>
+        <th>Artifact ID</th>
+        <th>Severity</th>
+        <th>Source → Target</th>
+        <th>Size</th>
+        <th>SHA-256</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for l in loot_entries %}
+      <tr>
+        <td><span class="ev-id">{{ l.doi_label }}</span></td>
+        <td><span class="badge badge-{{ l.severity | lower }}">{{ l.severity }}</span></td>
+        <td style="font-size:8pt;"><span class="mono">{{ l.source }}</span>{% if l.target %} → <span class="mono">{{ l.target }}</span>{% endif %}</td>
+        <td style="font-size:8pt;">{{ l.size_bytes | default('—') }}</td>
+        <td><span class="ev-hash">{{ l.sha256 if l.sha256 else '—' }}</span></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</section>
+{% endif %}
+
+<!-- ============================================================
+     SECTION 11 — MITRE ATT&CK MAP
+     ============================================================ -->
+{% if mitre_mappings %}
+<section class="page-break">
+  <div class="section-header">
+    <div class="section-num">11</div>
+    <div>
+      <div class="section-title">MITRE ATT&amp;CK Map</div>
+      <div class="section-sub">Techniques observed during this engagement · color-coded by tactic</div>
+    </div>
+    <div class="section-tag">Framework</div>
+  </div>
+
+  <div class="info-note mb-20">
+    Techniques highlighted in color were <strong>observed and confirmed</strong> during this engagement.
+    This map covers the ATT&amp;CK Enterprise framework tactics relevant to this assessment.
+  </div>
+
+  <!-- Group by tactic -->
+  {%- set tactic_map = {} -%}
+  {%- for m in mitre_mappings -%}
+    {%- if m.tactic not in tactic_map -%}
+      {%- set _ = tactic_map.update({m.tactic: []}) -%}
+    {%- endif -%}
+    {%- set _ = tactic_map[m.tactic].append(m) -%}
+  {%- endfor -%}
+
+  <div class="mitre-map-grid" style="grid-template-columns: repeat({{ [tactic_map | length, 6] | min }}, 1fr);">
+    {% for tactic, techniques in tactic_map.items() %}
+    {%- set tcolor = 'var(--m-init)' if 'access' in tactic | lower else ('var(--m-exec)' if 'exec' in tactic | lower else ('var(--m-persist)' if 'persist' in tactic | lower else ('var(--m-privesc)' if 'priv' in tactic | lower or 'escal' in tactic | lower else ('var(--m-cred)' if 'cred' in tactic | lower else ('var(--m-disco)' if 'disco' in tactic | lower else ('var(--m-lateral)' if 'lateral' in tactic | lower else '#64748b')))))) -%}
+    <div class="mitre-col">
+      <div class="mitre-col-header" style="background:{{ tcolor }};">{{ tactic }}</div>
+      <div class="mitre-col-body">
+        {% for m in techniques %}
+        <div class="mitre-technique mt-active" style="border-color:{{ tcolor }};">
+          <div class="mt-id" style="color:{{ tcolor }};">{{ m.technique_id }}</div>
+          <div class="mt-name">{{ m.technique_name }}{% if m.tool_used %} · <em style="color:var(--ink-5);">{{ m.tool_used }}</em>{% endif %}</div>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+
+  <!-- Confirmed techniques summary -->
+  <div style="margin-top:16px;background:var(--surface-2);border:1px solid var(--border);border-radius:6px;padding:16px 20px;">
+    <div style="font-size:8pt;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-4);margin-bottom:10px;">Confirmed Techniques Summary</div>
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;">
+      {% for m in mitre_mappings %}
+      <div style="font-size:8.5pt;"><span class="mitre-tag">{{ m.technique_id }}</span> &nbsp;{{ m.technique_name }}</div>
+      {% endfor %}
+    </div>
+  </div>
+</section>
+{% endif %}
+
+<!-- ============================================================
+     SECTION 12 — REMEDIATION ROADMAP
+     ============================================================ -->
+{% if findings %}
+<section>
+  <div class="section-header">
+    <div class="section-num">12</div>
+    <div>
+      <div class="section-title">Remediation Roadmap</div>
+      <div class="section-sub">Prioritised actions · P1 immediate · P2 short-term · P3 planned</div>
+    </div>
+    <div class="section-tag">Action Plan</div>
+  </div>
+
+  {%- set p1_findings = findings | selectattr('severity', 'equalto', 'Critical') | list -%}
+  {%- set p2_findings = findings | selectattr('severity', 'in', ['High', 'Medium']) | list -%}
+  {%- set p3_findings = findings | selectattr('severity', 'in', ['Low', 'Info']) | list -%}
+
+  <div class="rr-grid">
+    <div class="rr-col rr-p1 no-break">
+      <div class="rr-col-header">P1 — Immediate<br><span style="font-size:9pt;font-weight:600;opacity:.8;">Within 24–48 hours</span></div>
+      <div class="rr-col-body">
+        {% if p1_findings %}
+        {% for f in p1_findings %}
+        <div class="rr-item">
+          <div class="rr-bullet">{{ loop.index }}</div>
+          <div><strong>{{ f.title }}:</strong> {{ f.remediation }}</div>
+        </div>
+        {% endfor %}
+        {% else %}
+        <div class="rr-item" style="border-bottom:none;">
+          <div style="color:var(--ink-4);font-size:8pt;">No critical findings requiring immediate action.</div>
+        </div>
+        {% endif %}
+      </div>
+    </div>
+
+    <div class="rr-col rr-p2 no-break">
+      <div class="rr-col-header">P2 — Short-term<br><span style="font-size:9pt;font-weight:600;opacity:.8;">Within 7–30 days</span></div>
+      <div class="rr-col-body">
+        {% if p2_findings %}
+        {% for f in p2_findings %}
+        <div class="rr-item{% if loop.last %}" style="border-bottom:none;{% endif %}">
+          <div class="rr-bullet">{{ loop.index }}</div>
+          <div><strong>{{ f.title }}:</strong> {{ f.remediation }}</div>
+        </div>
+        {% endfor %}
+        {% else %}
+        <div class="rr-item" style="border-bottom:none;">
+          <div style="color:var(--ink-4);font-size:8pt;">No high/medium findings.</div>
+        </div>
+        {% endif %}
+      </div>
+    </div>
+
+    <div class="rr-col rr-p3 no-break">
+      <div class="rr-col-header">P3 — Planned<br><span style="font-size:9pt;font-weight:600;opacity:.8;">Within 90 days</span></div>
+      <div class="rr-col-body">
+        {% if p3_findings %}
+        {% for f in p3_findings %}
+        <div class="rr-item{% if loop.last %}" style="border-bottom:none;{% endif %}">
+          <div class="rr-bullet">{{ loop.index }}</div>
+          <div><strong>{{ f.title }}:</strong> {{ f.remediation }}</div>
+        </div>
+        {% endfor %}
+        {% else %}
+        <div class="rr-item" style="border-bottom:none;">
+          <div style="color:var(--ink-4);font-size:8pt;">No low/info findings.</div>
+        </div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+</section>
+{% endif %}
+
+<!-- ============================================================
+     SECTION 13 — ENGAGEMENT TIMELINE
+     ============================================================ -->
+{% if engagement_timeline %}
+<section class="page-break">
+  <div class="section-header">
+    <div class="section-num">13</div>
+    <div>
+      <div class="section-title">Engagement Timeline</div>
+      <div class="section-sub">Chronological attack narrative</div>
+    </div>
+    <div class="section-tag">Chronology</div>
+  </div>
+
+  {% if session.started_at %}
+  <div style="font-size:8pt;font-weight:800;letter-spacing:.18em;text-transform:uppercase;color:var(--amber-dark);margin-bottom:16px;padding:8px 14px;background:var(--amber-bg);border:1px solid var(--amber);border-radius:4px;display:inline-block;">
+    Engagement Day — {{ session.started_at }}
+  </div>
+  {% endif %}
+
+  <div class="timeline-wrap mb-24">
+    <div class="timeline-line"></div>
+    {% for t in engagement_timeline %}
+    {%- set phase_class = 'phase-recon' if 'recon' in t.label | lower or 'scan' in t.label | lower or 'enum' in t.label | lower
+        else ('phase-exploit' if 'exploit' in t.label | lower or 'ssrf' in t.label | lower or 'shell' in t.label | lower or 'upload' in t.label | lower
+        else ('phase-privesc' if 'priv' in t.label | lower or 'root' in t.label | lower or 'sudo' in t.label | lower or 'esc' in t.label | lower
+        else ('phase-loot' if 'loot' in t.label | lower or 'cred' in t.label | lower or 'flag' in t.label | lower or 'captur' in t.label | lower
+        else 'phase-retest'))) -%}
+    {%- set tag_class = 'te-tag-recon' if phase_class == 'phase-recon'
+        else ('te-tag-exploit' if phase_class == 'phase-exploit'
+        else ('te-tag-privesc' if phase_class == 'phase-privesc'
+        else ('te-tag-loot' if phase_class == 'phase-loot'
+        else 'te-tag-retest'))) -%}
+    <div class="timeline-event {{ phase_class }}">
+      <div class="te-time">{{ t.ts }}</div>
+      <div class="te-title">{{ t.label }}</div>
+      {% if t.detail %}
+      <div class="te-desc">{{ t.detail }}</div>
+      {% endif %}
+      <span class="te-tag {{ tag_class }}">{{ t.label | truncate(40, true, '…') }}</span>
+    </div>
+    {% endfor %}
+  </div>
+
+  {% if session.completed_at %}
+  <div style="font-size:8pt;font-weight:800;letter-spacing:.18em;text-transform:uppercase;color:var(--teal);margin-bottom:16px;padding:8px 14px;background:#f0fdfa;border:1px solid #99f6e4;border-radius:4px;display:inline-block;">
+    Completed — {{ session.completed_at }}
+  </div>
+  {% endif %}
+</section>
+{% endif %}
+
+<!-- ============================================================
+     SECTION 14 — DATA VISUALIZATION
+     ============================================================ -->
+<section>
+  <div class="section-header">
+    <div class="section-num">14</div>
+    <div>
+      <div class="section-title">Data Visualization</div>
+      <div class="section-sub">Severity distribution · attempt-outcome breakdown · inline SVG charts</div>
+    </div>
+    <div class="section-tag">Charts</div>
+  </div>
+
+  <div class="charts-row mb-24">
+    <!-- Chart 1: Severity Distribution Bar Chart -->
+    <div class="chart-wrap">
+      <div class="chart-title">Findings by Severity</div>
+      <div class="chart-subtitle">{{ summary.total }} total findings across severity bands</div>
+      {%- set max_count = [summary.critical, summary.high, summary.medium, summary.low, summary.info] | max | default(1) -%}
+      {%- set bar_h = 136 -%}
+      {%- set unit = bar_h / (max_count if max_count > 0 else 1) -%}
+      <svg viewBox="0 0 340 200" xmlns="http://www.w3.org/2000/svg" style="width:100%;display:block;">
+        <defs>
+          <linearGradient id="gc2" x1="0%" y1="0%" x2="100%" y2="0%"><stop offset="0%" stop-color="#dc2626"/><stop offset="100%" stop-color="#f87171"/></linearGradient>
+          <linearGradient id="gh2" x1="0%" y1="0%" x2="100%" y2="0%"><stop offset="0%" stop-color="#ea580c"/><stop offset="100%" stop-color="#fb923c"/></linearGradient>
+          <linearGradient id="gm2" x1="0%" y1="0%" x2="100%" y2="0%"><stop offset="0%" stop-color="#d97706"/><stop offset="100%" stop-color="#fbbf24"/></linearGradient>
+          <linearGradient id="gl2" x1="0%" y1="0%" x2="100%" y2="0%"><stop offset="0%" stop-color="#2563eb"/><stop offset="100%" stop-color="#60a5fa"/></linearGradient>
+          <linearGradient id="gi2" x1="0%" y1="0%" x2="100%" y2="0%"><stop offset="0%" stop-color="#0891b2"/><stop offset="100%" stop-color="#22d3ee"/></linearGradient>
+        </defs>
+        <line x1="68" y1="10" x2="68" y2="158" stroke="#e2e8f0" stroke-width="1"/>
+        <line x1="68" y1="158" x2="330" y2="158" stroke="#e2e8f0" stroke-width="1"/>
+        <line x1="68" y1="124" x2="330" y2="124" stroke="#f0f2f5" stroke-width="1"/>
+        <line x1="68" y1="90"  x2="330" y2="90"  stroke="#f0f2f5" stroke-width="1"/>
+        <line x1="68" y1="56"  x2="330" y2="56"  stroke="#f0f2f5" stroke-width="1"/>
+        <text x="62" y="162" text-anchor="end" fill="#94a3b8" font-size="8" font-family="JetBrains Mono,monospace">0</text>
+        <text x="62" y="94"  text-anchor="end" fill="#94a3b8" font-size="8" font-family="JetBrains Mono,monospace">{{ (max_count / 2) | int }}</text>
+        <text x="62" y="26"  text-anchor="end" fill="#94a3b8" font-size="8" font-family="JetBrains Mono,monospace">{{ max_count }}</text>
+        {%- set ch = (summary.critical * unit) | int -%}
+        {%- set hh = (summary.high * unit) | int -%}
+        {%- set mh = (summary.medium * unit) | int -%}
+        {%- set lh = (summary.low * unit) | int -%}
+        {%- set ih = (summary.info * unit) | int -%}
+        <rect x="80"  y="{{ 158 - ch }}"  width="38" height="{{ ch if ch > 0 else 2 }}" rx="3" fill="url(#gc2)"/>
+        <text x="99"  y="{{ 158 - ch - 4 }}"  text-anchor="middle" fill="#dc2626" font-size="11" font-weight="800" font-family="Inter,sans-serif">{{ summary.critical }}</text>
+        <text x="99"  y="175" text-anchor="middle" fill="#64748b" font-size="8" font-family="Inter,sans-serif">Critical</text>
+        <rect x="130" y="{{ 158 - hh }}" width="38" height="{{ hh if hh > 0 else 2 }}" rx="3" fill="url(#gh2)"/>
+        <text x="149" y="{{ 158 - hh - 4 }}" text-anchor="middle" fill="#ea580c" font-size="11" font-weight="800" font-family="Inter,sans-serif">{{ summary.high }}</text>
+        <text x="149" y="175" text-anchor="middle" fill="#64748b" font-size="8" font-family="Inter,sans-serif">High</text>
+        <rect x="180" y="{{ 158 - mh }}" width="38" height="{{ mh if mh > 0 else 2 }}" rx="3" fill="url(#gm2)"/>
+        <text x="199" y="{{ 158 - mh - 4 }}" text-anchor="middle" fill="#d97706" font-size="11" font-weight="800" font-family="Inter,sans-serif">{{ summary.medium }}</text>
+        <text x="199" y="175" text-anchor="middle" fill="#64748b" font-size="8" font-family="Inter,sans-serif">Medium</text>
+        <rect x="230" y="{{ 158 - lh }}" width="38" height="{{ lh if lh > 0 else 2 }}" rx="3" fill="url(#gl2)"/>
+        <text x="249" y="{{ 158 - lh - 4 }}" text-anchor="middle" fill="#2563eb" font-size="11" font-weight="800" font-family="Inter,sans-serif">{{ summary.low }}</text>
+        <text x="249" y="175" text-anchor="middle" fill="#64748b" font-size="8" font-family="Inter,sans-serif">Low</text>
+        <rect x="280" y="{{ 158 - ih }}" width="38" height="{{ ih if ih > 0 else 2 }}" rx="3" fill="url(#gi2)"/>
+        <text x="299" y="{{ 158 - ih - 4 }}" text-anchor="middle" fill="#0891b2" font-size="11" font-weight="800" font-family="Inter,sans-serif">{{ summary.info }}</text>
+        <text x="299" y="175" text-anchor="middle" fill="#64748b" font-size="8" font-family="Inter,sans-serif">Info</text>
+      </svg>
+    </div>
+
+    <!-- Chart 2: Attempt Outcome Donut -->
+    {% if coverage_counts %}
+    <div class="chart-wrap">
+      <div class="chart-title">Attempt Outcomes</div>
+      <div class="chart-subtitle">{{ coverage_tests | length if coverage_tests else 0 }} attacks attempted</div>
+      {%- set total_attempts = (coverage_counts.values() | sum) | default(1) -%}
+      {%- set exploitable_count = coverage_counts.get('success', 0) -%}
+      {%- set blocked_count = (coverage_counts.get('blocked', 0) + coverage_counts.get('error', 0) + coverage_counts.get('negative', 0)) -%}
+      {%- set other_count = total_attempts - exploitable_count - blocked_count -%}
+      {%- set circ = 439.8 -%}
+      {%- set exp_arc = (exploitable_count / total_attempts * circ) | round(1) if total_attempts > 0 else 0 -%}
+      {%- set blk_arc = (blocked_count / total_attempts * circ) | round(1) if total_attempts > 0 else 0 -%}
+      {%- set oth_arc = (other_count / total_attempts * circ) | round(1) if total_attempts > 0 else 0 -%}
+      <svg viewBox="0 0 340 200" xmlns="http://www.w3.org/2000/svg" style="width:100%;display:block;">
+        <circle cx="130" cy="100" r="70" fill="none" stroke="#f0f2f5" stroke-width="28"/>
+        <circle cx="130" cy="100" r="70" fill="none" stroke="#cbd5e1" stroke-width="28"
+          stroke-dasharray="{{ blk_arc }} {{ circ - blk_arc }}" stroke-dashoffset="0" transform="rotate(-90 130 100)"/>
+        <circle cx="130" cy="100" r="70" fill="none" stroke="#60a5fa" stroke-width="28"
+          stroke-dasharray="{{ oth_arc }} {{ circ - oth_arc }}" stroke-dashoffset="-{{ blk_arc }}" transform="rotate(-90 130 100)"/>
+        <circle cx="130" cy="100" r="70" fill="none" stroke="#dc2626" stroke-width="28"
+          stroke-dasharray="{{ exp_arc }} {{ circ - exp_arc }}" stroke-dashoffset="-{{ blk_arc + oth_arc }}" transform="rotate(-90 130 100)"/>
+        <text x="130" y="95"  text-anchor="middle" fill="#0f172a" font-size="22" font-weight="900" font-family="Barlow Condensed,sans-serif">{{ total_attempts }}</text>
+        <text x="130" y="110" text-anchor="middle" fill="#64748b" font-size="8" font-family="Inter,sans-serif">attempts</text>
+        <rect x="218" y="52" width="12" height="12" rx="2" fill="#dc2626"/>
+        <text x="234" y="63" fill="#334155" font-size="9" font-family="Inter,sans-serif" font-weight="600">{{ exploitable_count }} Exploitable</text>
+        <rect x="218" y="72" width="12" height="12" rx="2" fill="#60a5fa"/>
+        <text x="234" y="83" fill="#334155" font-size="9" font-family="Inter,sans-serif" font-weight="600">{{ other_count }} Recon / Enum</text>
+        <rect x="218" y="92" width="12" height="12" rx="2" fill="#cbd5e1"/>
+        <text x="234" y="103" fill="#334155" font-size="9" font-family="Inter,sans-serif" font-weight="600">{{ blocked_count }} Non-Exploitable</text>
+        {% if blocked_count > 0 %}
+        <rect x="218" y="136" width="108" height="40" rx="4" fill="#f0fdf4" stroke="#86efac" stroke-width="1"/>
+        <text x="272" y="150" text-anchor="middle" fill="#15803d" font-size="8" font-weight="700" font-family="Inter,sans-serif">{{ blocked_count }} attacks blocked</text>
+        <text x="272" y="163" text-anchor="middle" fill="#166534" font-size="7.5" font-family="Inter,sans-serif">Positive security signals</text>
+        {% endif %}
+      </svg>
+    </div>
+    {% endif %}
+  </div>
+
+  <!-- Findings retest status chart -->
+  {% if findings %}
+  {%- set retestable = findings | rejectattr('severity', 'equalto', 'Info') | list -%}
+  {% if retestable %}
+  <div class="chart-wrap" style="margin-bottom:0;">
+    <div class="chart-title">Retest Status — {{ retestable | length }} Findings</div>
+    <div class="chart-subtitle">Status of all Medium+ findings after retest pass</div>
+    {%- set tile_w = 70 -%}
+    {%- set tile_gap = 78 -%}
+    {%- set svg_rw = retestable | length * tile_gap + 20 -%}
+    <svg viewBox="0 0 {{ [svg_rw, 400] | min }} 80" xmlns="http://www.w3.org/2000/svg" style="width:100%;display:block;margin-top:8px;">
+      <defs>
+        <linearGradient id="gReconf2" x1="0%" y1="0%" x2="0%" y2="100%">
+          <stop offset="0%" stop-color="#dc2626"/><stop offset="100%" stop-color="#991b1b"/>
+        </linearGradient>
+        <linearGradient id="gOpen2" x1="0%" y1="0%" x2="0%" y2="100%">
+          <stop offset="0%" stop-color="#d97706"/><stop offset="100%" stop-color="#b45309"/>
+        </linearGradient>
+        <linearGradient id="gFixed2" x1="0%" y1="0%" x2="0%" y2="100%">
+          <stop offset="0%" stop-color="#16a34a"/><stop offset="100%" stop-color="#15803d"/>
+        </linearGradient>
+      </defs>
+      {% for f in retestable %}
+      {%- set tx = loop.index0 * tile_gap + 10 -%}
+      {%- set grad2 = 'gReconf2' if f.retest_status == 'Verified' else ('gFixed2' if f.retest_status == 'Gated' else 'gOpen2') -%}
+      <g transform="translate({{ tx }},8)">
+        <rect width="{{ tile_w }}" height="52" rx="5" fill="url(#{{ grad2 }})"/>
+        <text x="{{ tile_w / 2 }}" y="20" text-anchor="middle" fill="white" font-size="8.5" font-weight="700" font-family="JetBrains Mono,monospace">F-{{ '%02d' % loop.index }}</text>
+        <text x="{{ tile_w / 2 }}" y="34" text-anchor="middle" fill="rgba(255,255,255,.8)" font-size="7" font-family="Inter,sans-serif">{{ f.severity[:4] }} · {{ f.extra.cvss_base if f.extra and f.extra.cvss_base else '—' }}</text>
+        <text x="{{ tile_w / 2 }}" y="47" text-anchor="middle" fill="{% if f.retest_status == 'Verified' %}#fca5a5{% elif f.retest_status == 'Gated' %}#bbf7d0{% else %}#fde68a{% endif %}" font-size="6.5" font-weight="700" font-family="Inter,sans-serif">
+          {{ f.retest_status | upper if f.retest_status else 'OPEN' }}
+        </text>
+      </g>
+      {% endfor %}
+    </svg>
+    <div style="display:flex;gap:20px;margin-top:12px;flex-wrap:wrap;">
+      <div style="display:flex;align-items:center;gap:6px;font-size:8pt;">
+        <div style="width:12px;height:12px;border-radius:2px;background:#dc2626;flex-shrink:0;"></div>
+        <span style="color:var(--ink-3);font-weight:600;">Verified — re-confirmed exploitable</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:6px;font-size:8pt;">
+        <div style="width:12px;height:12px;border-radius:2px;background:#d97706;flex-shrink:0;"></div>
+        <span style="color:var(--ink-3);font-weight:600;">Open — not yet remediated</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:6px;font-size:8pt;">
+        <div style="width:12px;height:12px;border-radius:2px;background:#16a34a;flex-shrink:0;"></div>
+        <span style="color:var(--ink-3);font-weight:600;">Gated — verified fixed</span>
+      </div>
+    </div>
+  </div>
+  {% endif %}
+  {% endif %}
+</section>
+
+{% if ai_security and ai_security.findings %}
+<!-- ============================================================
+     SECTION 15 — AI / LLM SECURITY (RED-TEAM)
+     ============================================================ -->
+<section class="page-break">
+  <div class="section-header">
+    <div class="section-num">15</div>
+    <div>
+      <div class="section-title">AI / LLM Security (Red-Team)</div>
+      <div class="section-sub">Adversarial prompt attacks · AIVSS scoring · OWASP LLM Top 10 · MITRE ATLAS mapping</div>
+    </div>
+    <div class="section-tag">AI Red-Team</div>
+  </div>
+
+  <!-- ── Summary banner ── -->
+  <div class="exec-headline mb-24" style="background:linear-gradient(135deg, #1e1b4b 0%, #312e81 100%);">
+    <div class="exec-headline-label" style="color:#a5b4fc;">AI Red-Team Overview</div>
+    <div class="exec-headline-text">
+      This engagement included adversarial testing of AI / LLM components.
+      <strong style="color:#a5b4fc;">{{ ai_security.count }}</strong> AI-specific finding{{ 's' if ai_security.count != 1 else '' }} were confirmed,
+      reaching a maximum AIVSS of <strong style="color:#fbbf24;">{{ ai_security.max_aivss }}</strong>
+      and an average Attack Success Rate of <strong style="color:#f87171;">{{ ai_security.avg_asr }}%</strong>.
+      {% if ai_security.owasp_classes %}
+      OWASP LLM classes implicated:
+      {% for cls in ai_security.owasp_classes %}<span class="mitre-tag" style="background:#ede9fe;color:#4c1d95;vertical-align:middle;">{{ cls }}</span>{% if not loop.last %} {% endif %}{% endfor %}.
+      {% endif %}
+    </div>
+  </div>
+
+  <!-- ── AI stat tiles ── -->
+  <div class="stat-tiles" style="grid-template-columns: repeat(4, 1fr); margin-bottom:28px;">
+    <div class="stat-tile no-break" style="background:#ede9fe;border-color:#7c3aed;color:#4c1d95;">
+      <span class="tile-num" style="font-size:28pt;">{{ ai_security.count }}</span>
+      <span class="tile-label">AI Findings</span>
+    </div>
+    <div class="stat-tile no-break" style="background:var(--crit-bg);border-color:var(--crit);color:var(--crit);">
+      <span class="tile-num">{{ ai_security.max_aivss }}</span>
+      <span class="tile-label">Max AIVSS</span>
+    </div>
+    <div class="stat-tile no-break" style="background:var(--high-bg);border-color:var(--high);color:var(--high);">
+      <span class="tile-num">{{ ai_security.avg_asr }}%</span>
+      <span class="tile-label">Avg ASR</span>
+    </div>
+    <div class="stat-tile no-break" style="background:#f3e8ff;border-color:#7c3aed;color:#4c1d95;">
+      <span class="tile-num" style="font-size:14pt;line-height:1.3;padding-top:4px;">{{ ai_security.owasp_classes | join(' ') if ai_security.owasp_classes else '—' }}</span>
+      <span class="tile-label">OWASP-LLM Classes</span>
+    </div>
+  </div>
+
+  <!-- ── Findings register table ── -->
+  <div style="font-size:8pt;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-4);margin-bottom:10px;">
+    AI Finding Register
+  </div>
+  <table class="register-table mb-24">
+    <thead>
+      <tr>
+        <th>Finding</th>
+        <th>Severity</th>
+        <th>AIVSS</th>
+        <th>ASR%</th>
+        <th>OWASP-LLM</th>
+        <th>ATLAS</th>
+        <th>Attack Vector</th>
+        <th>Model</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for f in ai_security.findings %}
+      <tr class="register-row">
+        <td style="font-weight:600;font-size:9pt;">{{ f.title }}</td>
+        <td>
+          <span class="badge badge-{{ f.severity | lower | default('info') }}">{{ f.severity | default('') }}</span>
+        </td>
+        <td>
+          <span class="cvss-score cs-{{ f.severity | lower | default('info') }}">{{ f.aivss | default('—') }}</span>
+        </td>
+        <td>
+          <!-- Inline ASR bar -->
+          <div style="display:flex;align-items:center;gap:6px;">
+            <div style="flex:1;min-width:48px;height:6px;background:var(--border);border-radius:3px;overflow:hidden;">
+              <div style="height:100%;width:{{ f.asr | default(0) }}%;background:{% if f.asr | default(0) >= 70 %}var(--crit){% elif f.asr | default(0) >= 40 %}var(--high){% else %}var(--med){% endif %};border-radius:3px;"></div>
+            </div>
+            <span style="font-family:'JetBrains Mono',monospace;font-size:8pt;font-weight:700;color:{% if f.asr | default(0) >= 70 %}var(--crit){% elif f.asr | default(0) >= 40 %}var(--high){% else %}var(--med){% endif %};">{{ f.asr | default(0) }}%</span>
+          </div>
+        </td>
+        <td>
+          {% if f.owasp_llm | default('') %}
+          <span class="mitre-tag" style="background:#ede9fe;color:#4c1d95;">{{ f.owasp_llm }}</span>
+          {% else %}
+          <span class="mono" style="font-size:8pt;color:var(--ink-4);">—</span>
+          {% endif %}
+        </td>
+        <td>
+          {% if f.atlas | default('') %}
+          <span class="mitre-tag" style="background:#e0f2fe;color:#0c4a6e;">{{ f.atlas }}</span>
+          {% else %}
+          <span class="mono" style="font-size:8pt;color:var(--ink-4);">—</span>
+          {% endif %}
+        </td>
+        <td style="font-size:8.5pt;">{{ f.attack_vector | default('—') }}</td>
+        <td><span class="mono" style="font-size:8pt;color:var(--ink-3);">{{ f.target_model | default('—') }}</span></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <!-- ── Per-finding detail cards ── -->
+  <div style="font-size:8pt;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-4);margin-bottom:14px;">
+    AI Finding Detail
+  </div>
+
+  {% for f in ai_security.findings %}
+  <div style="display:flex;align-items:center;gap:14px;margin-bottom:14px;margin-top:{% if loop.first %}0{% else %}24{% endif %}px;">
+    <div class="stage-num" style="background:#7c3aed;color:#fff;">{{ loop.index }}</div>
+    <div style="font-family:'Barlow Condensed',sans-serif;font-size:14pt;font-weight:800;color:var(--ink);text-transform:uppercase;letter-spacing:.04em;">
+      {{ f.title }}
+    </div>
+  </div>
+
+  <div class="finding-card no-break">
+    <!-- Card header — uses severity colour tokens identical to standard finding cards -->
+    <div class="finding-card-header" style="background:var(--{{ f.severity | lower | default('info') }}-bg);border-color:var(--{{ f.severity | lower | default('info') }}-mid);">
+      <span class="fc-id" style="color:#7c3aed;">AI-{{ '%02d' % loop.index }}</span>
+      <span class="fc-title">{{ f.title }}</span>
+      <span class="badge badge-{{ f.severity | lower | default('info') }}">{{ f.severity | default('') }}</span>
+      <span class="fc-cvss cs-{{ f.severity | lower | default('info') }}">AIVSS {{ f.aivss | default('—') }}</span>
+      {% if f.cvss | default(0) %}
+      <span class="fc-cvss" style="color:var(--ink-4);font-size:9pt;">CVSS {{ f.cvss }}</span>
+      {% endif %}
+    </div>
+    <div class="finding-card-body">
+      <!-- Metadata grid -->
+      <div class="fc-grid" style="grid-template-columns:1fr 1fr 1fr;">
+        <div>
+          <div class="fc-field-label">Attack Vector</div>
+          <div class="fc-field-val">{{ f.attack_vector | default('—') }}</div>
+        </div>
+        <div>
+          <div class="fc-field-label">Target Model</div>
+          <div class="fc-field-val mono">{{ f.target_model | default('—') }}</div>
+        </div>
+        <div>
+          <div class="fc-field-label">Attack Success Rate</div>
+          <div class="fc-field-val">
+            <div style="display:flex;align-items:center;gap:8px;">
+              <div style="flex:1;height:8px;background:var(--border);border-radius:4px;overflow:hidden;">
+                <div style="height:100%;width:{{ f.asr | default(0) }}%;background:{% if f.asr | default(0) >= 70 %}var(--crit){% elif f.asr | default(0) >= 40 %}var(--high){% else %}var(--med){% endif %};border-radius:4px;"></div>
+              </div>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:9pt;font-weight:800;color:{% if f.asr | default(0) >= 70 %}var(--crit){% elif f.asr | default(0) >= 40 %}var(--high){% else %}var(--med){% endif %};">{{ f.asr | default(0) }}%</span>
+            </div>
+            {% if f.trials | default(0) %}
+            <div style="font-size:7.5pt;color:var(--ink-4);margin-top:3px;">{{ f.successes | default(0) }} / {{ f.trials }} trials succeeded</div>
+            {% endif %}
+          </div>
+        </div>
+        <div>
+          <div class="fc-field-label">OWASP LLM</div>
+          <div class="fc-field-val">
+            {% if f.owasp_llm | default('') %}
+            <span class="mitre-tag" style="background:#ede9fe;color:#4c1d95;">{{ f.owasp_llm }}</span>
+            {% else %}—{% endif %}
+          </div>
+        </div>
+        <div>
+          <div class="fc-field-label">MITRE ATLAS</div>
+          <div class="fc-field-val">
+            {% if f.atlas | default('') %}
+            <span class="mitre-tag" style="background:#e0f2fe;color:#0c4a6e;">{{ f.atlas }}</span>
+            {% else %}—{% endif %}
+          </div>
+        </div>
+        {% if f.vector | default('') %}
+        <div>
+          <div class="fc-field-label">AIVSS Vector</div>
+          <div class="fc-field-val mono" style="font-size:7.5pt;word-break:break-all;">{{ f.vector }}</div>
+        </div>
+        {% endif %}
+      </div>
+
+      {% if f.evidence | default('') %}
+      <div class="evidence-box">
+        <div class="evidence-box-label">Evidence / Prompt–Response Capture</div>
+        <div class="evidence-code">{{ f.evidence }}</div>
+      </div>
+      {% endif %}
+
+      {% if f.remediation | default('') %}
+      <div class="remediation-box">
+        <div class="remediation-box-label">Remediation</div>
+        <div class="remediation-box-text">{{ f.remediation }}</div>
+      </div>
+      {% endif %}
+    </div>
+  </div>
+  {% endfor %}
+
+  <!-- ── Attack-class breakdown bar chart (by_class dict) ── -->
+  {% if ai_security.by_class %}
+  <div style="margin-top:28px;">
+    <div style="font-size:8pt;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-4);margin-bottom:12px;">
+      Findings by Attack Vector
+    </div>
+    <div class="chart-wrap" style="padding:16px 20px;">
+      {%- set max_cls = ai_security.by_class.values() | max | default(1) -%}
+      {% for vec, cnt in ai_security.by_class.items() %}
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;">
+        <div style="min-width:160px;font-size:8.5pt;color:var(--ink-2);font-weight:600;text-align:right;">{{ vec }}</div>
+        <div style="flex:1;height:14px;background:var(--border);border-radius:4px;overflow:hidden;">
+          <div style="height:100%;width:{{ (cnt / max_cls * 100) | int }}%;background:linear-gradient(90deg,#7c3aed,#a78bfa);border-radius:4px;"></div>
+        </div>
+        <div style="min-width:28px;font-family:'JetBrains Mono',monospace;font-size:9pt;font-weight:800;color:#7c3aed;">{{ cnt }}</div>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+
+</section>
+{% endif %}
+
+<!-- ============================================================
+     REPORT FOOTER
+     ============================================================ -->
+<div class="report-footer">
+  <div>
+    <div class="footer-conf">CONFIDENTIAL — CLIENT PRIVILEGED</div>
+    <div style="margin-top:3px;">ARGUS Security Assessment &nbsp;·&nbsp; <span class="footer-mono">{{ target_display }}</span>
+      {% if session.target_ip %} &nbsp;·&nbsp; {{ session.target_ip }}{% endif %}
+    </div>
+  </div>
+  <div style="text-align:right;">
+    <div style="color:rgba(255,255,255,.5);margin-bottom:3px;">Generated {{ generated_at }}</div>
+    <div class="footer-mono" style="color:rgba(255,255,255,.3);font-size:7pt;">Autonomous Pentest Engine v1 &nbsp;·&nbsp; Operator-reviewed &nbsp;·&nbsp; ARGUS</div>
+  </div>
+</div>
+
+</div>
+</body>
+</html>
+
+
+
+

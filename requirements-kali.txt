@@ -35,6 +35,13 @@
 # ═════════════════════════════════════════════════════════════════════════════
 #   python3        (>= 3.11)                  apt install python3 python3-venv python3-pip pipx
 #   node + npm     (>= 18, runs mcp-server.js) apt install nodejs npm
+#   mongodb server (>= 6.x, localhost:27017)   apt install mongodb   (or run mongo:6 in Docker)
+#                  └─ REQUIRED: agent_server.py builds indexes at startup and will
+#                     not boot without it (ServerSelectionTimeoutError / Errno 111
+#                     "Connection refused" on 27017). The pymongo/motor CLIENTS are
+#                     in requirements.txt; this is the SERVER they connect to.
+#                     If apt has no 'mongodb' pkg:  sudo docker run -d --name argus-mongo \
+#                       --restart unless-stopped -p 27017:27017 -v argus-mongo:/data/db mongo:6
 #   metasploit-framework (msfconsole/msfvenom) apt install metasploit-framework
 #   seclists       (wordlists, see bottom)     apt install seclists
 #   golang         (>= 1.21, for the Go tools) apt install golang-go
@@ -219,3 +226,18 @@ ike-scan lbd inetsim pwn atk6-alive6 cewl-ng tcpick udptunnel
 #   /usr/share/seclists/Passwords/Common-Credentials/top-passwords-shortlist.txt
 #   /usr/share/seclists/Passwords/Common-Credentials/best110.txt
 #   /usr/share/wfuzz/wordlist/vulns/lfi.txt
+
+# Headless-browser verification of web findings (Gap #2 — IDOR/auth-bypass/XSS/business-logic).
+# OPTIONAL: ARGUS skips browser verification gracefully if absent.
+# After install, run: playwright install --with-deps chromium
+playwright>=1.40
+
+# ── Fuzzing → custom-exploit workshop (OWASP Fuzzing coverage) ────────────────
+# All OPTIONAL: each fuzzing engine degrades cleanly when its tool is absent.
+boofuzz>=0.4.1          # protocol fuzzing framework (OWASP-listed; smart stateful proto)
+schemathesis>=3.25      # OpenAPI/GraphQL API fuzzing (property-based; APIFuzzer-class)
+hachoir>=3.1            # binary/file-format parser — seed/structure analysis for file fuzzing
+# Native crash-triage helpers for the binary engine (used when present):
+#   pwntools (pwn) and angr are installed via the Kali tool script, not pip here.
+# NOTE: the coverage-guided + mutational fuzzers themselves (AFL++, radamsa, zzuf,
+# honggfuzz) are SYSTEM binaries — installed by install-kali-tools.sh, not pip.

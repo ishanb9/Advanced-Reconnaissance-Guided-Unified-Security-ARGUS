@@ -182,6 +182,19 @@ class CveLookupSubagent(BaseSubagent):
                 host=target,
             ))
 
+        # Widen the "public exploit available" signal beyond the curated MSF map:
+        # CISA-KEV membership (actively exploited in the wild) + any CVE that
+        # searchsploit surfaces below. So a famous-but-unmapped CVE rates High at
+        # first sight (per the rubric) instead of only on a later re-grade.
+        _ss_cves = set()
+        _is_kev = lambda _c: False
+        try:
+            from agents.osint.cisa_kev_subagent import _load_kev_catalog, is_kev as _kev_fn
+            await _load_kev_catalog()
+            _is_kev = _kev_fn
+        except Exception:
+            pass
+
         # ── Step 1: searchsploit per service ─────────────────────────────
         for svc in versioned_services:
             port    = svc.get("port", "")
@@ -199,6 +212,10 @@ class CveLookupSubagent(BaseSubagent):
                     {"options": f'--colour {query}'},
                 )
                 exploits = _parse_searchsploit(ss_out)
+                # Every CVE searchsploit references HAS a public exploit → feed the
+                # operational severity policy so those CVEs grade High in Step 2.
+                for _e in exploits:
+                    _ss_cves.update(str(c).upper() for c in (_e.get("cves") or []))
                 for exp in exploits:
                     cves_str = ", ".join(exp["cves"]) if exp["cves"] else "N/A"
                     # Determine metasploit module suggestion
@@ -236,6 +253,11 @@ class CveLookupSubagent(BaseSubagent):
                         cve=exp["cves"][0] if exp["cves"] else None,
                         mitre_technique="T1190",
                         exploit_suggestion=exploit_suggestion,
+                        # A public exploit ARGUS has NOT run = High (definite risk),
+                        # not Critical — Critical is reserved for demonstrated
+                        # compromise. searchsploit matched the detected version.
+                        signals={"confirmed": True, "exploit_available": True,
+                                 "version_confirmed": True},
                     )
                     await self.store_finding(finding)
             except Exception as exc:
@@ -282,7 +304,8 @@ class CveLookupSubagent(BaseSubagent):
                         continue
                     seen_cves.add(cve)
 
-                    has_exploit = cve.upper() in _CVE_TO_MSF
+                    _cu = cve.upper()
+                    has_exploit = (_cu in _CVE_TO_MSF) or (_cu in _ss_cves) or _is_kev(_cu)
                     severity    = _score_to_severity(score, has_exploit)
 
                     msf_module  = _CVE_TO_MSF.get(cve.upper())
@@ -306,6 +329,18 @@ class CveLookupSubagent(BaseSubagent):
                         cve=cve,
                         mitre_technique="T1190",
                         exploit_suggestion=exploit_suggestion,
+                        # Operational severity: nmap-vulners matched this CVE to the
+                        # detected service VERSION (version-confirmed). High only when
+                        # a public exploit is known; otherwise a confirmed, chainable
+                        # vuln = Medium (per the rubric — High requires a public exploit).
+                        # The CVSS score is retained as the reference number.
+                        signals={
+                            "confirmed":         True,
+                            "exploit_available": has_exploit,
+                            "version_confirmed": True,
+                            "chainable":         True,
+                            "cvss_base":         score,
+                        },
                     )
                     await self.store_finding(finding)
             except Exception as exc:

@@ -85,7 +85,6 @@ from utils.scan_logger import (
 # Meta-agents — plan auditor and findings validator
 _META_AGENTS_IMPORT_ERROR: str = ""
 try:
-    from agents.meta.master_checker_agent  import MasterCheckerAgent
     from agents.meta.issue_validator_agent import IssueValidatorAgent
     from agents.meta.expert_agent          import RedTeamExpertAgent
     from agents.meta.correction            import (
@@ -340,7 +339,6 @@ class MasterAgent(BaseAgent):
 
         # ── Meta-agents (plan auditor + findings validator + expert) ───
         self._meta_agents_enabled:   bool                    = True
-        self._master_checker:        Optional[Any]           = None
         self._issue_validator:       Optional[Any]           = None
         self._expert:                Optional[Any]           = None
         self._pending_corrections:   asyncio.Queue           = asyncio.Queue()
@@ -728,6 +726,70 @@ class MasterAgent(BaseAgent):
             mission_brief = brief_dict,
         )
 
+    # ─── Engagement provenance (per session+target) ───────────
+    def _engagement_origin(self) -> Dict[str, str]:
+        """Identity of the CURRENT engagement (session + target).  Mirrors
+        OperatorCore._engagement_origin so evidence stamped by either side
+        compares equal."""
+        return {
+            "session_id": str(getattr(self, "_session_id", "") or ""),
+            "target": str(self._intel.get("target_host") or self._intel.get("target") or ""),
+        }
+
+    def _scrub_foreign_evidence(self, intel: Dict[str, Any], current: Dict[str, str]) -> int:
+        """Drop evidence carried into intel that originated in a DIFFERENT
+        engagement (the Niagara/Fox bleed: a prior run's findings/loot surfaced
+        as current).  Returns the count removed.  Config, scope, target and
+        cross-session knowledge are untouched — only known-foreign *evidence*
+        (findings / loot) is removed.  An item with no `_origin` is 'unknown'
+        and kept (it cannot be proven foreign)."""
+        def _keep(item) -> bool:
+            o = item.get("_origin") if isinstance(item, dict) else None
+            if not o:
+                return True
+            return (str(o.get("session_id", "")) == current.get("session_id", "")
+                    and str(o.get("target", "")) == current.get("target", ""))
+        removed = 0
+        v = intel.get("findings")
+        if isinstance(v, list):
+            before = len(v); intel["findings"] = [x for x in v if _keep(x)]; removed += before - len(intel["findings"])
+        loot = intel.get("loot")
+        if isinstance(loot, list):
+            before = len(loot); intel["loot"] = [x for x in loot if _keep(x)]; removed += before - len(intel["loot"])
+        elif isinstance(loot, dict) and isinstance(loot.get("items"), list):
+            before = len(loot["items"]); loot["items"] = [x for x in loot["items"] if _keep(x)]; removed += before - len(loot["items"])
+        return removed
+
+    async def _preflight_reachable(self, host: str) -> bool:
+        """Best-effort reachability probe at scan start.  Returns True UNLESS we
+        have positive evidence the target is unreachable (fail-open — never block
+        a run on a flaky probe).  Catches the tun0-down case where every packet
+        was 'Network is unreachable' yet ARGUS scanned for minutes anyway."""
+        import asyncio as _a
+        if not host:
+            return True
+        async def _try(port: int) -> bool:
+            try:
+                r, w = await _a.wait_for(_a.open_connection(host, port), timeout=3)
+                try:
+                    w.close()
+                except Exception:
+                    pass
+                return True
+            except Exception:
+                return False
+        cands = []
+        for p in (list(self._intel.get("open_ports") or [])[:3] or [80, 443, 22]):
+            try:
+                cands.append(int(p))
+            except Exception:
+                pass
+        if not cands:
+            return True
+        results = await _a.gather(*[_try(p) for p in cands[:3]], return_exceptions=True)
+        # Unreachable only if EVERY probe failed (any success ⇒ reachable).
+        return any(r is True for r in results)
+
     # ─── Main Entry Point ─────────────────────────────────────
 
     async def run(
@@ -748,12 +810,31 @@ class MasterAgent(BaseAgent):
         mission_brief:      Optional[Any] = None,    # Improvement #1 — formal mission
         objective:          str  = "",               # operator-supplied goal text
         autonomy:           str  = "",               # operator-core autonomy for this scan
+        token_budget_per_target: int = 0,            # human-set LLM-token cap for THIS target (0 = unlimited)
+        max_seconds: int = 0,                         # per-host depth budget (0 = use operator default)
         **kwargs
     ) -> Dict:
         self._use_reasoning_loop = _REASONING_AVAILABLE  # Always use reasoning if available
         # Per-scan operator autonomy (UI/selectable) overrides the env default.
         self._operator_autonomy = (autonomy or "").strip().lower() or os.environ.get(
             "ARGUS_OPERATOR_AUTONOMY", "approve_to_exploit")
+        # Human-set per-target LLM-token budget.  Each MasterAgent.run() drives ONE
+        # target (CIDR/domain scans spawn one master per host), so this IS the
+        # per-target cap.  0 = unlimited (ARGUS never imposes its own limit — only
+        # the human does).  When real token usage on this target reaches it, the
+        # operator PAUSES and asks the human to extend or cut off (see
+        # OperatorCore._token_budget_gate).  Accounting lives in self._tokens_used.
+        try:
+            self._token_budget_per_target = max(0, int(token_budget_per_target or 0))
+        except Exception:
+            self._token_budget_per_target = 0
+        self._tokens_used = int(getattr(self, "_tokens_used", 0) or 0)
+        # Optional per-host depth budget (used by the CIDR exploit phase so a
+        # stalled host hands off its slot).  0 = use the operator's env default.
+        try:
+            self._operator_max_seconds = max(0, int(max_seconds or 0))
+        except Exception:
+            self._operator_max_seconds = 0
         self._session_id     = session_id
         # Stash operator-supplied objective so the EngagementContext
         # init below picks it up.
@@ -800,6 +881,14 @@ class MasterAgent(BaseAgent):
         self._web_phase_timeout   = web_phase_timeout
         self._intel["target"]     = target
         self._intel["target_type"] = target_type
+        # AI / LLM target adapter config (target_type == 'ai'); empty otherwise.
+        self._intel["ai_target"]  = kwargs.get("ai_target") or {}
+        # Human-set scan-intrusiveness ceiling (safe|intrusive|disruptive) — the
+        # safety gate for technology-capability quick-wins (#5). Safe by default.
+        self._intel["scan_intrusiveness"] = (kwargs.get("scan_intrusiveness") or "safe")
+        # Optional PCAP/SPAN capture for passive-first OT fingerprinting (#5 S2).
+        if kwargs.get("pcap_path"):
+            self._intel["pcap_path"] = kwargs.get("pcap_path")
         # New intel fields surfaced to ALL consumers
         self._intel["target_kind"]   = _norm.kind
         self._intel["target_host"]   = self._target_host
@@ -807,6 +896,42 @@ class MasterAgent(BaseAgent):
         self._intel["target_scope"]  = list(getattr(_norm, "scope_hosts", []) or [target])
         self._intel["target_resolved_ip"] = getattr(_norm, "resolved_ip", None)
         self._phases_to_run  = phases or [p.value for p in AttackPhase]
+
+        # ── Engagement provenance + scrub-on-seed ──────────────────────
+        # Stamp this engagement's identity, then drop any evidence carried in
+        # (via a shared intel object / seeded state) that belongs to a DIFFERENT
+        # engagement.  This is the root-cause fix for prior-run findings (e.g. a
+        # Niagara/Fox box from a previous session) surfacing as CURRENT loot and
+        # progress.  Cross-session knowledge/lessons are untouched.
+        self._intel["_origin"] = self._engagement_origin()
+        try:
+            _rm = self._scrub_foreign_evidence(self._intel, self._intel["_origin"])
+            if _rm:
+                import logging as _l
+                _l.getLogger(__name__).info("scrubbed %d foreign-origin evidence item(s) at seed", _rm)
+        except Exception:
+            pass
+
+        # ── Pre-flight reachability (honest blocker, not a doomed scan) ─────
+        # If the target is unreachable at scan start (e.g. the VPN/route is
+        # down), surface a prominent blocker immediately.  The operator's
+        # connectivity gate then pauses for the human after the first failed
+        # probes — instead of spinning ~145s of doomed scans and reporting a
+        # false "0 findings — complete" (the tun0-down run).  Default on;
+        # ARGUS_PREFLIGHT_REACHABILITY=0 disables.
+        if os.environ.get("ARGUS_PREFLIGHT_REACHABILITY", "1") != "0":
+            try:
+                _pf_host = self._intel.get("target_resolved_ip") or self._target_host
+                if _pf_host and not await self._preflight_reachable(str(_pf_host)):
+                    self._intel["blocker"] = {"kind": "unreachable", "target": str(_pf_host),
+                                              "phase": "preflight"}
+                    await self._emit("engagement_blocker", {
+                        "session_id": session_id, "target": str(_pf_host), "kind": "unreachable",
+                        "detail": ("Pre-flight: target not reachable on any candidate port "
+                                   "(check the VPN/route). The engagement will pause for you "
+                                   "rather than scan a dead target.")})
+            except Exception:
+                pass
 
         # ── Proactive /etc/hosts hygiene (stale-vhost reconcile) ───────
         # A leftover `<old-ip> <vhost> # argus-managed` line from a PRIOR
@@ -955,26 +1080,22 @@ class MasterAgent(BaseAgent):
         if _META_AGENTS_AVAILABLE and self._meta_agents_enabled:
             try:
                 _db_conn = db.get_db()
-                # Under the operator core, MasterChecker + IssueValidator are
-                # DEAD WEIGHT: they only run as pre/post-phase reviewers and the
-                # operator does not march phases, so they never fire.  Skip
-                # instantiating them.  The RedTeamExpert IS kept — the operator
-                # consults it every few iterations via _consult_advisors.
+                # MasterChecker was removed (dead plan-auditor that never fired
+                # under the operator).  The IssueValidator is now a real finding
+                # GATE that runs on the DEFAULT operator path — constructed +
+                # registered next to the Error Analyzer (see _reasoning_loop_run);
+                # the legacy fallback still builds one here.  The RedTeamExpert is
+                # kept — the operator consults it via _consult_advisors.
                 try:
                     _op_driver = self._operator_core_enabled()
                 except Exception:
                     _op_driver = False
                 if _op_driver:
-                    self._master_checker  = None
-                    self._issue_validator = None
+                    self._issue_validator = None      # built on the operator path
                 else:
-                    self._master_checker  = MasterCheckerAgent(
-                        broadcast=self.broadcast, session_id=session_id, db_conn=_db_conn
-                    )
                     self._issue_validator = IssueValidatorAgent(
                         broadcast=self.broadcast, session_id=session_id, db_conn=_db_conn
                     )
-                    self._master_checker._session_id  = session_id
                     self._issue_validator._session_id = session_id
                 self._expert = RedTeamExpertAgent(
                     broadcast=self.broadcast, session_id=session_id, db_conn=_db_conn
@@ -1007,7 +1128,6 @@ class MasterAgent(BaseAgent):
                 _mlog.getLogger(__name__).error(
                     "[meta-agents] Init failed: %s", _meta_init_exc, exc_info=True
                 )
-                self._master_checker  = None
                 self._issue_validator = None
                 self._expert          = None
                 await self._emit("meta_agents_status", {
@@ -1033,7 +1153,32 @@ class MasterAgent(BaseAgent):
             try:
                 cp = await db.get_latest_checkpoint(session_id)
                 if cp:
-                    self._intel.update(cp.get("intel_snapshot", {}))
+                    # Only merge a checkpoint's intel_snapshot when it belongs to
+                    # THIS engagement (same session+target).  A foreign/stale
+                    # snapshot (e.g. a different target in a CIDR session, or a
+                    # prior run) must NOT seed its findings/loot as current — that
+                    # is the context-bleed vector.  Non-evidence resume state
+                    # (used_tools / phases) is always restored.
+                    _snap = cp.get("intel_snapshot", {}) or {}
+                    _cur = self._intel.get("_origin") or self._engagement_origin()
+                    _cp_origin = (cp.get("_origin") or _snap.get("_origin") or {
+                        "session_id": str(session_id),
+                        "target": str(_snap.get("target_host") or _snap.get("target") or target),
+                    })
+                    if (str(_cp_origin.get("session_id", "")) == str(_cur.get("session_id", ""))
+                            and str(_cp_origin.get("target", "")) == str(_cur.get("target", ""))):
+                        self._intel.update(_snap)            # legitimate resume
+                    else:
+                        import logging as _l
+                        _l.getLogger(__name__).info(
+                            "checkpoint origin mismatch (%s != %s) — skipping evidence merge",
+                            _cp_origin.get("target"), _cur.get("target"))
+                    # re-assert provenance + scrub anything the merge carried in
+                    self._intel["_origin"] = self._engagement_origin()
+                    try:
+                        self._scrub_foreign_evidence(self._intel, self._intel["_origin"])
+                    except Exception:
+                        pass
                     self._used_tools       = cp.get("used_tools", {})
                     self._phases_completed = cp.get("phases_completed", [])
                     self._phases_to_run    = cp.get("phases_to_run") or self._phases_to_run
@@ -1263,8 +1408,6 @@ class MasterAgent(BaseAgent):
         llm_ok = await self.check_llm_available()
         # Share LLM availability with meta-agents so they skip their own cold-check
         # and avoid a redundant /api/tags request at the start of every phase.
-        if self._master_checker:
-            self._master_checker._llm_available  = self._llm_available
         if self._issue_validator:
             self._issue_validator._llm_available = self._llm_available
         if self._expert:
@@ -1463,7 +1606,23 @@ class MasterAgent(BaseAgent):
 
         # ── Step 4: Execute phases ─────────────────────────────
         try:
-            await self._execute_phases(session_id, target, plan, resume_from=resume_from_phase)
+            if str(target_type).lower() in ("ai", "llm", "agent"):
+                # AI / agentic target → run the AI Red-Team Engine INSTEAD of the
+                # network phases; findings still flow through store_finding → the
+                # validator gate → the report.  Additive + guarded; a non-AI
+                # engagement never reaches this branch.
+                try:
+                    await self._advance_phase(AttackPhase.RECON)
+                except Exception:
+                    pass
+                from agents.ai_red_team.engine import AIRedTeamEngine
+                _ai_cfg = (self._intel.get("ai_target")
+                           or (self._intel.get("engagement_context") or {}).get("ai_target")
+                           or {"type": "single_endpoint",
+                               "url": self._target_url or target})
+                await AIRedTeamEngine(self, _ai_cfg).run(session_id)
+            else:
+                await self._execute_phases(session_id, target, plan, resume_from=resume_from_phase)
         except asyncio.CancelledError:
             # Explicit user cancellation (tool_stop / request_stop) — respect it
             await self.set_status(AgentStatus.IDLE, "Pentest cancelled by user")
@@ -1576,6 +1735,20 @@ class MasterAgent(BaseAgent):
         except Exception as _lexc:
             logger.warning("RAG lesson distillation failed to schedule: %s", _lexc)
 
+        # Skill learning loop (#1): attribute this engagement's genuine findings to
+        # the skills that fired + refresh their learned weights / review flags, so
+        # the catalog self-improves at *prioritising* what actually yields.  The
+        # distiller already learns reusable techniques into RAG; this learns which
+        # technology skills earn their place.  Best-effort; never blocks finalize.
+        try:
+            if os.environ.get("ARGUS_SKILL_REGISTRY", "1") != "0":
+                from knowledge import skill_telemetry as _stl
+                _stl.learn_from_engagement(
+                    list(self._intel.get("_fired_skills", []) or []),
+                    list(getattr(self, "findings", []) or []))
+        except Exception as _slexc:
+            logger.warning("skill-telemetry learning failed: %s", _slexc)
+
         await self._emit("pentest_complete", {
             "session_id": session_id,
             "intel":      self._intel,
@@ -1642,6 +1815,17 @@ class MasterAgent(BaseAgent):
             if getattr(self, "_error_analyzer", None) is not None:
                 self._error_analyzer.request_stop()
             unregister_analyzer(session_id)
+        except Exception:
+            pass
+        # Stop + unregister the Issue Validator (finding gate)
+        try:
+            from agents.meta.issue_validator_agent import unregister_validator
+            if getattr(self, "_issue_validator", None) is not None:
+                try:
+                    self._issue_validator.request_stop()
+                except Exception:
+                    pass
+            unregister_validator(session_id)
         except Exception:
             pass
         # Unregister the OSINT intel cascade (cancels any in-flight
@@ -2723,9 +2907,39 @@ class MasterAgent(BaseAgent):
             session_id             = session_id,
             auto_execute_threshold = 0.70,
             voi_rank_fn            = self.rank_actions,
+            tool_reliability_fn    = self._read_tool_reliability,
         )
         # Restore score from checkpoint
         self._decision_engine.set_score(self._intel.get("action_score", 0))
+
+    def _read_tool_reliability(self) -> Dict[str, Dict[str, int]]:
+        """Per-tool {success, fail} telemetry for the DecisionEngine read-side (Gap #7).
+        Consumes the reliability signals ARGUS ALREADY tracks in-memory this engagement:
+        ``_used_tools`` (attempts) and ``_tool_circuit_breaker`` (empty/blocked runs).
+        Best-effort + read-only — returns {} on any problem so selection is unaffected."""
+        try:
+            used = getattr(self, "_used_tools", {}) or {}
+            breaker = getattr(self, "_tool_circuit_breaker", {}) or {}
+            fails: Dict[str, int] = {}
+            for key, st in breaker.items():
+                tool = key[0] if isinstance(key, (tuple, list)) and key else str(key)
+                n = int((st or {}).get("consecutive_empty", 0) or 0)
+                if (st or {}).get("blocked"):
+                    n = max(n, 3)                     # a tripped breaker is a strong fail signal
+                fails[tool] = fails.get(tool, 0) + n
+            stats: Dict[str, Dict[str, int]] = {}
+            for tool, attempts in used.items():
+                try:
+                    a = int(attempts)
+                except (TypeError, ValueError):
+                    continue
+                f = min(a, fails.get(tool, 0))
+                stats[tool] = {"success": max(0, a - f), "fail": f}
+            for tool, f in fails.items():             # breaker-only tools (no run count)
+                stats.setdefault(tool, {"success": 0, "fail": int(f)})
+            return stats
+        except Exception:
+            return {}
 
     async def _note_operator_fallback(self, reason: str, detail: str) -> None:
         """Make an operator→legacy fallback VISIBLE on the findings page + feed.
@@ -2873,6 +3087,34 @@ class MasterAgent(BaseAgent):
                 "[error_analyzer] default-path start failed (non-fatal): %s", _eaerr)
             _err_task = None
 
+        # ── Issue Validator — real finding GATE on the DEFAULT operator path ──
+        # Construct + register + run alongside the Error Analyzer so the
+        # write-time gate (base_agent.store_finding) can look it up by session,
+        # and rejections broadcast live.  bind_master wires the
+        # _pending_corrections bridge so the operator sees gated findings.
+        try:
+            from agents.meta.issue_validator_agent import (
+                IssueValidatorAgent as _IVA, register_validator as _reg_iv)
+            if getattr(self, "_issue_validator", None) is None and self._meta_agents_enabled:
+                try:
+                    _iv_db = db.get_db()
+                except Exception:
+                    _iv_db = None
+                self._issue_validator = _IVA(
+                    broadcast=self.broadcast, session_id=session_id, db_conn=_iv_db)
+                self._issue_validator._session_id = session_id
+                try:
+                    self._issue_validator.bind_master(self)
+                except Exception:
+                    pass
+            if getattr(self, "_issue_validator", None) is not None:
+                _reg_iv(session_id, self._issue_validator)
+                self._create_task(self._issue_validator.run())
+        except Exception as _iverr:
+            import logging as _l
+            _l.getLogger(__name__).warning(
+                "[issue_validator] default-path start failed (non-fatal): %s", _iverr)
+
         # Run the driver — operator core first, legacy ReasoningLoop as fallback.
         # One-time TRUTH banner: print what is ACTUALLY driving this engagement.
         # The per-call logs historically stamped a static MODEL_NAME constant (a
@@ -2906,7 +3148,11 @@ class MasterAgent(BaseAgent):
                         OperatorCore, OperatorUnavailable)
                     autonomy = (getattr(self, "_operator_autonomy", "") or
                                 os.environ.get("ARGUS_OPERATOR_AUTONOMY", "approve_to_exploit"))
-                    op = OperatorCore(self, autonomy=autonomy)
+                    _op_kwargs = dict(autonomy=autonomy,
+                                      token_budget=getattr(self, "_token_budget_per_target", 0))
+                    if getattr(self, "_operator_max_seconds", 0) > 0:
+                        _op_kwargs["max_seconds"] = self._operator_max_seconds
+                    op = OperatorCore(self, **_op_kwargs)
                     self._operator_core_inst = op
                     await self._emit("operator_core_start", {
                         "session_id": session_id, "target": target,
@@ -3964,6 +4210,286 @@ class MasterAgent(BaseAgent):
                     have.add(pn)
                 svcs[pn] = {"service": svc, "version": ver,
                             "protocol": "tcp", "port": int(pn)}
+        # Capability-module recon fingerprint (Crestron AV/OT today; the seed of
+        # the OT/IoT/IT registry, sub-project #5) — best-effort, never raises.
+        self._avot_capability_scan()
+        # Real-time latest-vulnerability lookup (client feedback #5): the moment a
+        # service+version is identified, hand it to the OSINT intel-cascade so the
+        # latest-CVE/exploit lookups (NVD CPE → Vulners → CISA-KEV → ExploitDB →
+        # GitHub-PoC) fire NOW, not only at the later OSINT phase.  The cascade
+        # de-duplicates signals, so repeated merges are cheap.  Best-effort.
+        self._realtime_cve_lookup()
+
+    # Capability-module registry: each module exposes detect(intel) -> dict |
+    # list[dict] | None and finding_for(det) -> store_finding-shaped record.
+    # agents/avot = Crestron AV/OT; agents/ai_red_team/discovery = shadow-AI
+    # surfaces.  Seed of the broader OT/IoT/IT registry (sub-project #5).
+    _CAPABILITY_MODULES = ("agents.avot.recon", "agents.ai_red_team.discovery",
+                           "agents.ot.modbus", "agents.ot.opcua", "agents.ot.bacnet")
+
+    def _realtime_cve_lookup(self) -> None:
+        """Client feedback #5 — prove ARGUS hunts the LATEST vulnerabilities for
+        whatever technology it identifies, in real time.  As soon as recon merges
+        a service+version into intel, push those signals into the per-session
+        OSINT intel-cascade so its latest-CVE / public-exploit subagents (NVD CPE,
+        Vulners, CISA-KEV, ExploitDB, GitHub-PoC) run immediately instead of only
+        at the dedicated OSINT phase.  The cascade de-duplicates by signal token,
+        so calling this on every merge is cheap and idempotent.  Best-effort —
+        any failure (no cascade yet, import error) is swallowed so recon is never
+        blocked.  Emits a lightweight event the first time a tech is queued so the
+        operator can SEE the lookup happening in the live feed."""
+        try:
+            from agents.osint.intel_cascade import get_cascade
+        except Exception:
+            return
+        sid = getattr(self, "_session_id", None) or getattr(self, "session_id", None)
+        if not sid:
+            return
+        try:
+            casc = get_cascade(str(sid))
+        except Exception:
+            casc = None
+        if casc is None:
+            return
+        intel = getattr(self, "_intel", None) or {}
+        # Only the technology-bearing slices — never hosts/IPs (target-agnostic).
+        payload = {
+            "services":        intel.get("services") or {},
+            "open_ports":      intel.get("open_ports") or [],
+            "cves_with_score": intel.get("cves_with_score"),
+            "critical_cves":   intel.get("critical_cves"),
+            "technologies":    intel.get("technologies") or intel.get("tech") or [],
+            "hostnames":       intel.get("hostnames") or [],
+        }
+        try:
+            n = casc.harvest_signals_from_intel(payload)
+        except Exception:
+            n = 0
+        # Surface the FIRST time each technology batch is queued so the user can
+        # confirm in the feed that latest-CVE hunting is actually firing.
+        try:
+            if n and not getattr(self, "_realtime_cve_announced", False):
+                self._realtime_cve_announced = True
+                svc_names = sorted({
+                    (v or {}).get("service", "") for v in (payload["services"] or {}).values()
+                    if (v or {}).get("service")
+                })[:8]
+                self._create_task(self._emit("intel_cascade_status", {
+                    "status":  "querying",
+                    "message": ("🌐 Latest-CVE lookup queued for identified tech: "
+                                + (", ".join(svc_names) if svc_names else f"{n} signal(s)")),
+                    "signals": int(n),
+                }))
+        except Exception:
+            pass
+
+    def _avot_capability_scan(self) -> None:
+        """Ask every registered capability module whether the current intel
+        matches its technology.  On a match: record a finding ONCE via the
+        standard pipeline and inject an operator guidance note so the LLM knows
+        the capability exists.  All technology specifics live in the capability
+        modules — the engine stays content-agnostic.  ``detect`` may return a
+        single dict or a list (e.g. several shadow-AI surfaces on one host).
+        Best-effort; never raises into the caller."""
+        # One-time RAG ingest of the human-authored skill bodies (sub-project #5).
+        self._ingest_skills_to_rag()
+        # Passive-first OT (GRASSMARLIN doctrine, #5 Slice 2): if a PCAP/SPAN
+        # capture was supplied, merge its observed services into intel BEFORE any
+        # active probe so fragile OT is characterised with zero packets sent.
+        self._merge_passive_capture()
+        import importlib as _il
+        for _modname in self._CAPABILITY_MODULES:
+            try:
+                _mod = _il.import_module(_modname)
+                det = _mod.detect(self._intel)
+            except Exception:
+                continue
+            if not det:
+                continue
+            for d in (det if isinstance(det, list) else [det]):
+                if isinstance(d, dict):
+                    self._record_capability_detection(_mod, d)
+        # Data-driven skill registry (sub-project #5): match human-authored skill
+        # files against intel.  Record findings (dedup), then PRIORITISE the matches
+        # (#2), record telemetry (#5), and gated-auto-dispatch the top safe quick-wins
+        # (#3).  The self-learning loop closes at engagement end (skill_telemetry).
+        try:
+            from knowledge import skill_registry as _sr
+            _skill_dets = _sr.match_skills(self._intel)
+            for _d in _skill_dets:
+                self._record_capability_detection(_sr, _d, advise=False)
+            self._capability_skill_followup(_skill_dets)
+        except Exception:
+            pass
+
+    def _ingest_skills_to_rag(self) -> None:
+        """Best-effort: ingest the skill-file guidance bodies into RAG once per
+        process so the operator can also retrieve them semantically.  Behind
+        ARGUS_SKILL_REGISTRY (default-on); idempotent via a flag."""
+        import os as _os
+        if _os.environ.get("ARGUS_SKILL_REGISTRY", "1") == "0":
+            return
+        if getattr(self, "_skills_ingested", False):
+            return
+        self._skills_ingested = True
+        try:
+            from knowledge import skill_registry as _sr
+            for _s in _sr.load_skills():
+                _sr.ingest_to_rag(_s)
+        except Exception:
+            pass
+
+    def _merge_passive_capture(self) -> None:
+        """Best-effort passive-first OT: merge a supplied PCAP/SPAN capture's
+        observed ports/services into intel (zero packets sent).  Idempotent;
+        no-op when no pcap_path is configured or scapy is unavailable."""
+        path = self._intel.get("pcap_path")
+        if not path or getattr(self, "_passive_merged", False):
+            return
+        self._passive_merged = True
+        try:
+            from agents.ot import passive_ingest as _pi
+            observed = _pi.ingest_pcap(str(path))
+            if not observed:
+                return
+            ports = self._intel.setdefault("open_ports", [])
+            have = {str(p.get("port") if isinstance(p, dict) else p) for p in ports}
+            for op in observed.get("open_ports", []):
+                if str(op.get("port")) not in have:
+                    ports.append(op); have.add(str(op.get("port")))
+            svcs = self._intel.setdefault("services", {})
+            for k, v in (observed.get("services") or {}).items():
+                svcs.setdefault(str(k), v)
+            self._intel["passive_capture"] = True
+        except Exception:
+            pass
+
+    def _record_capability_detection(self, mod, det: Dict, advise: bool = True) -> None:
+        """Dedup + record a single capability detection (finding + operator note).
+        ``advise=False`` suppresses the per-detection note (skill matches use the
+        prioritised block in _capability_skill_followup instead, to avoid noise)."""
+        tech = det.get("technology", "")
+        seen = self._intel.setdefault("_capability_detected", [])
+        if tech in seen:
+            return
+        seen.append(tech)
+        # Operator guidance (best-effort) so the LLM can use the capability.
+        if advise:
+            try:
+                self._meta_advisory_context.append(
+                    f"{tech} detected ({det.get('evidence','')}). {det.get('hint','')}".strip())
+            except Exception:
+                pass
+        # Record a finding through the standard pipeline (async, fire-and-forget).
+        try:
+            import asyncio as _a
+            from db.schemas import FindingSeverity as _FS
+            f = mod.finding_for(det)
+            # A bare capability detection is an OBSERVATION → default INFO, never HIGH.
+            _sev = getattr(_FS, str(f.get("severity", "info")).upper(), _FS.INFO)
+            # Carry the inherent-risk class as metadata so prioritisation / the P1
+            # remediation roadmap still rank SharePoint / Modbus / FADEC as high-VALUE
+            # targets without inflating the finding's headline severity.
+            _inh = f.get("inherent_risk") or det.get("inherent_risk") or det.get("severity")
+            _a.ensure_future(self.store_finding(
+                severity=_sev, title=f["title"], description=f["description"],
+                host=str(self._intel.get("target_host") or self._intel.get("target") or ""),
+                tool_used=f.get("tool_used", "capability"),
+                evidence=f.get("evidence"), remediation=f.get("remediation"),
+                extra=({"inherent_risk": str(_inh).lower()} if _inh else None),
+                # Operational severity: a capability detection is an OBSERVATION →
+                # the policy grades it INFO (evidence tag OBSERVED). inherent_risk
+                # is carried for prioritisation only.
+                signals={"detection_only": True,
+                         "inherent_risk": (str(_inh).lower() if _inh else None)}))
+        except Exception:
+            pass
+
+    def _capability_skill_followup(self, skill_dets: List[Dict]) -> None:
+        """#5 telemetry + #2 prioritisation + #3 auto-dispatch for matched skills.
+        Records which skills fired (for end-of-engagement learning), injects ONE
+        prioritised, focused advisory (top-N, highest-yield first), and schedules
+        the gated safe-quick-win auto-dispatch.  Best-effort; never raises."""
+        if not skill_dets:
+            return
+        try:
+            from knowledge import skill_registry as _sr
+            from knowledge import skill_telemetry as _st
+        except Exception:
+            return
+        # #5 — record every fired skill + remember it for the learning loop.
+        fired = self._intel.setdefault("_fired_skills", [])
+        for _d in skill_dets:
+            _sid = str(_d.get("id", ""))
+            if not _sid:
+                continue
+            try:
+                _st.record_fired(_sid)
+            except Exception:
+                pass
+            if _sid not in fired:
+                fired.append(_sid)
+        ceiling = str(self._intel.get("scan_intrusiveness") or "safe")
+        domain = "OT" if any(_d.get("domain") == "OT" for _d in skill_dets) else "IT"
+        # #2 — one prioritised, focused advisory so the operator does not drown.
+        try:
+            guidance = _sr.prioritized_guidance(skill_dets, ceiling=ceiling, domain=domain,
+                                                authorized=False, top_n=6)
+            if guidance:
+                self._meta_advisory_context.append(
+                    "PRIORITISED technology matches (highest-yield first; respect the "
+                    f"scan-intrusiveness ceiling = {ceiling}):\n" + guidance)
+        except Exception:
+            pass
+        # #3 — gated safe-quick-win auto-dispatch (default OFF).  Check the toggle
+        # BEFORE creating the coroutine so the default path allocates nothing.
+        import os as _os
+        if _os.environ.get("ARGUS_SKILL_AUTODISPATCH", "0") == "1":
+            try:
+                self._create_task(self._capability_autodispatch(skill_dets, ceiling, domain))
+            except Exception:
+                pass
+
+    async def _capability_autodispatch(self, skill_dets: List[Dict], ceiling: str,
+                                       domain: str) -> None:
+        """#3 — opt-in (ARGUS_SKILL_AUTODISPATCH=1): auto-run the top few SAFE
+        quick-wins within the ceiling via run_tool, recording the outcome to
+        telemetry (did the safe quick-win produce usable output?).  Only SAFE
+        class, only enumeration the operator could run anyway; best-effort."""
+        import os as _os
+        if _os.environ.get("ARGUS_SKILL_AUTODISPATCH", "0") != "1":
+            return
+        try:
+            from knowledge import skill_registry as _sr
+            from knowledge import skill_telemetry as _st
+        except Exception:
+            return
+        host = str(self._intel.get("target_host") or self._intel.get("target") or "")
+        if not host:
+            return
+        for _d in _sr.rank_matches(skill_dets)[:3]:
+            _sid = str(_d.get("id", ""))
+            qws = _sr.safe_quick_wins(_d, ceiling, _d.get("domain", domain), authorized=False)
+            if not qws:
+                continue
+            cmd = str(qws[0].get("cmd", "")).replace("{host}", host).strip()
+            if not cmd or "{" in cmd:        # unresolved placeholder → skip
+                continue
+            tool = cmd.split()[0]
+            args = cmd[len(tool):].strip()
+            produced = False
+            try:
+                res = await self.run_tool(tool, args, target=host, timeout=120)
+                out = (res or {}).get("stdout", "") or ""
+                produced = bool(out.strip()) and int((res or {}).get("exit_code", 1) or 1) == 0
+            except Exception:
+                produced = False
+            try:
+                _st.record_quick_win(_sid, produced)
+                await self._emit("skill_autodispatch",
+                                 {"skill": _sid, "cmd": cmd[:200], "produced": produced})
+            except Exception:
+                pass
 
     def _record_dispatch_outcome(self, cb_key, *, productive: bool) -> None:
         """Update the circuit-breaker counter for a (tool, target) pair.
@@ -4692,31 +5218,9 @@ class MasterAgent(BaseAgent):
         # ── PHASE 1: RECON (always first, sequential) ─────────
         await self._apply_pending_guidance()   # drain any queued guidance before recon
         if phase_enabled("recon") and not already_done("recon"):
-            # META: pre-phase review
-            if self._master_checker and self._meta_agents_enabled:
-                _pre_c = await self._master_checker.pre_phase_review(
-                    phase="recon", instructions=[], intel_snapshot=dict(self._intel))
-                await self._handle_corrections(_pre_c, "recon", allow_replan=True)
             await self._phase_recon(target, plan)
             self._phases_completed.append("recon")
-            # META: post-phase review + issue validation
-            if self._master_checker and self._meta_agents_enabled:
-                _recon_findings = []
-                try:
-                    _recon_findings = await db.get_findings_by_phase(self._session_id, "recon") or []
-                except Exception:
-                    pass
-                _post_c = await self._master_checker.post_phase_review(
-                    phase="recon",
-                    executed_tools=list(self._intel.get("raw_outputs", {}).keys()),
-                    findings=_recon_findings, intel_delta={})
-                if self._issue_validator:
-                    _val_c = await self._issue_validator.validate_phase_findings(
-                        phase="recon", all_findings=_recon_findings,
-                        scan_objectives=self._intel.get("ctf_objectives", []))
-                    _post_c.extend(_val_c)
-                await self._drain_pending_corrections("recon")
-                await self._handle_corrections(_post_c, "recon", allow_replan=False)
+            await self._drain_pending_corrections("recon")
         elif already_done("recon"):
             await self.emit_reasoning(
                 step="recon_skipped", reasoning="Recon already completed before pause",
@@ -4970,26 +5474,7 @@ class MasterAgent(BaseAgent):
             # Sync gate: ensure all parallel agents are truly done before continuing
             await self._wait_for_agents_idle(timeout=120.0)
 
-            # META: post-parallel phase review (vuln_id + web_testing combined)
-            if self._master_checker and self._meta_agents_enabled:
-                _para_findings = []
-                try:
-                    for _pname in [n for n, _ in parallel_coros]:
-                        _pf = await db.get_findings_by_phase(self._session_id, _pname) or []
-                        _para_findings.extend(_pf)
-                except Exception:
-                    pass
-                _post_c2 = await self._master_checker.post_phase_review(
-                    phase="intelligence_aggregation",
-                    executed_tools=[n for n, _ in parallel_coros],
-                    findings=_para_findings, intel_delta={})
-                if self._issue_validator and _para_findings:
-                    _val_c2 = await self._issue_validator.validate_phase_findings(
-                        phase="intelligence_aggregation", all_findings=_para_findings,
-                        scan_objectives=self._intel.get("ctf_objectives", []))
-                    _post_c2.extend(_val_c2)
-                await self._drain_pending_corrections("intelligence_aggregation")
-                await self._handle_corrections(_post_c2, "intelligence_aggregation", allow_replan=False)
+            await self._drain_pending_corrections("intelligence_aggregation")
 
         # ── AUTO-CHECKPOINT 2: after parallel intel ───────────
         await self._check_pause("parallel_intel")
@@ -5067,11 +5552,6 @@ class MasterAgent(BaseAgent):
         await self._apply_pending_guidance()   # drain before exploit gate
         await self._transition_state("EXPLOITATION")
         if phase_enabled("exploit") and not already_done("exploit"):
-            # META: pre-phase review
-            if self._master_checker and self._meta_agents_enabled:
-                _pre_exp = await self._master_checker.pre_phase_review(
-                    phase="exploit", instructions=[], intel_snapshot=dict(self._intel))
-                await self._handle_corrections(_pre_exp, "exploit", allow_replan=True)
             if self._auto_exploit:
                 await self._phase_exploit(target)
             else:
@@ -5087,22 +5567,7 @@ class MasterAgent(BaseAgent):
                     self._phases_completed.append("exploit")
                 else:
                     await self._emit("phase_skipped", {"phase": "exploit"})
-            # META: post-phase review
-            if self._master_checker and self._meta_agents_enabled:
-                _exp_findings = []
-                try:
-                    _exp_findings = await db.get_findings_by_phase(self._session_id, "exploit") or []
-                except Exception:
-                    pass
-                _post_exp = await self._master_checker.post_phase_review(
-                    phase="exploit", executed_tools=[], findings=_exp_findings, intel_delta={})
-                if self._issue_validator and _exp_findings:
-                    _val_exp = await self._issue_validator.validate_phase_findings(
-                        phase="exploit", all_findings=_exp_findings,
-                        scan_objectives=self._intel.get("ctf_objectives", []))
-                    _post_exp.extend(_val_exp)
-                await self._drain_pending_corrections("exploit")
-                await self._handle_corrections(_post_exp, "exploit", allow_replan=False)
+            await self._drain_pending_corrections("exploit")
         elif already_done("exploit"):
             await self.emit_reasoning(
                 step="exploit_skipped", reasoning="Exploit phase completed before pause",
@@ -5118,17 +5583,7 @@ class MasterAgent(BaseAgent):
             if phase_enabled("post_exploit") and not already_done("post_exploit"):
                 await self._phase_post_exploit(target)
                 self._phases_completed.append("post_exploit")
-                # META: post-exploit review
-                if self._master_checker and self._meta_agents_enabled:
-                    _pe_findings = []
-                    try:
-                        _pe_findings = await db.get_findings_by_phase(self._session_id, "post_exploit") or []
-                    except Exception:
-                        pass
-                    _post_pe = await self._master_checker.post_phase_review(
-                        phase="post_exploit", executed_tools=[], findings=_pe_findings, intel_delta={})
-                    await self._drain_pending_corrections("post_exploit")
-                    await self._handle_corrections(_post_pe, "post_exploit", allow_replan=False)
+                await self._drain_pending_corrections("post_exploit")
 
             await self._transition_state("PRIVILEGE_ESCALATION")
             if phase_enabled("privesc") and not already_done("privesc"):

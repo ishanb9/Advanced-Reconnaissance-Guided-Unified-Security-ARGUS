@@ -126,16 +126,108 @@ def _looks_like_flag(val: str) -> bool:
     return False
 
 
+# ── Live-operator registry ─────────────────────────────────────────────────
+# Lets the WebSocket layer route a human token-budget decision (extend / cut
+# off) to the exact operator that is paused on its per-target budget.  Keyed by
+# (session_id, target) so a multi-host scan (one operator per host) resolves the
+# right one.  A second (session_id, "") alias is kept for the common single-
+# target case where the UI may not echo the target back.
+_OPERATOR_REGISTRY: "Dict[tuple, Any]" = {}
+
+
+def _register_operator(op) -> None:
+    try:
+        _OPERATOR_REGISTRY[(op._session_id or "", op._target or "")] = op
+        _OPERATOR_REGISTRY[(op._session_id or "", "")] = op
+    except Exception:
+        pass
+
+
+def _unregister_operator(op) -> None:
+    for k in list(_OPERATOR_REGISTRY.keys()):
+        if _OPERATOR_REGISTRY.get(k) is op:
+            _OPERATOR_REGISTRY.pop(k, None)
+
+
+def resolve_token_decision(session_id: str, action: str, *, target: str = "",
+                           extra: int = 0) -> bool:
+    """WS entry point: deliver a human extend/cut-off decision to the paused
+    operator for (session_id, target).  Returns True if an operator was found."""
+    op = (_OPERATOR_REGISTRY.get((session_id or "", target or ""))
+          or _OPERATOR_REGISTRY.get((session_id or "", "")))
+    if op is None:
+        return False
+    try:
+        op.apply_token_decision(action, extra=extra)
+        return True
+    except Exception:
+        return False
+
+
+# Network-diagnostic markers (NOT vuln/attack content) used by the connectivity
+# blocker gate to recognise an unreachable target / dead route.
+_UNREACHABLE_MARKERS = (
+    "network is unreachable", "no route to host", "100% packet loss",
+    "destination host unreachable", "connection timed out",
+    "could not resolve host", "name or service not known",
+    "0 hosts up",
+)
+
+
+def resolve_blocker_decision(session_id: str, action: str, *, target: str = "") -> bool:
+    """WS entry point: deliver a human RESUME/ABORT decision to the operator
+    paused on a connectivity blocker for (session_id, target).  Reuses the same
+    operator registry as the token-budget gate.  Returns True if delivered."""
+    op = (_OPERATOR_REGISTRY.get((session_id or "", target or ""))
+          or _OPERATOR_REGISTRY.get((session_id or "", "")))
+    if op is None:
+        return False
+    try:
+        op.apply_blocker_decision(action)
+        return True
+    except Exception:
+        return False
+
+
 class OperatorCore:
     def __init__(self, master, *, autonomy: str = "approve_to_exploit",
                  max_iters: Optional[int] = None,
-                 max_seconds: Optional[int] = None):
+                 max_seconds: Optional[int] = None,
+                 token_budget: int = 0):
         self.master = master
         self.autonomy = (autonomy or "approve_to_exploit").strip()
         self.max_iters = int(max_iters if max_iters is not None
                              else os.environ.get("ARGUS_OPERATOR_MAX_ITERS", "60"))
         self.max_seconds = int(max_seconds if max_seconds is not None
                                else os.environ.get("ARGUS_OPERATOR_MAX_SECONDS", "3000"))
+        # ── Human-set per-target LLM-token budget ────────────────────────────
+        # 0 = unlimited (ARGUS never sets its own cap — only the human does).
+        # When this target's real token spend (master._tokens_used) reaches the
+        # budget the operator PAUSES and asks the human to extend (raise it) or
+        # cut off (stop this target).  If no human answers within the grace wait,
+        # the SAFE default is to cut off — conserving tokens, the whole point.
+        try:
+            self._token_budget = max(0, int(token_budget or 0))
+        except Exception:
+            self._token_budget = 0
+        # Grace window (seconds) to wait for the human's extend/cut-off decision
+        # before defaulting to cut-off.  Human-tunable; generous so a present
+        # operator is never rushed, finite so a headless run still converges.
+        self._token_prompt_wait = max(30, int(
+            os.environ.get("ARGUS_TOKEN_PROMPT_WAIT_SEC", "1800")))
+        self._token_decision_event: Optional[asyncio.Event] = None
+        self._token_decision: str = ""          # "extend" | "stop" (set by WS handler)
+        self._token_budget_hit = False          # latched once we've prompted at the cap
+        # ── Connectivity blocker gate (target unreachable / VPN down) ─────
+        # Mirrors the token-budget pause: after N consecutive network-unreachable
+        # tool signals the operator PAUSES and asks the human to fix connectivity
+        # and RESUME, or ABORT — instead of spinning doomed scans for minutes
+        # (the tun0-down run wasted ~145s with 0 findings and never told anyone).
+        self._consec_unreachable = 0
+        self._blocker_decision_event: Optional[asyncio.Event] = None
+        self._blocker_decision: str = ""        # "resume" | "abort" (set by WS handler)
+        self._blocker_wait = max(30, int(
+            os.environ.get("ARGUS_BLOCKER_WAIT_SEC", "600") or 600))
         # Safety ceiling ONLY (guards a hung process).  The time budget is
         # advisory the instant any real progress exists — see _has_progress_signal
         # — so the clock can never fail a productive engagement.
@@ -186,6 +278,11 @@ class OperatorCore:
         self._method_tries: Dict[str, int] = {}
         self._banned_methods: set = set()
         self._consec_banned = 0
+        # Committed-exploitation loop (lock onto a high-confidence exploit + adapt it to
+        # land instead of thrashing across CVEs).  `_committed_done` holds signatures
+        # already exhausted so it commits to each candidate exactly once.
+        self._committed_exploit_active = False
+        self._committed_done: set = set()
         self._method_max_tries = max(3, min(5, int(
             os.environ.get("ARGUS_OPERATOR_METHOD_MAX_TRIES", "4"))))
         # Per-ENDPOINT repeat cap for actions that declare NO hypothesis/CVE
@@ -326,6 +423,14 @@ class OperatorCore:
             "autonomy": self.autonomy, "max_iters": self.max_iters,
         })
         await self._reason("Operator core engaged — driving the engagement end-to-end.")
+        # Register so the WS layer can deliver a human token-budget decision to
+        # THIS operator (per session+target).  Unregistered in teardown below.
+        _register_operator(self)
+        if self._token_budget > 0:
+            await self._reason(
+                f"Per-target LLM-token budget set by the human: {self._token_budget} "
+                f"tokens for {self._target}. At the cap I will pause and ask whether "
+                "to extend or cut off this target.")
 
         # Auto-seed: if recon already fingerprinted a web product, run the
         # known-CVE / public-PoC lookup NOW and drop it into the transcript so
@@ -341,6 +446,12 @@ class OperatorCore:
         foothold_bonus = int(os.environ.get("ARGUS_OPERATOR_FOOTHOLD_BONUS", "1800"))
         for i in range(self._iter_ceiling):
             self._iteration = i
+            if getattr(self.master, "_stop_requested", False):
+                done_reason = "stopped"; break
+            # ── Committed exploitation: if a HIGH-confidence exploit candidate is in
+            # hand, LOCK ON and adapt it to land before the pivot logic can thrash it
+            # away.  Best-effort + Master-aware; never breaks the loop. (Orion fix.)
+            await self._maybe_commit_exploit()
             if getattr(self.master, "_stop_requested", False):
                 done_reason = "stopped"; break
             # ── Iteration budget is ADVISORY once progress exists ─────────────
@@ -411,6 +522,22 @@ class OperatorCore:
                     await self._run_completeness_critic()
                 if self._backlog.high_value_remaining() == 0:
                     done_reason = "hypotheses_exhausted"; break
+
+            # ── Per-target token budget (human-set) ───────────────────────────
+            # Before spending more LLM tokens, honour the human's per-target cap:
+            # at the cap, PAUSE and ask the human to extend or cut off this
+            # target.  ARGUS never moves the cap itself; on no answer it cuts off.
+            _tb_stop = await self._token_budget_gate()
+            if _tb_stop:
+                done_reason = _tb_stop; break
+
+            # ── Connectivity blocker (target unreachable / VPN down) ──────────
+            # If recent tool results show the target is unreachable, PAUSE and
+            # ask the human to fix connectivity + resume (or abort) instead of
+            # spinning doomed scans and reporting a false "0 findings — complete".
+            _blk_stop = await self._connectivity_gate()
+            if _blk_stop:
+                done_reason = _blk_stop; break
 
             await self._maybe_pause()
 
@@ -529,6 +656,10 @@ class OperatorCore:
                 self._intrusive_approved = True
 
             observation = await self._run_action(tool, action["args"])
+            # Feed the connectivity detector so the circuit-breaker can trip when
+            # the target/route goes unreachable (the connectivity gate above acts
+            # on the next iteration).
+            self.note_tool_connectivity(observation)
             self.transcript.append({"role": "assistant", "content": reply})
             self.transcript.append({"role": "user", "content": observation})
             # PERSIST success the operator just produced (RCE/flags/creds) to
@@ -636,11 +767,14 @@ class OperatorCore:
         except Exception:
             pass
 
+        _unregister_operator(self)
         await self._emit("operator_end", {
             "session_id": self._session_id, "reason": done_reason,
             "iterations": self._iteration + 1,
             "user_flag": bool(self._intel.get("user_flag")),
             "root_flag": bool(self._intel.get("root_flag")),
+            "tokens_used": int(getattr(self.master, "_tokens_used", 0) or 0),
+            "token_budget": self._token_budget,
         })
         try:
             await self._http.close()
@@ -677,6 +811,8 @@ class OperatorCore:
                 return await self._do_loot_hunt(args)
             if tool == "dispatch":
                 return await self._do_dispatch(args)
+            if tool == "technique_search":
+                return await self._do_technique_search(args)
             if tool in ("recon", "web_enum", "cve_lookup", "run_playbook"):
                 return await self._do_macro(tool, args)
             return (f"UNKNOWN tool '{tool}'. Valid tools: "
@@ -1208,11 +1344,59 @@ class OperatorCore:
         except Exception:
             pass
 
+    # ── engagement provenance (per session+target) ────────────────────────────
+    def _engagement_origin(self) -> Dict[str, str]:
+        """Identity of the CURRENT engagement: which session + which target this
+        OperatorCore instance is driving.  Stamped onto every evidence item so a
+        prior engagement's loot/findings can never be presented as current
+        (the Niagara/Fox bleed: a different run's findings surfaced as current
+        loot/progress because nothing tagged evidence with its origin)."""
+        return {
+            "session_id": str(getattr(self, "_session_id", "") or ""),
+            "target": str(self._intel.get("target_host") or self._intel.get("target") or ""),
+        }
+
+    @staticmethod
+    def _origin_matches(item: Dict[str, Any], current: Dict[str, str]) -> bool:
+        """True when an evidence item belongs to the current engagement.  An item
+        with no `_origin` is 'unknown' and treated as current (recorded this run
+        before stamping, or by a not-yet-stamped path); known-foreign items are
+        removed at seed-time (master._scrub_foreign_evidence), so only
+        current-or-unknown survive here."""
+        o = item.get("_origin") if isinstance(item, dict) else None
+        if not o:
+            return True
+        return (str(o.get("session_id", "")) == current.get("session_id", "")
+                and str(o.get("target", "")) == current.get("target", ""))
+
+    @staticmethod
+    def _loot_fingerprint(item: Dict[str, Any]) -> str:
+        """Stable dedup key for a loot/flag/secret artifact so the same trophy is
+        never booked twice (the loot view showed duplicates of one flag)."""
+        import hashlib
+        basis = "|".join(str(item.get(k, "")).strip().lower()
+                         for k in ("type", "user", "secret", "value", "flag", "host", "port"))
+        return hashlib.sha1(basis.encode("utf-8", "ignore")).hexdigest()
+
     def _add_loot(self, item: Dict[str, Any]) -> None:
         """Append a loot artifact whether intel['loot'] is a LIST or the schema's
         CATEGORY DICT ({ssh_keys, nt_hashes, secrets, …}).  The dict shape made a
         plain .append() raise 'dict object has no attribute append' and CRASH the
-        operator the instant it captured a flag — never again."""
+        operator the instant it captured a flag — never again.
+
+        Stamps the current engagement origin and deduplicates by fingerprint so
+        (a) a prior engagement's loot is identifiable/filterable and (b) the same
+        trophy is not recorded twice."""
+        if isinstance(item, dict):
+            item.setdefault("_origin", self._engagement_origin())
+            key = self._loot_fingerprint(item)
+            seen = self._intel.setdefault("_loot_seen", set())
+            if not isinstance(seen, set):
+                seen = set(seen) if seen else set()
+                self._intel["_loot_seen"] = seen
+            if key in seen:
+                return                      # duplicate — drop silently
+            seen.add(key)
         loot = self._intel.get("loot")
         if isinstance(loot, list):
             loot.append(item)
@@ -1255,6 +1439,8 @@ class OperatorCore:
         nothing (the Silentium run recovered ben@silentium.htb / Password123! via
         the ATO, emitted the event, but never wrote it to the DB).  Best-effort;
         never raises (recording must never crash the engagement)."""
+        if isinstance(cred, dict):
+            cred.setdefault("_origin", self._engagement_origin())
         user   = cred.get("user", "") or ""
         secret = cred.get("secret") or cred.get("password") or cred.get("hash") or ""
         host   = cred.get("host") or self._target
@@ -1313,6 +1499,137 @@ class OperatorCore:
                 asyncio.ensure_future(self._emit("win_condition_update", payload))
             except Exception:
                 pass
+
+    # ── Committed exploitation loop (Orion fix) ───────────────────────────────
+    async def _maybe_commit_exploit(self) -> None:
+        """When a HIGH-confidence exploit candidate is in hand (fingerprinted app +
+        matched public PoC/CVE, or a verified injection), LOCK ON and adapt it to land —
+        instead of letting the per-method ban logic thrash it away onto other CVEs.  The
+        committed loop runs its OWN commands (bypassing the ban gate), records every
+        attempt to the Master's negative_memory, and keeps the Master informed.
+        Best-effort + heavily guarded; never breaks the operator loop."""
+        if self._committed_exploit_active:
+            return
+        try:
+            from .committed_exploit import detect_candidate, run_committed
+            cand = detect_candidate(self._intel)
+        except Exception as exc:   # noqa: BLE001
+            logger.debug("commit detect failed: %s", exc)
+            return
+        if cand is None or cand.signature in self._committed_done:
+            return
+        self._committed_exploit_active = True
+        try:
+            await self._commit_master_start(cand)
+            res = await run_committed(
+                cand, llm_generate=self._committed_llm, run_cmd=self._committed_run,
+                emit=self._emit, on_attempt=self._commit_record_attempt)
+            self._committed_done.add(cand.signature)
+            await self._commit_master_result(cand, res)
+        except Exception as exc:   # noqa: BLE001
+            logger.debug("committed exploit run failed: %s", exc)
+        finally:
+            self._committed_exploit_active = False
+
+    async def _committed_llm(self, prompt: str, system: str) -> str:
+        try:
+            return str(await self.master.converse(
+                [{"role": "system", "content": system}, {"role": "user", "content": prompt}],
+                tier="reason") or "")
+        except Exception:
+            return ""
+
+    async def _committed_run(self, cmd: str) -> Dict[str, Any]:
+        try:
+            res = await self._dispatch_bounded(tool="shell_exec", args=cmd,
+                                               purpose="committed exploit", phase="exploit",
+                                               timeout=120)
+            return res if isinstance(res, dict) else {"stdout": str(res or "")}
+        except Exception as exc:   # noqa: BLE001
+            return {"stdout": "", "stderr": f"{type(exc).__name__}: {exc}"}
+
+    async def _commit_record_attempt(self, attempt: Dict[str, Any]) -> None:
+        """Master-awareness: record every FAILED adaptation to the Master's
+        negative_memory + intel.failed_attempts (fixes the empty-memory bug)."""
+        if attempt.get("landed"):
+            return
+        host = (self._target or "").split("/")[0]
+        self._intel.setdefault("failed_attempts", []).append({
+            "tool": "committed_exploit", "signature": attempt.get("signature"),
+            "exploit_class": attempt.get("exploit_class"), "reason": attempt.get("reason"),
+            "host": host})
+        nm = getattr(self.master, "_negative_memory", None)
+        if nm is not None:
+            try:
+                await nm.record_failure(
+                    tool="committed_exploit", args=str(attempt.get("code", ""))[:300],
+                    target_service="http", failure_reason=str(attempt.get("reason", ""))[:120],
+                    evidence=str(attempt.get("output", ""))[:500], host=host)
+            except Exception:
+                pass
+
+    async def _commit_master_start(self, cand) -> None:
+        # Advance the Master's phase so it reflects exploitation, not RECON.
+        try:
+            from agents.base_agent import AttackPhase
+            adv = getattr(self.master, "_advance_phase", None)
+            if adv is not None:
+                await adv(AttackPhase.EXPLOIT)
+        except Exception:
+            pass
+        self._intel["committed_exploit"] = {"candidate": cand.to_dict(), "status": "running",
+                                            "attempts": 0, "landed": False}
+        await self._emit("committed_exploit_start", {"session_id": self._session_id, **cand.to_dict()})
+
+    async def _commit_master_result(self, cand, res) -> None:
+        self._intel["committed_exploit"] = {
+            "candidate": cand.to_dict(), "status": "landed" if res.landed else "exhausted",
+            "attempts": res.attempts, "landed": res.landed, "reason": res.exhausted_reason}
+        if not res.landed:
+            # Mark exhausted so detect_candidate won't re-pick it (commit once).
+            self._intel.setdefault("failed_attempts", []).append({
+                "tool": "committed_exploit", "signature": cand.signature,
+                "committed_exhausted": True, "reason": res.exhausted_reason})
+        await self._emit("committed_exploit_result", {
+            "session_id": self._session_id, "landed": res.landed, "attempts": res.attempts,
+            "reason": res.exhausted_reason, **cand.to_dict()})
+        if res.landed:
+            await self._record_committed_win(cand, res)
+
+    async def _record_committed_win(self, cand, res) -> None:
+        """A committed exploit landed — record a DEMONSTRATED finding + stash the working
+        PoC command in intel so the operator can escalate it to an interactive shell."""
+        host = (self._target or "").split("/")[0]
+        finding = {
+            "title": f"Custom exploit PROVEN: {cand.cve or cand.exploit_class} on {cand.target_url}",
+            "severity": "critical", "host": host, "service": "http",
+            "description": f"A committed exploit-development loop landed {cand.cve or cand.exploit_class} "
+                           f"against {cand.target_url}. {res.evidence}",
+            "evidence": str(res.evidence)[:300], "source": "committed_exploit",
+            "exploit_class": cand.exploit_class, "reproduce_status": "reproduced",
+            "evidence_tag": "DEMONSTRATED",
+            "signals": {"directly_exploitable": True, "compromise": "user_rce"},
+            "poc": res.poc, "cves": [cand.cve] if cand.cve else []}
+        store = getattr(self.master, "store_finding", None)
+        if store is not None:
+            try:
+                try:
+                    from db.schemas import FindingSeverity as _FS
+                    _sev = _FS("critical")
+                except Exception:
+                    _sev = "critical"
+                await store(severity=_sev, title=finding["title"],
+                            description=finding["description"], host=host, service="http",
+                            cves=finding["cves"], evidence=finding["evidence"],
+                            signals=finding["signals"],
+                            extra={"source": "committed_exploit", "poc": res.poc,
+                                   "evidence_tag": "DEMONSTRATED",
+                                   "exploit_class": cand.exploit_class})
+            except Exception:
+                pass
+        self._intel.setdefault("verified_rce", []).append(
+            {"target": cand.target_url, "cve": cand.cve, "poc": (res.poc or {}).get("code", "")})
+        await self._emit("fuzz_finding", {"session_id": self._session_id, **finding})
 
     async def _record_operator_success(self, tool: str, args: Any, observation: str) -> None:
         """LLM-free detection of foothold / flags / creds / users in operator
@@ -1759,6 +2076,30 @@ class OperatorCore:
             return await self._run_playbook(str(args.get("name", "")).strip())
         return f"macro '{tool}' not available"
 
+    async def _do_technique_search(self, args: Dict[str, Any]) -> str:
+        """Lexical lookup of exact payloads / bypasses / commands in ARGUS's offensive
+        corpus (HackTricks + PayloadsAllTheThings, FTS5).  Use it when you know the
+        vulnerability CLASS and want the precise payload to try — faster and more
+        exact than semantic recall.  Never blocks the loop (returns [] on any error)."""
+        query = str(args.get("query") or args.get("q") or "").strip()
+        if not query:
+            return "technique_search: provide 'query' (e.g. 'jinja2 ssti rce bypass')."
+        try:
+            from knowledge.technique_search import technique_search as _ts
+        except Exception as exc:   # noqa: BLE001
+            return f"technique_search unavailable: {exc}"
+        try:
+            hits = _ts(query, k=int(args.get("k", 6)))
+        except Exception as exc:   # noqa: BLE001
+            return f"technique_search error: {type(exc).__name__}: {exc}"
+        if not hits:
+            return f"technique_search: no corpus match for {query!r}."
+        lines = [f"Top techniques for {query!r}:"]
+        for h in hits:
+            lines.append(f"  • [{h.get('category')}] {h.get('title')} "
+                         f"({h.get('source')})\n      {h.get('snippet')}")
+        return "\n".join(lines)
+
     async def _do_cve_lookup(self, product: str, version: str) -> str:
         """Multi-source known-CVE + public-PoC lookup (NVD + GitHub + searchsploit).
 
@@ -1919,6 +2260,181 @@ class OperatorCore:
             self._backlog.generate_from_surface(self._surface)
         except Exception:
             pass
+
+    async def _token_budget_gate(self) -> Optional[str]:
+        """Enforce the HUMAN-set per-target LLM-token budget.
+
+        Returns a ``done_reason`` string to STOP this target, or None to
+        continue.  At the cap the operator PAUSES (makes no further LLM call)
+        and asks the human to EXTEND the budget or CUT OFF this target — ARGUS
+        never sets or moves the cap itself.  If no human answers within the
+        grace window the safe default is to cut off (conserve tokens — the whole
+        purpose).  Budget 0 = disabled (no cap, no prompt; behaviour unchanged)."""
+        if self._token_budget <= 0:
+            return None
+        used = int(getattr(self.master, "_tokens_used", 0) or 0)
+        if used < self._token_budget:
+            return None
+
+        # Reached the human-set cap → prompt and pause.
+        self._token_decision = ""
+        self._token_decision_event = asyncio.Event()
+        try:
+            await self._emit("token_budget_reached", {
+                "session_id":  self._session_id, "target": self._target,
+                "tokens_used": used, "budget": self._token_budget,
+                "wait_sec":    self._token_prompt_wait,
+            })
+        except Exception:
+            pass
+        await self._reason(
+            f"Per-target token budget reached on {self._target}: {used} / "
+            f"{self._token_budget} tokens. PAUSING — waiting for the human to "
+            f"EXTEND the budget or CUT OFF this target (auto cut-off in "
+            f"{self._token_prompt_wait}s if no answer).")
+
+        try:
+            await asyncio.wait_for(self._token_decision_event.wait(),
+                                   timeout=self._token_prompt_wait)
+        except asyncio.TimeoutError:
+            self._token_decision = "timeout"
+
+        if self._token_decision == "extend":
+            await self._reason(
+                f"Human EXTENDED the token budget to {self._token_budget} on "
+                f"{self._target} — resuming.")
+            try:
+                await self._emit("token_budget_extended", {
+                    "session_id": self._session_id, "target": self._target,
+                    "budget": self._token_budget, "tokens_used": used})
+            except Exception:
+                pass
+            return None
+
+        # human cut-off OR no-answer grace timeout → end THIS target gracefully
+        # (finalize + report run normally on the way out of run()).
+        await self._reason(
+            f"Token budget CUT-OFF on {self._target} at {used} tokens "
+            f"({'no answer — auto' if self._token_decision == 'timeout' else 'human'} "
+            "cut-off) — stopping this target and finalizing its report.")
+        try:
+            await self._emit("token_budget_cutoff", {
+                "session_id":  self._session_id, "target": self._target,
+                "tokens_used": used, "budget": self._token_budget,
+                "reason":      self._token_decision or "timeout"})
+        except Exception:
+            pass
+        return "token_budget"
+
+    def apply_token_decision(self, action: str, *, extra: int = 0) -> None:
+        """Deliver the human's token-budget answer (called via the module-level
+        resolve_token_decision from the WS layer).  'extend' RAISES the cap by
+        ``extra`` (or doubles it if no amount given) and resumes; anything else
+        cuts this target off.  Safe to call when no prompt is pending."""
+        act = (action or "").strip().lower()
+        if act in ("extend", "continue", "more", "raise"):
+            _add = int(extra or 0)
+            if _add <= 0:
+                _add = max(1000, self._token_budget)   # default: roughly double
+            used = int(getattr(self.master, "_tokens_used", 0) or 0)
+            self._token_budget = max(self._token_budget, used) + _add
+            self._token_decision = "extend"
+        else:
+            self._token_decision = "stop"
+        ev = self._token_decision_event
+        if ev is not None:
+            try:
+                ev.set()
+            except Exception:
+                pass
+
+    # ── Connectivity blocker gate ─────────────────────────────────────────────
+    @staticmethod
+    def _connectivity_signal(text: str) -> bool:
+        """True when tool output indicates the TARGET (or its route) is
+        unreachable — a network-layer blocker, not a finding.  Used to detect a
+        down VPN/route so ARGUS pauses instead of spinning doomed scans."""
+        t = (text or "").lower()
+        return any(m in t for m in _UNREACHABLE_MARKERS)
+
+    def note_tool_connectivity(self, text: str) -> None:
+        """Feed every tool result through the unreachable detector, tracking a
+        run of consecutive unreachable signals for the circuit-breaker."""
+        try:
+            if self._connectivity_signal(text):
+                self._consec_unreachable += 1
+            else:
+                self._consec_unreachable = 0
+        except Exception:
+            pass
+
+    def apply_blocker_decision(self, action: str) -> None:
+        """Deliver the human's RESUME/ABORT answer (via resolve_blocker_decision
+        from the WS layer).  Safe to call when no blocker is pending."""
+        act = (action or "").strip().lower()
+        self._blocker_decision = "resume" if act in ("resume", "retry", "continue") else "abort"
+        ev = self._blocker_decision_event
+        if ev is not None:
+            try:
+                ev.set()
+            except Exception:
+                pass
+
+    async def _connectivity_gate(self) -> Optional[str]:
+        """Circuit-breaker: after N consecutive network-unreachable signals,
+        PAUSE and ask the human to restore connectivity and RESUME, or ABORT.
+        Returns a done_reason to stop this target, or None to continue.  Default
+        on; ARGUS_CONNECTIVITY_GATE=0 disables (behaviour unchanged)."""
+        if os.environ.get("ARGUS_CONNECTIVITY_GATE", "1") == "0":
+            return None
+        try:
+            thresh = int(os.environ.get("ARGUS_BLOCKER_MAX_CONSEC", "3") or 3)
+        except Exception:
+            thresh = 3
+        if self._consec_unreachable < max(1, thresh):
+            return None
+        self._blocker_decision = ""
+        self._blocker_decision_event = asyncio.Event()
+        _tgt = self._intel.get("target_host") or self._target
+        try:
+            await self._emit("engagement_blocker", {
+                "session_id": self._session_id, "target": _tgt, "kind": "unreachable",
+                "detail": ("Repeated network-unreachable signals — the target appears "
+                           "offline (check the VPN/route). Paused: resume after restoring "
+                           "connectivity, or abort this target."),
+                "consec": self._consec_unreachable, "wait_sec": self._blocker_wait})
+        except Exception:
+            pass
+        await self._reason(
+            f"CONNECTIVITY BLOCKER on {_tgt}: {self._consec_unreachable} consecutive "
+            "network-unreachable signals. PAUSING — waiting for the human to restore "
+            "connectivity and RESUME, or ABORT this target (no false 'complete').")
+        try:
+            await asyncio.wait_for(self._blocker_decision_event.wait(),
+                                   timeout=self._blocker_wait)
+        except asyncio.TimeoutError:
+            self._blocker_decision = "timeout"
+        if self._blocker_decision == "resume":
+            self._consec_unreachable = 0
+            await self._reason(f"Human restored connectivity on {_tgt} — resuming.")
+            try:
+                await self._emit("engagement_blocker_resolved", {
+                    "session_id": self._session_id, "target": _tgt, "decision": "resume"})
+            except Exception:
+                pass
+            return None
+        # abort OR no-answer timeout → halt this target HONESTLY
+        self._intel["blocker"] = {"kind": "unreachable", "target": _tgt}
+        await self._reason(
+            f"Connectivity blocker {'unresolved (no answer)' if self._blocker_decision == 'timeout' else 'ABORTED by human'} "
+            f"on {_tgt} — halting this target honestly rather than reporting a false 'complete'.")
+        try:
+            await self._emit("engagement_blocker_resolved", {
+                "session_id": self._session_id, "target": _tgt,
+                "decision": self._blocker_decision or "timeout"})
+        except Exception:
+            pass
+        return "blocker_unreachable"
 
     def _has_progress_signal(self) -> bool:
         """True once ARGUS holds ANY real progress — a confirmed finding/vuln, a
@@ -2805,7 +3321,9 @@ class OperatorCore:
                     "ENGAGEMENT STATE: confirmed facts, creds, vhosts, the app's "
                     "purpose, what was tried + outcomes, and the current best lead. "
                     "Keep every concrete value (hosts, paths, params, tokens). "
-                    "No prose, just the state."},
+                    "No prose, just the state. Summarize ONLY this engagement "
+                    f"against {self._intel.get('target_host') or self._intel.get('target')}; "
+                    "ignore any facts about a different target/host."},
                 {"role": "user", "content":
                     "\n\n".join(f"[{m['role']}] {m['content']}" for m in middle)[:60000]},
             ]

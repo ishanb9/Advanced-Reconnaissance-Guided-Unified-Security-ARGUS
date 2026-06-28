@@ -207,6 +207,11 @@ class Finding:
     cve: Optional[str] = None
     mitre_technique: Optional[str] = None
     exploit_suggestion: Optional[str] = None
+    # Optional evidence signals scored by the central operational severity policy
+    # (knowledge/severity_policy.py).  When set, it OVERRIDES `severity` with what
+    # ARGUS demonstrated/assessed — compromise / applicable public exploit /
+    # chainability — not raw CVSS.  Omit it and `severity` is used as-is.
+    signals: Optional[dict] = None
     finding_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -1195,7 +1200,88 @@ class BaseSubagent(ABC):
             The Finding object to persist.
         """
         self._findings.append(finding)
+        # ── Browser verification (Gap #2): confirm IDOR / auth-bypass / XSS /
+        # business-logic with a real headless browser BEFORE severity is finalised.
+        # ADDITIVE + BEST-EFFORT: a NO-OP when Playwright is absent (finding
+        # untouched).  Verified → confirmed/directly_exploitable signals (graded
+        # DEMONSTRATED/CONFIRMED below) + PoC artifact; unverified → downgraded into
+        # the report's 'Unverified' section (never dropped); not-attempted →
+        # severity unchanged.  Fully wrapped: never blocks/breaks the write.
+        _verify_extra = {}
+        try:
+            from agents.web import browser_verify_subagent as _bv
+            _fv = {
+                "title":       getattr(finding, "title", ""),
+                "description": getattr(finding, "description", ""),
+                "severity":    getattr(finding, "severity", ""),
+                "host":        getattr(finding, "host", ""),
+                "port":        getattr(finding, "port", None),
+                "url":         getattr(finding, "evidence", "") or "",
+                "cve":         getattr(finding, "cve", ""),
+                "extra":       {}, "signals": (getattr(finding, "signals", None) or {}),
+            }
+            if _bv.verifiable_class(_fv) and _bv.is_browser_available():
+                _intel = {}
+                try:
+                    from agents.engagement_context import get_context as _get_ctx
+                    _ctx = _get_ctx(self.session_id)
+                    _intel = getattr(_ctx, "intel", None) or getattr(_ctx, "_intel", None) or {}
+                except Exception:
+                    _intel = {}
+                if not _intel:
+                    _intel = {"target_host": _fv["host"], "target": _fv["host"],
+                              "credentials": [], "session_id": self.session_id}
+                _creds = _bv.collect_verify_creds(_intel, {})
+                _verdict = await _bv.verify(_fv, _intel, {})
+                _bv.apply_verdict(_fv, _verdict, browser_available=True,
+                                  creds_present=(_creds.get("mode") != "unauth"))
+                if _fv.get("signals"):
+                    finding.signals = _fv["signals"]
+                if _fv.get("severity"):
+                    finding.severity = str(_fv["severity"]).upper()
+                _vx = _fv.get("extra", {}) or {}
+                for _k in ("browser_verified", "verification_method", "poc_artifacts",
+                           "report_section", "unverified_reason"):
+                    if _k in _vx:
+                        _verify_extra[_k] = _vx[_k]
+        except Exception as _bv_exc:
+            # Best-effort: never break the finding write — but DO log so a real bug
+            # in the verification path is debuggable (not silently swallowed).
+            logger.debug("browser-verify hook skipped: %s", _bv_exc)
+        # ── Operational severity policy (single source of truth) ────────────
+        # If the subagent supplied evidence `signals`, the headline severity is
+        # computed by what ARGUS demonstrated/assessed, not raw CVSS keywords.
+        _sev_extra = {}
+        _sig = getattr(finding, "signals", None)
+        if isinstance(_sig, dict) and _sig:
+            try:
+                from knowledge import severity_policy as _sp
+                _v = _sp.grade(_sig)
+                finding.severity = str(_v["severity"]).upper()
+                _sev_extra = {"severity_signals":   _sig,
+                              "severity_rationale": _v.get("rationale"),
+                              "evidence_tag":       _v.get("evidence_tag")}
+            except Exception:
+                pass
         doc = finding.to_dict()
+        doc.update(_sev_extra)
+        doc.update(_verify_extra)
+        # ── Reproduction status (Gap #1): an HONEST 'reproduced' / 'evidence_confirmed'
+        # / 'unreproduced' label derived from the verification signals above (Gap #2
+        # browser result, operational evidence tag, demonstrated compromise), and a
+        # gate that moves un-reproduced high/critical findings into the 'unverified'
+        # lane (never dropped).  Best-effort; never breaks the write.
+        try:
+            from agents.reasoning import repro_verifier as _rv
+            _rstat = _rv.repro_status(doc)
+            doc["reproduce_status"] = _rstat
+            if _rstat == "unreproduced" and \
+               str(doc.get("severity") or "").lower().replace("findingseverity.", "") in ("high", "critical"):
+                doc.setdefault("report_section", "unverified")
+                doc.setdefault("unverified_reason",
+                               "high/critical finding not independently reproduced")
+        except Exception as _r_exc:
+            logger.debug("repro-status skipped: %s", _r_exc)
         doc["session_id"] = self.session_id
         doc["agent"] = self.AGENT_NAME
         doc["subagent"] = self.SUBAGENT_NAME
@@ -1221,22 +1307,69 @@ class BaseSubagent(ABC):
                 doc["cves"] = []
         else:
             doc.setdefault("cves", [])
+
+        # ── Issue-Validator WRITE-TIME GATE (subagent path) ─────────────
+        # This raw insert used to bypass dedup + validation entirely.  Route it
+        # through the deterministic gate, but LENIENTLY: subagent findings are
+        # tool-derived, so only structural rejects (duplicate / foreign-origin)
+        # gate them — we must not swallow a real tool finding that simply lacks
+        # a populated `evidence` field.  Operator-declared findings get the full
+        # grounding gate via base_agent.store_finding.
+        try:
+            import os as _os
+            if _os.environ.get("ARGUS_ISSUE_VALIDATOR", "1") != "0":
+                from agents.meta.issue_validator_agent import get_validator
+                _iv = get_validator(self.session_id or "")
+                if _iv is not None:
+                    _v = _iv.validate_finding(doc)
+                    _accept = _v.get("reason") not in ("duplicate", "foreign-origin")
+                    doc["verified"] = _accept
+                    if not _accept:
+                        doc["gated_reason"] = _v.get("reason", "")
+                    _iv.ingest_finding(doc, {"accept": _accept,
+                                             "reason": "" if _accept else _v.get("reason", "")})
+                else:
+                    doc.setdefault("verified", True)
+            else:
+                doc.setdefault("verified", True)
+        except Exception:
+            doc.setdefault("verified", True)
+
         _dbh = self._resolve_db()
         if _dbh is None:
-            logger.error("MongoDB unavailable — finding %s kept in-memory only "
-                         "(will still flow to the SubagentResult merge)",
-                         finding.finding_id)
+            # Mongo was torn down mid-scan — try a transparent reconnect first.
+            try:
+                from db.mongo_client import ensure_setup
+                await ensure_setup()
+                _dbh = self._resolve_db()
+            except Exception:
+                _dbh = None
+        if _dbh is None:
+            logger.warning("MongoDB unavailable — finding %s kept in scan-log + the "
+                           "SubagentResult merge (no DB row)", finding.finding_id)
         else:
             try:
                 await _dbh["findings"].insert_one(doc)
             except Exception as exc:  # noqa: BLE001
-                logger.error("MongoDB insert failed for finding %s: %s", finding.finding_id, exc)
+                # A mid-scan client close surfaces here: reconnect on a FRESH global
+                # handle (bypassing any stale cached self.db) and retry once.
+                retry_err = exc
                 try:
-                    _slog_error(self.session_id, "mongo_insert_finding",
-                                f"{type(exc).__name__}: {exc}",
-                                finding_id=getattr(finding, "finding_id", None))
-                except Exception:
-                    pass
+                    from db.mongo_client import ensure_setup, get_db
+                    await ensure_setup()
+                    await get_db()["findings"].insert_one(doc)
+                    retry_err = None
+                except Exception as exc2:  # noqa: BLE001
+                    retry_err = exc2
+                if retry_err is not None:
+                    logger.warning("MongoDB insert failed for finding %s (kept in "
+                                   "scan-log): %s", finding.finding_id, retry_err)
+                    try:
+                        _slog_error(self.session_id, "mongo_insert_finding",
+                                    f"{type(retry_err).__name__}: {retry_err}",
+                                    finding_id=getattr(finding, "finding_id", None))
+                    except Exception:
+                        pass
         # Per-session scan log record (best-effort, never raises).
         try:
             _slog_finding(

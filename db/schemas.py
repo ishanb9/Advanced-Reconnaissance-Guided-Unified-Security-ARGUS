@@ -487,6 +487,20 @@ class StartPentestRequest(BaseModel):
     confirm_web:        bool = False  # Show confirmation gate before web testing starts
     web_phase_timeout:  int  = 600    # Seconds before web phase emits time-extension popup (0 = no limit)
     max_parallel_hosts: int  = 5
+    # Human-set LLM-token budget PER TARGET (0 = unlimited).  ARGUS never sets
+    # its own cap; at this many tokens on a given target the operator pauses and
+    # asks the human to extend or cut off that target.  Applied independently to
+    # each target in a multi-host / CIDR / domain scan.
+    token_budget_per_target: int = 0
+    # AI / LLM target adapter config (used when target_type == 'ai'):
+    # {type, url, auth_header, model, request_template, response_path}.
+    ai_target:          Optional[dict] = None
+    # Human-set scan-intrusiveness ceiling (#5): safe | intrusive | disruptive.
+    # Gates technology-capability quick-wins; safe-by-default for OT.
+    scan_intrusiveness: str = "safe"
+    # Optional PCAP/SPAN capture path for passive-first OT fingerprinting (#5 S2);
+    # observed services are merged into intel with zero packets sent.
+    pcap_path:          Optional[str] = None
     use_reasoning_loop: bool = False  # Enable hypothesis-driven reasoning engine
     mission_brief:      Optional[MissionBrief] = None  # Improvement #1 — formal mission
     # Domain mode: when target is a domain, hunt its subdomains across the

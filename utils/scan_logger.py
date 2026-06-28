@@ -746,6 +746,19 @@ def get_scan_logger(session_id: Optional[str]) -> Optional[ScanLogger]:
     return _ACTIVE.get(session_id)
 
 
+def current_log_dir(session_id: Optional[str] = None) -> Optional[Path]:
+    """The per-scan log directory to use for SIDE-CHANNEL traces (e.g. RAG) so they
+    land INSIDE the scan folder, not the repo-level logs/ root.  Prefers the named
+    session; otherwise the most-recently-started active scan.  None when no scan is
+    active or the logger fell back to the shared root."""
+    with _LOCK:
+        slog = _ACTIVE.get(session_id) if session_id else None
+        if slog is None and _ACTIVE:
+            slog = next(reversed(_ACTIVE.values()))     # most-recent active scan
+        d = getattr(slog, "dir", None) if slog is not None else None
+        return d if (d is not None and d != _LOGS_ROOT) else None
+
+
 def close_scan_logger(session_id: str) -> None:
     with _LOCK:
         slog = _ACTIVE.pop(session_id, None)

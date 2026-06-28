@@ -1,0 +1,68 @@
+{
+  "cases": [
+    {
+      "case_id": "web-sqli-001",
+      "detected": true,
+      "exploited": true,
+      "pass_mode": "exploit",
+      "passed": true,
+      "reasons": [
+        "injected flag recovered \u2192 compromise proven (un-fakeable)",
+        "finding signature matched"
+      ],
+      "score": 1.0
+    },
+    {
+      "case_id": "net-cve-log4shell-001",
+      "detected": true,
+      "exploited": true,
+      "pass_mode": "exploit",
+      "passed": true,
+      "reasons": [
+        "injected flag recovered \u2192 compromise proven (un-fakeable)",
+        "finding signature matched"
+      ],
+      "score": 1.0
+    },
+    {
+      "case_id": "web-idor-001",
+      "detected": false,
+      "exploited": false,
+      "pass_mode": "exploit",
+      "passed": false,
+      "reasons": [
+        "no run output (skipped)"
+      ],
+      "score": 0.0
+    },
+    {
+      "case_id": "net-tls-weak-001",
+      "detected": true,
+      "exploited": false,
+      "pass_mode": "detect",
+      "passed": true,
+      "reasons": [
+        "finding signature matched"
+      ],
+      "score": 1.0
+    },
+    {
+      "case_id": "ai-promptinj-001",
+      "detected": false,
+      "exploited": false,
+      "pass_mode": "exploit",
+      "passed": false,
+      "reasons": [
+        "no run output (skipped)"
+      ],
+      "score": 0.0
+    }
+  ],
+  "mode": "replay",
+  "passed": 3,
+  "run_at": null,
+  "score_pct": 100.0,
+  "score_sum": 3.0,
+  "skipped": 2,
+  "total": 5
+}

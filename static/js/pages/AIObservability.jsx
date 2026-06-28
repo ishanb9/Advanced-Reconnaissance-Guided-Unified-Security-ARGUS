@@ -516,15 +516,16 @@ function StatsPanel({ agentComms, reasoningLog, llmStatus }) {
       bigStat('💭', reasoningLog.length, 'Reasonings','var(--medium)'),
     ),
 
-    // Model card
+    // Model card — PRIMARY LLM
     llmStatus?.model && React.createElement('div', {
       style: { padding: '10px 14px', borderRadius: 7, background: 'var(--bg-surface)',
                border: '1px solid var(--bg-panel)', display: 'flex', gap: 12, alignItems: 'center' }
     },
       React.createElement('span', { style: { fontSize: 18 } }, '🤖'),
       React.createElement('div', { style: { flex: 1 } },
-        React.createElement('div', { style: { fontSize: 11, color: 'var(--cyan)', fontFamily: 'var(--font-mono)', fontWeight: 700 } }, llmStatus.model),
-        React.createElement('div', { style: { fontSize: 9, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', marginTop: 1 } }, llmStatus.url || ''),
+        React.createElement('div', { style: { fontSize: 11, color: 'var(--cyan)', fontFamily: 'var(--font-mono)', fontWeight: 700 } },
+          `PRIMARY${llmStatus.llm_provider ? ' · ' + llmStatus.llm_provider : ''} · ${llmStatus.model}`),
+        React.createElement('div', { style: { fontSize: 9, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', marginTop: 1 } }, llmStatus.url || llmStatus.llm_message || ''),
       ),
       React.createElement('span', {
         style: {
@@ -534,6 +535,27 @@ function StatsPanel({ agentComms, reasoningLog, llmStatus }) {
           color: llmStatus.available ? 'var(--green)' : 'var(--red)',
         }
       }, llmStatus.available ? '● ONLINE' : '● OFFLINE')
+    ),
+
+    // Model card — SECONDARY / BACKUP LLM (e.g. a locally-hosted Ollama model)
+    llmStatus?.llm_fallback_model && React.createElement('div', {
+      style: { padding: '10px 14px', borderRadius: 7, background: 'var(--bg-surface)',
+               border: '1px solid rgba(160,100,200,0.30)', display: 'flex', gap: 12, alignItems: 'center', marginTop: 6 }
+    },
+      React.createElement('span', { style: { fontSize: 18 } }, '🛡'),
+      React.createElement('div', { style: { flex: 1 } },
+        React.createElement('div', { style: { fontSize: 11, color: 'var(--violet)', fontFamily: 'var(--font-mono)', fontWeight: 700 } },
+          `BACKUP${llmStatus.llm_fallback_provider ? ' · ' + llmStatus.llm_fallback_provider : ''} · ${llmStatus.llm_fallback_model}`),
+        React.createElement('div', { style: { fontSize: 9, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', marginTop: 1 } }, llmStatus.llm_fallback_message || 'failover provider'),
+      ),
+      React.createElement('span', {
+        style: {
+          fontSize: 9, padding: '2px 10px', borderRadius: 10, fontFamily: 'var(--font-mono)',
+          background: llmStatus.llm_fallback_available ? 'rgba(0,255,136,0.08)' : 'rgba(150,150,150,0.08)',
+          border: `1px solid ${llmStatus.llm_fallback_available ? 'var(--green)' : 'var(--border)'}`,
+          color: llmStatus.llm_fallback_available ? 'var(--green)' : 'var(--text-muted)',
+        }
+      }, llmStatus.llm_fallback_available ? '● READY' : '○ STANDBY')
     ),
 
     // Per-agent table

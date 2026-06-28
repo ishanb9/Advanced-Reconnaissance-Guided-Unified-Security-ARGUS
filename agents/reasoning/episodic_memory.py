@@ -176,9 +176,13 @@ def render_recall_block(episodes: List[Dict[str, Any]]) -> str:
     if not episodes:
         return ""
     eps = episodes[:MAX_RECALL_FOR_PROMPT]
-    lines = ["=== EPISODIC MEMORY (lessons from past engagements) ==="]
+    # These are OTHER, PRIOR engagements recalled as reference PATTERNS only — they are
+    # NOT this target.  Label them unmistakably so neither the model nor the report ever
+    # presents another box's hosts/CVEs/findings as facts about the current target.
+    lines = ["=== EPISODIC MEMORY — OTHER PRIOR ENGAGEMENTS (reference patterns only; "
+             "NOT this target — never cite as a finding here) ==="]
     for i, ep in enumerate(eps, 1):
-        head = f"  [{i}] {ep.get('target_type','?')} → {ep.get('target','?')}"
+        head = f"  [{i}] OTHER ENGAGEMENT: {ep.get('target_type','?')} → {ep.get('target','?')}"
         meta = []
         if ep.get("services"):
             meta.append(f"svcs={','.join(ep['services'][:5])}")

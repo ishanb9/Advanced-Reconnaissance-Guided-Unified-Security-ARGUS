@@ -484,6 +484,19 @@ async def create_session(body: StartPentestRequest):
         use_reasoning_loop = True,  # Always enabled — reasoning-driven approach
         mission_brief      = mission_brief.dict() if hasattr(mission_brief, "dict") else mission_brief,
         autonomy           = getattr(body, "autonomy", None) or "",
+        # Human-set per-target LLM-token budget (0 = unlimited).  Applied
+        # INDEPENDENTLY to each target — single-host gets it directly; CIDR /
+        # domain scans pass it into every per-host MasterAgent.run().  ARGUS
+        # never sets its own cap; at the cap the operator asks the human to
+        # extend or cut off that target.  Read via getattr so the request schema
+        # stays backward-compatible.
+        token_budget_per_target = int(getattr(body, "token_budget_per_target", 0) or 0),
+        # AI / LLM target adapter config (target_type == 'ai'); {} for non-AI runs.
+        ai_target               = getattr(body, "ai_target", None) or {},
+        # Human-set scan-intrusiveness ceiling (#5): safe|intrusive|disruptive.
+        scan_intrusiveness      = getattr(body, "scan_intrusiveness", "safe") or "safe",
+        # Optional PCAP/SPAN capture for passive-first OT fingerprinting (#5 S2).
+        pcap_path               = getattr(body, "pcap_path", None),
     )
 
     # ── Crash-logger for fire-and-forget scan tasks ─────────────────────────
@@ -1037,23 +1050,37 @@ async def get_osint(session_id: str):
 #  REPORT
 # ══════════════════════════════════════════════════════════════
 
+@app.get("/report/themes")
+async def get_report_themes():
+    """List the selectable report themes (key/name/description) for the picker."""
+    return report_generator.list_themes()
+
+
 @app.get("/sessions/{session_id}/report")
-async def get_report(session_id: str, format: str = "html"):
-    """Generate HTML or PDF pentest report."""
+async def get_report(session_id: str, format: str = "html",
+                     theme: str = "", engine: str = ""):
+    """Generate the HTML or PDF pentest report for the chosen theme."""
     s = await db.get_session(session_id)
     if not s:
         raise HTTPException(status_code=404, detail="Session not found")
 
+    _theme = theme or None
     if format == "pdf":
-        pdf_bytes = await report_generator.generate_pdf(session_id)
+        pdf_bytes = await report_generator.generate_pdf(
+            session_id, theme=_theme, engine=(engine or None))
         if pdf_bytes:
             return Response(
                 content=pdf_bytes, media_type="application/pdf",
                 headers={"Content-Disposition":
-                         f"attachment; filename=pentest_report_{session_id[:8]}.pdf"}
+                         f"attachment; filename=pentest_report_{session_id[:8]}.pdf",
+                         "X-PDF-Engine": "server"}
             )
-        # Fallback to HTML if wkhtmltopdf missing
-    html = await report_generator.generate_html(session_id)
+        # No server-side styled engine (weasyprint/wkhtmltopdf absent) — signal
+        # the client to use browser print-to-PDF of the styled HTML.  We NEVER
+        # serve HTML masquerading as a PDF (that produced the "corrupted PDF").
+        return Response(status_code=503, headers={"X-PDF-Engine": "none"},
+                        content="No server PDF engine; use the browser print fallback.")
+    html = await report_generator.generate_html(session_id, theme=_theme)
     return HTMLResponse(content=html)
 
 
@@ -1550,6 +1577,367 @@ async def execute_tool_post(body: ExecuteToolRequest):
                           f"&target={body.target}&options={body.options}"}
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Fuzzing Lab (client feedback #6) — human-controlled fuzzing of any tech type
+# (web/app/api/network/iot/ot) on ARGUS-identified in-scope targets, running in
+# PARALLEL with the autonomous engagement, with findings fed back to the agents.
+# ──────────────────────────────────────────────────────────────────────────────
+class FuzzStartRequest(BaseModel):
+    session_id: str
+    target:     str
+    tech_type:  str
+    fuzzer_id:  str
+    config:     Optional[dict]  = None
+    feedback:   Optional[bool]  = True
+
+
+def _fuzz_severity(name: str):
+    m = {"info": FindingSeverity.INFO, "low": FindingSeverity.LOW,
+         "medium": FindingSeverity.MEDIUM, "high": FindingSeverity.HIGH,
+         "critical": FindingSeverity.CRITICAL}
+    return m.get(str(name or "info").lower(), FindingSeverity.INFO)
+
+
+def _resolve_session_master(session_id: str, host: str = ""):
+    """Best-effort resolve the MasterAgent for a session (or per-host master in a
+    multi-host orchestrator) so fuzz findings flow into the real finding pipeline."""
+    agent = active_agents.get(session_id)
+    if agent is None:
+        return None
+    if hasattr(agent, "store_finding"):
+        return agent
+    # CIDR orchestrator: try a host resolver, then any per-host master map.
+    for attr in ("master_for_host", "get_master"):
+        fn = getattr(agent, attr, None)
+        if callable(fn):
+            try:
+                m = fn(host)
+                if m is not None and hasattr(m, "store_finding"):
+                    return m
+            except Exception:
+                pass
+    for attr in ("_host_masters", "host_masters", "_masters"):
+        coll = getattr(agent, attr, None)
+        if isinstance(coll, dict):
+            if host and host in coll and hasattr(coll[host], "store_finding"):
+                return coll[host]
+            for m in coll.values():
+                if hasattr(m, "store_finding"):
+                    return m
+    return getattr(agent, "_master", None)
+
+
+def _fuzz_feedback_for(session_id: str):
+    """Build the on_finding callback that feeds a fuzz hit back to the agents:
+    (1) a real finding via the session master's store_finding, and (2) an
+    intel-cascade signal so the operator picks the host up for follow-up."""
+    async def _cb(finding: dict):
+        host = finding.get("host", "")
+        try:
+            master = _resolve_session_master(session_id, host)
+            if master is not None and hasattr(master, "store_finding"):
+                await master.store_finding(
+                    severity=_fuzz_severity(finding.get("severity")),
+                    title=finding.get("title", "Fuzzing hit"),
+                    description=finding.get("description", ""),
+                    host=host,
+                    port=finding.get("port"),
+                    service=finding.get("service"),
+                    tool_used=finding.get("tool_used"),
+                    raw_output=finding.get("raw_output"),
+                    evidence=finding.get("evidence"),
+                    extra={"source": "fuzzing_lab",
+                           "tech_type": finding.get("tech_type"),
+                           "fuzzer_id": finding.get("fuzzer_id"),
+                           "job_id": finding.get("job_id")},
+                )
+        except Exception:
+            pass
+        try:
+            import re as _re
+            from agents.osint.intel_cascade import get_cascade, IntelSignal
+            casc = get_cascade(session_id)
+            if casc is not None and host:
+                is_ip = bool(_re.match(r"^\d{1,3}(\.\d{1,3}){3}$", host))
+                casc.submit_signal(IntelSignal(
+                    kind="ip" if is_ip else "domain", value=host,
+                    meta={"source": "fuzzing_lab"}))
+        except Exception:
+            pass
+        # (3) Nudge the operator to EXPLOIT + PROVE the fuzz hit (a successful fuzz
+        # hit must be driven to a proven finding).  Best-effort 'add_note' guidance:
+        # ADVISORY and parallel — it never gates the engagement.  The operator
+        # reproduces + proves it in its normal loop, and the operational severity
+        # policy grades the result (crash≠vuln → Info until proven; demonstrated
+        # compromise → Critical, proof attached).
+        try:
+            master = _resolve_session_master(session_id, host)
+            if master is not None and hasattr(master, "inject_guidance"):
+                _loc = f"{host}:{finding.get('port')}" if finding.get("port") else host
+                master.inject_guidance({
+                    "directive": "add_note",
+                    "note": (f"FUZZING LAB surfaced a hit on {_loc} via "
+                             f"{finding.get('fuzzer_id') or finding.get('tech_type') or 'fuzzer'}: "
+                             f"{(finding.get('evidence') or finding.get('title') or '')[:200]}. "
+                             "Reproduce it and PROVE exploitability (drive a crash to RCE/DoS, "
+                             "confirm the anomaly, or probe the discovered endpoint) and record the "
+                             "proof as evidence. This is additional/parallel — do NOT let it block "
+                             "the main objectives."),
+                })
+        except Exception:
+            pass
+    return _cb
+
+
+@app.get("/fuzz/catalog")
+async def fuzz_catalog(session: str = ""):
+    """Tech types + per-type fuzzer specs + the session's in-scope targets."""
+    from agents.fuzzing import tech_types, fuzzers_for, scope_for_agent
+    scope = {"hosts": [], "count": 0}
+    agent = active_agents.get(session)
+    if agent is not None:
+        try:
+            scope = scope_for_agent(agent)
+        except Exception:
+            pass
+    return {
+        "tech_types": tech_types(),
+        "fuzzers":    {t: fuzzers_for(t) for t in tech_types()},
+        "scope":      scope,
+        "session":    session,
+    }
+
+
+@app.post("/fuzz/start")
+async def fuzz_start(body: FuzzStartRequest):
+    """Launch a human-configured fuzz run (scope-enforced, parallel to the scan)."""
+    import uuid
+    from agents.fuzzing import FuzzLab, scope_for_agent, start_lab
+    # Standalone-capable (human-driven lab): with a live session we reuse its derived
+    # scope; without one, the explicitly-typed target IS the authorized scope.
+    agent = active_agents.get(body.session_id)
+    if agent is not None:
+        try:
+            scope = scope_for_agent(agent)
+        except Exception:
+            scope = {"hosts": [], "count": 0}
+    else:
+        scope = {"hosts": [], "count": 0}
+    if scope.get("count", 0) == 0:
+        # Fall back to the typed target as a single-host scope (the operator
+        # authorizes by typing it + pressing Start). Only 400 if nothing was given.
+        _t = str(body.target or "").strip()
+        _h = _t.split("//", 1)[-1].split("/", 1)[0].split(":", 1)[0]
+        if not _h:
+            raise HTTPException(status_code=400,
+                                detail="enter an in-scope target host (or start a pentest so ARGUS can identify hosts)")
+        scope = {"hosts": [{"host": _h, "url": _t if _t.startswith("http") else "", "ports": [], "label": _h}],
+                 "count": 1}
+    job_id = f"fuzz_{uuid.uuid4().hex[:10]}"
+
+    def _emit(event, payload):
+        return ws_manager.broadcast_raw(body.session_id, event, payload)
+
+    lab = FuzzLab(job_id=job_id, session_id=body.session_id, target=body.target,
+                  tech_type=body.tech_type, fuzzer_id=body.fuzzer_id,
+                  config=body.config or {}, emit=_emit,
+                  on_finding=_fuzz_feedback_for(body.session_id),
+                  feedback=bool(body.feedback))
+    start_lab(lab, scope)
+    return {"job_id": job_id, "status": "started", "target": body.target,
+            "tech_type": body.tech_type, "fuzzer_id": body.fuzzer_id,
+            "feedback": bool(body.feedback)}
+
+
+@app.post("/fuzz/stop")
+async def fuzz_stop(body: dict):
+    from agents.fuzzing import stop_lab
+    job_id = (body or {}).get("job_id", "")
+    return {"stopped": stop_lab(job_id), "job_id": job_id}
+
+
+@app.get("/fuzz/labs")
+async def fuzz_labs(session: str = ""):
+    from agents.fuzzing import list_labs
+    return {"labs": list_labs(session or None)}
+
+
+# ── Fuzz Campaign (custom exploit-development workshop) ────────────────────────
+@app.post("/fuzz/campaign/start")
+async def fuzz_campaign_start(body: dict):
+    """Launch a custom-exploit-development campaign: fuzz a surface, develop + PROVE a
+    PoC for any anomaly, feed proven exploits back as findings.  Parallel to the scan,
+    scope-enforced, ceiling-gated.  Never blocks the engagement."""
+    import uuid
+    from agents.fuzzing import campaign as _camp
+    from agents.fuzzing import engines as _eng
+    from agents.fuzzing.session_bridge import build_ctx
+
+    body = body or {}
+    session_id = str(body.get("session_id") or "")
+    target = str(body.get("target") or "")
+    modality = str(body.get("modality") or "web")
+    # Standalone-capable: the Fuzzing Lab is a HUMAN-driven tool. When a pentest is
+    # running we reuse its agent (tiered LLM + scope); when it is NOT, we run a
+    # standalone campaign against the explicitly-typed in-scope target (the LLM falls
+    # back to the provider, the scope becomes that target).  Pressing Start is the
+    # operator's authorization — so the lab is usable without first launching a scan.
+    agent = active_agents.get(session_id)
+    standalone = agent is None
+    if not target:
+        raise HTTPException(status_code=400, detail="target is required")
+    engine = _eng.get_engine(modality)
+    if engine is None:
+        raise HTTPException(status_code=400, detail=f"no engine for modality '{modality}'")
+    ok, why = engine.is_available()
+    if not ok:
+        raise HTTPException(status_code=400, detail=f"engine unavailable: {why}")
+
+    def _emit(event, payload):
+        return ws_manager.broadcast_raw(session_id, event, payload)
+
+    ctx = build_ctx(session_id=session_id, agent=agent, target=target, modality=modality,
+                    surface=body.get("surface") or {}, ceiling=str(body.get("ceiling") or "intrusive"),
+                    domain=str(body.get("domain") or "IT"), authorized=bool(body.get("authorized")),
+                    emit=_emit)
+    if standalone:
+        # No live session to derive scope from → the typed target IS the scope.
+        _h = target.split("//", 1)[-1].split("/", 1)[0].split(":", 1)[0]
+        if _h and _h not in (ctx.scope_hosts or []):
+            ctx.scope_hosts = list(ctx.scope_hosts or []) + [_h]
+    job_id = f"campaign_{uuid.uuid4().hex[:10]}"
+    camp = _camp.FuzzCampaign(job_id=job_id, ctx=ctx, engine=engine,
+                              on_finding=(_fuzz_feedback_for(session_id) if not standalone else None),
+                              max_sec=int(body.get("max_sec") or 1800))
+    _camp.start_campaign(camp)
+    return {"job_id": job_id, "status": "started", "target": target, "modality": modality}
+
+
+@app.post("/fuzz/campaign/stop")
+async def fuzz_campaign_stop(body: dict):
+    from agents.fuzzing import campaign as _camp
+    job_id = (body or {}).get("job_id", "")
+    return {"stopped": _camp.stop_campaign(job_id), "job_id": job_id}
+
+
+@app.get("/fuzz/campaigns")
+async def fuzz_campaigns(session: str = ""):
+    from agents.fuzzing import campaign as _camp
+    return {"campaigns": _camp.list_campaigns(session or None)}
+
+
+@app.get("/fuzz/engines")
+async def fuzz_engines():
+    """The custom-exploit-development modalities the Fuzz Campaign can run, with each
+    engine's live tool availability — so the UI can surface the new capability
+    (file-format / binary / AI) and grey out an engine whose tool is missing."""
+    import shutil as _sh
+    import importlib.util as _ilu
+    from agents.fuzzing import engines as _eng
+
+    def _bin(name):
+        return bool(_sh.which(name))
+
+    def _pylib(name):
+        try:
+            return _ilu.find_spec(name) is not None
+        except Exception:
+            return False
+
+    # Per-modality: label, description, and the concrete TOOLS the engine can use —
+    # so the operator SEES which of the newly-installed fuzzers are live (and which
+    # are a built-in fallback that always works).  `kind`: bin = external binary,
+    # lib = python package, builtin = always available.
+    meta = {
+        "web":     ("Web / HTTP", "Mutate params → detect injection/logic anomalies → develop+prove a PoC",
+                    [("built-in mutator", "builtin", True), ("httpx", "lib", _pylib("httpx"))]),
+        "api":     ("API (HTTP)", "Fuzz API params/endpoints → injection/auth anomalies → exploit",
+                    [("built-in mutator", "builtin", True), ("schemathesis", "bin", _bin("schemathesis")),
+                     ("httpx", "lib", _pylib("httpx"))]),
+        "network": ("Network / Protocol", "Mutate TCP/UDP messages (oversize/format/boundary) → crash/DoS/desync",
+                    [("built-in socket mutator", "builtin", True), ("boofuzz", "lib", _pylib("boofuzz"))]),
+        "file":    ("File-format", "Mutate a sample → run the parser → harvest crashes (OWASP file fuzzing)",
+                    [("radamsa", "bin", _bin("radamsa")), ("zzuf", "bin", _bin("zzuf")),
+                     ("built-in byte mutator", "builtin", True)]),
+        "binary":  ("Binary (coverage-guided)", "AFL++/honggfuzz/libFuzzer over a harness → crash discovery",
+                    [("afl-fuzz (AFL++)", "bin", _bin("afl-fuzz")), ("honggfuzz", "bin", _bin("honggfuzz")),
+                     ("radamsa", "bin", _bin("radamsa"))]),
+        "ai":      ("AI / LLM endpoint", "Adversarial prompts → system-prompt leak / jailbreak",
+                    [("built-in red-team probes", "builtin", True), ("httpx", "lib", _pylib("httpx"))]),
+    }
+    out = []
+    for m in ("web", "api", "network", "file", "binary", "ai"):
+        try:
+            eng = _eng.get_engine(m)
+            ok, why = (eng.is_available() if eng else (False, "engine missing"))
+        except Exception as _exc:   # one bad engine must never blank the whole dropdown
+            ok, why = (False, f"{type(_exc).__name__}: {_exc}")
+        label, desc, tools = meta.get(m, (m, "", []))
+        tool_rows = [{"name": n, "kind": k, "installed": bool(i)} for (n, k, i) in tools]
+        present = [t["name"] for t in tool_rows if t["installed"]]
+        missing = [t["name"] for t in tool_rows if not t["installed"] and t["kind"] != "builtin"]
+        out.append({"modality": m, "label": label, "desc": desc,
+                    "tools": tool_rows, "tools_present": present, "tools_missing": missing,
+                    "needs": " · ".join(present) or "built-in",
+                    "available": bool(ok), "reason": why})
+    return {"engines": out}
+
+
+@app.api_route("/fuzz/oob/{token}", methods=["GET", "POST", "HEAD"])
+async def fuzz_oob_callback(token: str, request: Request):
+    """Out-of-band proof endpoint: when an exploited TARGET calls back here, it is
+    undeniable proof of SSRF / blind RCE for the campaign that armed this token."""
+    from agents.fuzzing import proof as _proof
+    hit = _proof.mark_oob_hit(token, {"src": request.client.host if request.client else None,
+                                       "path": str(request.url.path)})
+    return {"ok": True, "recognised": bool(hit)}
+
+
+def _collect_intels(agent) -> list:
+    """Gather intel snapshots (one per host) from a live session's agent —
+    single MasterAgent (._intel) or a multi-host orchestrator (per-host masters)."""
+    out = []
+    if agent is None:
+        return out
+    it = getattr(agent, "_intel", None)
+    if isinstance(it, dict):
+        out.append(it)
+    for attr in ("_host_masters", "host_masters", "_masters"):
+        coll = getattr(agent, attr, None)
+        if isinstance(coll, dict):
+            for m in coll.values():
+                mi = getattr(m, "_intel", None)
+                if isinstance(mi, dict):
+                    out.append(mi)
+    return out
+
+
+@app.get("/fuzz/targets")
+async def fuzz_targets(session: str = ""):
+    """The 'where to fuzz' indicator — a transparent, ranked list of fuzz surfaces
+    scored by novel-bug likelihood.  Pure advisory: computed on demand from intel,
+    never runs anything, never affects the engagement.  Empty on any error."""
+    try:
+        from knowledge import fuzz_targeting as ft
+    except Exception:
+        return {"targets": [], "by_host": {}, "high_count": 0, "count": 0}
+    agent = active_agents.get(session)
+    targets: list = []
+    by_host: dict = {}
+    high = 0
+    for it in _collect_intels(agent):
+        try:
+            r = ft.rank_targets(it)
+        except Exception:
+            continue
+        targets.extend(r.get("targets", []))
+        by_host.update(r.get("by_host", {}))
+        high += int(r.get("high_count", 0) or 0)
+    targets.sort(key=lambda x: x.get("score", 0), reverse=True)
+    return {"targets": targets[:100], "by_host": by_host,
+            "high_count": high, "count": len(targets)}
+
+
 @app.get("/tools/stream")
 @app.get("/api/execute-tool")
 async def execute_tool_stream(tool_name: str = "", target: str = "",
@@ -1963,14 +2351,31 @@ async def status():
     llm_provider_name = ""
     llm_model_name = MODEL_NAME
     llm_message = ""
+    # Secondary / backup LLM (e.g. a locally-hosted Ollama model) so the GUI can
+    # show BOTH providers' health, not just the primary.
+    llm_fb_name = ""
+    llm_fb_model = ""
+    llm_fb_ok = False
+    llm_fb_message = ""
     try:
-        from utils.llm_providers import get_provider
+        from utils.llm_providers import get_provider, get_fallback_provider
         prov = get_provider()
         llm_provider_name = prov.name
         llm_model_name = prov.model or MODEL_NAME
         ok, msg, _ = await prov.check_available()
         llm_ok = bool(ok)
         llm_message = msg or ""
+        # Backup provider (None when no fallback is configured).
+        try:
+            fb = get_fallback_provider()
+            if fb is not None:
+                llm_fb_name = fb.name
+                llm_fb_model = fb.model or ""
+                fok, fmsg, _ = await fb.check_available()
+                llm_fb_ok = bool(fok)
+                llm_fb_message = fmsg or ""
+        except Exception as _fb_err:
+            llm_fb_message = f"fallback check error: {_fb_err}"
     except Exception as _llm_err:                   # pragma: no cover
         llm_message = f"provider check error: {_llm_err}"
 
@@ -1985,6 +2390,10 @@ async def status():
         "llm":             "online" if llm_ok    else "offline",   # provider-agnostic
         "llm_provider":    llm_provider_name,
         "llm_message":     llm_message,
+        "llm_fallback_provider":  llm_fb_name,
+        "llm_fallback_model":     llm_fb_model,
+        "llm_fallback_available": llm_fb_ok,
+        "llm_fallback_message":   llm_fb_message,
         "model":           llm_model_name,
         "active_sessions": [sid for sid, t in active_tasks.items() if not t.done()],
         "agent_count":     len(active_agents),
@@ -2589,6 +2998,46 @@ async def websocket_endpoint(ws: WebSocket, session_id: str):
                                  "message": (f"Tool '{subagent_name}' cancelled — scan continues"
                                              if sa else
                                              f"Stop request for '{subagent_name}' — no matching agent found")}
+                    }))
+
+                elif mtype in ("token_extend", "token_stop"):
+                    # Human's per-target LLM-token-budget decision.  'token_extend'
+                    # raises the cap (by `extra`, or doubles it) and resumes the
+                    # paused target; 'token_stop' cuts that target off.  Routed to
+                    # the exact paused operator by (session_id, target).
+                    from agents.operator_agent.operator_core import resolve_token_decision
+                    _action = "extend" if mtype == "token_extend" else "stop"
+                    _tgt    = msg.get("target", "") or ""
+                    _extra  = int(msg.get("extra", 0) or 0)
+                    _ok = resolve_token_decision(session_id, _action, target=_tgt, extra=_extra)
+                    await ws.send_text(json.dumps({
+                        "type": "token_budget_ack",
+                        "data": {"action": _action, "target": _tgt, "extra": _extra,
+                                 "resolved": _ok,
+                                 "message": (("Budget extended — target resumes"
+                                              if _action == "extend" else
+                                              "Target cut off — finalizing its report")
+                                             if _ok else
+                                             "No paused target matched this decision")}
+                    }))
+
+                elif mtype in ("blocker_resume", "blocker_abort"):
+                    # Human's connectivity-blocker decision.  'blocker_resume'
+                    # tells the paused operator the target is reachable again and
+                    # to continue; 'blocker_abort' halts that target honestly.
+                    # Routed to the exact paused operator by (session_id, target).
+                    from agents.operator_agent.operator_core import resolve_blocker_decision
+                    _action = "resume" if mtype == "blocker_resume" else "abort"
+                    _tgt    = msg.get("target", "") or ""
+                    _ok = resolve_blocker_decision(session_id, _action, target=_tgt)
+                    await ws.send_text(json.dumps({
+                        "type": "engagement_blocker_ack",
+                        "data": {"action": _action, "target": _tgt, "resolved": _ok,
+                                 "message": (("Connectivity restored — target resumes"
+                                              if _action == "resume" else
+                                              "Target aborted — finalizing honestly")
+                                             if _ok else
+                                             "No paused target matched this decision")}
                     }))
 
             except asyncio.TimeoutError:

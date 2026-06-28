@@ -54,14 +54,39 @@ async def setup(uri: str = MONGO_URI, db_name: str = DB_NAME):
     print(f"[DB] Connected to MongoDB: {uri}/{db_name}")
 
 
-async def teardown():
-    """Close MongoDB connection."""
+async def ensure_setup(uri: str = MONGO_URI, db_name: str = DB_NAME):
+    """Idempotent (re)connect.  Hot paths call this so a connection that was torn
+    down mid-scan (e.g. a server lifespan shutdown / reload while a detached scan
+    task keeps running) SELF-HEALS instead of spraying 'MongoClient after close' /
+    'not initialized' errors and aborting the exploit phase.  Cheap when already up."""
+    global _db
+    if _db is None:
+        await setup(uri, db_name)
+    return _db
+
+
+async def teardown(force: bool = False):
+    """Close MongoDB connection.  Refuses to close while scans are still running
+    (unless ``force=True``) so a graceful server shutdown can't nuke the data layer
+    out from under in-flight engagement tasks."""
     global _client, _db, _db_instance
+    if not force and _has_active_scans():
+        print("[DB] teardown skipped — scans still active; keeping MongoDB open.")
+        return
     if _client:
         _client.close()
         _db = None
         _db_instance = None
         print("[DB] MongoDB connection closed.")
+
+
+def _has_active_scans() -> bool:
+    """True if any scan task is still registered in the server (best-effort)."""
+    try:
+        import agent_server
+        return bool(getattr(agent_server, "active_tasks", None))
+    except Exception:
+        return False
 
 
 async def _create_indexes():
@@ -490,6 +515,34 @@ async def add_discovered_host(session_id: str, host: str) -> None:
         pass
 
 
+async def set_host_triage(session_id: str, host: str, promise_score: float,
+                          status: str = "triaged", surface: Optional[Dict] = None) -> None:
+    """Record a per-host triage result (promise_score + status + surface summary) so
+    the multi-host UI grid can rank/badge hosts and a resumed scan keeps the ranking.
+
+    discovered_hosts is a list of plain IP strings, so positional updates don't
+    apply — triage lives in a parallel ``host_triage`` map keyed by the host
+    (dots replaced with ``_`` because Mongo field keys may not contain dots).
+    Best-effort; never raises into the orchestrator."""
+    db = get_db()
+    key = str(host).replace(".", "_")
+    try:
+        await db.sessions.update_one(
+            {"_id": ObjectId(session_id)},
+            {"$set": {
+                f"host_triage.{key}": {
+                    "host": host, "promise_score": float(promise_score),
+                    "status": status, "surface": surface or {},
+                },
+                "updated_at": datetime.utcnow(),
+            }},
+        )
+    except InvalidId:
+        pass
+    except Exception:
+        pass
+
+
 async def mark_host_complete(session_id: str, host: str) -> None:
     """Mark a specific host as fully tested."""
     db = get_db()
@@ -742,6 +795,14 @@ async def store_finding(
 
     fp = _finding_fingerprint(host=host, port=port, cves=cves, title=title)
 
+    # Issue-Validator write-time gate verdict (set by base_agent.store_finding)
+    # rides in `extra`; lift it so BOTH the insert and the dedup-merge branch
+    # can act on it (and so the report read-gate / cross-engagement filter see it).
+    _extra = dict(extra or {})
+    _verified     = bool(_extra.pop("verified", False))
+    _gated_reason = str(_extra.pop("gated_reason", "") or "")
+    _origin       = _extra.pop("_origin", None)
+
     # Try to find an existing finding with the same fingerprint for this
     # session.  Index on (session_id, fingerprint) — added in setup().
     existing = await db.findings.find_one({
@@ -760,25 +821,23 @@ async def store_finding(
         merged_cves = list({*(existing.get("cves") or []), *(cves or [])})
         merged_exploits = list({*(existing.get("exploits") or []), *(exploits or [])})
 
-        update_doc = {
-            "$set": {
-                "severity":     sev_to_set,
-                "cves":         merged_cves,
-                "exploits":     merged_exploits,
-                "last_seen_at": datetime.utcnow(),
-            },
-            "$inc": {"seen_count": 1},
-        }
-        await db.findings.update_one({"_id": existing["_id"]}, update_doc)
-
-        # Reflect changes in the doc we return
-        existing.update({
+        # `verified` is UPGRADE-only: a finding first stored ungrounded can be
+        # un-hidden when later re-found WITH evidence (never downgraded).
+        _ver_up = bool(existing.get("verified")) or _verified
+        _set = {
             "severity":     sev_to_set,
             "cves":         merged_cves,
             "exploits":     merged_exploits,
             "last_seen_at": datetime.utcnow(),
-            "seen_count":   (existing.get("seen_count") or 1) + 1,
-        })
+            "verified":     _ver_up,
+        }
+        if _ver_up:
+            _set["gated_reason"] = ""
+        update_doc = {"$set": _set, "$inc": {"seen_count": 1}}
+        await db.findings.update_one({"_id": existing["_id"]}, update_doc)
+
+        # Reflect changes in the doc we return
+        existing.update({**_set, "seen_count": (existing.get("seen_count") or 1) + 1})
         return _serialize(existing)
 
     doc = {
@@ -801,10 +860,12 @@ async def store_finding(
         "remediation": None,
         "found_at":    datetime.utcnow(),
         "last_seen_at": datetime.utcnow(),
-        "verified":    False,
+        "verified":    _verified,
+        "gated_reason": _gated_reason,
+        "_origin":     _origin,
         "fingerprint": fp,
         "seen_count":  1,
-        "extra":       extra or {}
+        "extra":       _extra
     }
     await db.findings.insert_one(doc)
     # Update session counter (only on first insertion of this fingerprint)
@@ -819,15 +880,47 @@ async def get_findings(
     host:       Optional[str] = None,
     limit:      int = 1000,
     skip:       int = 0,
+    validated_only: bool = False,
 ) -> List[Dict]:
-    """Get findings for a session with optional pagination (skip/limit)."""
+    """Get findings for a session with optional pagination (skip/limit).
+
+    When ``validated_only`` is True, exclude findings the Issue-Validator gated
+    out (verified is explicitly False) — legacy docs without a ``verified``
+    field are KEPT (cannot be proven faulty).  Used by the report read-path so
+    faulty/silly findings never render."""
     db = get_db()
     query = {"session_id": session_id}
     if severity: query["severity"] = severity
     if phase:    query["phase"]    = phase
     if host:     query["host"]     = host
+    if validated_only:
+        query["$or"] = [{"verified": True}, {"verified": {"$exists": False}}]
     cursor = db.findings.find(query).sort("found_at", DESCENDING).skip(skip).limit(limit)
     return _serialize_list(await cursor.to_list(length=limit))
+
+
+async def regrade_finding(finding_id, new_severity: str,
+                          extra_updates: Optional[Dict] = None) -> bool:
+    """Update a finding's severity (and merge keys into its ``extra``) in place.
+
+    Used by the operational severity re-grade when fresh evidence (a demonstrated
+    compromise, a confirmed public exploit, an attack-graph path) escalates a
+    finding that was stored earlier.  Best-effort; returns True if a doc changed."""
+    db = get_db()
+    query = None
+    try:
+        from bson import ObjectId
+        query = {"_id": ObjectId(str(finding_id))}
+    except Exception:
+        query = {"_id": finding_id}
+    set_doc = {"severity": str(new_severity).lower()}
+    for k, v in (extra_updates or {}).items():
+        set_doc[f"extra.{k}"] = v
+    try:
+        res = await db.findings.update_one(query, {"$set": set_doc})
+        return bool(getattr(res, "modified_count", 0))
+    except Exception:
+        return False
 
 
 async def get_findings_count(

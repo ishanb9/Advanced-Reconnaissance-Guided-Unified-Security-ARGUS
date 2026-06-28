@@ -353,7 +353,7 @@ function PlanStepCard({ step, index, isOptimal }) {
 
 
 // ── Attack Phase Panel — the main new component ──────────────────────────────
-function AttackPhasePanel({ planSteps, currentPhase, attackTree, phasesCompleted, hypothesis, assessmentType }) {
+function AttackPhasePanel({ planSteps, currentPhase, attackTree, phasesCompleted, hypothesis, assessmentType, viewHost, hasHostPlan }) {
   const [tab, setTab] = useState('steps'); // 'steps' | 'tree' | 'gantt'
   const optimal = attackTree?.optimal_path || [];
   // Backend can ship optimal_path as strings OR objects.  optimalSet is
@@ -443,6 +443,21 @@ function AttackPhasePanel({ planSteps, currentPhase, attackTree, phasesCompleted
         hasTree && React.createElement('div', { style: tabStyle('tree'), onClick: () => setTab('tree') }, '🌳 TREE'),
         hasSteps && React.createElement('div', { style: tabStyle('gantt'), onClick: () => setTab('gantt') }, '📊 GANTT'),
       )
+    ),
+
+    // Per-host view indicator — in a multi-host scan, makes clear WHICH host's
+    // attack phase / hypothesis is shown (it follows the host selector above).
+    viewHost && React.createElement('div', {
+      style: {
+        marginBottom: 10, padding: '6px 12px', borderRadius: 6,
+        background: 'rgba(0,212,255,0.06)', border: '1px solid rgba(0,212,255,0.25)',
+        fontSize: 10.5, color: 'var(--cyan)', fontFamily: 'var(--font-mono)',
+        display: 'flex', gap: 8, alignItems: 'center',
+      }
+    },
+      React.createElement('span', null, '🎯'),
+      React.createElement('span', null,
+        `Showing attack phase for host ${viewHost}` + (hasHostPlan ? '' : ' — awaiting this host’s plan…'))
     ),
 
     // Hypothesis banner (shown when plan is ready but tree not yet).
@@ -812,6 +827,31 @@ function AgentCard({ name, status = 'idle', phase, message, onClick }) {
       style: { fontSize: 8, color: 'var(--text-muted)', marginTop: 2, fontFamily: 'var(--font-mono)', letterSpacing: 0.5 }
     }, phase.toUpperCase())
   );
+}
+
+// Compact advisory prompt: ARGUS-ranked high-yield fuzz surfaces. Self-contained
+// (own fetch, isolated hooks); clicking opens the Fuzzing Lab. Never gates anything.
+function FuzzTargetsBadge({ sessionId, dispatch }) {
+  const [n, setN] = React.useState(0);
+  React.useEffect(() => {
+    if (!sessionId) { setN(0); return; }
+    let alive = true;
+    const load = () => fetch(`/fuzz/targets?session=${encodeURIComponent(sessionId)}`)
+      .then(r => r.json()).then(d => { if (alive) setN((d && d.high_count) || 0); })
+      .catch(() => {});
+    load();
+    const id = setInterval(load, 30000);
+    return () => { alive = false; clearInterval(id); };
+  }, [sessionId]);
+  if (!n) return null;
+  return React.createElement('div', {
+    onClick: () => dispatch && dispatch({ type: 'SET_HUB_TAB', payload: { hub: 'foothold', tab: 'fuzz_lab' } }),
+    title: 'Open the Fuzzing Lab to target these high-yield surfaces',
+    style: { display: 'inline-flex', alignItems: 'center', gap: 6, cursor: 'pointer',
+             padding: '4px 10px', borderRadius: 8, fontSize: 11, fontWeight: 700,
+             background: 'rgba(248,81,73,0.10)', border: '1px solid rgba(248,81,73,0.5)',
+             color: 'var(--red, #f85149)', marginBottom: 8 },
+  }, `🎯 ${n} high-yield fuzz target${n === 1 ? '' : 's'} — open Fuzzing Lab →`);
 }
 
 function StatTile({ label, value, color, sub }) {
@@ -1374,6 +1414,54 @@ function OperatorQABanner({ questions, sessionId, dispatch }) {
   );
 }
 
+// ── Multi-host overview grid ─────────────────────────────────────────────────
+// One card per live host, sorted by promise score, so the operator sees ALL
+// hosts at a glance and clicks one to drill in. Reads the per-host hostData
+// bucket (status/score/phase/findings) with a fallback to discoveredHosts.
+function HostOverviewGrid({ discoveredHosts, hostData, dispatch }) {
+  const hosts = (discoveredHosts || []).map(h => {
+    const ip = (h && h.ip) || h;   // discoveredHosts entries may be strings or {ip}
+    const d = (hostData && hostData[ip]) || {};
+    return {
+      ip,
+      status:   d.status || (h && (h.triage_status || h.status)) || 'queued',
+      score:    (d.score != null ? d.score : ((h && h.promise_score) || 0)),
+      phase:    d.phase || '',
+      // Prefer the authoritative per-host accumulator (h.findings_count) — the
+      // hostData.findings[] array only retains the most recent items for drill-down.
+      findings: (h && h.findings_count) || (d.findings || []).length || 0,
+      foothold: !!d.foothold,
+    };
+  }).sort((a, b) => (b.score - a.score) || String(a.ip).localeCompare(String(b.ip)));
+  if (!hosts.length) return null;
+  const color = (s) => s === 'exploiting' ? 'var(--cyan)'
+                : s === 'foothold' ? 'var(--green)'
+                : s === 'done' ? 'var(--text-muted)'
+                : s === 'triaged' ? 'var(--amber)' : 'var(--text-dim)';
+  return React.createElement('div', {
+    style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))',
+             gap: 10, marginBottom: 14 }
+  },
+    hosts.map(h => React.createElement('div', {
+      key: h.ip,
+      onClick: () => dispatch({ type: 'SET_HOST_FILTER', payload: h.ip }),
+      style: { cursor: 'pointer', borderRadius: 10, padding: '11px 13px',
+               background: 'var(--bg-surface)', border: '1px solid var(--border)' }
+    },
+      React.createElement('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center' } },
+        React.createElement('span', { style: { fontFamily: 'var(--font-mono)', fontWeight: 700, fontSize: 12 } }, h.ip),
+        React.createElement('span', { style: { fontSize: 9, color: color(h.status), textTransform: 'uppercase', letterSpacing: 0.6 } }, h.status)
+      ),
+      React.createElement('div', { style: { display: 'flex', justifyContent: 'space-between', marginTop: 8, fontSize: 10, color: 'var(--text-muted)' } },
+        React.createElement('span', null, `score ${h.score}`),
+        React.createElement('span', null, h.phase ? String(h.phase).toUpperCase() : '—'),
+        React.createElement('span', null, `${h.findings} find`)
+      ),
+      h.foothold && React.createElement('div', { style: { marginTop: 6, fontSize: 10, color: 'var(--green)' } }, '🔓 foothold')
+    ))
+  );
+}
+
 // ── Main MissionControl ──────────────────────────────────────────────────────
 function MissionControl(props) {
   const { state, dispatch } = window.useStore();
@@ -1386,8 +1474,28 @@ function MissionControl(props) {
     webConfirmPending, phaseTimeExtension,
     reasoningEngineActive, reasoningIteration, hypotheses, actionScore,
     operatorQuestions, engagementContext,
-    agentComms, reasoningLog,
+    agentComms, reasoningLog, hostPlans, hostData,
   } = state;
+  // Per-host attack-phase view: when a specific host is selected in a multi-host
+  // scan, show THAT host's hypothesis / phase / steps instead of the global blur.
+  // Falls back to the global plan when no host is selected (ALL) or single-host.
+  const _selHostPlan = (hostFilter && hostPlans && hostPlans[hostFilter]) || null;
+  // Per-target finding summary: when a specific host is selected, the metric
+  // cards show ONLY that host's severity counts (from the store's per-host
+  // accumulator); they show the full aggregate only when "ALL" is selected.
+  const _selHostRow   = (hostFilter && discoveredHosts)
+                          ? discoveredHosts.find(h => ((h && h.ip) || h) === hostFilter) : null;
+  const _sevc         = (_selHostRow && _selHostRow.severity_counts) || {};
+  const _summaryForView = _selHostRow ? {
+    critical: _sevc.critical || 0, high: _sevc.high || 0, medium: _sevc.medium || 0,
+    low: _sevc.low || 0, info: _sevc.info || 0,
+    total: (_selHostRow.findings_count != null ? _selHostRow.findings_count : 0),
+  } : findingsSummary;
+  const _viewHypothesis = (_selHostPlan && _selHostPlan.hypothesis) || planHypothesis;
+  const _viewAssessment = (_selHostPlan && _selHostPlan.assessment) || planAssessment;
+  const _viewPhase      = (_selHostPlan && _selHostPlan.phase) || currentPhase;
+  const _viewSteps      = (_selHostPlan && _selHostPlan.steps && _selHostPlan.steps.length)
+                            ? _selHostPlan.steps : (planSteps || []);
   const vm = (props && props.viewMode) || 'OPERATOR';
   const fontScale = vm === 'BRIEFING' ? 16 : 14;
 
@@ -1889,10 +1997,10 @@ function MissionControl(props) {
 
     // ── Stats row ─────────────────────────────────────────────────────────
     React.createElement('div', { style: { display: 'flex', gap: 8, marginBottom: 14, flexWrap: 'wrap' } },
-      React.createElement(StatTile, { label: 'Critical', value: s(findingsSummary.critical), color: 'var(--red)'    }),
-      React.createElement(StatTile, { label: 'High',     value: s(findingsSummary.high),     color: 'var(--high)'   }),
-      React.createElement(StatTile, { label: 'Medium',   value: s(findingsSummary.medium),   color: 'var(--amber)'  }),
-      React.createElement(StatTile, { label: 'Findings', value: s(findingsSummary.total),    color: 'var(--cyan)'   }),
+      React.createElement(StatTile, { label: 'Critical', value: s(_summaryForView.critical), color: 'var(--red)'    }),
+      React.createElement(StatTile, { label: 'High',     value: s(_summaryForView.high),     color: 'var(--high)'   }),
+      React.createElement(StatTile, { label: 'Medium',   value: s(_summaryForView.medium),   color: 'var(--amber)'  }),
+      React.createElement(StatTile, { label: 'Findings', value: s(_summaryForView.total),    color: 'var(--cyan)'   }),
       React.createElement(StatTile, { label: 'Flags',    value: flags.length,                color: 'var(--green)'  }),
       React.createElement(StatTile, { label: 'Agents',   value: activeAgents.length,         color: 'var(--violet)', sub: 'active' }),
       mitreMap.length > 0 && React.createElement(StatTile, { label: 'MITRE', value: mitreMap.length, color: 'var(--cyan)', sub: 'techniques' }),
@@ -1900,7 +2008,20 @@ function MissionControl(props) {
     ),
 
     // ── Host selector (CIDR/multi mode only) ──────────────────────────────
+    React.createElement(FuzzTargetsBadge, { sessionId: state.sessionId, dispatch }),
     React.createElement(HostSelector, { hosts: discoveredHosts, hostFilter, dispatch }),
+
+    // Multi-host overview grid (shown until a host is drilled into).
+    (discoveredHosts && discoveredHosts.length > 1 && !hostFilter)
+      && React.createElement(HostOverviewGrid, { discoveredHosts, hostData, dispatch }),
+
+    // Back-to-grid control when drilled into a host.
+    (discoveredHosts && discoveredHosts.length > 1 && hostFilter)
+      && React.createElement('div', {
+           onClick: () => dispatch({ type: 'SET_HOST_FILTER', payload: null }),
+           style: { cursor: 'pointer', display: 'inline-block', marginBottom: 10, fontSize: 11,
+                    color: 'var(--cyan)', fontFamily: 'var(--font-mono)' }
+         }, `← All hosts  ·  viewing ${hostFilter}`),
 
     // ── Pentest Progress Bar ──────────────────────────────────────────────
     React.createElement(PentestProgressBar, {
@@ -1910,13 +2031,17 @@ function MissionControl(props) {
     }),
 
     // ── Attack Phase panel (the big new component) ────────────────────────
+    // Host-aware: when a host is selected in a multi-host scan it shows THAT
+    // host's plan; otherwise the global plan (single-host / ALL).
     activeSession && React.createElement(AttackPhasePanel, {
-      planSteps:       planSteps || [],
-      currentPhase,
+      planSteps:       _viewSteps,
+      currentPhase:    _viewPhase,
       attackTree,
       phasesCompleted,
-      hypothesis:      planHypothesis,
-      assessmentType:  planAssessment,
+      hypothesis:      _viewHypothesis,
+      assessmentType:  _viewAssessment,
+      viewHost:        hostFilter || null,
+      hasHostPlan:     !!_selHostPlan,
     }),
 
     // ── Crosshair section divider ─────────────────────────────────────────

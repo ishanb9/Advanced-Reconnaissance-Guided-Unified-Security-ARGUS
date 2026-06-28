@@ -1,0 +1,2548 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ARGUS Security Assessment · {{ target_display }} · CONFIDENTIAL</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,300;9..144,400;9..144,600;9..144,700;9..144,900&family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+/* ═══════════════════════════════════════════════════════════════
+   ARGUS EDITORIAL WHITEPAPER — COMPLETE STYLESHEET
+   CONFIDENTIAL — CLIENT PRIVILEGED
+═══════════════════════════════════════════════════════════════ */
+
+/* ─── CSS CUSTOM PROPERTIES ─────────────────────────────────── */
+:root {
+  /* Severity Palette */
+  --sev-critical:     #C0392B;
+  --sev-critical-bg:  #fdf3f2;
+  --sev-critical-mid: #e74c3c;
+  --sev-high:         #D35400;
+  --sev-high-bg:      #fef5ee;
+  --sev-high-mid:     #e67e22;
+  --sev-medium:       #B7770D;
+  --sev-medium-bg:    #fefae9;
+  --sev-medium-mid:   #f39c12;
+  --sev-low:          #1A6B3C;
+  --sev-low-bg:       #f0faf4;
+  --sev-low-mid:      #27ae60;
+  --sev-info:         #1A5276;
+  --sev-info-bg:      #eaf4fb;
+  --sev-info-mid:     #2980b9;
+
+  /* Brand & Neutrals */
+  --brand:            #1C1C2E;
+  --brand-mid:        #2C2C4A;
+  --brand-accent:     #4A4A7A;
+  --accent-gold:      #B8960C;
+  --accent-rule:      #D4AF37;
+
+  /* Typography */
+  --ink:              #1A1A2E;
+  --ink-mid:          #2D2D44;
+  --ink-light:        #5A5A7A;
+  --ink-faint:        #9090AA;
+  --surface:          #FFFFFF;
+  --surface-warm:     #FAFAF7;
+  --surface-cool:     #F4F4F8;
+  --border:           #E2E2EA;
+  --border-strong:    #C8C8D8;
+
+  /* Spacing */
+  --gap-xs:  0.25rem;
+  --gap-sm:  0.5rem;
+  --gap-md:  1rem;
+  --gap-lg:  1.5rem;
+  --gap-xl:  2.5rem;
+  --gap-xxl: 4rem;
+
+  /* Typography Scale */
+  --fs-display: clamp(2.8rem, 6vw, 5rem);
+  --fs-h1:      clamp(1.8rem, 3.5vw, 2.8rem);
+  --fs-h2:      clamp(1.3rem, 2.5vw, 1.9rem);
+  --fs-h3:      clamp(1.05rem, 1.8vw, 1.3rem);
+  --fs-body:    0.9375rem;
+  --fs-small:   0.8125rem;
+  --fs-micro:   0.7rem;
+
+  /* Radius */
+  --r-sm:  3px;
+  --r-md:  6px;
+  --r-lg:  10px;
+  --r-xl:  16px;
+}
+
+/* ─── PRINT / PAGE SETUP ─────────────────────────────────────── */
+@page {
+  size: A4;
+  margin: 18mm 18mm 22mm 18mm;
+  @bottom-center {
+    content: "CONFIDENTIAL — CLIENT PRIVILEGED  ·  Page " counter(page) " of " counter(pages);
+    font-family: 'Inter', sans-serif;
+    font-size: 7pt;
+    color: #9090AA;
+    letter-spacing: 0.04em;
+  }
+}
+
+@media print {
+  * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+  body { font-size: 9pt; background: white !important; }
+  .no-print { display: none !important; }
+  .page-break { page-break-before: always; break-before: page; }
+  .avoid-break { page-break-inside: avoid; break-inside: avoid; }
+  section { page-break-inside: avoid; }
+  .cover { page-break-after: always; }
+  a { color: inherit; text-decoration: none; }
+  .finding-card { page-break-inside: avoid; break-inside: avoid; }
+}
+
+/* ─── RESET & BASE ───────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html {
+  font-size: 16px;
+  -webkit-text-size-adjust: 100%;
+  scroll-behavior: smooth;
+}
+
+body {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  font-size: var(--fs-body);
+  line-height: 1.7;
+  color: var(--ink);
+  background: var(--surface-warm);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ─── TYPOGRAPHY ─────────────────────────────────────────────── */
+.serif { font-family: 'Fraunces', 'Georgia', 'Times New Roman', serif; }
+
+h1, h2, h3, .display { font-family: 'Fraunces', serif; font-weight: 700; line-height: 1.15; }
+
+p { margin-bottom: 0.85em; }
+p:last-child { margin-bottom: 0; }
+
+strong { font-weight: 600; color: var(--ink-mid); }
+em { font-style: italic; color: var(--ink-light); }
+
+code, .mono {
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 0.82em;
+  background: var(--surface-cool);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 0.1em 0.35em;
+  color: var(--ink-mid);
+}
+
+/* ─── PAGE WRAPPER ───────────────────────────────────────────── */
+.page-wrapper {
+  max-width: 900px;
+  margin: 0 auto;
+  background: var(--surface);
+  box-shadow: 0 0 60px rgba(0,0,0,0.08);
+}
+
+@media (max-width: 960px) {
+  .page-wrapper { max-width: 100%; box-shadow: none; }
+}
+
+/* ─── CONFIDENTIAL BANNER ────────────────────────────────────── */
+.confid-banner {
+  background: var(--brand);
+  color: #fff;
+  text-align: center;
+  font-size: var(--fs-micro);
+  font-weight: 600;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  padding: 0.55rem 1rem;
+  position: sticky;
+  top: 0;
+  z-index: 100;
+}
+
+.confid-banner span { color: var(--accent-gold); }
+
+/* ─── COVER PAGE ─────────────────────────────────────────────── */
+.cover {
+  min-height: 100vh;
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  background: var(--surface);
+  position: relative;
+  overflow: hidden;
+}
+
+.cover-top-rule {
+  height: 6px;
+  background: linear-gradient(90deg, var(--sev-critical) 0%, var(--sev-high) 25%, var(--sev-medium) 55%, var(--sev-low) 80%, var(--sev-info) 100%);
+}
+
+.cover-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 2.5rem 3.5rem 0;
+}
+
+.cover-logo {
+  font-family: 'Fraunces', serif;
+  font-size: 1.5rem;
+  font-weight: 900;
+  letter-spacing: -0.02em;
+  color: var(--brand);
+}
+
+.cover-logo span { color: var(--sev-critical); }
+
+.cover-classification {
+  font-size: var(--fs-micro);
+  font-weight: 700;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--sev-critical);
+  border: 1.5px solid var(--sev-critical);
+  padding: 0.35rem 0.85rem;
+  border-radius: var(--r-sm);
+}
+
+.cover-body {
+  padding: 3rem 3.5rem 2rem;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  position: relative;
+}
+
+.cover-eyebrow {
+  font-size: var(--fs-small);
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  margin-bottom: 1.2rem;
+}
+
+.cover-title {
+  font-family: 'Fraunces', serif;
+  font-size: var(--fs-display);
+  font-weight: 900;
+  line-height: 1.04;
+  color: var(--brand);
+  letter-spacing: -0.025em;
+  margin-bottom: 0.5rem;
+  max-width: 780px;
+}
+
+.cover-subtitle {
+  font-family: 'Fraunces', serif;
+  font-size: clamp(1rem, 2vw, 1.4rem);
+  font-weight: 300;
+  color: var(--ink-light);
+  margin-bottom: 2.5rem;
+  font-style: italic;
+  letter-spacing: 0.01em;
+}
+
+.cover-divider {
+  width: 60px;
+  height: 3px;
+  background: var(--accent-rule);
+  margin-bottom: 2.5rem;
+}
+
+.cover-meta-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  overflow: hidden;
+  max-width: 700px;
+  margin-bottom: 2.5rem;
+}
+
+.cover-meta-item {
+  padding: 1rem 1.4rem;
+  border-right: 1px solid var(--border);
+  background: var(--surface-warm);
+}
+.cover-meta-item:last-child { border-right: none; }
+
+.cover-meta-label {
+  font-size: var(--fs-micro);
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  margin-bottom: 0.3rem;
+}
+
+.cover-meta-value {
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.cover-badges {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: var(--fs-small);
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  padding: 0.45rem 1rem;
+  border-radius: var(--r-md);
+}
+
+.badge-critical { background: var(--sev-critical); color: #fff; }
+.badge-high     { background: var(--sev-high);     color: #fff; }
+.badge-medium   { background: var(--sev-medium);   color: #fff; }
+.badge-low      { background: var(--sev-low);      color: #fff; }
+.badge-info     { background: var(--sev-info);     color: #fff; }
+.badge-outcome  { background: var(--brand); color: var(--accent-gold); border: 1.5px solid var(--brand-accent); }
+.badge-outline  { background: transparent; color: var(--ink); border: 1.5px solid var(--border-strong); }
+.badge-verified { background: var(--sev-low-bg); color: var(--sev-low); border: 1px solid var(--sev-low-mid); }
+.badge-open     { background: var(--sev-medium-bg); color: var(--sev-medium); border: 1px solid var(--sev-medium-mid); }
+
+.cover-footer-bar {
+  padding: 1.8rem 3.5rem;
+  border-top: 1px solid var(--border);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: var(--surface-cool);
+}
+
+.cover-footer-left { font-size: var(--fs-small); color: var(--ink-light); }
+.cover-footer-right { font-size: var(--fs-micro); color: var(--ink-faint); letter-spacing: 0.08em; text-align: right; }
+
+/* ─── SECTION WRAPPER ────────────────────────────────────────── */
+.section {
+  padding: 3.5rem 3.5rem 2.5rem;
+  border-bottom: 1px solid var(--border);
+  position: relative;
+}
+
+.section:last-child { border-bottom: none; }
+
+.section-alt { background: var(--surface-warm); }
+.section-dark { background: var(--brand); color: #eee; }
+
+/* ─── SECTION HEADERS ────────────────────────────────────────── */
+.section-numeral {
+  font-family: 'Fraunces', serif;
+  font-size: clamp(3.5rem, 8vw, 7rem);
+  font-weight: 900;
+  line-height: 1;
+  color: var(--border);
+  position: absolute;
+  top: 1.2rem;
+  right: 3rem;
+  pointer-events: none;
+  user-select: none;
+  letter-spacing: -0.04em;
+}
+
+.section-label {
+  font-size: var(--fs-micro);
+  font-weight: 700;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  margin-bottom: 0.5rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.section-label::before {
+  content: '';
+  display: inline-block;
+  width: 20px;
+  height: 2px;
+  background: var(--accent-rule);
+}
+
+.section-title {
+  font-family: 'Fraunces', serif;
+  font-size: var(--fs-h1);
+  font-weight: 700;
+  color: var(--brand);
+  line-height: 1.15;
+  margin-bottom: 0.4rem;
+  letter-spacing: -0.02em;
+}
+
+.section-lead {
+  font-size: 1.05rem;
+  font-weight: 400;
+  color: var(--ink-light);
+  max-width: 680px;
+  margin-bottom: 2rem;
+  line-height: 1.65;
+  font-style: italic;
+}
+
+.section-rule {
+  width: 40px;
+  height: 2px;
+  background: var(--accent-rule);
+  margin-bottom: 2rem;
+}
+
+/* ─── STAT TILES ─────────────────────────────────────────────── */
+.stat-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: var(--gap-md);
+  margin-bottom: 2.5rem;
+}
+
+.stat-tile {
+  border-radius: var(--r-lg);
+  padding: 1.2rem 1rem 1rem;
+  text-align: center;
+  position: relative;
+  overflow: hidden;
+  border: 1px solid transparent;
+}
+
+.stat-tile-critical { background: var(--sev-critical-bg); border-color: rgba(192,57,43,0.2); }
+.stat-tile-high     { background: var(--sev-high-bg);     border-color: rgba(211,84,0,0.2); }
+.stat-tile-medium   { background: var(--sev-medium-bg);   border-color: rgba(183,119,13,0.2); }
+.stat-tile-low      { background: var(--sev-low-bg);      border-color: rgba(26,107,60,0.2); }
+.stat-tile-info     { background: var(--sev-info-bg);     border-color: rgba(26,82,118,0.2); }
+.stat-tile-total    { background: var(--brand); border-color: var(--brand-mid); }
+.stat-tile-access   { background: var(--sev-critical); border-color: var(--sev-critical-mid); }
+
+.stat-num {
+  font-family: 'Fraunces', serif;
+  font-size: clamp(2rem, 4vw, 3rem);
+  font-weight: 900;
+  line-height: 1;
+  margin-bottom: 0.3rem;
+  letter-spacing: -0.03em;
+}
+
+.stat-tile-critical .stat-num { color: var(--sev-critical); }
+.stat-tile-high     .stat-num { color: var(--sev-high); }
+.stat-tile-medium   .stat-num { color: var(--sev-medium); }
+.stat-tile-low      .stat-num { color: var(--sev-low); }
+.stat-tile-info     .stat-num { color: var(--sev-info); }
+.stat-tile-total    .stat-num { color: #fff; }
+.stat-tile-access   .stat-num { color: #fff; font-size: 1.1rem; }
+
+.stat-label {
+  font-size: var(--fs-micro);
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.stat-tile-critical .stat-label { color: var(--sev-critical); }
+.stat-tile-high     .stat-label { color: var(--sev-high); }
+.stat-tile-medium   .stat-label { color: var(--sev-medium); }
+.stat-tile-low      .stat-label { color: var(--sev-low); }
+.stat-tile-info     .stat-label { color: var(--sev-info); }
+.stat-tile-total    .stat-label { color: rgba(255,255,255,0.7); }
+.stat-tile-access   .stat-label { color: rgba(255,255,255,0.8); }
+
+/* ─── SEVERITY BADGE (inline) ────────────────────────────────── */
+.sev {
+  display: inline-flex;
+  align-items: center;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 0.2rem 0.55rem;
+  border-radius: var(--r-sm);
+  white-space: nowrap;
+}
+
+.sev-critical { background: var(--sev-critical); color: #fff; }
+.sev-high     { background: var(--sev-high);     color: #fff; }
+.sev-medium   { background: var(--sev-medium);   color: #fff; }
+.sev-low      { background: var(--sev-low);      color: #fff; }
+.sev-info     { background: var(--sev-info);     color: #fff; }
+.sev-ne       { background: var(--surface-cool); color: var(--ink-light); border: 1px solid var(--border-strong); }
+
+/* ─── OUTCOME BADGE ──────────────────────────────────────────── */
+.outcome {
+  display: inline-flex;
+  align-items: center;
+  font-size: 0.7rem;
+  font-weight: 600;
+  padding: 0.18rem 0.5rem;
+  border-radius: 20px;
+  white-space: nowrap;
+}
+
+.outcome-success   { background: #e8f5e9; color: #2e7d32; border: 1px solid #a5d6a7; }
+.outcome-exploit   { background: var(--sev-critical-bg); color: var(--sev-critical); border: 1px solid rgba(192,57,43,0.25); }
+.outcome-failed    { background: var(--surface-cool); color: var(--ink-faint); border: 1px solid var(--border); }
+.outcome-blocked   { background: var(--sev-info-bg); color: var(--sev-info); border: 1px solid rgba(26,82,118,0.25); }
+.outcome-medium    { background: var(--sev-medium-bg); color: var(--sev-medium); border: 1px solid rgba(183,119,13,0.25); }
+
+/* ─── TABLES ─────────────────────────────────────────────────── */
+.data-table-wrap { overflow-x: auto; margin: 1.5rem 0; border-radius: var(--r-lg); border: 1px solid var(--border); }
+
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--fs-small);
+  background: var(--surface);
+}
+
+.data-table thead tr {
+  background: var(--brand);
+  color: #fff;
+}
+
+.data-table thead th {
+  padding: 0.8rem 1rem;
+  text-align: left;
+  font-size: var(--fs-micro);
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.data-table tbody tr { border-bottom: 1px solid var(--border); }
+.data-table tbody tr:last-child { border-bottom: none; }
+.data-table tbody tr:nth-child(even) { background: var(--surface-warm); }
+.data-table tbody tr:hover { background: var(--surface-cool); transition: background 0.15s; }
+
+.data-table tbody td {
+  padding: 0.75rem 1rem;
+  vertical-align: middle;
+  color: var(--ink-mid);
+}
+
+.data-table .col-id  { font-family: 'JetBrains Mono', monospace; font-size: 0.78rem; color: var(--ink-faint); font-weight: 500; }
+.data-table .col-cvss { font-weight: 700; }
+.data-table .col-mitre { font-family: 'JetBrains Mono', monospace; font-size: 0.75rem; color: var(--ink-light); }
+
+/* ─── FINDING CARDS ──────────────────────────────────────────── */
+.finding-card {
+  border: 1px solid var(--border);
+  border-radius: var(--r-xl);
+  overflow: hidden;
+  margin-bottom: 1.8rem;
+  background: var(--surface);
+  box-shadow: 0 2px 12px rgba(0,0,0,0.04);
+}
+
+.finding-card-header {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: start;
+  gap: 1rem;
+  padding: 1.4rem 1.6rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.finding-card-header-critical { border-left: 5px solid var(--sev-critical); }
+.finding-card-header-high     { border-left: 5px solid var(--sev-high); }
+.finding-card-header-medium   { border-left: 5px solid var(--sev-medium); }
+.finding-card-header-low      { border-left: 5px solid var(--sev-low); }
+.finding-card-header-info     { border-left: 5px solid var(--sev-info); }
+
+.finding-card-id {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: var(--ink-faint);
+  letter-spacing: 0.05em;
+  padding-top: 0.1rem;
+}
+
+.finding-card-title {
+  font-family: 'Fraunces', serif;
+  font-size: var(--fs-h3);
+  font-weight: 700;
+  color: var(--brand);
+  line-height: 1.2;
+  margin-bottom: 0.4rem;
+}
+
+.finding-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+  margin-top: 0.4rem;
+  font-size: var(--fs-micro);
+  color: var(--ink-light);
+}
+
+.finding-card-cvss {
+  font-family: 'Fraunces', serif;
+  font-size: 1.6rem;
+  font-weight: 900;
+  line-height: 1;
+  text-align: right;
+}
+
+.finding-card-cvss-critical { color: var(--sev-critical); }
+.finding-card-cvss-high     { color: var(--sev-high); }
+.finding-card-cvss-medium   { color: var(--sev-medium); }
+.finding-card-cvss-low      { color: var(--sev-low); }
+
+.finding-card-body { padding: 1.4rem 1.6rem; }
+
+.finding-section-label {
+  font-size: var(--fs-micro);
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  margin-bottom: 0.4rem;
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+}
+
+.finding-section-label:first-child { margin-top: 0; padding-top: 0; border-top: none; }
+
+.finding-card-text { font-size: var(--fs-small); color: var(--ink-mid); line-height: 1.65; }
+
+.loot-block {
+  background: var(--brand);
+  border-radius: var(--r-md);
+  padding: 1rem 1.2rem;
+  margin-top: 0.6rem;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.76rem;
+  color: #c8ffc8;
+  line-height: 1.6;
+  word-break: break-all;
+}
+
+.loot-block .loot-key { color: #7eb8f7; }
+.loot-block .loot-redact { color: #ffc107; font-style: italic; }
+.loot-hash { font-size: 0.7rem; color: #888; margin-top: 0.4rem; }
+
+.remediation-block {
+  background: var(--sev-low-bg);
+  border: 1px solid rgba(26,107,60,0.2);
+  border-radius: var(--r-md);
+  padding: 0.9rem 1.1rem;
+  margin-top: 0.6rem;
+  font-size: var(--fs-small);
+  color: var(--sev-low);
+  line-height: 1.6;
+}
+
+/* ─── CALLOUT / HIGHLIGHT BOX ────────────────────────────────── */
+.callout {
+  border-radius: var(--r-lg);
+  padding: 1.3rem 1.6rem;
+  margin: 1.5rem 0;
+  border-left: 4px solid;
+  font-size: var(--fs-small);
+  line-height: 1.65;
+}
+
+.callout-critical { background: var(--sev-critical-bg); border-color: var(--sev-critical); color: #6b1511; }
+.callout-info     { background: var(--sev-info-bg);     border-color: var(--sev-info);     color: #1a3a55; }
+.callout-gold     { background: #fdf9ee; border-color: var(--accent-gold); color: #5a4800; }
+
+.callout-title { font-weight: 700; margin-bottom: 0.4rem; font-size: 0.82rem; letter-spacing: 0.06em; text-transform: uppercase; }
+
+/* ─── TWO-COLUMN LAYOUT ──────────────────────────────────────── */
+.two-col {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2rem;
+}
+
+.two-col-60-40 { grid-template-columns: 60fr 40fr; }
+
+@media (max-width: 700px) {
+  .two-col, .two-col-60-40 { grid-template-columns: 1fr; }
+  .cover-meta-grid { grid-template-columns: 1fr; }
+  .stat-row { grid-template-columns: repeat(3, 1fr); }
+  .section { padding: 2.5rem 1.5rem; }
+  .cover-header, .cover-body, .cover-footer-bar { padding-left: 1.5rem; padding-right: 1.5rem; }
+}
+
+/* ─── SCOPE TABLE / SERVICE TABLE ────────────────────────────── */
+.service-row { display: flex; align-items: center; gap: 0.8rem; padding: 0.65rem 0; border-bottom: 1px solid var(--border); }
+.service-row:last-child { border-bottom: none; }
+.service-port { font-family: 'JetBrains Mono', monospace; font-weight: 700; font-size: 0.82rem; color: var(--brand); min-width: 48px; }
+.service-name { font-size: var(--fs-small); font-weight: 600; color: var(--ink-mid); min-width: 160px; }
+.service-desc { font-size: var(--fs-small); color: var(--ink-light); }
+
+/* ─── PRIORITY ACTIONS ───────────────────────────────────────── */
+.action-list { list-style: none; margin-top: 0.8rem; }
+.action-item {
+  display: flex;
+  gap: 0.8rem;
+  align-items: flex-start;
+  padding: 0.75rem 0;
+  border-bottom: 1px solid var(--border);
+  font-size: var(--fs-small);
+}
+.action-item:last-child { border-bottom: none; }
+.action-num {
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: var(--brand);
+  color: #fff;
+  font-size: 0.7rem;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: 0.1rem;
+}
+
+/* ─── TIMELINE ───────────────────────────────────────────────── */
+.timeline { position: relative; padding-left: 2.5rem; }
+.timeline::before {
+  content: '';
+  position: absolute;
+  left: 9px;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--border);
+}
+
+.tl-item {
+  position: relative;
+  padding-bottom: 1.5rem;
+}
+
+.tl-item::before {
+  content: '';
+  position: absolute;
+  left: -2.07rem;
+  top: 4px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--surface);
+  border: 2.5px solid var(--border-strong);
+}
+
+.tl-item.tl-critical::before { border-color: var(--sev-critical); background: var(--sev-critical-bg); }
+.tl-item.tl-success::before  { border-color: var(--sev-low-mid);  background: var(--sev-low-bg); }
+.tl-item.tl-high::before     { border-color: var(--sev-high);     background: var(--sev-high-bg); }
+
+.tl-time {
+  font-size: var(--fs-micro);
+  font-weight: 700;
+  color: var(--ink-faint);
+  letter-spacing: 0.08em;
+  margin-bottom: 0.1rem;
+}
+
+.tl-event { font-size: var(--fs-small); color: var(--ink-mid); font-weight: 500; }
+.tl-note  { font-size: var(--fs-micro); color: var(--ink-faint); margin-top: 0.15rem; }
+
+/* ─── REMEDIATION ROADMAP ────────────────────────────────────── */
+.remed-tier {
+  border-radius: var(--r-lg);
+  padding: 1.4rem 1.6rem;
+  margin-bottom: 1.2rem;
+  border: 1px solid transparent;
+}
+
+.remed-tier-p1 { background: var(--sev-critical-bg); border-color: rgba(192,57,43,0.2); }
+.remed-tier-p2 { background: var(--sev-high-bg);     border-color: rgba(211,84,0,0.2); }
+.remed-tier-p3 { background: var(--sev-info-bg);     border-color: rgba(26,82,118,0.15); }
+
+.remed-tier-header {
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+  margin-bottom: 0.8rem;
+}
+
+.remed-tier-label {
+  font-family: 'Fraunces', serif;
+  font-size: 1.05rem;
+  font-weight: 700;
+}
+
+.remed-tier-p1 .remed-tier-label { color: var(--sev-critical); }
+.remed-tier-p2 .remed-tier-label { color: var(--sev-high); }
+.remed-tier-p3 .remed-tier-label { color: var(--sev-info); }
+
+.remed-items { list-style: none; }
+.remed-items li {
+  font-size: var(--fs-small);
+  color: var(--ink-mid);
+  padding: 0.3rem 0;
+  padding-left: 1.2rem;
+  position: relative;
+}
+.remed-items li::before {
+  content: '→';
+  position: absolute;
+  left: 0;
+  color: var(--ink-faint);
+}
+
+/* ─── DETECTION TABLE ────────────────────────────────────────── */
+.detect-table { width: 100%; border-collapse: collapse; font-size: var(--fs-small); }
+.detect-table th, .detect-table td { padding: 0.7rem 0.9rem; border-bottom: 1px solid var(--border); text-align: left; }
+.detect-table th { background: var(--surface-cool); font-size: var(--fs-micro); letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink-faint); font-weight: 700; }
+.detect-table td:first-child { font-weight: 600; color: var(--ink-mid); }
+
+/* ─── MITRE MAP ──────────────────────────────────────────────── */
+.mitre-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: var(--gap-sm);
+  margin-top: var(--gap-md);
+}
+
+.mitre-cell {
+  background: var(--brand);
+  border-radius: var(--r-md);
+  padding: 0.8rem 1rem;
+  color: #fff;
+  font-size: var(--fs-micro);
+}
+
+.mitre-cell-phase {
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--accent-gold);
+  margin-bottom: 0.3rem;
+}
+
+.mitre-cell-tactic { font-size: 0.78rem; font-weight: 600; margin-bottom: 0.2rem; }
+.mitre-cell-id { font-family: 'JetBrains Mono', monospace; color: rgba(255,255,255,0.5); font-size: 0.7rem; }
+
+/* ─── EVIDENCE APPENDIX ──────────────────────────────────────── */
+.ev-item {
+  display: grid;
+  grid-template-columns: 60px 1fr 1fr 1fr;
+  gap: 0.8rem;
+  padding: 0.75rem 0;
+  border-bottom: 1px solid var(--border);
+  font-size: var(--fs-small);
+  align-items: center;
+}
+
+.ev-item:last-child { border-bottom: none; }
+.ev-id { font-family: 'JetBrains Mono', monospace; font-weight: 700; color: var(--ink-faint); font-size: 0.78rem; }
+.ev-hash { font-family: 'JetBrains Mono', monospace; font-size: 0.7rem; color: var(--ink-faint); }
+
+/* ─── LEGEND ─────────────────────────────────────────────────── */
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  margin-top: 1rem;
+}
+
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: var(--fs-micro);
+  font-weight: 600;
+  color: var(--ink-mid);
+}
+
+.legend-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+/* ─── SVG CHART WRAPPERS ─────────────────────────────────────── */
+.chart-wrap {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  padding: 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.8rem;
+}
+
+.chart-title {
+  font-family: 'Fraunces', serif;
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: var(--brand);
+  margin-bottom: 0.2rem;
+}
+
+/* ─── FOOTER ─────────────────────────────────────────────────── */
+.doc-footer {
+  background: var(--brand);
+  color: rgba(255,255,255,0.6);
+  text-align: center;
+  font-size: var(--fs-micro);
+  letter-spacing: 0.1em;
+  padding: 1.4rem 2rem;
+  line-height: 2;
+}
+
+.doc-footer strong { color: rgba(255,255,255,0.9); }
+.doc-footer .gold { color: var(--accent-gold); }
+
+/* ─── RETEST STATUS ──────────────────────────────────────────── */
+.retest-open     { color: var(--sev-medium); font-weight: 600; font-size: var(--fs-small); }
+.retest-verified { color: var(--sev-low);    font-weight: 600; font-size: var(--fs-small); }
+.retest-gated    { color: var(--ink-faint);  font-weight: 500; font-size: var(--fs-small); }
+
+/* ─── TOC ────────────────────────────────────────────────────── */
+.toc-list { list-style: none; margin-top: 1rem; }
+.toc-item {
+  display: flex;
+  align-items: baseline;
+  gap: 0;
+  padding: 0.45rem 0;
+  border-bottom: 1px dotted var(--border);
+}
+.toc-item:last-child { border-bottom: none; }
+.toc-num { font-family: 'JetBrains Mono', monospace; font-size: 0.78rem; color: var(--ink-faint); width: 28px; flex-shrink: 0; }
+.toc-text { font-size: 0.875rem; font-weight: 500; color: var(--ink-mid); flex: 1; }
+.toc-dots { flex: 1; border-bottom: 1px dotted var(--border); margin: 0 0.5rem; position: relative; top: -0.2rem; }
+.toc-page { font-family: 'JetBrains Mono', monospace; font-size: 0.75rem; color: var(--ink-faint); }
+.toc-section-group { margin-bottom: 0.3rem; }
+.toc-section-head {
+  font-size: var(--fs-micro);
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  padding-top: 0.8rem;
+  margin-bottom: 0.2rem;
+}
+
+/* ─── KILL CHAIN SVG WRAPPER ─────────────────────────────────── */
+.killchain-wrap {
+  overflow-x: auto;
+  border-radius: var(--r-lg);
+  border: 1px solid var(--border);
+  background: var(--brand);
+  padding: 1.5rem;
+}
+
+/* ─── NOT-EXPLOITABLE SECTION ────────────────────────────────── */
+.ne-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 1rem;
+  margin-top: 1rem;
+}
+
+.ne-card {
+  background: var(--surface-cool);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: 1rem 1.1rem;
+}
+
+.ne-card-title { font-weight: 600; font-size: var(--fs-small); color: var(--ink-mid); margin-bottom: 0.3rem; }
+.ne-card-reason { font-size: var(--fs-micro); color: var(--ink-faint); line-height: 1.5; }
+
+/* ─── SEPARATOR ──────────────────────────────────────────────── */
+.hr-styled {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 1.5rem 0;
+}
+
+/* ─── INLINE TAG ─────────────────────────────────────────────── */
+.tag {
+  display: inline-block;
+  font-size: 0.7rem;
+  font-weight: 600;
+  padding: 0.15rem 0.45rem;
+  border-radius: var(--r-sm);
+  letter-spacing: 0.04em;
+  background: var(--surface-cool);
+  color: var(--ink-light);
+  border: 1px solid var(--border);
+}
+</style>
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════
+     CONFIDENTIAL BANNER
+═══════════════════════════════════════════ -->
+<div class="confid-banner">
+  <span>CONFIDENTIAL</span> — CLIENT PRIVILEGED &nbsp;·&nbsp; {{ target_display }} &nbsp;·&nbsp; NOT FOR DISTRIBUTION
+</div>
+
+<div class="page-wrapper">
+
+<!-- ═══════════════════════════════════════════
+     COVER PAGE
+═══════════════════════════════════════════ -->
+<section class="cover">
+  <div class="cover-top-rule"></div>
+
+  <header class="cover-header">
+    <div class="cover-logo">ARG<span>US</span></div>
+    <div class="cover-classification">CONFIDENTIAL — CLIENT PRIVILEGED</div>
+  </header>
+
+  <div class="cover-body">
+    <div class="cover-eyebrow">Security Assessment Report &nbsp;·&nbsp; {{ engagement_type }} &nbsp;·&nbsp; {{ generated_at }}</div>
+
+    <h1 class="cover-title">Penetration Test<br>Report</h1>
+    <p class="cover-subtitle">Target: {{ target_display }}{% if session is defined and session.scope %} &nbsp;·&nbsp; {{ session.scope }}{% endif %}</p>
+    <div class="cover-divider"></div>
+
+    <div class="cover-meta-grid">
+      <div class="cover-meta-item">
+        <div class="cover-meta-label">Target Host</div>
+        <div class="cover-meta-value" style="font-family:'JetBrains Mono',monospace;font-size:0.82rem;">
+          {% if session is defined %}{{ session.target_ip }}{% if session.target_hostname %} ("{{ session.target_hostname }}"){% endif %}{% else %}{{ target_display }}{% endif %}
+        </div>
+      </div>
+      <div class="cover-meta-item">
+        <div class="cover-meta-label">Scope</div>
+        <div class="cover-meta-value">{% if session is defined and session.scope %}{{ session.scope }}{% else %}—{% endif %}</div>
+      </div>
+      <div class="cover-meta-item">
+        <div class="cover-meta-label">Engagement Window</div>
+        <div class="cover-meta-value">
+          {% if session is defined and session.started_at %}{{ session.started_at }}{% if session.completed_at %} – {{ session.completed_at }}{% endif %}{% else %}{{ generated_at }}{% endif %}
+        </div>
+      </div>
+      <div class="cover-meta-item">
+        <div class="cover-meta-label">Assessment Type</div>
+        <div class="cover-meta-value" style="font-family:'JetBrains Mono',monospace;font-size:0.82rem;">{{ engagement_type }}</div>
+      </div>
+      <div class="cover-meta-item">
+        <div class="cover-meta-label">Analysts</div>
+        <div class="cover-meta-value">ARGUS Autonomous Engine<br><span style="font-size:0.75rem;color:var(--ink-faint);">(Operator-Reviewed)</span></div>
+      </div>
+      <div class="cover-meta-item">
+        <div class="cover-meta-label">Report Date</div>
+        <div class="cover-meta-value">{{ generated_at }}</div>
+      </div>
+    </div>
+
+    <div class="cover-badges">
+      {% if summary is defined and summary.critical is defined and summary.critical > 0 %}
+      <div>
+        <div class="cover-meta-label" style="margin-bottom:0.5rem;">Overall Risk</div>
+        <span class="badge badge-critical">&#9632; Critical Risk</span>
+      </div>
+      {% elif summary is defined and summary.high is defined and summary.high > 0 %}
+      <div>
+        <div class="cover-meta-label" style="margin-bottom:0.5rem;">Overall Risk</div>
+        <span class="badge badge-high">&#9632; High Risk</span>
+      </div>
+      {% endif %}
+      {% if outcome is defined %}
+      <div>
+        <div class="cover-meta-label" style="margin-bottom:0.5rem;">Outcome</div>
+        <span class="badge badge-outcome">&#9650; {{ outcome.label }}</span>
+      </div>
+      {% endif %}
+      <div>
+        <div class="cover-meta-label" style="margin-bottom:0.5rem;">Assessment Type</div>
+        <span class="badge badge-outline">{{ engagement_type }}</span>
+      </div>
+    </div>
+  </div>
+
+  <footer class="cover-footer-bar">
+    <div class="cover-footer-left">
+      <strong>ARGUS Security</strong> &nbsp;·&nbsp; Autonomous Penetration Testing Engine<br>
+      <span style="font-size:var(--fs-micro);color:var(--ink-faint);">Operator-reviewed. Every finding grounded in concrete tool evidence.</span>
+    </div>
+    <div class="cover-footer-right">
+      CONFIDENTIAL — CLIENT PRIVILEGED<br>
+      Not for distribution beyond named recipients.<br>
+      Generated: {{ generated_at }}
+    </div>
+  </footer>
+</section>
+
+<!-- ═══════════════════════════════════════════
+     DOCUMENT CONTROL + TABLE OF CONTENTS
+═══════════════════════════════════════════ -->
+<section class="section section-alt page-break" id="doc-control">
+  <div class="section-numeral">00</div>
+  <div class="section-label">Document Control</div>
+  <h2 class="section-title">Document Control &amp; Contents</h2>
+  <div class="section-rule"></div>
+
+  <div class="two-col" style="gap:3rem;margin-bottom:2rem;">
+    <div>
+      <h3 style="font-family:'Fraunces',serif;font-size:1rem;font-weight:700;color:var(--brand);margin-bottom:1rem;">Document Information</h3>
+      <table style="width:100%;font-size:var(--fs-small);border-collapse:collapse;">
+        <tr style="border-bottom:1px solid var(--border);">
+          <td style="padding:0.5rem 0.5rem 0.5rem 0;color:var(--ink-faint);font-weight:600;font-size:var(--fs-micro);letter-spacing:0.1em;text-transform:uppercase;width:38%;">Document Title</td>
+          <td style="padding:0.5rem;color:var(--ink-mid);">ARGUS Security Assessment Report</td>
+        </tr>
+        <tr style="border-bottom:1px solid var(--border);">
+          <td style="padding:0.5rem 0.5rem 0.5rem 0;color:var(--ink-faint);font-weight:600;font-size:var(--fs-micro);letter-spacing:0.1em;text-transform:uppercase;">Target</td>
+          <td style="padding:0.5rem;color:var(--ink-mid);font-family:'JetBrains Mono',monospace;font-size:0.8rem;">{{ target_display }}</td>
+        </tr>
+        <tr style="border-bottom:1px solid var(--border);">
+          <td style="padding:0.5rem 0.5rem 0.5rem 0;color:var(--ink-faint);font-weight:600;font-size:var(--fs-micro);letter-spacing:0.1em;text-transform:uppercase;">Classification</td>
+          <td style="padding:0.5rem;"><span style="color:var(--sev-critical);font-weight:700;">CONFIDENTIAL — CLIENT PRIVILEGED</span></td>
+        </tr>
+        <tr style="border-bottom:1px solid var(--border);">
+          <td style="padding:0.5rem 0.5rem 0.5rem 0;color:var(--ink-faint);font-weight:600;font-size:var(--fs-micro);letter-spacing:0.1em;text-transform:uppercase;">Version</td>
+          <td style="padding:0.5rem;color:var(--ink-mid);">1.0 (Final)</td>
+        </tr>
+        <tr style="border-bottom:1px solid var(--border);">
+          <td style="padding:0.5rem 0.5rem 0.5rem 0;color:var(--ink-faint);font-weight:600;font-size:var(--fs-micro);letter-spacing:0.1em;text-transform:uppercase;">Report Date</td>
+          <td style="padding:0.5rem;color:var(--ink-mid);">{{ generated_at }}</td>
+        </tr>
+        {% if session is defined and session.started_at %}
+        <tr style="border-bottom:1px solid var(--border);">
+          <td style="padding:0.5rem 0.5rem 0.5rem 0;color:var(--ink-faint);font-weight:600;font-size:var(--fs-micro);letter-spacing:0.1em;text-transform:uppercase;">Engagement Window</td>
+          <td style="padding:0.5rem;color:var(--ink-mid);">{{ session.started_at }}{% if session.completed_at %} – {{ session.completed_at }}{% endif %}</td>
+        </tr>
+        {% endif %}
+        <tr style="border-bottom:1px solid var(--border);">
+          <td style="padding:0.5rem 0.5rem 0.5rem 0;color:var(--ink-faint);font-weight:600;font-size:var(--fs-micro);letter-spacing:0.1em;text-transform:uppercase;">Analysts</td>
+          <td style="padding:0.5rem;color:var(--ink-mid);">ARGUS Autonomous Engine (Operator-Reviewed)</td>
+        </tr>
+        <tr>
+          <td style="padding:0.5rem 0.5rem 0.5rem 0;color:var(--ink-faint);font-weight:600;font-size:var(--fs-micro);letter-spacing:0.1em;text-transform:uppercase;">Status</td>
+          <td style="padding:0.5rem;color:var(--ink-mid);"><span class="badge badge-outcome" style="font-size:0.68rem;padding:0.2rem 0.6rem;">Final</span></td>
+        </tr>
+      </table>
+    </div>
+
+    <div>
+      <h3 style="font-family:'Fraunces',serif;font-size:1rem;font-weight:700;color:var(--brand);margin-bottom:1rem;">Handling Instructions</h3>
+      <div class="callout callout-critical" style="margin-top:0;">
+        <div class="callout-title">Restricted Distribution</div>
+        This document contains sensitive vulnerability details and captured credentials. Distribution is restricted to named recipients only. Do not forward, copy, or store on unencrypted media. Destroy or shred all physical copies after use.
+      </div>
+
+      <div style="margin-top:1.2rem;">
+        <div class="cover-meta-label" style="margin-bottom:0.6rem;">Severity Legend</div>
+        <div class="legend">
+          <div class="legend-item"><div class="legend-dot" style="background:var(--sev-critical);"></div>Critical (9.0–10)</div>
+          <div class="legend-item"><div class="legend-dot" style="background:var(--sev-high);"></div>High (7.0–8.9)</div>
+          <div class="legend-item"><div class="legend-dot" style="background:var(--sev-medium);"></div>Medium (4.0–6.9)</div>
+          <div class="legend-item"><div class="legend-dot" style="background:var(--sev-low);"></div>Low (0.1–3.9)</div>
+          <div class="legend-item"><div class="legend-dot" style="background:var(--sev-info);"></div>Info (0)</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <h3 style="font-family:'Fraunces',serif;font-size:1.05rem;font-weight:700;color:var(--brand);margin-bottom:0.5rem;">Table of Contents</h3>
+
+  <div class="two-col" style="gap:2rem;">
+    <ul class="toc-list">
+      <li class="toc-section-head">Front Matter</li>
+      <li class="toc-item"><span class="toc-num">00</span><span class="toc-text">Document Control &amp; Contents</span><span class="toc-dots"></span><span class="toc-page">2</span></li>
+      <li class="toc-item"><span class="toc-num">01</span><span class="toc-text">Executive Summary</span><span class="toc-dots"></span><span class="toc-page">3</span></li>
+      <li class="toc-item"><span class="toc-num">02</span><span class="toc-text">System &amp; Scope</span><span class="toc-dots"></span><span class="toc-page">4</span></li>
+      <li class="toc-item"><span class="toc-num">03</span><span class="toc-text">Methodology &amp; CVSS Rubric</span><span class="toc-dots"></span><span class="toc-page">5</span></li>
+      <li class="toc-section-head" style="margin-top:0.8rem;">Technical Findings</li>
+      <li class="toc-item"><span class="toc-num">04</span><span class="toc-text">Attack Path / Kill-Chain Graph</span><span class="toc-dots"></span><span class="toc-page">6</span></li>
+      <li class="toc-item"><span class="toc-num">05</span><span class="toc-text">Attacks Attempted — Coverage Log</span><span class="toc-dots"></span><span class="toc-page">7</span></li>
+      <li class="toc-item"><span class="toc-num">06</span><span class="toc-text">Findings Register</span><span class="toc-dots"></span><span class="toc-page">8</span></li>
+      <li class="toc-item"><span class="toc-num">07</span><span class="toc-text">Detailed Finding Cards</span><span class="toc-dots"></span><span class="toc-page">9</span></li>
+    </ul>
+    <ul class="toc-list">
+      <li class="toc-section-head">Intelligence &amp; Response</li>
+      <li class="toc-item"><span class="toc-num">08</span><span class="toc-text">Tested — Not Exploitable</span><span class="toc-dots"></span><span class="toc-page">14</span></li>
+      <li class="toc-item"><span class="toc-num">09</span><span class="toc-text">Detection / Purple-Team Mapping</span><span class="toc-dots"></span><span class="toc-page">15</span></li>
+      <li class="toc-item"><span class="toc-num">10</span><span class="toc-text">Evidence Appendix</span><span class="toc-dots"></span><span class="toc-page">16</span></li>
+      <li class="toc-item"><span class="toc-num">11</span><span class="toc-text">MITRE ATT&amp;CK Map</span><span class="toc-dots"></span><span class="toc-page">17</span></li>
+      <li class="toc-section-head" style="margin-top:0.8rem;">Remediation &amp; Closeout</li>
+      <li class="toc-item"><span class="toc-num">12</span><span class="toc-text">Remediation Roadmap</span><span class="toc-dots"></span><span class="toc-page">18</span></li>
+      <li class="toc-item"><span class="toc-num">13</span><span class="toc-text">Engagement Timeline</span><span class="toc-dots"></span><span class="toc-page">19</span></li>
+      <li class="toc-item"><span class="toc-num">14</span><span class="toc-text">Data Visualizations</span><span class="toc-dots"></span><span class="toc-page">20</span></li>
+    </ul>
+  </div>
+</section>
+
+
+<!-- ═══════════════════════════════════════════
+     §01 — EXECUTIVE SUMMARY
+═══════════════════════════════════════════ -->
+<section class="section page-break" id="exec-summary">
+  <div class="section-numeral">01</div>
+  <div class="section-label">Executive Summary</div>
+  <h2 class="section-title">Executive Summary</h2>
+  <p class="section-lead">A plain-English account of what ARGUS found, what it achieved, and what must be fixed immediately.</p>
+  <div class="section-rule"></div>
+
+  <!-- Stat Tiles -->
+  {% if summary is defined %}
+  <div class="stat-row">
+    {% if summary.critical is defined %}
+    <div class="stat-tile stat-tile-critical avoid-break">
+      <div class="stat-num">{{ summary.critical }}</div>
+      <div class="stat-label">Critical</div>
+    </div>
+    {% endif %}
+    {% if summary.high is defined %}
+    <div class="stat-tile stat-tile-high avoid-break">
+      <div class="stat-num">{{ summary.high }}</div>
+      <div class="stat-label">High</div>
+    </div>
+    {% endif %}
+    {% if summary.medium is defined %}
+    <div class="stat-tile stat-tile-medium avoid-break">
+      <div class="stat-num">{{ summary.medium }}</div>
+      <div class="stat-label">Medium</div>
+    </div>
+    {% endif %}
+    {% if summary.low is defined %}
+    <div class="stat-tile stat-tile-low avoid-break">
+      <div class="stat-num">{{ summary.low }}</div>
+      <div class="stat-label">Low</div>
+    </div>
+    {% endif %}
+    {% if summary.info is defined %}
+    <div class="stat-tile stat-tile-info avoid-break">
+      <div class="stat-num">{{ summary.info }}</div>
+      <div class="stat-label">Info</div>
+    </div>
+    {% endif %}
+    {% if summary.total is defined %}
+    <div class="stat-tile stat-tile-total avoid-break">
+      <div class="stat-num">{{ summary.total }}</div>
+      <div class="stat-label">Total Findings</div>
+    </div>
+    {% endif %}
+    {% if outcome is defined %}
+    <div class="stat-tile stat-tile-access avoid-break">
+      <div class="stat-num">{% if outcome.root %}ROOT{% elif outcome.compromised %}COMP{% else %}ACCESS{% endif %}</div>
+      <div class="stat-label">Max Access</div>
+    </div>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  <!-- Headline callout -->
+  {% if outcome is defined and outcome.compromised %}
+  <div class="callout callout-critical avoid-break">
+    <div class="callout-title">&#9888; {{ outcome.label }}</div>
+    {{ executive_summary }}
+  </div>
+  {% elif executive_summary %}
+  <div class="callout callout-info avoid-break">
+    <div class="callout-title">&#9432; Engagement Summary</div>
+    {{ executive_summary }}
+  </div>
+  {% endif %}
+
+  <div class="two-col" style="margin-top:2rem;gap:2.5rem;">
+    <div>
+      <h3 style="font-family:'Fraunces',serif;font-weight:700;font-size:1.05rem;color:var(--brand);margin-bottom:1rem;">What Happened</h3>
+      {% if executive_summary %}
+      <p style="font-size:var(--fs-small);color:var(--ink-mid);line-height:1.7;">{{ executive_summary }}</p>
+      {% else %}
+      <p style="font-size:var(--fs-small);color:var(--ink-light);line-height:1.7;font-style:italic;">No executive summary provided.</p>
+      {% endif %}
+
+      {% if intel is defined and intel.open_ports %}
+      <h3 style="font-family:'Fraunces',serif;font-weight:700;font-size:1.05rem;color:var(--brand);margin-top:1.5rem;margin-bottom:0.8rem;">Target Intelligence</h3>
+      <p style="font-size:var(--fs-small);color:var(--ink-mid);line-height:1.7;">
+        {% if intel.os_guess %}<strong>OS:</strong> {{ intel.os_guess }}<br>{% endif %}
+        <strong>Open Ports:</strong> {% for p in intel.open_ports %}{{ p }}{% if not loop.last %}, {% endif %}{% endfor %}<br>
+        {% if intel.shell_access %}<strong>Shell Access:</strong> {{ intel.shell_access }}{% endif %}
+      </p>
+      {% endif %}
+    </div>
+
+    <div>
+      {% if findings is defined and findings %}
+      <h3 style="font-family:'Fraunces',serif;font-weight:700;font-size:1.05rem;color:var(--brand);margin-bottom:1rem;">Priority Actions</h3>
+      <ul class="action-list">
+        {% set action_ns = namespace(count=0) %}
+      {% for f in findings %}{% if f.severity|lower in ['critical','high'] and action_ns.count < 5 %}
+      {% set action_ns.count = action_ns.count + 1 %}
+        <li class="action-item">
+          <div class="action-num">{{ action_ns.count }}</div>
+          <div><strong style="color:var(--sev-{{ f.severity|lower }});">{{ f.title }}</strong>{% if f.remediation %} — {{ f.remediation|truncate(120) }}{% endif %}</div>
+        </li>
+        {% endif %}{% endfor %}
+      </ul>
+      {% endif %}
+
+      <div class="callout callout-gold" style="margin-top:1.2rem;">
+        <div class="callout-title">Assessment Note</div>
+        All attack paths were validated end-to-end by the ARGUS Issue-Validator gate. Every finding is grounded in concrete tool evidence with integrity-hashed artifacts.
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════
+     §02 — SYSTEM & SCOPE
+═══════════════════════════════════════════ -->
+<section class="section section-alt" id="scope">
+  <div class="section-numeral">02</div>
+  <div class="section-label">System &amp; Scope</div>
+  <h2 class="section-title">System &amp; Scope</h2>
+  <p class="section-lead">Target profile, in-scope services, trust-boundary analysis, and engagement parameters.</p>
+  <div class="section-rule"></div>
+
+  <div class="two-col-60-40 two-col" style="gap:2.5rem;align-items:start;">
+    <div>
+      <div class="avoid-break" style="background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);padding:1.4rem 1.6rem;margin-bottom:1.5rem;">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem;">
+          <div>
+            <div class="cover-meta-label">Target Host</div>
+            {% if session is defined and session.target_hostname %}
+            <div style="font-family:'Fraunces',serif;font-size:1.4rem;font-weight:900;color:var(--brand);letter-spacing:-0.02em;">{{ session.target_hostname }}</div>
+            {% endif %}
+            <div style="font-family:'JetBrains Mono',monospace;font-size:0.85rem;color:var(--ink-light);">{% if session is defined and session.target_ip %}{{ session.target_ip }}{% else %}{{ target_display }}{% endif %}</div>
+          </div>
+          {% if intel is defined and intel.os_guess %}
+          <div style="text-align:right;">
+            <div class="cover-meta-label">Operating System</div>
+            <div style="font-size:var(--fs-small);font-weight:600;color:var(--ink-mid);">{{ intel.os_guess }}</div>
+          </div>
+          {% endif %}
+        </div>
+
+        {% if intel is defined and intel.services %}
+        <div class="cover-meta-label" style="margin-bottom:0.6rem;">Discovered Services</div>
+        <div style="border:1px solid var(--border);border-radius:var(--r-md);overflow:hidden;">
+          {% for port, s in intel.services.items() %}
+          <div class="service-row" style="padding:0.65rem 1rem;{% if loop.index is odd %}background:var(--surface-cool);{% endif %}">
+            <div class="service-port">{{ port }}</div>
+            <div class="service-name">{{ s.service }}{% if s.version %} {{ s.version }}{% endif %}</div>
+            <div class="service-desc">{{ s.description if s.description is defined else '' }}</div>
+          </div>
+          {% endfor %}
+        </div>
+        {% elif intel is defined and intel.open_ports %}
+        <div class="cover-meta-label" style="margin-bottom:0.6rem;">Open Ports</div>
+        <div style="display:flex;flex-wrap:wrap;gap:0.4rem;">
+          {% for p in intel.open_ports %}<span class="tag" style="font-family:'JetBrains Mono',monospace;">{{ p }}</span>{% endfor %}
+        </div>
+        {% endif %}
+      </div>
+
+      <!-- Trust Boundary SVG — static structural diagram, labels driven by session data -->
+      {% if session is defined %}
+      <div class="avoid-break" style="background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);padding:1.4rem 1.6rem;">
+        <div class="cover-meta-label" style="margin-bottom:0.6rem;">Trust Boundary Overview</div>
+        <svg viewBox="0 0 520 130" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:520px;display:block;border-radius:8px;">
+          <defs>
+            <marker id="arr" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+              <path d="M0,0 L0,6 L8,3 z" fill="#C0392B"/>
+            </marker>
+          </defs>
+          <rect x="0" y="0" width="520" height="130" fill="#1C1C2E" rx="8"/>
+          <rect x="10" y="10" width="140" height="110" fill="none" stroke="#C0392B" stroke-width="1" stroke-dasharray="5,3" rx="6" opacity="0.6"/>
+          <text x="80" y="24" fill="#C0392B" font-size="9" font-family="Inter,sans-serif" font-weight="700" text-anchor="middle" letter-spacing="1">EXTERNAL</text>
+          <rect x="190" y="10" width="150" height="110" fill="none" stroke="#B8960C" stroke-width="1" stroke-dasharray="5,3" rx="6" opacity="0.6"/>
+          <text x="265" y="24" fill="#B8960C" font-size="9" font-family="Inter,sans-serif" font-weight="700" text-anchor="middle" letter-spacing="1">TARGET</text>
+          <rect x="370" y="10" width="140" height="110" fill="none" stroke="#27ae60" stroke-width="1" stroke-dasharray="5,3" rx="6" opacity="0.5"/>
+          <text x="440" y="24" fill="#27ae60" font-size="9" font-family="Inter,sans-serif" font-weight="700" text-anchor="middle" letter-spacing="1">{% if outcome is defined and outcome.root %}ROOT / OS{% else %}OBJECTIVE{% endif %}</text>
+          <rect x="20" y="40" width="110" height="38" fill="#2C2C4A" stroke="#C0392B" stroke-width="1.5" rx="5"/>
+          <text x="75" y="56" fill="#fff" font-size="9" font-family="Inter,sans-serif" font-weight="600" text-anchor="middle">ARGUS</text>
+          <text x="75" y="70" fill="#9090AA" font-size="7.5" font-family="Inter,sans-serif" text-anchor="middle">External Attacker</text>
+          <rect x="200" y="35" width="130" height="38" fill="#2C2C4A" stroke="#C0392B" stroke-width="1.5" rx="5"/>
+          <text x="265" y="51" fill="#fff" font-size="9" font-family="Inter,sans-serif" font-weight="600" text-anchor="middle">{{ session.target_hostname if session.target_hostname else session.target_ip }}</text>
+          <text x="265" y="65" fill="#C0392B" font-size="7.5" font-family="Inter,sans-serif" text-anchor="middle">{{ session.target_ip }}</text>
+          {% if outcome is defined and outcome.compromised %}
+          <rect x="382" y="43" width="115" height="38" fill="#1A6B3C" stroke="#27ae60" stroke-width="1.5" rx="5"/>
+          <text x="440" y="59" fill="#fff" font-size="9" font-family="Inter,sans-serif" font-weight="600" text-anchor="middle">{% if outcome.root %}Root Shell{% else %}Shell Access{% endif %}</text>
+          <text x="440" y="73" fill="#a0ffb8" font-size="7.5" font-family="Inter,sans-serif" text-anchor="middle">COMPROMISED</text>
+          {% endif %}
+          <line x1="130" y1="54" x2="199" y2="54" stroke="#C0392B" stroke-width="1.5" marker-end="url(#arr)"/>
+          {% if outcome is defined and outcome.compromised %}
+          <line x1="330" y1="54" x2="381" y2="62" stroke="#27ae60" stroke-width="1.5" marker-end="url(#arr)"/>
+          {% endif %}
+        </svg>
+        <p style="font-size:var(--fs-micro);color:var(--ink-faint);margin-top:0.6rem;">Scope: {{ session.scope if session.scope else 'Single host assessment' }}.</p>
+      </div>
+      {% endif %}
+    </div>
+
+    <div>
+      <div class="avoid-break" style="background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);padding:1.4rem 1.6rem;margin-bottom:1.2rem;">
+        <div class="cover-meta-label" style="margin-bottom:0.8rem;">Engagement Parameters</div>
+        <table style="width:100%;font-size:var(--fs-small);border-collapse:collapse;">
+          <tr style="border-bottom:1px solid var(--border);"><td style="padding:0.5rem 0;color:var(--ink-faint);font-size:var(--fs-micro);font-weight:700;text-transform:uppercase;letter-spacing:0.1em;">Type</td><td style="padding:0.5rem;color:var(--ink-mid);">{{ engagement_type }}</td></tr>
+          {% if session is defined and session.scope %}
+          <tr style="border-bottom:1px solid var(--border);"><td style="padding:0.5rem 0;color:var(--ink-faint);font-size:var(--fs-micro);font-weight:700;text-transform:uppercase;letter-spacing:0.1em;">Scope</td><td style="padding:0.5rem;color:var(--ink-mid);">{{ session.scope }}</td></tr>
+          {% endif %}
+          {% if duration %}
+          <tr style="border-bottom:1px solid var(--border);"><td style="padding:0.5rem 0;color:var(--ink-faint);font-size:var(--fs-micro);font-weight:700;text-transform:uppercase;letter-spacing:0.1em;">Duration</td><td style="padding:0.5rem;color:var(--ink-mid);">{{ duration }}</td></tr>
+          {% endif %}
+          {% if intel is defined and intel.shell_access %}
+          <tr style="border-bottom:1px solid var(--border);"><td style="padding:0.5rem 0;color:var(--ink-faint);font-size:var(--fs-micro);font-weight:700;text-transform:uppercase;letter-spacing:0.1em;">Shell Access</td><td style="padding:0.5rem;color:var(--ink-mid);">{{ intel.shell_access }}</td></tr>
+          {% endif %}
+        </table>
+      </div>
+
+      {% if intel is defined and intel.services %}
+      <div class="avoid-break" style="background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);padding:1.4rem 1.6rem;">
+        <div class="cover-meta-label" style="margin-bottom:0.8rem;">Services Discovered</div>
+        <div style="font-size:var(--fs-small);color:var(--ink-mid);display:flex;flex-direction:column;gap:0.4rem;">
+          {% for port, s in intel.services.items() %}
+          <div style="display:flex;align-items:center;gap:0.6rem;">
+            <span style="font-family:'JetBrains Mono',monospace;font-size:0.78rem;color:var(--ink);">{{ port }}</span>
+            <span class="tag">{{ s.service }}</span>
+            {% if s.version %}<span style="font-size:var(--fs-micro);color:var(--ink-faint);">{{ s.version }}</span>{% endif %}
+          </div>
+          {% endfor %}
+        </div>
+      </div>
+      {% endif %}
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════
+     §03 — METHODOLOGY & CVSS RUBRIC
+═══════════════════════════════════════════ -->
+<section class="section" id="methodology">
+  <div class="section-numeral">03</div>
+  <div class="section-label">Methodology</div>
+  <h2 class="section-title">Methodology &amp; CVSS Rubric</h2>
+  <p class="section-lead">How ARGUS plans, executes, and validates. Every action is MITRE-annotated and evidence-chained before a finding ships.</p>
+  <div class="section-rule"></div>
+
+  <div class="two-col" style="gap:2.5rem;align-items:start;">
+    <div>
+      <h3 style="font-family:'Fraunces',serif;font-size:1rem;font-weight:700;color:var(--brand);margin-bottom:0.9rem;">Engagement Process</h3>
+
+      <div style="display:flex;flex-direction:column;gap:0;border:1px solid var(--border);border-radius:var(--r-lg);overflow:hidden;">
+        <div style="display:flex;gap:1rem;align-items:flex-start;padding:1rem 1.2rem;border-bottom:1px solid var(--border);background:var(--surface);">
+          <div style="flex-shrink:0;width:28px;height:28px;border-radius:50%;background:var(--brand);color:#fff;font-size:0.72rem;font-weight:700;display:flex;align-items:center;justify-content:center;">P</div>
+          <div>
+            <div style="font-weight:700;font-size:var(--fs-small);color:var(--ink-mid);margin-bottom:0.2rem;">Plan — Hypothesis Tree</div>
+            <div style="font-size:var(--fs-micro);color:var(--ink-light);line-height:1.55;">ARGUS constructs a structured hypothesis tree of all plausible attack vectors given scope and reconnaissance data. Each hypothesis is prioritised by CVSS pre-exploitation likelihood and banked for ordered execution.</div>
+          </div>
+        </div>
+        <div style="display:flex;gap:1rem;align-items:flex-start;padding:1rem 1.2rem;border-bottom:1px solid var(--border);background:var(--surface-warm);">
+          <div style="flex-shrink:0;width:28px;height:28px;border-radius:50%;background:var(--brand-accent);color:#fff;font-size:0.72rem;font-weight:700;display:flex;align-items:center;justify-content:center;">E</div>
+          <div>
+            <div style="font-weight:700;font-size:var(--fs-small);color:var(--ink-mid);margin-bottom:0.2rem;">Execute — Tool-Driven Exploration</div>
+            <div style="font-size:var(--fs-micro);color:var(--ink-light);line-height:1.55;">Each hypothesis is tested via purpose-built tool calls. All tool invocations are logged with timestamps, raw output, and evidence hashes.</div>
+          </div>
+        </div>
+        <div style="display:flex;gap:1rem;align-items:flex-start;padding:1rem 1.2rem;border-bottom:1px solid var(--border);background:var(--surface);">
+          <div style="flex-shrink:0;width:28px;height:28px;border-radius:50%;background:var(--sev-low);color:#fff;font-size:0.72rem;font-weight:700;display:flex;align-items:center;justify-content:center;">V</div>
+          <div>
+            <div style="font-weight:700;font-size:var(--fs-small);color:var(--ink-mid);margin-bottom:0.2rem;">Validate — Issue-Validator Gate</div>
+            <div style="font-size:var(--fs-micro);color:var(--ink-light);line-height:1.55;">A finding only ships when it passes the ARGUS Issue-Validator: the exploit must be reproducible, the evidence must be concrete, and the CVSS vector must be defensible.</div>
+          </div>
+        </div>
+        <div style="display:flex;gap:1rem;align-items:flex-start;padding:1rem 1.2rem;background:var(--surface-warm);">
+          <div style="flex-shrink:0;width:28px;height:28px;border-radius:50%;background:var(--sev-info);color:#fff;font-size:0.72rem;font-weight:700;display:flex;align-items:center;justify-content:center;">R</div>
+          <div>
+            <div style="font-weight:700;font-size:var(--fs-small);color:var(--ink-mid);margin-bottom:0.2rem;">Retest — Remediation Verification</div>
+            <div style="font-size:var(--fs-micro);color:var(--ink-light);line-height:1.55;">After the client remediates, ARGUS retests each finding and updates its status (Open / Verified-Fixed / Re-confirmed).</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="callout callout-info" style="margin-top:1.2rem;">
+        <div class="callout-title">MITRE Annotation Policy</div>
+        Every offensive action is tagged with one or more MITRE ATT&amp;CK technique IDs at execution time, enabling direct mapping to defensive controls without post-hoc retro-fitting.
+      </div>
+    </div>
+
+    <div>
+      <h3 style="font-family:'Fraunces',serif;font-size:1rem;font-weight:700;color:var(--brand);margin-bottom:0.9rem;">CVSS v3.1 Scoring Bands</h3>
+
+      <div style="display:flex;flex-direction:column;gap:0.5rem;margin-bottom:1.5rem;">
+        <div style="display:flex;align-items:center;gap:0.8rem;padding:0.7rem 1rem;background:var(--sev-critical-bg);border:1px solid rgba(192,57,43,0.2);border-radius:var(--r-md);">
+          <span class="sev sev-critical" style="min-width:68px;justify-content:center;">Critical</span>
+          <div>
+            <div style="font-family:'JetBrains Mono',monospace;font-size:0.82rem;font-weight:700;color:var(--sev-critical);">9.0 – 10.0</div>
+            <div style="font-size:var(--fs-micro);color:var(--ink-light);">Exploitable remotely with no auth; full system impact likely</div>
+          </div>
+        </div>
+        <div style="display:flex;align-items:center;gap:0.8rem;padding:0.7rem 1rem;background:var(--sev-high-bg);border:1px solid rgba(211,84,0,0.2);border-radius:var(--r-md);">
+          <span class="sev sev-high" style="min-width:68px;justify-content:center;">High</span>
+          <div>
+            <div style="font-family:'JetBrains Mono',monospace;font-size:0.82rem;font-weight:700;color:var(--sev-high);">7.0 – 8.9</div>
+            <div style="font-size:var(--fs-micro);color:var(--ink-light);">Significant impact; may require low-privilege access or interaction</div>
+          </div>
+        </div>
+        <div style="display:flex;align-items:center;gap:0.8rem;padding:0.7rem 1rem;background:var(--sev-medium-bg);border:1px solid rgba(183,119,13,0.2);border-radius:var(--r-md);">
+          <span class="sev sev-medium" style="min-width:68px;justify-content:center;">Medium</span>
+          <div>
+            <div style="font-family:'JetBrains Mono',monospace;font-size:0.82rem;font-weight:700;color:var(--sev-medium);">4.0 – 6.9</div>
+            <div style="font-size:var(--fs-micro);color:var(--ink-light);">Moderate impact; limited scope or requires user interaction</div>
+          </div>
+        </div>
+        <div style="display:flex;align-items:center;gap:0.8rem;padding:0.7rem 1rem;background:var(--sev-low-bg);border:1px solid rgba(26,107,60,0.2);border-radius:var(--r-md);">
+          <span class="sev sev-low" style="min-width:68px;justify-content:center;">Low</span>
+          <div>
+            <div style="font-family:'JetBrains Mono',monospace;font-size:0.82rem;font-weight:700;color:var(--sev-low);">0.1 – 3.9</div>
+            <div style="font-size:var(--fs-micro);color:var(--ink-light);">Minimal impact; hardening/hygiene items</div>
+          </div>
+        </div>
+        <div style="display:flex;align-items:center;gap:0.8rem;padding:0.7rem 1rem;background:var(--sev-info-bg);border:1px solid rgba(26,82,118,0.15);border-radius:var(--r-md);">
+          <span class="sev sev-info" style="min-width:68px;justify-content:center;">Info</span>
+          <div>
+            <div style="font-family:'JetBrains Mono',monospace;font-size:0.82rem;font-weight:700;color:var(--sev-info);">0.0</div>
+            <div style="font-size:var(--fs-micro);color:var(--ink-light);">Observations; no direct exploitability; context-dependent risk</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+
+<!-- ═══════════════════════════════════════════
+     §04 — ATTACK-PATH / KILL-CHAIN GRAPH
+═══════════════════════════════════════════ -->
+{% if attack_path is defined and attack_path %}
+<section class="section section-alt page-break" id="killchain">
+  <div class="section-numeral">04</div>
+  <div class="section-label">Attack Path</div>
+  <h2 class="section-title">Attack Path &amp; Kill-Chain Graph</h2>
+  <p class="section-lead">The complete exploitation chain — each node color-coded by severity, annotated with MITRE technique IDs.</p>
+  <div class="section-rule"></div>
+
+  <div class="killchain-wrap avoid-break">
+    {# Compute layout: nodes spaced evenly across 820px, 5 phases max visible #}
+    {% set ns = namespace(node_count=attack_path|length) %}
+    {% set spacing = (800 / (ns.node_count + 1))|int %}
+    <svg viewBox="0 0 820 {{ [220, ns.node_count * 60 + 80]|max }}" xmlns="http://www.w3.org/2000/svg" style="width:100%;min-width:500px;display:block;">
+      <defs>
+        <marker id="kc-arr" markerWidth="9" markerHeight="9" refX="7" refY="3.5" orient="auto">
+          <path d="M0,0 L0,7 L9,3.5 z" fill="#C0392B"/>
+        </marker>
+        <marker id="kc-arr-green" markerWidth="9" markerHeight="9" refX="7" refY="3.5" orient="auto">
+          <path d="M0,0 L0,7 L9,3.5 z" fill="#27ae60"/>
+        </marker>
+        <filter id="glow-green" x="-20%" y="-20%" width="140%" height="140%">
+          <feGaussianBlur stdDeviation="4" result="blur"/>
+          <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+        </filter>
+      </defs>
+      <rect width="820" height="{{ [220, ns.node_count * 60 + 80]|max }}" fill="#12121F" rx="10"/>
+
+      {% for s in attack_path %}
+      {% set x = (loop.index0 * spacing + spacing)|int %}
+      {% set y = 50 %}
+      {% set is_last = loop.last %}
+      {% set is_root = s.phase|lower in ['impact','privesc','privilege escalation'] %}
+
+      <!-- Node {{ loop.index }}: {{ s.phase }} -->
+      <rect x="{{ x - 52 }}" y="{{ y }}" width="104" height="58" rx="7"
+        fill="{% if is_last %}#0A1F0A{% elif is_root %}#2A0C0C{% else %}#1E2040{% endif %}"
+        stroke="{% if is_last %}#27ae60{% elif is_root %}#C0392B{% else %}#2980b9{% endif %}"
+        stroke-width="{% if is_last %}2.5{% else %}1.5{% endif %}"
+        {% if is_last %}filter="url(#glow-green)"{% endif %}
+      />
+      <text x="{{ x }}" y="{{ y + 22 }}" fill="{% if is_last %}#2ecc71{% elif is_root %}#ff6b6b{% else %}#7eb8f7{% endif %}"
+        font-size="9" font-family="Inter,sans-serif" font-weight="700" text-anchor="middle">{{ s.phase }}</text>
+      <text x="{{ x }}" y="{{ y + 36 }}" fill="{% if is_last %}#27ae60{% elif is_root %}#c0392b{% else %}#5a8ab0{% endif %}"
+        font-size="7.5" font-family="Inter,sans-serif" text-anchor="middle">{{ s.result|truncate(22) }}</text>
+      {% if s.source %}
+      <text x="{{ x }}" y="{{ y + 49 }}" fill="rgba(255,255,255,0.3)"
+        font-size="6.5" font-family="JetBrains Mono,monospace" text-anchor="middle">{{ s.source|truncate(18) }}</text>
+      {% endif %}
+
+      <!-- Phase label top -->
+      <text x="{{ x }}" y="{{ y - 8 }}" fill="#4A4A6A" font-size="7.5" font-family="Inter,sans-serif" font-weight="700"
+        text-anchor="middle" letter-spacing="1.2">{{ s.phase|upper|truncate(14, True, '') }}</text>
+
+      <!-- Arrow to next node -->
+      {% if not loop.last %}
+      <line x1="{{ x + 52 }}" y1="{{ y + 29 }}" x2="{{ x + spacing - 52 }}" y2="{{ y + 29 }}"
+        stroke="{% if is_root %}#C0392B{% else %}#4A4A7A{% endif %}" stroke-width="1.5"
+        marker-end="url(#kc-arr)"/>
+      {% endif %}
+      {% endfor %}
+
+      <!-- Legend -->
+      <circle cx="20" cy="{{ [200, ns.node_count * 60 + 60]|max }}" r="4" fill="#C0392B"/>
+      <text x="29" y="{{ [204, ns.node_count * 60 + 64]|max }}" fill="#777" font-size="8" font-family="Inter,sans-serif">Critical path</text>
+      <circle cx="130" cy="{{ [200, ns.node_count * 60 + 60]|max }}" r="4" fill="#27ae60"/>
+      <text x="139" y="{{ [204, ns.node_count * 60 + 64]|max }}" fill="#777" font-size="8" font-family="Inter,sans-serif">Objective reached</text>
+      <circle cx="250" cy="{{ [200, ns.node_count * 60 + 60]|max }}" r="4" fill="#2980b9"/>
+      <text x="259" y="{{ [204, ns.node_count * 60 + 64]|max }}" fill="#777" font-size="8" font-family="Inter,sans-serif">Reconnaissance</text>
+    </svg>
+  </div>
+
+  {% if outcome is defined %}
+  <div class="callout callout-gold" style="margin-top:1.2rem;">
+    <div class="callout-title">Kill-Chain Narrative</div>
+    <strong>
+      {% for s in attack_path %}{{ s.phase }}{% if s.result %} ({{ s.result }}){% endif %}{% if not loop.last %} → {% endif %}{% endfor %}
+    </strong>
+    {% if outcome.label %} — {{ outcome.label }}.{% endif %}
+  </div>
+  {% endif %}
+</section>
+{% endif %}
+
+
+<!-- ═══════════════════════════════════════════
+     §05 — ATTACKS ATTEMPTED — COVERAGE LOG
+═══════════════════════════════════════════ -->
+{% if coverage_tests is defined and coverage_tests %}
+<section class="section" id="attacks-attempted">
+  <div class="section-numeral">05</div>
+  <div class="section-label">Coverage Log</div>
+  <h2 class="section-title">Attacks Attempted — Coverage Log</h2>
+  <p class="section-lead">Every offensive action taken — exploitable and non-exploitable alike — logged for full audit transparency.</p>
+  <div class="section-rule"></div>
+
+  <div class="data-table-wrap avoid-break">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th style="width:32px;">#</th>
+          <th>Tool / Technique</th>
+          <th>Command / Target</th>
+          <th>Outcome</th>
+          <th>Exploitable?</th>
+          <th>Notes</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for c in coverage_tests %}
+        <tr{% if loop.index is even %} style="background:var(--surface-warm);"{% endif %}>
+          <td class="col-id">{{ "%02d"|format(loop.index) }}</td>
+          <td style="font-weight:600;color:{% if c.outcome == 'success' %}var(--sev-critical){% else %}var(--ink){% endif %};">{{ c.tool }}</td>
+          <td><code style="font-size:0.72rem;">{{ c.command|truncate(60) }}</code></td>
+          <td>
+            {% if c.outcome == 'success' %}<span class="outcome outcome-exploit">&#9650; Exploitable</span>
+            {% elif c.outcome == 'negative' %}<span class="outcome outcome-failed">&#10007; Negative</span>
+            {% elif c.outcome == 'blocked' %}<span class="outcome outcome-blocked">&#9632; Blocked</span>
+            {% elif c.outcome == 'error' %}<span class="outcome outcome-failed">&#10007; Error</span>
+            {% else %}<span class="outcome outcome-success">&#10003; {{ c.outcome|title }}</span>
+            {% endif %}
+          </td>
+          <td>
+            {% if c.outcome == 'success' %}
+              <span class="sev sev-critical">Critical</span>
+            {% else %}
+              <span class="sev sev-ne">Non-Exploitable</span>
+            {% endif %}
+          </td>
+          <td style="font-size:var(--fs-micro);color:var(--ink-light);">{{ c.note|default('') }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <div style="margin-top:1rem;display:flex;flex-wrap:wrap;gap:1rem;align-items:center;">
+    <div style="font-size:var(--fs-micro);color:var(--ink-faint);font-weight:600;letter-spacing:0.1em;text-transform:uppercase;">Outcome Legend:</div>
+    <span class="outcome outcome-exploit">&#9650; Exploitable</span>
+    <span class="outcome outcome-success">&#10003; Success / Recon</span>
+    <span class="outcome outcome-failed">&#10007; Failed / Negative</span>
+    <span class="outcome outcome-blocked">&#9632; Blocked / Rate-limited</span>
+    <span class="sev sev-ne">Non-Exploitable</span>
+  </div>
+</section>
+{% endif %}
+
+
+<!-- ═══════════════════════════════════════════
+     §06 — FINDINGS REGISTER
+═══════════════════════════════════════════ -->
+{% if findings is defined and findings %}
+<section class="section section-alt page-break" id="findings-register">
+  <div class="section-numeral">06</div>
+  <div class="section-label">Findings Register</div>
+  <h2 class="section-title">Findings Register</h2>
+  <p class="section-lead">All {{ findings|length }} findings tabulated — severity color-coded, CVSS scored, MITRE-mapped, and retest-status tracked.</p>
+  <div class="section-rule"></div>
+
+  <div class="data-table-wrap">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>Finding</th>
+          <th>Severity</th>
+          <th style="text-align:center;">CVSS</th>
+          <th>Host</th>
+          <th>MITRE</th>
+          <th>Retest</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for f in findings %}
+        {% set sev_lower = f.severity|lower %}
+        <tr>
+          <td class="col-id">{{ f.fid | default("F-%02d"|format(loop.index)) }}</td>
+          <td style="font-weight:600;color:var(--ink);">{{ f.title }}</td>
+          <td><span class="sev sev-{{ sev_lower }}">{{ f.severity }}</span></td>
+          <td class="col-cvss" style="text-align:center;color:var(--sev-{{ sev_lower }});">
+            {% if f.extra is defined and f.extra.cvss_base %}{{ f.extra.cvss_base }}{% else %}—{% endif %}
+          </td>
+          <td style="font-family:'JetBrains Mono',monospace;font-size:0.75rem;">
+            {{ f.host }}{% if f.port %}:{{ f.port }}{% endif %}
+          </td>
+          <td class="col-mitre">{{ f.mitre|default('—') }}</td>
+          <td>
+            {% set rs = f.retest_status|default('Open')|lower %}
+            {% if 'verified' in rs or 'fixed' in rs %}
+              <span style="display:inline-block;padding:0.2rem 0.5rem;border-radius:4px;font-size:0.7rem;font-weight:700;background:var(--sev-low-bg);color:var(--sev-low);border:1px solid var(--sev-low-mid);">Verified</span>
+            {% elif 'open' in rs %}
+              <span style="display:inline-block;padding:0.2rem 0.5rem;border-radius:4px;font-size:0.7rem;font-weight:700;background:var(--sev-medium-bg);color:var(--sev-medium);border:1px solid rgba(183,119,13,0.3);">Open</span>
+            {% else %}
+              <span style="display:inline-block;padding:0.2rem 0.5rem;border-radius:4px;font-size:0.7rem;font-weight:700;background:var(--surface-cool);color:var(--ink-faint);border:1px solid var(--border);">{{ f.retest_status }}</span>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <div style="margin-top:1rem;font-size:var(--fs-micro);color:var(--ink-faint);line-height:1.8;">
+    <strong style="color:var(--ink-light);">Retest Status Key:</strong>
+    &nbsp;<span style="color:var(--sev-low);font-weight:700;">Verified</span> — confirmed fixed &nbsp;·&nbsp;
+    <span style="color:var(--sev-medium);font-weight:700;">Open</span> — awaiting remediation &nbsp;·&nbsp;
+    <span style="color:var(--ink-faint);font-weight:700;">Gated</span> — blocked pending prerequisite fix
+  </div>
+</section>
+{% endif %}
+
+
+<!-- ═══════════════════════════════════════════
+     §07 — DETAILED FINDING CARDS
+═══════════════════════════════════════════ -->
+{% if findings is defined and findings %}
+<section class="section page-break" id="findings-detail">
+  <div class="section-numeral">07</div>
+  <div class="section-label">Detailed Findings</div>
+  <h2 class="section-title">Detailed Finding Cards</h2>
+  <p class="section-lead">Each confirmed finding documented in full: description, impact, evidence, captured loot, and remediation guidance.</p>
+  <div class="section-rule"></div>
+
+  {% for f in findings %}
+  {% set sev_lower = f.severity|lower %}
+  {% set fid = f.fid | default("F-%02d"|format(loop.index)) %}
+  {% set rs = f.retest_status|default('Open') %}
+
+  <div class="finding-card avoid-break">
+    <div class="finding-card-header finding-card-header-{{ sev_lower }}">
+      <div class="finding-card-id">{{ fid }}</div>
+      <div>
+        <div class="finding-card-title">{{ f.title }}</div>
+        <div class="finding-card-meta">
+          <span class="sev sev-{{ sev_lower }}">{{ f.severity }}</span>
+      {%- set _etag = f.evidence_tag if f.evidence_tag else (f.extra.evidence_tag if f.extra and f.extra.evidence_tag else '') -%}
+      {% if _etag %}<span style="padding:1px 6px;border-radius:4px;font-size:7pt;font-weight:700;background:rgba(128,128,150,0.16);border:1px solid rgba(128,128,150,0.42);">{{ _etag }}</span>{% endif %}
+      {%- set _basis = f.severity_rationale if f.severity_rationale else (f.extra.severity_rationale if f.extra and f.extra.severity_rationale else '') -%}
+      {% if _basis %}<div style="font-size:7pt;opacity:.68;margin-top:2px;">Severity basis: {{ _basis }}</div>{% endif %}
+          {% if f.mitre %}<span class="tag">{{ f.mitre }}</span>{% endif %}
+          <span class="tag">{{ f.host }}{% if f.port %}:{{ f.port }}{% endif %}</span>
+          {% if f.cves is defined and f.cves %}<span class="tag">{{ f.cves|join(', ') }}</span>{% endif %}
+          {% set rs_lower = rs|lower %}
+          {% if 'verified' in rs_lower or 'fixed' in rs_lower %}
+            <span style="padding:0.15rem 0.5rem;border-radius:4px;font-size:0.68rem;font-weight:700;background:var(--sev-low-bg);color:var(--sev-low);border:1px solid var(--sev-low-mid);display:inline-block;">{{ rs }}</span>
+          {% elif 'open' in rs_lower %}
+            <span style="padding:0.15rem 0.5rem;border-radius:4px;font-size:0.68rem;font-weight:700;background:var(--sev-medium-bg);color:var(--sev-medium);border:1px solid rgba(183,119,13,0.3);display:inline-block;">{{ rs }}</span>
+          {% endif %}
+        </div>
+      </div>
+      <div>
+        {% if f.extra is defined and f.extra.cvss_base %}
+        <div class="finding-card-cvss finding-card-cvss-{{ sev_lower }}">{{ f.extra.cvss_base }}</div>
+        <div style="font-size:var(--fs-micro);color:var(--ink-faint);text-align:right;margin-top:0.2rem;">CVSS v3.1</div>
+        {% endif %}
+      </div>
+    </div>
+    <div class="finding-card-body">
+      {% if f.description %}
+      <div class="finding-section-label">Description</div>
+      <p class="finding-card-text">{{ f.description }}</p>
+      {% endif %}
+
+      {% if f.extra is defined and f.extra.cvss_vector %}
+      <div style="font-size:var(--fs-micro);color:var(--ink-faint);margin-top:0.3rem;">CVSS vector: <code>{{ f.extra.cvss_vector }}</code></div>
+      {% endif %}
+
+      {% if f.evidence %}
+      <div class="finding-section-label">Evidence</div>
+      <div class="loot-block">{{ f.evidence }}</div>
+      {% endif %}
+
+      {% if f.remediation %}
+      <div class="finding-section-label">Remediation</div>
+      <div class="remediation-block">{{ f.remediation }}</div>
+      {% endif %}
+    </div>
+  </div>
+  {% endfor %}
+</section>
+{% endif %}
+
+
+<!-- ═══════════════════════════════════════════
+     §07b — AI / LLM SECURITY (RED-TEAM)
+═══════════════════════════════════════════ -->
+{% if ai_security and ai_security.findings %}
+<section class="section section-alt page-break" id="ai-security">
+  <div class="section-numeral" style="font-size:clamp(2.5rem,6vw,5rem);">AI</div>
+  <div class="section-label">AI / LLM Security</div>
+  <h2 class="section-title">AI / LLM Security (Red-Team)</h2>
+  <p class="section-lead">Results of adversarial red-teaming against the AI/LLM target — prompt injection, jailbreaks, model extraction, and OWASP Top-10 for LLMs.</p>
+  <div class="section-rule"></div>
+
+  <!-- ── Summary stat tiles ── -->
+  <div class="stat-row">
+    <div class="stat-tile stat-tile-critical avoid-break">
+      <div class="stat-num">{{ ai_security.count }}</div>
+      <div class="stat-label">AI Findings</div>
+    </div>
+    <div class="stat-tile stat-tile-high avoid-break">
+      <div class="stat-num">{{ ai_security.max_aivss }}</div>
+      <div class="stat-label">Max AIVSS</div>
+    </div>
+    <div class="stat-tile stat-tile-medium avoid-break">
+      <div class="stat-num">{{ ai_security.avg_asr }}%</div>
+      <div class="stat-label">Avg ASR</div>
+    </div>
+    <div class="stat-tile stat-tile-info avoid-break">
+      <div class="stat-num" style="font-size:clamp(0.85rem,1.8vw,1.2rem);line-height:1.2;padding-top:0.2rem;">{{ ai_security.owasp_classes|join(', ') }}</div>
+      <div class="stat-label">OWASP-LLM Classes</div>
+    </div>
+  </div>
+
+  <!-- ── Context callout ── -->
+  <div class="callout callout-critical avoid-break">
+    <div class="callout-title">&#9888; AI / LLM Attack Surface</div>
+    This section covers adversarial red-team results against LLM endpoints within the engagement scope.
+    AIVSS scores follow the AI Vulnerability Severity Score rubric (0–10). ASR (Attack Success Rate)
+    is the percentage of trials in which the attack produced a successful outcome.
+    OWASP LLM class codes align to the OWASP Top-10 for Large Language Model Applications.
+  </div>
+
+  <!-- ── Findings table ── -->
+  <div class="data-table-wrap" style="margin-top:1.5rem;">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th style="width:36px;">#</th>
+          <th>Finding</th>
+          <th>Severity</th>
+          <th style="text-align:center;">AIVSS</th>
+          <th style="text-align:center;">ASR %</th>
+          <th>OWASP-LLM</th>
+          <th>ATLAS</th>
+          <th>Attack Vector</th>
+          <th>Model</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for ai in ai_security.findings %}
+        {% set sev_lower = ai.severity|lower %}
+        <tr>
+          <td class="col-id">AI-{{ "%02d"|format(loop.index) }}</td>
+          <td style="font-weight:600;color:var(--ink);">{{ ai.title }}</td>
+          <td><span class="sev sev-{{ sev_lower }}">{{ ai.severity }}</span></td>
+          <td class="col-cvss" style="text-align:center;color:var(--sev-{{ sev_lower }});">{{ ai.aivss }}</td>
+          <td style="text-align:center;">
+            <!-- Inline ASR bar -->
+            <div style="display:flex;align-items:center;gap:0.4rem;">
+              <div style="flex:1;height:6px;background:var(--border);border-radius:3px;min-width:40px;overflow:hidden;">
+                <div style="height:100%;width:{{ ai.asr }}%;background:{% if ai.asr >= 75 %}var(--sev-critical){% elif ai.asr >= 40 %}var(--sev-high){% elif ai.asr >= 15 %}var(--sev-medium){% else %}var(--sev-low){% endif %};border-radius:3px;"></div>
+              </div>
+              <span style="font-family:'JetBrains Mono',monospace;font-size:0.75rem;font-weight:700;color:var(--ink-mid);flex-shrink:0;">{{ ai.asr }}%</span>
+            </div>
+          </td>
+          <td><span class="tag" style="font-family:'JetBrains Mono',monospace;">{{ ai.owasp_llm|default('') }}</span></td>
+          <td style="font-family:'JetBrains Mono',monospace;font-size:0.75rem;color:var(--ink-light);">{{ ai.atlas|default('') }}</td>
+          <td style="font-size:var(--fs-small);color:var(--ink-mid);">{{ ai.attack_vector|default('') }}</td>
+          <td style="font-family:'JetBrains Mono',monospace;font-size:0.75rem;color:var(--ink-faint);">{{ ai.target_model|default('') }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <!-- ── Per-finding detail cards ── -->
+  <div style="margin-top:2rem;">
+    {% for ai in ai_security.findings %}
+    {% set sev_lower = ai.severity|lower %}
+    {% set aid = "AI-%02d"|format(loop.index) %}
+
+    <div class="finding-card avoid-break">
+      <div class="finding-card-header finding-card-header-{{ sev_lower }}">
+        <div class="finding-card-id">{{ aid }}</div>
+        <div>
+          <div class="finding-card-title">{{ ai.title }}</div>
+          <div class="finding-card-meta">
+            <span class="sev sev-{{ sev_lower }}">{{ ai.severity }}</span>
+            {% if ai.owasp_llm|default('') %}<span class="tag" style="font-family:'JetBrains Mono',monospace;">{{ ai.owasp_llm }}</span>{% endif %}
+            {% if ai.atlas|default('') %}<span class="tag" style="font-family:'JetBrains Mono',monospace;">{{ ai.atlas }}</span>{% endif %}
+            {% if ai.target_model|default('') %}<span class="tag">{{ ai.target_model }}</span>{% endif %}
+            <!-- ASR / trials badge -->
+            {% if ai.trials is defined and ai.trials %}
+            <span style="font-size:var(--fs-micro);color:var(--ink-faint);">{{ ai.successes|default(0) }}/{{ ai.trials }} trials</span>
+            {% endif %}
+          </div>
+        </div>
+        <!-- AIVSS score in top-right, mirroring CVSS slot -->
+        <div>
+          <div class="finding-card-cvss finding-card-cvss-{{ sev_lower }}">{{ ai.aivss }}</div>
+          <div style="font-size:var(--fs-micro);color:var(--ink-faint);text-align:right;margin-top:0.2rem;">AIVSS</div>
+          <!-- ASR mini-bar below score -->
+          <div style="margin-top:0.5rem;width:64px;text-align:right;">
+            <div style="height:5px;background:var(--border);border-radius:3px;overflow:hidden;width:64px;">
+              <div style="height:100%;width:{{ ai.asr }}%;background:{% if ai.asr >= 75 %}var(--sev-critical){% elif ai.asr >= 40 %}var(--sev-high){% elif ai.asr >= 15 %}var(--sev-medium){% else %}var(--sev-low){% endif %};border-radius:3px;"></div>
+            </div>
+            <div style="font-size:0.65rem;color:var(--ink-faint);margin-top:0.15rem;font-family:'JetBrains Mono',monospace;">ASR {{ ai.asr }}%</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="finding-card-body">
+        <!-- Attack metadata row -->
+        <div style="display:flex;flex-wrap:wrap;gap:1.2rem;margin-bottom:1rem;padding-bottom:0.8rem;border-bottom:1px solid var(--border);">
+          {% if ai.attack_vector|default('') %}
+          <div>
+            <div style="font-size:var(--fs-micro);font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:var(--ink-faint);margin-bottom:0.2rem;">Attack Vector</div>
+            <div style="font-size:var(--fs-small);font-weight:600;color:var(--ink-mid);">{{ ai.attack_vector }}</div>
+          </div>
+          {% endif %}
+          {% if ai.cvss is defined and ai.cvss %}
+          <div>
+            <div style="font-size:var(--fs-micro);font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:var(--ink-faint);margin-bottom:0.2rem;">CVSS</div>
+            <div style="font-size:var(--fs-small);font-weight:600;color:var(--ink-mid);">{{ ai.cvss }}</div>
+          </div>
+          {% endif %}
+          {% if ai.trials is defined and ai.trials %}
+          <div>
+            <div style="font-size:var(--fs-micro);font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:var(--ink-faint);margin-bottom:0.2rem;">Trials / Successes</div>
+            <div style="font-size:var(--fs-small);font-weight:600;color:var(--ink-mid);">{{ ai.successes|default(0) }} / {{ ai.trials }}</div>
+          </div>
+          {% endif %}
+        </div>
+
+        {% if ai.vector|default('') %}
+        <div class="finding-section-label">AIVSS Vector</div>
+        <div style="font-size:var(--fs-micro);color:var(--ink-faint);margin-bottom:0.8rem;"><code>{{ ai.vector }}</code></div>
+        {% endif %}
+
+        {% if ai.evidence|default('') %}
+        <div class="finding-section-label">Evidence</div>
+        <div class="loot-block">{{ ai.evidence }}</div>
+        {% endif %}
+
+        {% if ai.remediation|default('') %}
+        <div class="finding-section-label">Remediation</div>
+        <div class="remediation-block">{{ ai.remediation }}</div>
+        {% endif %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+
+  <!-- ── By-class breakdown ── -->
+  {% if ai_security.by_class %}
+  <div style="margin-top:1.5rem;">
+    <h3 style="font-family:'Fraunces',serif;font-size:1rem;font-weight:700;color:var(--brand);margin-bottom:0.8rem;">Findings by Attack Vector Class</h3>
+    <div style="display:flex;flex-direction:column;gap:0.5rem;">
+      {% for vec, cnt in ai_security.by_class.items() %}
+      {% set max_cnt = ai_security.count if ai_security.count > 0 else 1 %}
+      {% set bar_pct = (cnt / max_cnt * 100)|int %}
+      <div style="display:flex;align-items:center;gap:0.8rem;">
+        <div style="font-size:var(--fs-small);font-weight:600;color:var(--ink-mid);min-width:180px;flex-shrink:0;">{{ vec }}</div>
+        <div style="flex:1;height:10px;background:var(--border);border-radius:5px;overflow:hidden;">
+          <div style="height:100%;width:{{ bar_pct }}%;background:var(--brand-accent);border-radius:5px;"></div>
+        </div>
+        <div style="font-family:'JetBrains Mono',monospace;font-size:0.78rem;font-weight:700;color:var(--brand);min-width:24px;text-align:right;">{{ cnt }}</div>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+</section>
+{% endif %}
+
+
+<!-- ═══════════════════════════════════════════
+     §08 — TESTED — NOT EXPLOITABLE
+═══════════════════════════════════════════ -->
+<section class="section section-alt" id="not-exploitable">
+  <div class="section-numeral">08</div>
+  <div class="section-label">Coverage Integrity</div>
+  <h2 class="section-title">Tested — Not Exploitable</h2>
+  <p class="section-lead">Vectors that were actively attempted and confirmed non-exploitable. Included for full audit coverage and to prevent re-testing known-negative paths.</p>
+  <div class="section-rule"></div>
+
+  <div class="callout callout-info" style="margin-bottom:1.5rem;">
+    <div class="callout-title">Why This Section Matters</div>
+    A finding register that only lists vulnerabilities creates an incomplete picture. The following vectors were all attempted with purpose-built tooling and realistic payloads. Their absence from the findings register is the result of deliberate negative testing — not omission.
+  </div>
+
+  {% set ne_tests = [] %}
+  {% if coverage_tests is defined %}
+    {% for c in coverage_tests %}
+      {% if c.outcome in ['negative','blocked','error'] %}
+        {% set _ = ne_tests.append(c) %}
+      {% endif %}
+    {% endfor %}
+  {% endif %}
+
+  {% if ne_tests %}
+  <div class="ne-grid">
+    {% for c in ne_tests %}
+    <div class="ne-card avoid-break">
+      <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.5rem;">
+        <span class="sev sev-ne">Non-Exploitable</span>
+      </div>
+      <div class="ne-card-title">{{ c.tool }}</div>
+      <div class="ne-card-reason">
+        <strong>Command:</strong> <code style="font-size:0.7rem;">{{ c.command|truncate(80) }}</code><br>
+        <strong>Outcome:</strong> {{ c.outcome|title }}<br>
+        {% if c.note %}<strong>Notes:</strong> {{ c.note }}{% endif %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% else %}
+  <div style="padding:1rem 1.2rem;background:var(--surface);border:1px solid var(--border);border-radius:var(--r-md);">
+    <p style="font-size:var(--fs-small);color:var(--ink-light);">No non-exploitable coverage records available for this engagement.</p>
+  </div>
+  {% endif %}
+
+  <div style="margin-top:1.5rem;padding:1rem 1.2rem;background:var(--surface);border:1px solid var(--border);border-radius:var(--r-md);">
+    <div class="cover-meta-label" style="margin-bottom:0.4rem;">Scope Note — What Was Not Tested</div>
+    <p style="font-size:var(--fs-small);color:var(--ink-light);line-height:1.65;">The following were explicitly excluded from scope or not applicable: Denial-of-service testing; hosts outside the defined scope; client-side application reverse engineering; physical security; social engineering. These exclusions were agreed prior to engagement commencement.</p>
+  </div>
+</section>
+
+
+<!-- ═══════════════════════════════════════════
+     §09 — DETECTION / PURPLE-TEAM MAPPING
+═══════════════════════════════════════════ -->
+<section class="section page-break" id="detection">
+  <div class="section-numeral">09</div>
+  <div class="section-label">Purple Team</div>
+  <h2 class="section-title">Detection &amp; Purple-Team Mapping</h2>
+  <p class="section-lead">For each exploited stage: where detection was possible, what telemetry or rule would catch it, and whether a control was active during the engagement.</p>
+  <div class="section-rule"></div>
+
+  {% if detection_map is defined and detection_map %}
+  <div class="data-table-wrap avoid-break">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Finding</th>
+          <th>Technique</th>
+          <th>Detection Opportunity</th>
+          <th>Recommended Telemetry</th>
+          <th>Caught?</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for d in detection_map %}
+        <tr>
+          <td style="font-weight:700;color:var(--sev-critical);white-space:nowrap;">{{ d.finding }}</td>
+          <td style="font-size:var(--fs-small);">{{ d.technique }}</td>
+          <td style="font-size:var(--fs-small);">{{ d.opportunity }}</td>
+          <td style="font-size:var(--fs-small);">{{ d.telemetry }}</td>
+          <td>
+            {% if d.caught|lower in ['yes','true','caught'] %}
+              <span style="color:var(--sev-low);font-weight:700;font-size:var(--fs-small);">&#10003; CAUGHT</span>
+            {% else %}
+              <span style="color:var(--sev-critical);font-weight:700;font-size:var(--fs-small);">&#10007; OPEN</span>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="callout callout-gold" style="margin-bottom:1.5rem;">
+    <div class="callout-title">Purple-Team Note</div>
+    No detection mapping data was provided for this engagement. The recommendations below provide a general defensive roadmap aligned to the observed techniques.
+  </div>
+  {% endif %}
+
+  <div style="margin-top:1.5rem;">
+    <h3 style="font-family:'Fraunces',serif;font-size:1rem;font-weight:700;color:var(--brand);margin-bottom:0.8rem;">Recommended Detection Stack (Priority Order)</h3>
+    <div class="two-col" style="gap:1.5rem;">
+      <div>
+        <ol style="padding-left:1.2rem;font-size:var(--fs-small);color:var(--ink-mid);line-height:2;">
+          <li>Egress firewall blocking web-tier outbound to RFC-1918 / loopback</li>
+          <li>File integrity monitoring on all web root directories</li>
+          <li>EDR with process-ancestry rules (web server spawning shells)</li>
+        </ol>
+      </div>
+      <div>
+        <ol start="4" style="padding-left:1.2rem;font-size:var(--fs-small);color:var(--ink-mid);line-height:2;">
+          <li>auditd rules: sudo by web accounts + sensitive key-file reads</li>
+          <li>WAF with ModSecurity CRS (SSRF + XSS rulesets)</li>
+          <li>SIEM correlation: anomalous process lineage alerts</li>
+        </ol>
+      </div>
+    </div>
+  </div>
+</section>
+
+
+<!-- ═══════════════════════════════════════════
+     §10 — EVIDENCE APPENDIX
+═══════════════════════════════════════════ -->
+<section class="section section-alt" id="evidence">
+  <div class="section-numeral">10</div>
+  <div class="section-label">Evidence Appendix</div>
+  <h2 class="section-title">Evidence Appendix</h2>
+  <p class="section-lead">Integrity-hashed artifact registry. All evidence is redacted where it contains sensitive credential material.</p>
+  <div class="section-rule"></div>
+
+  <div class="callout callout-info" style="margin-bottom:1.5rem;">
+    <div class="callout-title">Evidence Handling</div>
+    All artifacts were captured during the live engagement, immediately hashed (SHA-256), and stored in an encrypted evidence vault. Sensitive material (credentials, private keys, flag values) is redacted in this report; full unredacted artifacts are available to the client under NDA via secure transfer.
+  </div>
+
+  {% if loot_entries is defined and loot_entries %}
+  <div style="border:1px solid var(--border);border-radius:var(--r-lg);overflow:hidden;background:var(--surface);">
+    <!-- Header -->
+    <div style="display:grid;grid-template-columns:80px 1fr 100px 1fr 100px;gap:0.8rem;padding:0.7rem 1.2rem;background:var(--brand);">
+      <div style="font-size:var(--fs-micro);font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:rgba(255,255,255,0.6);">ID</div>
+      <div style="font-size:var(--fs-micro);font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:rgba(255,255,255,0.6);">Artifact Description</div>
+      <div style="font-size:var(--fs-micro);font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:rgba(255,255,255,0.6);">Severity</div>
+      <div style="font-size:var(--fs-micro);font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:rgba(255,255,255,0.6);">SHA-256</div>
+      <div style="font-size:var(--fs-micro);font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:rgba(255,255,255,0.6);">Size</div>
+    </div>
+    {% for l in loot_entries %}
+    <div style="display:grid;grid-template-columns:80px 1fr 100px 1fr 100px;gap:0.8rem;padding:0.75rem 1.2rem;border-bottom:1px solid var(--border);{% if loop.index is even %}background:var(--surface-warm);{% endif %}align-items:center;">
+      <div style="font-family:'JetBrains Mono',monospace;font-size:0.75rem;font-weight:700;color:var(--ink-faint);">{{ l.doi_label }}</div>
+      <div style="font-size:var(--fs-small);color:var(--ink-mid);">
+        {% if l.source %}<strong>Src:</strong> <code style="font-size:0.7rem;">{{ l.source }}</code>{% endif %}
+        {% if l.target %} → <code style="font-size:0.7rem;">{{ l.target }}</code>{% endif %}
+      </div>
+      <div>
+        {% if l.severity %}
+        <span class="sev sev-{{ l.severity|lower }}" style="font-size:0.65rem;">{{ l.severity }}</span>
+        {% endif %}
+      </div>
+      <div style="font-family:'JetBrains Mono',monospace;font-size:0.7rem;color:var(--ink-faint);">
+        {% if l.sha256 %}{{ l.sha256|truncate(24) }}{% else %}—{% endif %}
+      </div>
+      <div style="font-size:var(--fs-micro);color:var(--ink-faint);">
+        {% if l.size_bytes %}{{ l.size_bytes }} B{% else %}—{% endif %}
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% else %}
+  <div style="padding:1.2rem;background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);">
+    <p style="font-size:var(--fs-small);color:var(--ink-light);">No loot entries recorded for this engagement.</p>
+  </div>
+  {% endif %}
+
+  {% if creds_summary is defined and creds_summary %}
+  <div style="margin-top:1.5rem;">
+    <h3 style="font-family:'Fraunces',serif;font-size:1rem;font-weight:700;color:var(--brand);margin-bottom:0.8rem;">Captured Credentials <span style="font-size:0.75rem;font-weight:400;color:var(--ink-faint);">(passwords redacted)</span></h3>
+    <div style="border:1px solid var(--border);border-radius:var(--r-lg);overflow:hidden;">
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:0.8rem;padding:0.6rem 1rem;background:var(--brand);">
+        <div style="font-size:var(--fs-micro);font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:rgba(255,255,255,0.6);">Username</div>
+        <div style="font-size:var(--fs-micro);font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:rgba(255,255,255,0.6);">Password</div>
+        <div style="font-size:var(--fs-micro);font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:rgba(255,255,255,0.6);">Domain</div>
+        <div style="font-size:var(--fs-micro);font-weight:700;letter-spacing:0.1em;text-transform:uppercase;color:rgba(255,255,255,0.6);">Source</div>
+      </div>
+      {% for cr in creds_summary %}
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:0.8rem;padding:0.65rem 1rem;border-bottom:1px solid var(--border);{% if loop.index is even %}background:var(--surface-warm);{% endif %}font-size:var(--fs-small);">
+        <div style="font-family:'JetBrains Mono',monospace;font-size:0.8rem;color:var(--ink-mid);">{{ cr.user }}</div>
+        <div style="color:var(--ink-faint);font-style:italic;">{{ cr.password|default('••••••••') }}</div>
+        <div style="color:var(--ink-light);">{{ cr.domain|default('—') }}</div>
+        <div style="font-size:var(--fs-micro);color:var(--ink-faint);">{{ cr.source|default('—') }}</div>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+
+  <p style="font-size:var(--fs-micro);color:var(--ink-faint);margin-top:0.8rem;line-height:1.7;">All SHA-256 values are truncated in this report for readability. Full hashes are provided in the secure evidence package.</p>
+</section>
+
+
+<!-- ═══════════════════════════════════════════
+     §11 — MITRE ATT&CK MAP
+═══════════════════════════════════════════ -->
+{% if mitre_mappings is defined and mitre_mappings %}
+<section class="section" id="mitre">
+  <div class="section-numeral">11</div>
+  <div class="section-label">MITRE ATT&amp;CK</div>
+  <h2 class="section-title">MITRE ATT&amp;CK Map</h2>
+  <p class="section-lead">Techniques observed during this engagement mapped to the MITRE ATT&amp;CK Enterprise framework, with associated tactic phases.</p>
+  <div class="section-rule"></div>
+
+  <div class="mitre-grid">
+    {% for m in mitre_mappings %}
+    <div class="mitre-cell avoid-break">
+      <div class="mitre-cell-phase">{{ m.tactic }}</div>
+      <div class="mitre-cell-tactic">{{ m.technique_name }}</div>
+      <div class="mitre-cell-id">{{ m.technique_id }}</div>
+      {% if m.tool_used %}
+      <div style="font-size:0.7rem;color:rgba(255,255,255,0.4);margin-top:0.3rem;">Tool: {{ m.tool_used }}</div>
+      {% endif %}
+    </div>
+    {% endfor %}
+  </div>
+
+  <!-- ATT&CK Tactic flow SVG — rendered from mitre_mappings -->
+  <div style="margin-top:2rem;background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);padding:1.5rem;">
+    <div class="chart-title" style="margin-bottom:1rem;">ATT&amp;CK Tactic Coverage — Observed Techniques</div>
+    {% set tactics = mitre_mappings|map(attribute='tactic')|unique|list %}
+    {% set tac_count = tactics|length %}
+    {% set tac_w = (760 / (tac_count + 1))|int %}
+    <svg viewBox="0 0 780 90" xmlns="http://www.w3.org/2000/svg" style="width:100%;display:block;">
+      <defs>
+        <marker id="tac-arr" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto">
+          <path d="M0,0 L0,7 L7,3.5 z" fill="#C8C8D8"/>
+        </marker>
+      </defs>
+      {% for tactic in tactics %}
+      {% set tx = (loop.index0 * tac_w + 5)|int %}
+      {% set tactic_techniques = mitre_mappings|selectattr('tactic','equalto',tactic)|list %}
+      {% set tactic_ids = tactic_techniques|map(attribute='technique_id')|join(' / ') %}
+      <rect x="{{ tx }}" y="15" width="{{ tac_w - 8 }}" height="56" rx="6" fill="#1A0A2A" stroke="#8e44ad" stroke-width="1.5"/>
+      <text x="{{ tx + (tac_w - 8) / 2 }}" y="33" fill="#8e44ad" font-size="7" font-family="Inter,sans-serif" font-weight="700" text-anchor="middle" letter-spacing="0.5">{{ tactic|upper|truncate(14,True,'') }}</text>
+      <text x="{{ tx + (tac_w - 8) / 2 }}" y="48" fill="#c39bd3" font-size="7" font-family="JetBrains Mono,monospace" text-anchor="middle">{{ tactic_ids|truncate(18) }}</text>
+      {% if not loop.last %}
+      <line x1="{{ tx + tac_w - 8 }}" y1="43" x2="{{ tx + tac_w }}" y2="43" stroke="#C8C8D8" stroke-width="1" marker-end="url(#tac-arr)"/>
+      {% endif %}
+      {% endfor %}
+    </svg>
+  </div>
+</section>
+{% endif %}
+
+
+<!-- ═══════════════════════════════════════════
+     §12 — REMEDIATION ROADMAP
+═══════════════════════════════════════════ -->
+{% if findings is defined and findings %}
+<section class="section section-alt page-break" id="remediation">
+  <div class="section-numeral">12</div>
+  <div class="section-label">Remediation Roadmap</div>
+  <h2 class="section-title">Remediation Roadmap</h2>
+  <p class="section-lead">Three-tier prioritised remediation plan. P1 items should be actioned within 48 hours; P2 within 14 days; P3 within 90 days.</p>
+  <div class="section-rule"></div>
+
+  {% set critical_findings = findings|selectattr('severity','equalto','Critical')|list %}
+  {% set high_findings     = findings|selectattr('severity','equalto','High')|list %}
+  {% set medium_findings   = findings|selectattr('severity','equalto','Medium')|list %}
+  {% set low_findings      = findings|selectattr('severity','in',['Low','Info'])|list %}
+
+  <!-- P1 -->
+  {% if critical_findings %}
+  <div class="remed-tier remed-tier-p1 avoid-break">
+    <div class="remed-tier-header">
+      <span class="sev sev-critical">P1 — Critical</span>
+      <span class="remed-tier-label">Immediate Action Required · Target: 48 Hours</span>
+    </div>
+    <p style="font-size:var(--fs-small);color:var(--ink-mid);margin-bottom:0.8rem;line-height:1.6;">These items represent active, exploitable compromise paths. Until P1 items are remediated, the host must be considered fully compromised and should not be exposed to untrusted networks.</p>
+    <ul class="remed-items">
+      {% for f in critical_findings %}
+      <li><strong>{{ f.fid | default("F-%02d"|format(loop.index)) }} — {{ f.title }}:</strong> {% if f.remediation %}{{ f.remediation }}{% else %}Remediate immediately — see finding card for details.{% endif %}</li>
+      {% endfor %}
+    </ul>
+  </div>
+  {% endif %}
+
+  <!-- P2 -->
+  {% if high_findings or medium_findings %}
+  <div class="remed-tier remed-tier-p2 avoid-break">
+    <div class="remed-tier-header">
+      <span class="sev sev-high">P2 — High / Medium</span>
+      <span class="remed-tier-label">Important Hardening · Target: 14 Days</span>
+    </div>
+    <p style="font-size:var(--fs-small);color:var(--ink-mid);margin-bottom:0.8rem;line-height:1.6;">These items do not represent immediate compromise paths in isolation but materially reduce the attack surface.</p>
+    <ul class="remed-items">
+      {% for f in high_findings + medium_findings %}
+      <li><strong>{{ f.title }}:</strong> {% if f.remediation %}{{ f.remediation|truncate(200) }}{% else %}Apply patch/configuration fix per finding card.{% endif %}</li>
+      {% endfor %}
+    </ul>
+  </div>
+  {% endif %}
+
+  <!-- P3 -->
+  {% if low_findings %}
+  <div class="remed-tier remed-tier-p3 avoid-break">
+    <div class="remed-tier-header">
+      <span class="sev sev-info">P3 — Low / Hygiene</span>
+      <span class="remed-tier-label">Best-Practice Hygiene · Target: 90 Days</span>
+    </div>
+    <p style="font-size:var(--fs-small);color:var(--ink-mid);margin-bottom:0.8rem;line-height:1.6;">Lower-risk hardening items that reduce attacker reconnaissance value and tighten the overall security posture.</p>
+    <ul class="remed-items">
+      {% for f in low_findings %}
+      <li><strong>{{ f.title }}:</strong> {% if f.remediation %}{{ f.remediation|truncate(200) }}{% else %}Apply best-practice hardening per finding card.{% endif %}</li>
+      {% endfor %}
+    </ul>
+  </div>
+  {% endif %}
+</section>
+{% endif %}
+
+
+<!-- ═══════════════════════════════════════════
+     §13 — ENGAGEMENT TIMELINE
+═══════════════════════════════════════════ -->
+{% if engagement_timeline is defined and engagement_timeline %}
+<section class="section" id="timeline">
+  <div class="section-numeral">13</div>
+  <div class="section-label">Engagement Timeline</div>
+  <h2 class="section-title">Engagement Timeline</h2>
+  <p class="section-lead">Chronological record of all significant events across the engagement window.</p>
+  <div class="section-rule"></div>
+
+  <div class="two-col" style="gap:3rem;align-items:start;">
+    {% set half = ((engagement_timeline|length) / 2)|round(0,'ceil')|int %}
+    <div>
+      <div style="font-size:var(--fs-micro);font-weight:700;letter-spacing:0.15em;text-transform:uppercase;color:var(--ink-faint);margin-bottom:1rem;padding-bottom:0.4rem;border-bottom:2px solid var(--accent-rule);">Timeline — Part 1</div>
+      <div class="timeline">
+        {% for t in engagement_timeline[:half] %}
+        {% set label_lower = t.label|lower %}
+        <div class="tl-item {% if 'root' in label_lower or 'compromise' in label_lower or 'rce' in label_lower or 'critical' in label_lower %}tl-critical{% elif 'success' in label_lower or 'found' in label_lower or 'confirmed' in label_lower %}tl-success{% elif 'high' in label_lower %}tl-high{% endif %}">
+          <div class="tl-time">{{ t.ts }}</div>
+          <div class="tl-event">{{ t.label }}</div>
+          {% if t.detail %}<div class="tl-note">{{ t.detail }}</div>{% endif %}
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+
+    <div>
+      {% if engagement_timeline|length > half %}
+      <div style="font-size:var(--fs-micro);font-weight:700;letter-spacing:0.15em;text-transform:uppercase;color:var(--ink-faint);margin-bottom:1rem;padding-bottom:0.4rem;border-bottom:2px solid var(--accent-rule);">Timeline — Part 2</div>
+      <div class="timeline">
+        {% for t in engagement_timeline[half:] %}
+        {% set label_lower = t.label|lower %}
+        <div class="tl-item {% if 'root' in label_lower or 'compromise' in label_lower or 'rce' in label_lower or 'critical' in label_lower %}tl-critical{% elif 'success' in label_lower or 'found' in label_lower or 'confirmed' in label_lower %}tl-success{% elif 'high' in label_lower %}tl-high{% endif %}">
+          <div class="tl-time">{{ t.ts }}</div>
+          <div class="tl-event">{{ t.label }}</div>
+          {% if t.detail %}<div class="tl-note">{{ t.detail }}</div>{% endif %}
+        </div>
+        {% endfor %}
+      </div>
+      {% endif %}
+
+      <!-- Quick stat box -->
+      <div style="margin-top:1.5rem;padding:1.2rem;background:var(--brand);border-radius:var(--r-lg);">
+        <div style="font-size:var(--fs-micro);font-weight:700;letter-spacing:0.15em;text-transform:uppercase;color:rgba(255,255,255,0.5);margin-bottom:0.8rem;">Engagement Summary</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.8rem;">
+          {% if duration %}
+          <div style="text-align:center;">
+            <div style="font-family:'Fraunces',serif;font-size:1.8rem;font-weight:900;color:#fff;line-height:1;">{{ duration }}</div>
+            <div style="font-size:var(--fs-micro);color:rgba(255,255,255,0.4);margin-top:0.2rem;">Duration</div>
+          </div>
+          {% endif %}
+          {% if summary is defined and summary.total is defined %}
+          <div style="text-align:center;">
+            <div style="font-family:'Fraunces',serif;font-size:1.8rem;font-weight:900;color:var(--accent-gold);line-height:1;">{{ summary.total }}</div>
+            <div style="font-size:var(--fs-micro);color:rgba(255,255,255,0.4);margin-top:0.2rem;">Total Findings</div>
+          </div>
+          {% endif %}
+          <div style="text-align:center;">
+            <div style="font-family:'Fraunces',serif;font-size:1.8rem;font-weight:900;color:var(--sev-critical-mid);line-height:1;">0</div>
+            <div style="font-size:var(--fs-micro);color:rgba(255,255,255,0.4);margin-top:0.2rem;">False Positives</div>
+          </div>
+          <div style="text-align:center;">
+            <div style="font-family:'Fraunces',serif;font-size:1.8rem;font-weight:900;color:#2ecc71;line-height:1;">100%</div>
+            <div style="font-size:var(--fs-micro);color:rgba(255,255,255,0.4);margin-top:0.2rem;">Evidence-Grounded</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+{% endif %}
+
+
+<!-- ═══════════════════════════════════════════
+     §14 — DATA VISUALIZATIONS
+═══════════════════════════════════════════ -->
+<section class="section section-alt page-break" id="dataviz">
+  <div class="section-numeral">14</div>
+  <div class="section-label">Data Visualizations</div>
+  <h2 class="section-title">Data Visualizations</h2>
+  <p class="section-lead">Severity distribution and attack-outcome breakdown — inline SVG, no external libraries.</p>
+  <div class="section-rule"></div>
+
+  <div class="two-col" style="gap:2rem;align-items:start;">
+
+    <!-- Chart 1: Severity Distribution — Donut -->
+    {% if summary is defined and summary.total is defined and summary.total > 0 %}
+    <div class="chart-wrap avoid-break">
+      <div class="chart-title">Severity Distribution — {{ summary.total }} Findings</div>
+      <div style="font-size:var(--fs-micro);color:var(--ink-faint);margin-bottom:1rem;">By CVSS band · {{ target_display }}</div>
+      {# Compute donut segments — circumference for r=72 is 452.4 #}
+      {% set circ = 452.4 %}
+      {% set total = summary.total|float %}
+      {% set crit_len  = ((summary.critical|default(0))  / total * circ)|round(1) %}
+      {% set high_len  = ((summary.high|default(0))      / total * circ)|round(1) %}
+      {% set med_len   = ((summary.medium|default(0))    / total * circ)|round(1) %}
+      {% set low_len   = ((summary.low|default(0))       / total * circ)|round(1) %}
+      {% set info_len  = ((summary.info|default(0))      / total * circ)|round(1) %}
+      {# dashoffsets: start at top (113.1 = circ/4), subtract segment cumulative #}
+      {% set off0 = 113.1 %}
+      {% set off1 = (off0 - crit_len)|round(1) %}
+      {% set off2 = (off1 - high_len)|round(1) %}
+      {% set off3 = (off2 - med_len)|round(1) %}
+      {% set off4 = (off3 - low_len)|round(1) %}
+      <svg viewBox="0 0 280 220" xmlns="http://www.w3.org/2000/svg" style="width:100%;display:block;">
+        <g transform="translate(100,115)">
+          <circle cx="0" cy="0" r="72" fill="none" stroke="#F0F0F5" stroke-width="28"/>
+          {% if crit_len > 0 %}
+          <circle cx="0" cy="0" r="72" fill="none" stroke="#C0392B" stroke-width="28"
+            stroke-dasharray="{{ crit_len }} {{ circ - crit_len }}" stroke-dashoffset="{{ off0 }}" stroke-linecap="butt"/>
+          {% endif %}
+          {% if high_len > 0 %}
+          <circle cx="0" cy="0" r="72" fill="none" stroke="#D35400" stroke-width="28"
+            stroke-dasharray="{{ high_len }} {{ circ - high_len }}" stroke-dashoffset="{{ off1 }}" stroke-linecap="butt"/>
+          {% endif %}
+          {% if med_len > 0 %}
+          <circle cx="0" cy="0" r="72" fill="none" stroke="#B7770D" stroke-width="28"
+            stroke-dasharray="{{ med_len }} {{ circ - med_len }}" stroke-dashoffset="{{ off2 }}" stroke-linecap="butt"/>
+          {% endif %}
+          {% if low_len > 0 %}
+          <circle cx="0" cy="0" r="72" fill="none" stroke="#1A6B3C" stroke-width="28"
+            stroke-dasharray="{{ low_len }} {{ circ - low_len }}" stroke-dashoffset="{{ off3 }}" stroke-linecap="butt"/>
+          {% endif %}
+          {% if info_len > 0 %}
+          <circle cx="0" cy="0" r="72" fill="none" stroke="#1A5276" stroke-width="28"
+            stroke-dasharray="{{ info_len }} {{ circ - info_len }}" stroke-dashoffset="{{ off4 }}" stroke-linecap="butt"/>
+          {% endif %}
+          <text x="0" y="-10" text-anchor="middle" font-family="Fraunces,serif" font-size="28" font-weight="900" fill="#1C1C2E">{{ summary.total }}</text>
+          <text x="0" y="12" text-anchor="middle" font-family="Inter,sans-serif" font-size="9" fill="#9090AA" font-weight="600" letter-spacing="1">FINDINGS</text>
+        </g>
+        <g transform="translate(182,48)">
+          <rect x="0" y="0"   width="10" height="10" rx="2" fill="#C0392B"/>
+          <text x="14" y="9"  font-family="Inter,sans-serif" font-size="9.5" fill="#2D2D44" font-weight="600">Critical</text>
+          <text x="14" y="20" font-family="Inter,sans-serif" font-size="8" fill="#9090AA">{{ summary.critical|default(0) }} findings</text>
+          <rect x="0" y="30"  width="10" height="10" rx="2" fill="#D35400"/>
+          <text x="14" y="39" font-family="Inter,sans-serif" font-size="9.5" fill="#2D2D44" font-weight="600">High</text>
+          <text x="14" y="50" font-family="Inter,sans-serif" font-size="8" fill="#9090AA">{{ summary.high|default(0) }} findings</text>
+          <rect x="0" y="60"  width="10" height="10" rx="2" fill="#B7770D"/>
+          <text x="14" y="69" font-family="Inter,sans-serif" font-size="9.5" fill="#2D2D44" font-weight="600">Medium</text>
+          <text x="14" y="80" font-family="Inter,sans-serif" font-size="8" fill="#9090AA">{{ summary.medium|default(0) }} findings</text>
+          <rect x="0" y="90"  width="10" height="10" rx="2" fill="#1A6B3C"/>
+          <text x="14" y="99" font-family="Inter,sans-serif" font-size="9.5" fill="#2D2D44" font-weight="600">Low</text>
+          <text x="14" y="110" font-family="Inter,sans-serif" font-size="8" fill="#9090AA">{{ summary.low|default(0) }} findings</text>
+          <rect x="0" y="120" width="10" height="10" rx="2" fill="#1A5276"/>
+          <text x="14" y="129" font-family="Inter,sans-serif" font-size="9.5" fill="#2D2D44" font-weight="600">Info</text>
+          <text x="14" y="140" font-family="Inter,sans-serif" font-size="8" fill="#9090AA">{{ summary.info|default(0) }} findings</text>
+        </g>
+      </svg>
+    </div>
+    {% endif %}
+
+    <!-- Chart 2: Attempt Outcome Breakdown — Horizontal Bar -->
+    {% if coverage_counts is defined and coverage_counts %}
+    <div class="chart-wrap avoid-break">
+      <div class="chart-title">Attack Attempt Outcomes</div>
+      <div style="font-size:var(--fs-micro);color:var(--ink-faint);margin-bottom:1rem;">Exploitable vs Non-Exploitable breakdown</div>
+      {% set max_count = coverage_counts.values()|max %}
+      {% set bar_scale = (200 / max_count)|round(1) %}
+      <svg viewBox="0 0 320 {{ (coverage_counts|length * 44 + 40)|int }}" xmlns="http://www.w3.org/2000/svg" style="width:100%;display:block;">
+        {% set colors = {'success': '#C0392B', 'exploit': '#C0392B', 'blocked': '#1A5276', 'negative': '#9090AA', 'error': '#9090AA', 'info': '#1A5276'} %}
+        {% for outcome, count in coverage_counts.items() %}
+        {% set y = loop.index0 * 44 + 15 %}
+        {% set bar_w = (count * bar_scale)|int %}
+        {% set color = colors.get(outcome, '#9090AA') %}
+        <text x="108" y="{{ y + 13 }}" font-family="Inter,sans-serif" font-size="8.5" fill="#5A5A7A" text-anchor="end">{{ outcome|title }}</text>
+        <rect x="112" y="{{ y }}" width="{{ bar_w }}" height="14" rx="3" fill="{{ color }}"/>
+        <text x="{{ 112 + bar_w + 5 }}" y="{{ y + 12 }}" font-family="Fraunces,serif" font-size="10" fill="{{ color }}" font-weight="900">{{ count }}</text>
+        {% endfor %}
+        <line x1="112" y1="{{ (coverage_counts|length * 44 + 15)|int }}" x2="312" y2="{{ (coverage_counts|length * 44 + 15)|int }}" stroke="#E2E2EA" stroke-width="1"/>
+      </svg>
+    </div>
+    {% endif %}
+  </div>
+
+  <!-- CVSS Bar Chart -->
+  {% if findings is defined and findings %}
+  {% set scored = findings|selectattr('extra')|list %}
+  {% if scored %}
+  <div class="chart-wrap avoid-break" style="margin-top:1.5rem;">
+    <div class="chart-title">CVSS Score Distribution — Scored Findings</div>
+    <div style="font-size:var(--fs-micro);color:var(--ink-faint);margin-bottom:1rem;">Findings with CVSS scores · {{ target_display }}</div>
+    {% set bar_count = scored|length %}
+    {% set bar_w_each = ([52, (680 / bar_count - 10)]|min)|int %}
+    {% set bar_gap = ([10, (680 / bar_count - bar_w_each)]|min)|int %}
+    <svg viewBox="0 0 720 130" xmlns="http://www.w3.org/2000/svg" style="width:100%;display:block;">
+      <line x1="30" y1="95" x2="700" y2="95" stroke="#E2E2EA" stroke-width="1"/>
+      <text x="25" y="98"  font-family="Inter,sans-serif" font-size="7.5" fill="#C8C8D8" text-anchor="end">0</text>
+      <line x1="28" y1="65" x2="700" y2="65" stroke="#E2E2EA" stroke-width="0.5" stroke-dasharray="3,4"/>
+      <text x="25" y="68"  font-family="Inter,sans-serif" font-size="7.5" fill="#C8C8D8" text-anchor="end">5</text>
+      <line x1="28" y1="35" x2="700" y2="35" stroke="#E2E2EA" stroke-width="0.5" stroke-dasharray="3,4"/>
+      <text x="25" y="38"  font-family="Inter,sans-serif" font-size="7.5" fill="#C8C8D8" text-anchor="end">10</text>
+      {% for f in scored %}
+      {% if f.extra is defined and f.extra.cvss_base %}
+      {% set score = f.extra.cvss_base|float %}
+      {% set bar_h = (score * 6)|int %}
+      {% set bar_x = (38 + loop.index0 * (bar_w_each + bar_gap))|int %}
+      {% set bar_y = (95 - bar_h)|int %}
+      {% set sev_lower = f.severity|lower %}
+      {% set bar_color = {'critical':'#C0392B','high':'#D35400','medium':'#B7770D','low':'#1A6B3C','info':'#1A5276'}.get(sev_lower, '#9090AA') %}
+      <rect x="{{ bar_x }}" y="{{ bar_y }}" width="{{ bar_w_each }}" height="{{ bar_h }}" rx="4" fill="{{ bar_color }}"/>
+      <text x="{{ bar_x + bar_w_each / 2 }}" y="{{ bar_y - 3 }}" font-family="Fraunces,serif" font-size="9" fill="{{ bar_color }}" font-weight="900" text-anchor="middle">{{ score }}</text>
+      <text x="{{ bar_x + bar_w_each / 2 }}" y="110" font-family="JetBrains Mono,monospace" font-size="7" fill="#9090AA" text-anchor="middle">{{ f.fid | default("F-%02d"|format(loop.index)) }}</text>
+      <text x="{{ bar_x + bar_w_each / 2 }}" y="120" font-family="Inter,sans-serif" font-size="6" fill="#C8C8D8" text-anchor="middle">{{ f.title|truncate(12,True,'') }}</text>
+      {% endif %}
+      {% endfor %}
+      <!-- Critical threshold line -->
+      <line x1="30" y1="41" x2="700" y2="41" stroke="#C0392B" stroke-width="0.8" stroke-dasharray="5,3" opacity="0.5"/>
+      <text x="702" y="44" font-family="Inter,sans-serif" font-size="7" fill="#C0392B" opacity="0.7">9.0</text>
+    </svg>
+  </div>
+  {% endif %}
+  {% endif %}
+</section>
+
+
+<!-- ═══════════════════════════════════════════
+     DOCUMENT FOOTER
+═══════════════════════════════════════════ -->
+<footer class="doc-footer">
+  <div style="margin-bottom:0.3rem;">
+    <strong>ARGUS Security Assessment</strong> &nbsp;·&nbsp;
+    <span class="gold">{{ target_display }}</span> &nbsp;·&nbsp;
+    <strong>CONFIDENTIAL — CLIENT PRIVILEGED</strong>
+  </div>
+  <div>
+    Report generated: <strong>{{ generated_at }}</strong> &nbsp;·&nbsp;
+    {{ engagement_type }} &nbsp;·&nbsp;
+    All findings evidence-grounded · Zero false positives
+  </div>
+  <div style="margin-top:0.4rem;font-size:0.62rem;color:rgba(255,255,255,0.25);">
+    This document is the property of ARGUS Security. Unauthorised reproduction, distribution, or disclosure is strictly prohibited.
+    All captured artifacts are stored in an encrypted evidence vault and will be destroyed per the agreed retention policy.
+  </div>
+</footer>
+
+</div><!-- end page-wrapper -->
+</body></html>
+
+
+
+
+

@@ -619,19 +619,21 @@ REPORT_TEMPLATE = """
 <div class="page-wrap">
 
 <!-- ═══════════ RISK BANNER ═══════════ -->
-{% set overall_risk = "critical" if summary.critical > 0 else ("high" if summary.high > 0 else ("medium" if summary.medium > 0 else "low")) %}
+{# Canonical verdict from _build_context — identical to every other theme. #}
+{% set overall_risk = (final_rating if (final_rating is defined and final_rating and final_rating != 'none') else ("critical" if summary.critical > 0 else ("high" if summary.high > 0 else ("medium" if summary.medium > 0 else "low")))) %}
 {% set risk_text = {
   "critical": "Critical Risk — Immediate Action Required",
   "high":     "High Risk — Urgent Remediation Needed",
   "medium":   "Medium Risk — Schedule Remediation",
-  "low":      "Low Risk — Monitor and Review"
+  "low":      "Low Risk — Monitor and Review",
+  "info":     "Informational — Attack Surface Only"
 } %}
 <div class="risk-banner {{ overall_risk }}" style="margin-top: 40px;">
   <div>
     <div class="risk-label">Overall Risk Rating</div>
-    <div class="risk-value">{{ overall_risk | upper }}</div>
+    <div class="risk-value">{{ (final_rating_label if final_rating_label is defined and final_rating_label else (overall_risk | upper)) }}</div>
   </div>
-  <div class="risk-desc">{{ risk_text[overall_risk] }}</div>
+  <div class="risk-desc">{{ risk_text[overall_risk] | default("Issues Identified") }}</div>
 </div>
 
 <!-- ═══════════ TABLE OF CONTENTS ═══════════ -->
@@ -1249,6 +1251,24 @@ REPORT_TEMPLATE = """
 """
 
 
+# ── Professional report template (preferred) ───────────────────────────────
+# The dark-dashboard REPORT_TEMPLATE above is kept as a guaranteed fallback.
+# When the professional, print-ready, light-theme template module is importable
+# it supersedes it — a polished client deliverable (cover page, document
+# control, executive summary with metric cards, methodology, host overview,
+# findings summary, engagement timeline, kill-chain attack narrative, per-
+# finding detail cards, coverage matrix with negative results, proof of
+# compromise, remediation roadmap, MITRE map, appendices).  Driven by the SAME
+# _build_context data, so nothing in the pipeline changes — only the styling
+# and section richness.  Override-not-delete keeps the fallback intact.
+try:
+    from report.report_template import REPORT_TEMPLATE as _PRO_REPORT_TEMPLATE
+    if _PRO_REPORT_TEMPLATE and "<!DOCTYPE html>" in _PRO_REPORT_TEMPLATE:
+        REPORT_TEMPLATE = _PRO_REPORT_TEMPLATE
+except Exception:
+    pass
+
+
 class ReportGenerator:
     """Generates HTML and PDF pentest reports from MongoDB session data."""
 
@@ -1256,47 +1276,72 @@ class ReportGenerator:
         self._jinja_env = Environment(loader=BaseLoader())
         self._template  = self._jinja_env.from_string(REPORT_TEMPLATE)
 
-    async def generate_html(self, session_id: str) -> str:
-        """Build and return full HTML report string."""
-        ctx = await self._build_context(session_id)
+    def _render(self, ctx: Dict, theme: Optional[str] = None) -> str:
+        """Render the report HTML for a theme key.  Falls back to the legacy
+        professional/dark template when the theme file is missing or fails to
+        render (override-not-delete)."""
+        try:
+            from report.themes import get_theme, DEFAULT_THEME
+            tpl = get_theme(theme or DEFAULT_THEME)
+            if tpl:
+                return self._jinja_env.from_string(tpl).render(**ctx)
+        except Exception as _texc:                     # noqa: BLE001
+            print(f"[REPORT] theme '{theme}' render failed ({_texc}); using fallback template")
         return self._template.render(**ctx)
 
-    async def generate_pdf(self, session_id: str) -> Optional[bytes]:
-        """
-        Generate a REAL PDF, always.
+    def list_themes(self):
+        """Theme registry (key/name/description) for the UI picker."""
+        try:
+            from report.themes import list_themes as _lt
+            return _lt()
+        except Exception:
+            return []
 
-        Order of attempts (best fidelity first), with a guaranteed fallback so we
-        NEVER return HTML masquerading as a PDF (the old behaviour: when
-        wkhtmltopdf was absent this returned None, the endpoint served HTML, and
-        the browser saved it as `.pdf` → a file that opened as a "corrupted PDF"):
-          1. wkhtmltopdf   — renders the full styled HTML (if the binary exists)
-          2. weasyprint    — pure-python HTML→PDF (if importable)
-          3. pdf_writer    — stdlib-only structured PDF built from the SAME
-                             context that feeds the HTML; always succeeds.
+    async def generate_html(self, session_id: str, theme: Optional[str] = None) -> str:
+        """Build and return the full HTML report string for the chosen theme."""
+        ctx = await self._build_context(session_id)
+        return self._render(ctx, theme)
+
+    async def generate_pdf(self, session_id: str, theme: Optional[str] = None,
+                           engine: Optional[str] = None) -> Optional[bytes]:
+        """
+        Render the SELECTED theme's styled HTML to PDF.
+
+        Order (best fidelity first): weasyprint (pure-python, renders the exact
+        styled HTML) → wkhtmltopdf (if the binary exists).  Returns None when no
+        styled engine is available, so the endpoint can fall back to the
+        browser's print-to-PDF (pixel-perfect, zero-dependency) — we NEVER
+        silently serve the raw plaintext writer as the styled download.  The
+        stdlib plaintext writer is reachable ONLY via engine='text' (an explicit
+        headless/API opt-in).
         """
         ctx  = await self._build_context(session_id)
-        html = self._template.render(**ctx)
+        html = self._render(ctx, theme)
 
-        pdf = await self._wkhtmltopdf_bytes(html)
-        if pdf:
-            return pdf
+        if engine == "text":
+            try:
+                from report.pdf_writer import lines_to_pdf, report_lines_from_context
+                target = (ctx.get("session") or {}).get("target", "target")
+                return lines_to_pdf(report_lines_from_context(ctx),
+                                    title=f"ARGUS Report — {target}")
+            except Exception as exc:                   # noqa: BLE001
+                print(f"[REPORT] stdlib PDF fallback failed: {exc}")
+                return None
 
-        # 2) weasyprint — renders the styled HTML without any system binary.
+        # 1) weasyprint — pure-python, renders the styled theme HTML at full fidelity.
         try:
             import weasyprint  # type: ignore
             return weasyprint.HTML(string=html).write_pdf()
         except Exception:
             pass
 
-        # 3) Guaranteed, dependency-free structured PDF from the context.
-        try:
-            from report.pdf_writer import lines_to_pdf, report_lines_from_context
-            target = (ctx.get("session") or {}).get("target", "target")
-            return lines_to_pdf(report_lines_from_context(ctx),
-                                title=f"ARGUS Report — {target}")
-        except Exception as exc:                       # noqa: BLE001
-            print(f"[REPORT] stdlib PDF fallback failed: {exc}")
-            return None
+        # 2) wkhtmltopdf — if the binary happens to be installed.
+        pdf = await self._wkhtmltopdf_bytes(html)
+        if pdf:
+            return pdf
+
+        # 3) No styled engine available → signal the caller to use browser print.
+        return None
 
     async def _wkhtmltopdf_bytes(self, html: str) -> Optional[bytes]:
         """Render HTML→PDF via wkhtmltopdf; None if the binary is missing/fails."""
@@ -1342,10 +1387,81 @@ class ReportGenerator:
     async def _build_context(self, session_id: str) -> Dict:
         """Query MongoDB and build template context."""
         session  = await db.get_session(session_id) or {}
-        findings = await db.get_findings(session_id)
+        import os as _os_rg
+        # Read-time gate: exclude Issue-Validator-rejected findings (verified
+        # explicitly False) so faulty/silly issues never render in the report.
+        _validated_only = _os_rg.environ.get("ARGUS_ISSUE_VALIDATOR", "1") != "0"
+        findings = await db.get_findings(session_id, validated_only=_validated_only)
         summary  = await db.get_findings_summary(session_id)
         flags    = await db.get_flags(session_id)
         graph    = await db.get_attack_graph(session_id)
+
+        # Cross-engagement bleed backstop: drop any finding/flag stamped with a
+        # DIFFERENT session's `_origin` (a prior engagement's evidence must never
+        # render in this report).  Filter by SESSION only — a CIDR session spans
+        # many target hosts, so we must NOT narrow to a single target here.
+        # Legacy items without `_origin` are kept (cannot be proven foreign).
+        def _same_session(x):
+            o = (x or {}).get("_origin") if isinstance(x, dict) else None
+            return (not o) or str(o.get("session_id", "")) == str(session_id)
+        if isinstance(findings, list):
+            findings = [f for f in findings if _same_session(f)]
+        if isinstance(flags, list):
+            flags = [fl for fl in flags if _same_session(fl)]
+
+        # ── Operational severity normalization — the SINGLE source of truth ──
+        # Render-time only (the DB is never mutated): drop tool-noise / internal
+        # diagnostics, and re-grade every finding to an HONEST severity so the report
+        # never inflates (service-discovery→info, unproven-RCE→capped, validated CVE
+        # kept, demonstrated kept).  This is what makes "critical" mean something.
+        try:
+            from knowledge import severity_policy as _sp
+            _normed = []
+            for _f in (findings or []):
+                if not isinstance(_f, dict):
+                    _normed.append(_f); continue
+                _v = _sp.normalize_finding(_f)
+                if _v.get("drop"):
+                    continue   # raw tool output / internal status — never shown to a client
+                # Title-case the canonical severity so BOTH the themes' capitalized
+                # selectattr filters ('Critical'…) AND their `|lower` comparisons agree.
+                _f["severity"] = str(_v["severity"]).capitalize()
+                if _v.get("evidence_tag"):
+                    _f["evidence_tag"] = _v["evidence_tag"]
+                if _v.get("rationale"):
+                    _f.setdefault("severity_rationale", _v["rationale"])
+                _normed.append(_f)
+            findings = _normed
+        except Exception:
+            pass
+
+        # ── One severity sort + one stable ID stamp (every theme reads these) ──
+        # Critical→High→Medium→Low→Info, ties broken by host then title; unknown last.
+        try:
+            _rank = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+            if isinstance(findings, list):
+                findings.sort(key=lambda f: (
+                    _rank.get(str((f or {}).get("severity") or "").lower().replace("findingseverity.", ""), 5),
+                    str((f or {}).get("host") or ""), str((f or {}).get("title") or "")))
+                for _i, _f in enumerate(findings):
+                    if isinstance(_f, dict):
+                        _f["fid"] = "F-%02d" % (_i + 1)
+        except Exception:
+            pass
+
+        # Keep the headline severity counts consistent with the findings that
+        # are ACTUALLY rendered (normalized + validated + same-session) so a
+        # gated-out finding never inflates the metric cards above the visible rows.
+        try:
+            _rs = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0, "total": 0}
+            for _f in (findings or []):
+                _sv = str((_f or {}).get("severity") or "").lower().replace("findingseverity.", "")
+                if _sv in _rs:
+                    _rs[_sv] += 1
+                _rs["total"] += 1
+            summary = _rs
+        except Exception:
+            pass
 
         # MITRE mappings — best-effort
         mitre_mappings = []
@@ -1618,10 +1734,130 @@ class ReportGenerator:
         engagement_timeline.sort(key=lambda e: str(e.get("ts")))
         engagement_timeline = engagement_timeline[:60]
 
+        # ── Derived fields for the professional (light-theme) report ─────────
+        # Purely presentational helpers; additive — the dark-dashboard template
+        # ignores them, the professional template uses them for the cover banner,
+        # metric cards, and tooling section.
+        _sev = {k: int((summary or {}).get(k, 0) or 0)
+                for k in ("critical", "high", "medium", "low", "info", "total")}
+        _root_flag = any((f or {}).get("flag_type") == "root" for f in (flags or []))
+        _user_flag = any((f or {}).get("flag_type") == "user" for f in (flags or []))
+        _shelled   = bool(intel.get("shell_access")) or _user_flag or _root_flag
+        # ── ONE canonical engagement verdict (identical across every report theme) ──
+        # Derived from the SAME normalized counts the metric cards use, so a theme can
+        # never print "CRITICAL" while another prints "PARTIAL".  outcome.label is set
+        # from it too, so legacy theme code that reads outcome.label stays consistent.
+        try:
+            from knowledge import severity_policy as _sp_rate
+            final_rating, final_rating_label = _sp_rate.compute_final_rating(
+                _sev, root=_root_flag, shell=_shelled,
+                has_issues=bool(_sev["total"] or discovered_issues))
+        except Exception:
+            final_rating, final_rating_label = (
+                ("critical", "FULL COMPROMISE — ROOT") if _root_flag else
+                ("critical", "COMPROMISED — FOOTHOLD") if _shelled else
+                ("critical", "CRITICAL — UNEXPLOITED CRITICAL ISSUES") if _sev.get("critical") else
+                ("high", "HIGH — SIGNIFICANT ISSUES IDENTIFIED") if _sev.get("high") else
+                ("medium", "PARTIAL — ISSUES IDENTIFIED") if (_sev["total"] or discovered_issues) else
+                ("none", "RECON ONLY"))
+        outcome = {
+            "compromised": _shelled or _root_flag or _user_flag,
+            "root":        _root_flag,
+            "label":       final_rating_label,
+            "final_rating": final_rating,
+            "final_rating_label": final_rating_label,
+        }
+        target_display = (session.get("target") or session.get("target_ip")
+                          or session.get("target_host") or intel.get("target") or "target")
+        tools_used = sorted({(t.get("tool") or "").strip()
+                             for t in coverage_tests if t.get("tool")})
+
+        # ── Per-finding retest status (drives the register's Verified/Open/Gated
+        #    column) + a best-effort, content-agnostic detection/purple-team map.
+        for _f in (findings or []):
+            if isinstance(_f, dict):
+                if _f.get("verified") is True:
+                    _f["retest_status"] = "Verified"
+                elif _f.get("gated_reason"):
+                    _f["retest_status"] = "Gated"
+                else:
+                    _f["retest_status"] = "Open"
+        detection_map = []
+        for _f in (findings or []):
+            if not isinstance(_f, dict):
+                continue
+            _tech = str(_f.get("mitre") or _f.get("mitre_technique") or "").strip()
+            _host = _f.get("host") or ""
+            detection_map.append({
+                "finding":     _f.get("title", ""),
+                "technique":   _tech or "—",
+                "opportunity": f"Activity on {_host or 'the asset'} consistent with this finding",
+                "telemetry":   ("Correlate the producing tool/command with host telemetry; alert on the "
+                                + (_tech or "matching ATT&CK") + " behaviour"),
+                "caught":      "Open",
+            })
+
+        # ── AI / LLM security section (Slice 3) — populated ONLY when this
+        #    engagement produced AI findings (extra.ai_finding / ai_red_team);
+        #    empty {} for a normal pentest so existing reports are unchanged. ──
+        ai_security: Dict[str, Any] = {}
+        try:
+            from utils.cvss_scorer import score_ai_findings as _score_ai
+            _ai_scored = _score_ai(findings or [])
+            if _ai_scored:
+                _by_id = {str(f.get("finding_id") or f.get("id") or ""): f
+                          for f in (findings or []) if isinstance(f, dict)}
+                _ai_rows: List[Dict[str, Any]] = []
+                _by_class: Dict[str, int] = {}
+                _asr_vals: List[float] = []
+                for _s in _ai_scored:
+                    _src = _by_id.get(_s.finding_id, {}) or {}
+                    _ex = _src.get("extra") if isinstance(_src.get("extra"), dict) else {}
+                    _cls = str(_ex.get("attack_vector") or _ex.get("category") or "ai")
+                    _by_class[_cls] = _by_class.get(_cls, 0) + 1
+                    try:
+                        _asr_vals.append(float(_ex.get("asr")))
+                    except (TypeError, ValueError):
+                        pass
+                    _ai_rows.append({
+                        "title":         _s.title or _src.get("title", ""),
+                        "severity":      _s.severity,
+                        "aivss":         _s.aivss_score,
+                        "cvss":          _s.cvss_base,
+                        "asr":           int(round(float(_ex.get("asr") or 0) * 100)),
+                        "trials":        _ex.get("trials", ""),
+                        "successes":     _ex.get("successes", ""),
+                        "owasp_llm":     _ex.get("owasp_llm", ""),
+                        "atlas":         _ex.get("atlas", "") or _src.get("mitre", ""),
+                        "attack_vector": _cls,
+                        "vector":        _s.vector,
+                        "target_model":  _ex.get("target_model", ""),
+                        "evidence":      _src.get("evidence", ""),
+                        "remediation":   _src.get("remediation", ""),
+                    })
+                ai_security = {
+                    "findings":      _ai_rows,
+                    "count":         len(_ai_rows),
+                    "by_class":      _by_class,
+                    "max_aivss":     max((r["aivss"] for r in _ai_rows), default=0.0),
+                    "avg_asr":       int(round(sum(_asr_vals) / len(_asr_vals) * 100)) if _asr_vals else 0,
+                    "owasp_classes": sorted({r["owasp_llm"].split()[0] for r in _ai_rows if r["owasp_llm"]}),
+                }
+        except Exception:
+            ai_security = {}
+
         return {
+            "ai_security":       ai_security,
             "session":           session,
             "findings":          findings,
+            "detection_map":     detection_map,
             "summary":           summary,
+            "sev":               _sev,
+            "outcome":           outcome,
+            "final_rating":       final_rating,
+            "final_rating_label": final_rating_label,
+            "target_display":    target_display,
+            "tools_used":        tools_used,
             "flags":             flags,
             "graph":             graph,
             "intel":             intel,

@@ -87,6 +87,7 @@ const HUBS = [
       { key: 'creds',    label: 'Credentials',         comp: 'CredentialsPage' },
       { key: 'shells',   label: 'Active Shells',       comp: 'ShellManager' },
       { key: 'exploit_lab', label: 'Exploit Lab',      comp: 'ExploitLabPage' },
+      { key: 'fuzz_lab', label: 'Fuzzing Lab',         comp: 'FuzzingLabPage' },
       { key: 'lateral',  label: 'Lateral & Post-Ex',   comp: 'LateralPostPage' },
       { key: 'payloads', label: 'Payload Builder',     comp: 'PayloadBuilder' },
     ] },
@@ -190,6 +191,7 @@ const COMP_FOR = {
   CredentialsPage:     () => window.CredentialsPage,
   ShellManager:        () => window.ShellManager,
   ExploitLabPage:      () => window.ExploitLabPage,
+  FuzzingLabPage:      () => window.FuzzingLabPage,
   LateralPostPage:     () => window.LateralPostPage,
   PayloadBuilder:      () => window.PayloadBuilder,
   TargetConfig:        () => window.TargetConfig,
@@ -822,6 +824,184 @@ function ToolTimeoutModal() {
           fontFamily: 'var(--font-mono)', letterSpacing: 0.5,
         }
       }, '■  Stop This Tool')
+    )
+  );
+}
+
+// ─── Connectivity Blocker Modal ──────────────────────────────
+// The target became unreachable (e.g. the VPN/route went down). ARGUS PAUSED
+// instead of spinning doomed scans, and asks the human to restore connectivity
+// and RESUME, or ABORT the target (which finalizes honestly — no false
+// "0 findings — complete"). Always mounted; renders only when blocked.
+function BlockerModal() {
+  const { state, dispatch, sendWS } = window.useStore();
+  const p = state.blockerPrompt;
+  if (!p) return null;
+  function resume() {
+    sendWS({ type: 'blocker_resume', target: p.target || '' });
+    dispatch({ type: 'BLOCKER_CLEAR' });
+  }
+  function abort() {
+    sendWS({ type: 'blocker_abort', target: p.target || '' });
+    dispatch({ type: 'BLOCKER_CLEAR' });
+  }
+  return React.createElement('div', {
+    style: {
+      position: 'fixed', inset: 0, zIndex: 9999,
+      background: 'rgba(0,0,0,0.68)', backdropFilter: 'blur(5px)',
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+    }
+  },
+    React.createElement('div', {
+      style: {
+        background: 'var(--bg-surface)', border: '1px solid var(--high)',
+        borderRadius: 14, padding: '26px 30px', minWidth: 440, maxWidth: 560,
+        boxShadow: '0 0 60px color-mix(in srgb, var(--high) 18%, transparent), 0 12px 40px rgba(0,0,0,0.65)',
+        fontFamily: 'var(--font-ui)',
+      }
+    },
+      React.createElement('div', { style: { display: 'flex', alignItems: 'flex-start', gap: 12, marginBottom: 16 } },
+        React.createElement('div', {
+          style: {
+            width: 36, height: 36, borderRadius: 8, flexShrink: 0,
+            background: 'var(--high-bg)', border: '1px solid color-mix(in srgb, var(--high) 31%, transparent)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18,
+          }
+        }, '⛔'),
+        React.createElement('div', null,
+          React.createElement('div', { style: { fontSize: 15, fontWeight: 700, color: 'var(--high)', letterSpacing: 0.2, marginBottom: 3 } },
+            'Target Unreachable — Engagement Paused'),
+          React.createElement('div', { style: { fontSize: 11, color: 'var(--text-secondary)', lineHeight: 1.5 } },
+            `${p.detail || 'The target is not reachable.'} Target: ${p.target || '(unknown)'}.`)
+        )
+      ),
+      React.createElement('div', { style: { display: 'flex', gap: 8 } },
+        React.createElement('button', {
+          onClick: resume,
+          style: { flex: 1, padding: '10px 0', borderRadius: 7, cursor: 'pointer',
+                   border: '1px solid color-mix(in srgb, var(--accent) 35%, transparent)', background: 'var(--accent-subtle)',
+                   color: 'var(--accent)', fontSize: 12, fontWeight: 700, fontFamily: 'var(--font-mono)' }
+        }, 'Resume — connectivity restored'),
+        React.createElement('button', {
+          onClick: abort,
+          style: { flex: 1, padding: '10px 0', borderRadius: 7, cursor: 'pointer',
+                   border: '1px solid color-mix(in srgb, var(--high) 35%, transparent)', background: 'var(--high-bg)',
+                   color: 'var(--high)', fontSize: 12, fontWeight: 700, fontFamily: 'var(--font-mono)' }
+        }, 'Abort this target')
+      )
+    )
+  );
+}
+
+// ─── Token Budget Modal ──────────────────────────────────────
+// Per-target, human-set LLM-token cap. When a target hits the budget ARGUS
+// PAUSES it and asks the operator to extend (raise the cap) or cut it off.
+// ARGUS never moves the cap itself; if the human doesn't answer within the
+// grace window the backend auto-cuts-off (conserving tokens). Mirrors
+// ToolTimeoutModal — always mounted, renders only when a prompt is pending.
+function TokenBudgetModal() {
+  const { state, dispatch, sendWS } = window.useStore();
+  const p = state.tokenBudgetPrompt;
+  const [custom, setCustom] = (window.React && React.useState) ? React.useState('') : [null, null];
+  if (!p) return null;
+
+  const fmt = (n) => {
+    n = Number(n) || 0;
+    if (n >= 1000000) return (n / 1000000).toFixed(2) + 'M';
+    if (n >= 1000)    return (n / 1000).toFixed(1) + 'k';
+    return String(n);
+  };
+  function extend(extra) {
+    sendWS({ type: 'token_extend', target: p.target || '', extra: extra });
+    dispatch({ type: 'TOKEN_BUDGET_CLEAR' });
+  }
+  function cutOff() {
+    sendWS({ type: 'token_stop', target: p.target || '' });
+    dispatch({ type: 'TOKEN_BUDGET_CLEAR' });
+  }
+
+  return React.createElement('div', {
+    style: {
+      position: 'fixed', inset: 0, zIndex: 9999,
+      background: 'rgba(0,0,0,0.68)', backdropFilter: 'blur(5px)',
+      display: 'flex', alignItems: 'center', justifyContent: 'center',
+    }
+  },
+    React.createElement('div', {
+      style: {
+        background: 'var(--bg-surface)', border: '1px solid var(--medium)',
+        borderRadius: 14, padding: '26px 30px', minWidth: 440, maxWidth: 540,
+        boxShadow: '0 0 60px color-mix(in srgb, var(--medium) 18%, transparent), 0 12px 40px rgba(0,0,0,0.65)',
+        fontFamily: 'var(--font-ui)',
+      }
+    },
+      React.createElement('div', { style: { display: 'flex', alignItems: 'flex-start', gap: 12, marginBottom: 18 } },
+        React.createElement('div', {
+          style: {
+            width: 36, height: 36, borderRadius: 8, flexShrink: 0,
+            background: 'var(--medium-bg)', border: '1px solid color-mix(in srgb, var(--medium) 31%, transparent)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 18,
+          }
+        }, '🪙'),
+        React.createElement('div', null,
+          React.createElement('div', { style: { fontSize: 15, fontWeight: 700, color: 'var(--medium)', letterSpacing: 0.2, marginBottom: 3 } },
+            'LLM Token Budget Reached'),
+          React.createElement('div', { style: { fontSize: 11, color: 'var(--text-secondary)', lineHeight: 1.5 } },
+            `This target hit its token budget and is PAUSED. Extend the budget to keep going, or cut this target off (its report is written either way). No answer in ${Math.round((p.wait_sec || 1800) / 60)} min → auto cut-off.`)
+        )
+      ),
+
+      React.createElement('div', {
+        style: { background: 'var(--bg-panel)', borderRadius: 8, padding: '10px 14px', border: '1px solid var(--border-dim)', marginBottom: 20 }
+      },
+        [['Target', p.target || 'target', 'var(--cyan)'],
+         ['Tokens used', fmt(p.tokens_used), 'var(--medium)'],
+         ['Budget', fmt(p.budget), 'var(--text-primary)']].map(([lbl, val, color], i) =>
+          React.createElement('div', {
+            key: lbl,
+            style: { display: 'flex', justifyContent: 'space-between', padding: '5px 0',
+                     borderBottom: i < 2 ? '1px solid color-mix(in srgb, var(--border-dim) 33%, transparent)' : 'none' }
+          },
+            React.createElement('span', { style: { fontSize: 9, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: 1, fontFamily: 'var(--font-mono)' } }, lbl),
+            React.createElement('span', { style: { fontSize: 11, fontFamily: 'var(--font-mono)', color, fontWeight: 700 } }, val)
+          )
+        )
+      ),
+
+      React.createElement('div', { style: { fontSize: 10, color: 'var(--text-secondary)', marginBottom: 10, letterSpacing: 0.3 } },
+        'Extend this target’s budget by:'),
+      React.createElement('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 8, marginBottom: 10 } },
+        [{ label: '+50k', n: 50000 }, { label: '+100k', n: 100000 }, { label: '+250k', n: 250000 }, { label: '+500k', n: 500000 }].map(({ label, n }) =>
+          React.createElement('button', {
+            key: label, onClick: () => extend(n),
+            style: { padding: '9px 0', borderRadius: 7, cursor: 'pointer',
+                     border: '1px solid color-mix(in srgb, var(--accent) 31%, transparent)', background: 'var(--accent-subtle)',
+                     color: 'var(--accent)', fontSize: 11, fontWeight: 700, fontFamily: 'var(--font-mono)' }
+          }, label)
+        )
+      ),
+
+      React.createElement('div', { style: { display: 'flex', gap: 8, marginBottom: 12 } },
+        React.createElement('input', {
+          type: 'number', min: 1, placeholder: 'custom amount of tokens',
+          value: custom || '', onChange: (e) => setCustom && setCustom(e.target.value),
+          style: { flex: 1, padding: '9px 12px', borderRadius: 7, border: '1px solid var(--border-dim)',
+                   background: 'var(--bg-panel)', color: 'var(--text-primary)', fontSize: 11, fontFamily: 'var(--font-mono)' }
+        }),
+        React.createElement('button', {
+          onClick: () => { const v = parseInt(custom, 10); if (v > 0) extend(v); },
+          style: { padding: '9px 16px', borderRadius: 7, cursor: 'pointer',
+                   border: '1px solid color-mix(in srgb, var(--accent) 31%, transparent)', background: 'var(--accent-subtle)',
+                   color: 'var(--accent)', fontSize: 11, fontWeight: 700, fontFamily: 'var(--font-mono)' }
+        }, 'Extend')
+      ),
+
+      React.createElement('button', {
+        onClick: cutOff,
+        style: { width: '100%', padding: '10px 0', borderRadius: 7, cursor: 'pointer',
+                 border: '1px solid var(--critical-bd)', background: 'var(--critical-bg)',
+                 color: 'var(--critical)', fontSize: 12, fontWeight: 700, fontFamily: 'var(--font-mono)', letterSpacing: 0.5 }
+      }, '■  Cut Off This Target')
     )
   );
 }
@@ -1629,6 +1809,8 @@ function App() {
     React.createElement('div', { className: 'stellar-beam' }),
 
     React.createElement(ToolTimeoutModal),
+    React.createElement(TokenBudgetModal),
+    React.createElement(BlockerModal),
     React.createElement(TargetSelectionModal),
     React.createElement(CommandPalette, {
       open: paletteOpen,

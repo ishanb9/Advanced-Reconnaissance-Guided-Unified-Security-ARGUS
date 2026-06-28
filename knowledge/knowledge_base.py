@@ -142,12 +142,27 @@ CHUNK_TYPE_ICONS = {
 # pattern is robust to that: whichever module-instance hits _get_embedder()
 # first stores the model on builtins; the second one finds it and reuses it.
 import builtins as _builtins
+import threading as _threading
 
 _SINGLETON_KEY_EMBEDDER  = "_argus_kb_embedder"
 _SINGLETON_KEY_COLLECTION = "_argus_kb_collection"
 _SINGLETON_KEY_CLIENT     = "_argus_kb_client"
 _SINGLETON_KEY_RERANKER   = "_argus_kb_reranker"
 _SINGLETON_KEY_RERANK_OK  = "_argus_kb_reranker_available"
+
+# Serialises the FIRST load of each heavyweight model so concurrent callers can
+# never each load their own copy.  Without this lock a multi-host scan (one
+# MasterAgent per host, KB queries dispatched to a thread pool) had every host's
+# first query miss the singleton cache simultaneously and load its OWN
+# CrossEncoder/SentenceTransformer — 7+ concurrent multi-GB CPU loads thrashed
+# RAM and effectively FROZE the whole run.  Double-checked locking (cache →
+# lock → re-check → load → cache) guarantees exactly ONE process-wide load that
+# every other caller then reuses.  Stored on builtins so it is shared even if
+# the module is imported under different names.
+_MODEL_LOAD_LOCK = getattr(_builtins, "_argus_kb_model_load_lock", None)
+if _MODEL_LOAD_LOCK is None:
+    _MODEL_LOAD_LOCK = _threading.Lock()
+    setattr(_builtins, "_argus_kb_model_load_lock", _MODEL_LOAD_LOCK)
 
 # Module-level mirrors (kept for backward compat with any external code
 # that pokes at them by name).  Reads go through getattr / builtins.
@@ -167,15 +182,26 @@ def _get_embedder():
     if _embedder is not None:
         setattr(_builtins, _SINGLETON_KEY_EMBEDDER, _embedder)
         return _embedder
-    from sentence_transformers import SentenceTransformer
-    logger.info("Loading embedding model: %s (max_length=%s)", EMBED_MODEL, EMBED_MAX_LENGTH)
-    _embedder = SentenceTransformer(EMBED_MODEL)
-    # Override tokenizer max_length to use the model's full context window.
-    # bge-m3 supports 8192 tokens; BERT-based models are capped at 512.
-    _embedder.max_seq_length = EMBED_MAX_LENGTH
-    logger.info("Embedding model ready — dim=%s", _embedder.get_sentence_embedding_dimension())
-    setattr(_builtins, _SINGLETON_KEY_EMBEDDER, _embedder)
-    return _embedder
+    # Serialise the load so N concurrent first-callers (parallel hosts) don't each
+    # load their own copy.  Re-check the cache inside the lock.
+    with _MODEL_LOAD_LOCK:
+        cached = getattr(_builtins, _SINGLETON_KEY_EMBEDDER, None)
+        if cached is not None:
+            _embedder = cached
+            return cached
+        from sentence_transformers import SentenceTransformer
+        logger.info("Loading embedding model: %s (max_length=%s)", EMBED_MODEL, EMBED_MAX_LENGTH)
+        _embedder = SentenceTransformer(EMBED_MODEL)
+        # Override tokenizer max_length to use the model's full context window.
+        # bge-m3 supports 8192 tokens; BERT-based models are capped at 512.
+        _embedder.max_seq_length = EMBED_MAX_LENGTH
+        try:                       # name renamed in newer sentence-transformers
+            _dim = _embedder.get_embedding_dimension()
+        except AttributeError:
+            _dim = _embedder.get_sentence_embedding_dimension()
+        logger.info("Embedding model ready — dim=%s", _dim)
+        setattr(_builtins, _SINGLETON_KEY_EMBEDDER, _embedder)
+        return _embedder
 
 
 def _get_collection():
@@ -190,21 +216,29 @@ def _get_collection():
         setattr(_builtins, _SINGLETON_KEY_COLLECTION, _collection)
         setattr(_builtins, _SINGLETON_KEY_CLIENT,     _client)
         return _collection
-    import chromadb
-    from chromadb.config import Settings
-    os.makedirs(CHROMA_PATH, exist_ok=True)
-    _client = chromadb.PersistentClient(
-        path=CHROMA_PATH,
-        settings=Settings(anonymized_telemetry=False)
-    )
-    _collection = _client.get_or_create_collection(
-        name=COLLECTION,
-        metadata={"hnsw:space": "cosine"}
-    )
-    logger.info("ChromaDB collection ready: %s chunks indexed", _collection.count())
-    setattr(_builtins, _SINGLETON_KEY_COLLECTION, _collection)
-    setattr(_builtins, _SINGLETON_KEY_CLIENT,     _client)
-    return _collection
+    # One Chroma client per process — concurrent PersistentClient opens on the
+    # same path can conflict; serialise + re-check inside the lock.
+    with _MODEL_LOAD_LOCK:
+        cached_coll = getattr(_builtins, _SINGLETON_KEY_COLLECTION, None)
+        if cached_coll is not None:
+            _collection = cached_coll
+            _client     = getattr(_builtins, _SINGLETON_KEY_CLIENT, None)
+            return cached_coll
+        import chromadb
+        from chromadb.config import Settings
+        os.makedirs(CHROMA_PATH, exist_ok=True)
+        _client = chromadb.PersistentClient(
+            path=CHROMA_PATH,
+            settings=Settings(anonymized_telemetry=False)
+        )
+        _collection = _client.get_or_create_collection(
+            name=COLLECTION,
+            metadata={"hnsw:space": "cosine"}
+        )
+        logger.info("ChromaDB collection ready: %s chunks indexed", _collection.count())
+        setattr(_builtins, _SINGLETON_KEY_COLLECTION, _collection)
+        setattr(_builtins, _SINGLETON_KEY_CLIENT,     _client)
+        return _collection
 
 
 def _get_reranker():
@@ -228,20 +262,32 @@ def _get_reranker():
         _reranker_available = False
         setattr(_builtins, _SINGLETON_KEY_RERANK_OK, False)
         return None
-    try:
-        from sentence_transformers import CrossEncoder
-        logger.info("Loading reranker: %s", RERANK_MODEL)
-        _reranker = CrossEncoder(RERANK_MODEL, max_length=512)   # BERT hard limit is 512 tokens
-        _reranker_available = True
-        logger.info("Reranker ready")
-        setattr(_builtins, _SINGLETON_KEY_RERANKER, _reranker)
-        setattr(_builtins, _SINGLETON_KEY_RERANK_OK, True)
-        return _reranker
-    except Exception as e:
-        logger.warning("Reranker unavailable (%s) — using cosine similarity only", e)
-        _reranker_available = False
-        setattr(_builtins, _SINGLETON_KEY_RERANK_OK, False)
-        return None
+    # Serialise: the reranker is ~1.1 GB on CPU.  Without this lock every host's
+    # first KB query loaded its OWN copy concurrently — the freeze.  Re-check the
+    # cache inside the lock so only the first caller loads; the rest reuse it.
+    with _MODEL_LOAD_LOCK:
+        cached = getattr(_builtins, _SINGLETON_KEY_RERANKER, None)
+        if cached is not None:
+            _reranker = cached
+            _reranker_available = True
+            return cached
+        if getattr(_builtins, _SINGLETON_KEY_RERANK_OK, None) is False:
+            _reranker_available = False
+            return None
+        try:
+            from sentence_transformers import CrossEncoder
+            logger.info("Loading reranker: %s", RERANK_MODEL)
+            _reranker = CrossEncoder(RERANK_MODEL, max_length=512)   # BERT hard limit is 512 tokens
+            _reranker_available = True
+            logger.info("Reranker ready")
+            setattr(_builtins, _SINGLETON_KEY_RERANKER, _reranker)
+            setattr(_builtins, _SINGLETON_KEY_RERANK_OK, True)
+            return _reranker
+        except Exception as e:
+            logger.warning("Reranker unavailable (%s) — using cosine similarity only", e)
+            _reranker_available = False
+            setattr(_builtins, _SINGLETON_KEY_RERANK_OK, False)
+            return None
 
 
 # ── Metadata merge for content-hash dedup ──────────────────────────────────────
@@ -372,6 +418,12 @@ def ingest(
       section_title : str         Heading of the section this chunk belongs to
     """
     if not text or len(text.strip()) < 40:
+        try:
+            from knowledge import rag_logger as _rl
+            _rl.log_ingest(source_file, (metadata or {}).get("chunk_type", "technique"),
+                           "", False, len(text or ""), reason="too_short")
+        except Exception:
+            pass
         return False
 
     # ── CONTENT-BASED CHUNK ID (dedup-by-design) ─────────────────────────────
@@ -398,7 +450,30 @@ def ingest(
                                     metadata, source_file)
             except Exception as _merge_exc:
                 logger.debug("metadata merge failed for %s: %s", doc_id, _merge_exc)
+        try:
+            from knowledge import rag_logger as _rl
+            _rl.log_ingest(source_file, (metadata or {}).get("chunk_type", "technique"),
+                           doc_id, False, len(text), reason="duplicate")
+        except Exception:
+            pass
         return False
+
+    # ── RAG growth guardrail: never let the store overwhelm the host ──────────
+    # Blocked when over the chunk/DB cap or when free disk/RAM run low.  Checked
+    # BEFORE the (expensive) embedding so a blocked ingest wastes no compute.
+    try:
+        from knowledge import rag_budget as _rb
+        _ok, _why = _rb.ingest_allowed()
+        if not _ok:
+            try:
+                from knowledge import rag_logger as _rl
+                _rl.log_ingest(source_file, (metadata or {}).get("chunk_type", "technique"),
+                               "", False, len(text), reason=f"budget:{_why}")
+            except Exception:
+                pass
+            return False
+    except Exception:
+        pass
 
     embedder  = _get_embedder()
 
@@ -435,6 +510,11 @@ def ingest(
                 meta[k] = str(v)
 
     col.add(ids=[doc_id], embeddings=[embedding], documents=[text], metadatas=[meta])
+    try:
+        from knowledge import rag_logger as _rl
+        _rl.log_ingest(source_file, chunk_type, doc_id, True, len(text))
+    except Exception:
+        pass
     return True
 
 
@@ -471,6 +551,15 @@ def ingest_tip(
     return ingest(text=text, source_file=source, chunk_index=chunk_idx, metadata=meta)
 
 
+def _trim_reranked(results, floor: float = 0.0):
+    """Drop reranker-rejected padding (relevance <= floor) so the operator's
+    context isn't filled with chunks the cross-encoder judged irrelevant — but
+    always keep at least the best hit(s) so a query never returns empty just
+    because its top score is marginally below the boundary."""
+    keep = [c for c in (results or []) if float(c.get("relevance", 0)) > floor]
+    return keep if keep else (results or [])[:min(2, len(results or []))]
+
+
 def search_raw(
     query: str,
     top_k: int = MAX_RESULTS,
@@ -494,9 +583,23 @@ def search_raw(
     if not query or not query.strip():
         return []
 
+    import time as _t
+    _t0 = _t.monotonic()
+    _caller = ""
+    try:
+        from knowledge import rag_logger as _rl
+        _caller = _rl.caller_hint()
+    except Exception:
+        _rl = None
+
     col = _get_collection()
     total = col.count()
     if total == 0:
+        if _rl is not None:
+            try:
+                _rl.log_search(query, [], (_t.monotonic() - _t0) * 1000, _caller, 0, reason="kb_empty")
+            except Exception:
+                pass
         return []
 
     embedder = _get_embedder()
@@ -571,22 +674,51 @@ def search_raw(
 
     candidates = list(seen_ids.values())
     if not candidates:
+        if _rl is not None:
+            try:
+                _rl.log_search(query, [], (_t.monotonic() - _t0) * 1000, _caller, total,
+                               reason="below_min_relevance")
+            except Exception:
+                pass
         return []
 
     # Optional cross-encoder reranking
     reranker = _get_reranker() if use_reranker else None
+    _reranked = False
     if reranker and len(candidates) > 1:
         try:
             pairs  = [(query, c["text"]) for c in candidates]
             scores = reranker.predict(pairs)
             for c, s in zip(candidates, scores):
                 c["relevance"] = float(s)
+            _reranked = True
         except Exception as e:
             logger.warning("Reranker failed: %s — using cosine scores", e)
 
     # Sort by relevance, take top_k
     candidates.sort(key=lambda x: x["relevance"], reverse=True)
-    return candidates[:top_k]
+    _out = candidates[:top_k]
+
+    # Post-rerank relevance-floor trim: the cross-encoder gives padding chunks a
+    # NEGATIVE score (it judged them irrelevant), but they still fill top_k and
+    # become noise in the operator's context.  When the reranker ran, drop results
+    # at/below the floor — but always keep at least the best hit so a query never
+    # returns empty just because its top score is marginally negative.  Only the
+    # reranked path is trimmed (cosine scores are already MIN_RELEVANCE-filtered).
+    # Disable with ARGUS_RAG_TRIM=0; tune the boundary with ARGUS_RAG_RERANK_FLOOR.
+    if _reranked and os.environ.get("ARGUS_RAG_TRIM", "1") != "0":
+        try:
+            _floor = float(os.environ.get("ARGUS_RAG_RERANK_FLOOR", "0.0"))
+        except ValueError:
+            _floor = 0.0
+        _out = _trim_reranked(_out, _floor)
+
+    if _rl is not None:
+        try:
+            _rl.log_search(query, _out, (_t.monotonic() - _t0) * 1000, _caller, total)
+        except Exception:
+            pass
+    return _out
 
 
 def search(
@@ -665,7 +797,10 @@ def search(
         + "\n=== END KNOWLEDGE BASE ===\n"
         "Apply the above examples to inform your decisions. "
         "Prefer techniques and commands that previously succeeded. "
-        "Adapt commands to the current target."
+        "These examples are from DIFFERENT past targets — host identifiers are "
+        "redacted to <host>/<mac>/<redacted>. Reuse the METHOD (product/version, "
+        "CVE, port, payload, technique), but ALWAYS substitute the CURRENT "
+        "target's address/hostname/credentials — never reuse an old IP or host."
     )
 
 
@@ -734,15 +869,24 @@ def stats() -> Dict[str, Any]:
             ct = meta.get("chunk_type", "unknown")
             chunk_types[ct] = chunk_types.get(ct, 0) + 1
 
+        # Resource metering (storage / RAM / chunk-budget) — best-effort.
+        resources: Dict[str, Any] = {}
+        try:
+            from knowledge import rag_budget as _rb
+            resources = _rb.usage()
+        except Exception:
+            pass
         return {
             "total_chunks": total,
             "source_files": len(sources),
             "by_phase":      phases,
             "by_outcome":    outcomes,
             "by_chunk_type": chunk_types,
+            "note":          "by_phase/outcome/chunk_type are from a 2000-chunk sample, not the full corpus",
             "embed_model":   EMBED_MODEL,
             "rerank_model":  RERANK_MODEL or "disabled",
             "db_path":       CHROMA_PATH,
+            "resources":     resources,
         }
     except Exception as e:
         return {"error": str(e), "total_chunks": 0}

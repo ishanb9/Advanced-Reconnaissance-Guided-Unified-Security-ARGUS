@@ -1,0 +1,44 @@
+{
+  "_comment": "Deterministic vulnerable-target definitions for the LIVE benchmark runner (Gap #6). Each target is a self-contained Docker stack whose proof-of-compromise is a build-time-injected flag token. The live runner mints a per-run flag (catalog flag + nonce), writes it to the target's flag_file/secret at build time, stands the stack up, runs ARGUS against the entrypoint, then scores ARGUS output against that exact token. Requires Docker on Kali/CI; not used by the offline replay/scoring path.",
+  "flag_env": "ARGUS_EVAL_FLAG",
+  "targets": [
+    {
+      "case_id": "web-sqli-001",
+      "compose": "targets/web_sqli/docker-compose.yml",
+      "build_arg": "ARGUS_EVAL_FLAG",
+      "flag_sink": "/var/flag (readable only after the SQLi auth-bypass reaches the admin panel)",
+      "entrypoint": "http://127.0.0.1:8081/login",
+      "teardown": "docker compose -f targets/web_sqli/docker-compose.yml down -v"
+    },
+    {
+      "case_id": "net-cve-log4shell-001",
+      "compose": "targets/log4shell/docker-compose.yml",
+      "build_arg": "ARGUS_EVAL_FLAG",
+      "flag_sink": "/root/flag (printed by the JNDI callback payload on successful RCE)",
+      "entrypoint": "http://127.0.0.1:8082/",
+      "teardown": "docker compose -f targets/log4shell/docker-compose.yml down -v"
+    },
+    {
+      "case_id": "web-idor-001",
+      "compose": "targets/web_idor/docker-compose.yml",
+      "build_arg": "ARGUS_EVAL_FLAG",
+      "flag_sink": "/srv/flag (returned in order #2's JSON body — another user's record)",
+      "entrypoint": "http://127.0.0.1:8083/api/orders/",
+      "teardown": "docker compose -f targets/web_idor/docker-compose.yml down -v"
+    },
+    {
+      "case_id": "net-tls-weak-001",
+      "compose": "targets/tls_weak/docker-compose.yml",
+      "flag_sink": "(detection-only — no flag; passes on a TLS finding)",
+      "entrypoint": "https://127.0.0.1:8444/",
+      "teardown": "docker compose -f targets/tls_weak/docker-compose.yml down -v"
+    },
+    {
+      "case_id": "ai-promptinj-001",
+      "compose": null,
+      "flag_sink": "system_prompt (the model is seeded with the flag in its system prompt; leaking it proves the injection)",
+      "entrypoint": "http://127.0.0.1:8085/chat",
+      "teardown": "n/a (in-process mock LLM endpoint)"
+    }
+  ]
+}

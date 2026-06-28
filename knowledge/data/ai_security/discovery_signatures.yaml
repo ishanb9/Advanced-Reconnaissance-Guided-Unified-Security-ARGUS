@@ -1,0 +1,444 @@
+# Shadow-AI discovery signatures (DATA, not code).  Each entry fingerprints an
+# exposed AI/LLM/agent surface by port, service banner, and/or HTTP marker.
+# Matched by agents/ai_red_team/discovery.py during a normal network engagement.
+# Adding a new AI surface = adding an entry here.
+#
+# MATCHING SEMANTICS: a signature FIRES if ANY of
+#   (a port in `ports` is open) OR (a banner substring appears) OR (a marker substring appears).
+# Ports listed here are AI-DEDICATED (a port match alone implies AI with very low FP rate).
+# Shared ports (80, 443, 8000, 8080, 3000, 5000, 8888, etc.) are NEVER listed in `ports` —
+# detection on those relies solely on banners and markers.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LOCAL / SELF-HOSTED INFERENCE
+# ─────────────────────────────────────────────────────────────────────────────
+
+- id: ollama
+  technology: "Ollama LLM server"
+  category: shadow-ai
+  ports: [11434]
+  banners: ["ollama"]
+  markers: ["/api/tags", "/api/chat", "/api/generate", "/api/show", "/api/pull"]
+  owasp_llm: "LLM06 (Excessive Agency) — unauthenticated inference and model management"
+  atlas: "AML.T0040"
+  severity: critical
+  governance: "Ollama is unauthenticated by default; any host that can reach port 11434 can run arbitrary prompts, enumerate loaded models, pull new models consuming host compute, and exfiltrate model weights. Shadow deployment with no inventory or egress control."
+  remediation: "Add to AI asset inventory; bind Ollama to 127.0.0.1 or enforce network-level ACLs; require a reverse proxy with authentication before any internal exposure."
+
+- id: llama_cpp_server
+  technology: "llama.cpp HTTP inference server"
+  category: shadow-ai
+  ports: []
+  banners: ["llama.cpp", "llama-server", "llama cpp"]
+  markers: ["/completion", "/tokenize", "/detokenize", "/embedding", "/props", "llama.cpp"]
+  owasp_llm: "LLM10 (Unbounded Consumption) — unauthenticated inference endpoint"
+  atlas: "AML.T0040"
+  severity: high
+  governance: "A llama.cpp server exposes raw inference without authentication; callers can submit unbounded token generation requests exhausting host GPU/CPU, or extract model configuration details."
+  remediation: "Inventory the host; disable external binding; place behind an authenticated reverse proxy with rate limiting."
+
+- id: vllm
+  technology: "vLLM inference server"
+  category: shadow-ai
+  ports: []
+  banners: ["vllm"]
+  markers: ["/v1/chat/completions", "x-vllm", "vllm-model", "vllm", "vllm_engine"]
+  owasp_llm: "LLM10 (Unbounded Consumption) — high-throughput unauthenticated inference"
+  atlas: "AML.T0040"
+  severity: high
+  governance: "vLLM exposes an OpenAI-compatible API for high-throughput inference; unauthenticated access enables prompt injection, denial-of-wallet attacks, and enumeration of served models."
+  remediation: "Enable vLLM's API key authentication flag; place behind an authenticated gateway; restrict network exposure to authorized clients."
+
+- id: lm_studio
+  technology: "LM Studio local inference server"
+  category: shadow-ai
+  ports: [1234]
+  banners: ["lm studio", "lmstudio"]
+  markers: ["/lmstudio", "lm-studio", "x-lm-studio"]
+  owasp_llm: "LLM01 (Prompt Injection) — developer tool exposed on network"
+  atlas: "AML.T0040"
+  severity: high
+  governance: "LM Studio's local server is unauthenticated and intended for single-user developer use; network exposure turns a personal AI workbench into a promptable endpoint accessible to all LAN peers."
+  remediation: "Restrict LM Studio to loopback; block port 1234 at VLAN/firewall boundary; add to shadow-AI inventory."
+
+- id: localai
+  technology: "LocalAI self-hosted inference server"
+  category: shadow-ai
+  # port 8080 removed — shared with web servers, proxies, dev tools; rely on banners/markers
+  ports: []
+  banners: ["localai", "local-ai"]
+  markers: ["/localai", "x-localai", "localai_version", "/v1/models"]
+  owasp_llm: "LLM02 (Sensitive Information Disclosure) — OpenAI-compatible unauthenticated API"
+  atlas: "AML.T0040"
+  severity: high
+  governance: "LocalAI provides an unauthenticated OpenAI-compatible API fronting multiple local model backends; shadow exposure allows prompt injection and potential data exfiltration through the model."
+  remediation: "Enable LocalAI's API key support; place behind an authenticated reverse proxy; limit network exposure."
+
+- id: text_generation_webui
+  technology: "Text-Generation-WebUI (oobabooga)"
+  category: shadow-ai
+  # ports 5000 (Flask default) and 5005 (generic) removed — shared with many dev servers; 7860 kept (Gradio-dedicated)
+  ports: [7860]
+  banners: ["text-generation-webui", "oobabooga", "oobaboogas"]
+  markers: ["/api/v1/generate", "/api/v1/chat", "text_generation_webui", "/api/v1/model", "oobabooga"]
+  owasp_llm: "LLM01 (Prompt Injection) — full model control panel exposed"
+  atlas: "AML.T0040"
+  severity: critical
+  governance: "Text-Generation-WebUI exposes both a chat interface and an API with model loading/unloading controls; unauthenticated network access gives attackers full inference capability and the ability to load arbitrary models."
+  remediation: "Enable '--api-key' and '--gradio-auth' flags; never expose publicly; restrict via VPN or host firewall."
+
+- id: koboldcpp
+  technology: "KoboldCpp inference server"
+  category: shadow-ai
+  ports: [5001]
+  banners: ["koboldcpp", "kobold cpp", "koboldai"]
+  markers: ["/api/v1/generate", "/api/extra/generate", "koboldcpp", "/api/v1/info/version", "KoboldAI"]
+  owasp_llm: "LLM01 (Prompt Injection) — storytelling-tuned model accessible without auth"
+  atlas: "AML.T0040"
+  severity: high
+  governance: "KoboldCpp is a popular local inference server (often running uncensored models) that is unauthenticated by default; network exposure enables prompt injection and access to potentially policy-violating model outputs."
+  remediation: "Use '--host 127.0.0.1'; place behind an authenticated reverse proxy; add to asset inventory."
+
+- id: triton_inference_server
+  technology: "NVIDIA Triton Inference Server"
+  category: shadow-ai
+  # port 8000 removed — shared with many web services; 8001 (gRPC) and 8002 (metrics) kept as Triton-dedicated
+  ports: [8001, 8002]
+  banners: ["triton", "tritonserver", "nvidia triton"]
+  markers: ["/v2/health/ready", "/v2/models", "/v2/repository", "tritonserver", "x-triton"]
+  owasp_llm: "LLM10 (Unbounded Consumption) — production inference cluster surface"
+  atlas: "AML.T0040"
+  severity: high
+  governance: "Triton Inference Server manages production ML model repositories; unauthenticated exposure (HTTP on 8000, gRPC on 8001, metrics on 8002) enables model enumeration, unbounded inference, and potential model extraction."
+  remediation: "Enable Triton's authorization plugin; restrict HTTP/gRPC ports to internal service mesh; disable public metrics endpoint."
+
+- id: torchserve
+  technology: "TorchServe model serving"
+  category: shadow-ai
+  # port 8080 removed — shared with many web servers; 8081 (management) and 8082 (metrics) kept as TorchServe-dedicated
+  ports: [8081, 8082]
+  banners: ["torchserve", "torch serve", "pytorch serve"]
+  markers: ["/predictions/", "torchserve", "/v2/models"]
+  owasp_llm: "LLM10 (Unbounded Consumption) — model inference and management API exposed"
+  atlas: "AML.T0040"
+  severity: high
+  governance: "TorchServe exposes both inference (8080) and management (8081) APIs; the management API allows registering, loading, and unloading arbitrary models — a severe risk if reachable without authentication."
+  remediation: "Bind management API to loopback only; enforce network policy restricting inference API to authorized clients; require mTLS for service-to-service communication."
+
+- id: ray_serve
+  technology: "Ray Serve ML serving"
+  category: shadow-ai
+  # port 8000 removed — shared with many web services; 8265 (Ray dashboard) kept as Ray-dedicated
+  ports: [8265]
+  banners: ["ray serve", "ray dashboard", "rayserve"]
+  markers: ["/api/serve/applications", "ray-serve", "x-ray-serve", "/serve/", "ray_cluster", "ray_dashboard"]
+  owasp_llm: "LLM06 (Excessive Agency) — distributed ML cluster management"
+  atlas: "AML.T0040"
+  severity: high
+  governance: "Ray Serve and its dashboard expose distributed ML cluster management; the dashboard (8265) can trigger arbitrary Python function execution across worker nodes — a severe privilege-escalation vector."
+  remediation: "Restrict Ray dashboard and serve ports to admin VLAN; enable Ray's authentication token; never expose cluster ports to untrusted networks."
+
+- id: kserve_seldon
+  technology: "KServe / Seldon Core model server"
+  category: shadow-ai
+  ports: []
+  banners: ["kserve", "seldon", "seldon-core", "inferenceservice"]
+  # /v1/models and /v2/models alone are too generic; replaced with more specific markers
+  markers: ["/v2/health/live", "/kserve", "inferenceservice", "seldon-deploy", "/v2/repository/models"]
+  owasp_llm: "LLM10 (Unbounded Consumption) — Kubernetes-hosted inference exposed off-cluster"
+  atlas: "AML.T0040"
+  severity: high
+  governance: "KServe/Seldon InferenceService endpoints exposed outside their Kubernetes namespace allow unauthenticated inference requests, model metadata leakage, and potential cluster pivot via Kubernetes API misconfigurations."
+  remediation: "Enforce Istio/Knative mTLS; restrict external load balancer exposure; require OAuth2 token authentication on inference endpoints."
+
+- id: bentoml
+  technology: "BentoML serving API"
+  category: shadow-ai
+  # port 3000 removed — shared with Node.js/React dev servers; rely on banners/markers
+  ports: []
+  banners: ["bentoml", "bento ml", "bentoserver"]
+  # /metrics and /healthz removed — generic Prometheus/k8s health endpoints on any service
+  markers: ["bentoml", "bento_service", "X-BentoML", "/docs.json"]
+  owasp_llm: "LLM02 (Sensitive Information Disclosure) — model metadata and inference exposed"
+  atlas: "AML.T0040"
+  severity: medium
+  governance: "BentoML services expose an auto-generated OpenAPI docs endpoint that reveals model input/output schema and inference routes; unauthenticated access enables model fingerprinting and direct inference."
+  remediation: "Deploy behind an authenticated API gateway; disable /docs.json in production; restrict network access to authorized service consumers."
+
+- id: huggingface_tgi
+  technology: "Hugging Face Text Generation Inference (TGI)"
+  category: shadow-ai
+  ports: []
+  banners: ["text-generation-inference", "tgi", "huggingface tgi"]
+  markers: ["/generate", "/generate_stream", "text-generation-inference", "/v1/chat/completions", "x-compute-type"]
+  owasp_llm: "LLM10 (Unbounded Consumption) — streaming inference without rate limiting"
+  atlas: "AML.T0040"
+  severity: high
+  governance: "Hugging Face TGI provides high-throughput streaming inference; unauthenticated exposure enables unbounded token generation draining GPU resources and allows adversarial prompt injection through the /generate endpoint."
+  remediation: "Enable TGI's API token authentication; place behind a rate-limiting reverse proxy; restrict to authorized internal subnets."
+
+- id: xinference
+  technology: "Xinference (Xorbits Inference)"
+  category: shadow-ai
+  ports: [9997]
+  banners: ["xinference", "xorbits inference"]
+  # /v1/models alone is too generic; replaced with more specific markers
+  markers: ["/v1/chat/completions", "xinference_version", "/v1/engines", "xinference"]
+  owasp_llm: "LLM06 (Excessive Agency) — multi-modal model management API"
+  atlas: "AML.T0040"
+  severity: high
+  governance: "Xinference exposes APIs for launching and managing multiple concurrent model instances (LLMs, embedding models, image models); unauthenticated access enables arbitrary model launches consuming cloud/on-prem GPU budget."
+  remediation: "Enable Xinference's token-based auth; restrict port 9997 to ML engineer subnet; audit launched model instances against approved model inventory."
+
+# ─────────────────────────────────────────────────────────────────────────────
+# OPENAI-COMPATIBLE / GATEWAY APIs
+# ─────────────────────────────────────────────────────────────────────────────
+
+- id: openai_compatible
+  technology: "Generic OpenAI-compatible LLM API"
+  category: shadow-ai
+  ports: []
+  banners: []
+  markers: ["/v1/chat/completions", "/v1/completions", "/v1/models", "/v1/embeddings"]
+  owasp_llm: "LLM01 (Prompt Injection) / LLM02 (Sensitive Information Disclosure)"
+  atlas: "AML.T0040"
+  severity: medium
+  governance: "An OpenAI-compatible API endpoint is reachable; without strong authentication it is directly promptable enabling prompt injection, sensitive data exfiltration via model context, and enumeration of deployed models."
+  remediation: "Require Bearer token or mTLS authentication; log all inference requests; restrict to authorized internal clients."
+
+- id: litellm_proxy
+  technology: "LiteLLM proxy gateway"
+  category: shadow-ai
+  ports: [4000]
+  banners: ["litellm", "lite llm"]
+  markers: ["x-litellm", "litellm_version", "/key/generate", "/team/", "x-litellm-call-id", "/health/readiness"]
+  owasp_llm: "LLM02 (Sensitive Information Disclosure) — credential and routing metadata exposure"
+  atlas: "AML.T0040"
+  severity: high
+  governance: "LiteLLM proxy routes traffic to upstream providers (OpenAI, Anthropic, Azure) and may store API keys in its config; an exposed proxy endpoint leaks upstream credentials, enables billing abuse, and can bypass per-provider rate limits."
+  remediation: "Enforce LiteLLM master key authentication; restrict /key/generate and admin endpoints; audit all upstream API keys stored in LiteLLM config."
+
+- id: openrouter_gateway
+  technology: "OpenRouter-style LLM gateway"
+  category: shadow-ai
+  ports: []
+  banners: ["openrouter", "open-router"]
+  markers: ["x-openrouter", "openrouter.ai", "/api/v1/chat/completions", "x-title"]
+  owasp_llm: "LLM02 (Sensitive Information Disclosure) — multi-provider API key aggregation"
+  atlas: "AML.T0040"
+  severity: medium
+  governance: "An OpenRouter-style gateway aggregates multiple LLM provider credentials; unauthenticated or poorly secured access exposes upstream API keys and allows attackers to route arbitrary workloads through corporate-funded accounts."
+  remediation: "Require authenticated access to the gateway; rotate upstream provider keys; monitor spend anomalies for billing abuse detection."
+
+# ─────────────────────────────────────────────────────────────────────────────
+# AGENT / RAG / ORCHESTRATION UIs & APIs
+# ─────────────────────────────────────────────────────────────────────────────
+
+- id: mcp_server
+  technology: "Model Context Protocol (MCP) server"
+  category: shadow-ai
+  ports: []
+  banners: ["mcp", "model context protocol"]
+  # /sse removed — generic Server-Sent Events endpoint used by many apps (e.g. React hot-reload)
+  markers: ["/mcp", "mcp/list_tools", "mcp/call_tool", "x-mcp-version", "tools/list", "protocolVersion"]
+  owasp_llm: "LLM06 (Excessive Agency) — tool-granting server accessible to untrusted agents"
+  atlas: "AML.T0053"
+  severity: high
+  governance: "An MCP server grants LLM agents access to tools (filesystem, shell, network, APIs); an exposed or injectable MCP server is a confused-deputy / excessive-agency risk enabling attackers to have agents execute arbitrary host operations."
+  remediation: "Restrict MCP server network binding to localhost or VPN; authenticate all tool-call sessions; audit tool manifests against the principle of least privilege."
+
+- id: langserve
+  technology: "LangServe / LangChain serving"
+  category: shadow-ai
+  ports: []
+  banners: ["langserve", "langchain serve"]
+  # /invoke, /stream, /batch removed — generic REST verbs on any API; replaced with specific LangServe markers
+  markers: ["/playground", "langserve", "input_schema", "x-langsmith", "runnable_config", "/c/N/stream"]
+  owasp_llm: "LLM01 (Prompt Injection) — chain input surfaces exposed without auth"
+  atlas: "AML.T0051"
+  severity: high
+  governance: "LangServe exposes LangChain chains/agents via REST including an interactive /playground; unauthenticated access allows adversarial prompt injection into retrieval chains that may access internal data stores."
+  remediation: "Disable /playground in production; require API authentication; audit chain tool access for excessive permissions."
+
+- id: langgraph_server
+  technology: "LangGraph agent server"
+  category: shadow-ai
+  ports: []
+  banners: ["langgraph", "lang graph"]
+  # /threads, /runs, /assistants removed — generic REST resources; replaced with specific LangGraph markers
+  markers: ["/threads/", "/runs/", "langgraph", "x-langgraph", "/checkpoints", "graph_schema"]
+  owasp_llm: "LLM06 (Excessive Agency) — stateful agent thread management exposed"
+  atlas: "AML.T0053"
+  severity: high
+  governance: "LangGraph server manages stateful multi-agent threads with persistent memory and tool execution; unauthenticated access allows session hijacking of agent threads, injection of malicious tool calls, and access to accumulated agent memory."
+  remediation: "Require LangGraph API token authentication; restrict to authorized agent clients; audit thread persistence storage for sensitive data retention."
+
+- id: flowise
+  technology: "Flowise AI flow builder"
+  category: shadow-ai
+  # port 3000 removed — shared with Node.js/React dev servers; rely on banners/markers
+  ports: []
+  banners: ["flowise"]
+  markers: ["/api/v1/chatflows", "/api/v1/prediction", "flowise", "/api/v1/apikey", "x-flowise-api-key"]
+  owasp_llm: "LLM06 (Excessive Agency) — low-code agent builder with tool integrations"
+  atlas: "AML.T0051"
+  severity: high
+  governance: "Flowise provides a visual builder for LLM-powered workflows with database, API, and tool integrations; the admin API exposes chatflow definitions containing embedded credentials, tool configs, and connected data source details."
+  remediation: "Enable Flowise authentication; restrict admin API to trusted networks; audit chatflow nodes for embedded API keys and database credentials."
+
+- id: dify
+  technology: "Dify AI application platform"
+  category: shadow-ai
+  ports: []
+  banners: ["dify"]
+  markers: ["/api/apps", "/v1/chat-messages", "x-app-code", "dify_version", "/console/api/", "x-dify"]
+  owasp_llm: "LLM02 (Sensitive Information Disclosure) — multi-tenant AI platform with dataset access"
+  atlas: "AML.T0051"
+  severity: high
+  governance: "Dify manages AI applications with integrated knowledge bases, API keys, and prompt templates; unauthenticated or cross-tenant access exposes proprietary datasets, system prompts, and downstream provider credentials."
+  remediation: "Enforce Dify authentication and RBAC; audit dataset access permissions per workspace; rotate all API keys stored in Dify app configurations."
+
+- id: anythingllm
+  technology: "AnythingLLM workspace"
+  category: shadow-ai
+  ports: [3001]
+  banners: ["anythingllm", "anything llm", "anything-llm"]
+  markers: ["/api/workspace", "/api/system/check", "anythingllm", "x-anythingllm", "/api/v1/workspace"]
+  owasp_llm: "LLM02 (Sensitive Information Disclosure) — document-ingest RAG system"
+  atlas: "AML.T0051"
+  severity: high
+  governance: "AnythingLLM ingests internal documents into a RAG workspace; unauthenticated access exposes the full document corpus, workspace configurations, and embedded vector store contents to unauthorized inference."
+  remediation: "Enable AnythingLLM multi-user mode with authentication; restrict port 3001 to authorized users; audit ingested document classification."
+
+- id: open_webui
+  technology: "Open WebUI (Ollama/OpenAI frontend)"
+  category: shadow-ai
+  # port 8080 removed — shared with many web servers; rely on banners/markers
+  ports: []
+  banners: ["open webui", "open-webui", "ollama webui"]
+  markers: ["open-webui", "/api/models", "/ollama/api", "x-openwebui", "webui_version"]
+  owasp_llm: "LLM01 (Prompt Injection) — web chat front-end without network controls"
+  atlas: "AML.T0040"
+  severity: medium
+  governance: "Open WebUI provides a polished chat interface over Ollama/OpenAI backends; if exposed without authentication it becomes an unauthenticated shadow-AI console accessible to any network peer."
+  remediation: "Enable Open WebUI's built-in authentication; restrict to VPN or trusted subnet; audit backend model access permissions."
+
+- id: n8n_ai_workflow
+  technology: "n8n AI workflow automation"
+  category: shadow-ai
+  ports: [5678]
+  banners: ["n8n"]
+  markers: ["/webhook/", "/rest/workflows", "n8n_version", "x-n8n", "/rest/executions", "/nodes/ai"]
+  owasp_llm: "LLM06 (Excessive Agency) — workflow automation with AI node executions"
+  atlas: "AML.T0053"
+  severity: high
+  governance: "n8n AI workflows can chain LLM calls with HTTP requests, database queries, and external service integrations; an exposed n8n instance allows manipulation of production automation flows and may expose webhook trigger URLs that invoke AI agents."
+  remediation: "Enable n8n authentication and restrict API access; audit workflow webhook URLs; disable direct internet exposure of n8n instances containing AI workflows."
+
+- id: autogpt_server
+  technology: "AutoGPT / autonomous agent server"
+  category: shadow-ai
+  ports: []
+  banners: ["autogpt", "auto-gpt", "auto gpt"]
+  markers: ["/api/v1/agents", "autogpt", "agent_task", "/ap/v1/agent", "agent_protocol", "/agent/tasks"]
+  owasp_llm: "LLM06 (Excessive Agency) — autonomous agent with unrestricted tool access"
+  atlas: "AML.T0053"
+  severity: critical
+  governance: "AutoGPT-style autonomous agents can execute multi-step plans using file system, web browsing, code execution, and shell access; an exposed agent server allows attackers to task the agent with arbitrary operations including data exfiltration and lateral movement."
+  remediation: "Never expose autonomous agent servers to untrusted networks; wrap with strong authentication; sandbox agent tool access using containers or restricted user accounts."
+
+- id: jupyter_ai_kernel
+  technology: "Jupyter Notebook/Lab with AI extensions"
+  category: shadow-ai
+  # 8888/8889 removed — Jupyter is widely deployed without AI extensions; detection relies on AI-specific markers
+  ports: []
+  banners: ["jupyter", "jupyterlab", "jupyter notebook"]
+  markers: ["/api/kernels", "/api/sessions", "jupyter_session", "/lab/api", "jupyter-ai", "x-jupyter-token"]
+  owasp_llm: "LLM01 (Prompt Injection) — arbitrary code execution via AI-assisted notebook"
+  atlas: "AML.T0040"
+  severity: critical
+  governance: "Jupyter environments with AI extensions (jupyter-ai, Copilot) combine arbitrary Python execution with LLM prompt surfaces; unauthenticated or token-less Jupyter exposure is already critical, and AI extensions add prompt injection as an additional attack path to kernel code execution."
+  remediation: "Always require Jupyter token/password authentication; never expose without TLS; restrict to localhost or authenticated VPN; audit AI extension permissions."
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ML APP FRAMEWORKS FRONTING MODELS
+# ─────────────────────────────────────────────────────────────────────────────
+
+- id: gradio_app
+  technology: "Gradio ML demo / AI app"
+  category: shadow-ai
+  ports: [7860]
+  banners: ["gradio"]
+  markers: ["gradio_config", "/gradio/", "/queue/join", "gradio_version", "__gradio_mode__"]
+  owasp_llm: "LLM01 (Prompt Injection) — model demo interface without access control"
+  atlas: "AML.T0040"
+  severity: medium
+  governance: "Gradio apps frequently front production AI models for internal demos; without authentication they expose model inference to all network peers, and Gradio's file upload endpoints have historically had path-traversal vulnerabilities (CVE-2024-1561)."
+  remediation: "Enable Gradio authentication (auth= parameter); restrict port 7860 to internal demo VLAN; patch Gradio to latest version; add to shadow-AI inventory."
+
+- id: streamlit_ai_app
+  technology: "Streamlit AI/ML application"
+  category: shadow-ai
+  ports: [8501]
+  banners: ["streamlit"]
+  # /stream removed — extremely generic; kept specific Streamlit markers
+  markers: ["streamlit", "_stcore/stream", "streamlit_app", "st.session_state", "x-streamlit"]
+  owasp_llm: "LLM02 (Sensitive Information Disclosure) — model-backed app with embedded credentials"
+  atlas: "AML.T0040"
+  severity: low
+  governance: "Streamlit apps frequently embed API keys in source (st.secrets) and front LLM-backed workflows; source disclosure via Streamlit's static file serving has exposed credentials, and AI-backed apps add prompt injection risk."
+  remediation: "Use Streamlit Community Cloud sharing controls or a reverse proxy with authentication; never hardcode API keys — use secrets management; restrict port 8501 to internal networks."
+
+# ─────────────────────────────────────────────────────────────────────────────
+# VECTOR DATABASES (RAG STACK EVIDENCE — SUPPORTING SHADOW-AI INDICATORS)
+# ─────────────────────────────────────────────────────────────────────────────
+
+- id: chroma_db
+  technology: "Chroma vector database"
+  category: shadow-ai
+  # port 8000 removed — shared with many web services; rely on banners/markers
+  ports: []
+  banners: ["chroma", "chromadb"]
+  markers: ["/api/v1/collections", "/api/v1/heartbeat", "chromadb", "chroma_version", "/api/v1/tenants"]
+  owasp_llm: "LLM02 (Sensitive Information Disclosure) — RAG knowledge base exposed"
+  atlas: "AML.T0051"
+  severity: medium
+  governance: "An exposed Chroma vector DB is strong evidence of a RAG stack; Chroma has no authentication by default, allowing enumeration and bulk extraction of embedded document chunks that may contain proprietary internal knowledge."
+  remediation: "Enable Chroma's token authentication header; bind to localhost in development; restrict production access to the application service account only."
+
+- id: qdrant
+  technology: "Qdrant vector search engine"
+  category: shadow-ai
+  ports: [6333, 6334]
+  banners: ["qdrant"]
+  markers: ["/collections", "/cluster", "qdrant_version", "x-qdrant", "/readyz", "/dashboard"]
+  owasp_llm: "LLM02 (Sensitive Information Disclosure) — vector store with embedded document content"
+  atlas: "AML.T0051"
+  severity: medium
+  governance: "Qdrant exposes HTTP (6333) and gRPC (6334) APIs for vector similarity search; unauthenticated access allows full collection enumeration and vector payload extraction, leaking embedded document fragments from any connected RAG pipeline."
+  remediation: "Enable Qdrant API key authentication; restrict ports 6333/6334 to the application service tier; disable the /dashboard UI in production."
+
+- id: weaviate
+  technology: "Weaviate vector database"
+  category: shadow-ai
+  # port 8080 removed — shared with many web servers; rely on banners/markers
+  ports: []
+  banners: ["weaviate"]
+  markers: ["/v1/schema", "/v1/objects", "/v1/.well-known/ready", "weaviate_version", "x-weaviate", "/v1/graphql"]
+  owasp_llm: "LLM02 (Sensitive Information Disclosure) — graph-based vector store"
+  atlas: "AML.T0051"
+  severity: medium
+  governance: "Weaviate exposes REST and GraphQL interfaces for semantic search; unauthenticated access enables schema enumeration (revealing data model), bulk object extraction (leaking embedded text and properties), and cross-class query abuse."
+  remediation: "Enable Weaviate's OIDC or API key authentication module; restrict GraphQL and REST ports to authorized consumers; audit class-level permissions."
+
+- id: milvus
+  technology: "Milvus vector database"
+  category: shadow-ai
+  ports: [19530, 9091]
+  banners: ["milvus"]
+  markers: ["/healthz", "milvus_version", "/metrics", "x-milvus", "/api/v1/collections"]
+  owasp_llm: "LLM02 (Sensitive Information Disclosure) — high-scale vector store for production RAG"
+  atlas: "AML.T0051"
+  severity: medium
+  governance: "Milvus gRPC (19530) and metrics (9091) endpoints exposed without authentication allow enumeration of collection schemas and bulk vector extraction from production RAG deployments, potentially leaking large corpora of embedded proprietary data."
+  remediation: "Enable Milvus TLS and authentication; restrict port 19530 to the application plane; disable public metrics endpoint or restrict to monitoring infrastructure."

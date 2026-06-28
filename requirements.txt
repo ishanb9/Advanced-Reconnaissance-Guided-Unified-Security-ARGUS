@@ -43,6 +43,12 @@ pydantic==2.7.1
 email-validator>=2.1                   # parses RFC 5321 emails for auth/schemas.py
 
 # ── Operational data stores ────────────────────────────────────
+# NOTE: these are the CLIENTS. ARGUS also needs a running MongoDB SERVER on
+# localhost:27017 (>= 6.x) — agent_server.py builds indexes at startup and will
+# NOT boot without it (Errno 111 "Connection refused"). The server is a system
+# service, not a pip package: see requirements-kali.txt → RUNTIME PREREQUISITES
+# (apt install mongodb, or `docker run -d -p 27017:27017 -v argus-mongo:/data/db mongo:6`).
+# Override the location with MONGO_URI=mongodb://<host>:27017 if it lives elsewhere.
 motor==3.4.0                           # async MongoDB driver — engagement state
 pymongo==4.7.2                         # sync MongoDB + bson
 dnspython==2.6.1                       # required by motor
@@ -85,6 +91,7 @@ python3-saml>=1.16                     # SAML 2.0 SP — auth/providers/saml.py
 chromadb>=0.5.0                        # vector store
 sentence-transformers>=3.0.0           # bge-small embedder + reranker
 pypdf>=4.0.0                           # PDF text extraction
+weasyprint>=60                         # server-side styled HTML→PDF for the report themes (needs pango/cairo system libs — see setup.sh / install-kali-tools.sh; browser print-to-PDF is the zero-dep fallback)
 beautifulsoup4>=4.12.0                 # HTML cleaning
 lxml>=5.0.0                            # XML/HTML parser (also used by python3-saml)
 tqdm>=4.66.0                           # progress bars during ingestion

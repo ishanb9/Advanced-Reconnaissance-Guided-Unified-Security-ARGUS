@@ -43,7 +43,15 @@ TOOLS: List[Dict[str, Any]] = [
                 "curl, openssl, ssh, smbclient, etc.  `args` is the full "
                 "command-line argument string (no leading tool name).  Use for "
                 "scanning, fuzzing, and for running attacker-side scripts/"
-                "payload servers."),
+                "payload servers.  For AV/OT control systems (e.g. Crestron, "
+                "CIP 41794 / CTP 41795) the agents/avot module ships a "
+                "SIMPL+/SIMPL# SAST (sast/simpl_scan.py) and a safe dry-run "
+                "CIP/CTP protocol fuzzer (fuzz/crestron_fuzzer.py).  When a "
+                "technology skill matches (knowledge/skills — OT/IoT/IT), its "
+                "safe quick-wins are surfaced to you: prefer the skill's safe "
+                "quick-win first.  Respect the scan-intrusiveness ceiling — "
+                "intrusive/disruptive quick-wins need authorization, and OT "
+                "targets stay read-only (safe) unless explicitly authorized."),
     },
     {
         "name": "http",
@@ -94,6 +102,16 @@ TOOLS: List[Dict[str, Any]] = [
                 "version you fingerprinted. Returns CVE IDs with severity AND "
                 "GitHub repo URLs you can git clone and run. Use it BEFORE "
                 "hand-rolling endpoint enumeration."),
+    },
+    {
+        "name": "technique_search",
+        "args": {"query": "str", "k": "int(optional)"},
+        "doc": ("Lexical search of ARGUS's offensive corpus (HackTricks + "
+                "PayloadsAllTheThings) for the EXACT payload / bypass / command for a "
+                "vulnerability class you already identified. Use it when you know the "
+                "bug type (e.g. 'jinja2 ssti rce', 'jwt alg none', 'lfi path "
+                "traversal php filter') and want the precise string to try — faster "
+                "and more exact than recalling it. Returns ranked technique snippets."),
     },
     {
         "name": "run_playbook",

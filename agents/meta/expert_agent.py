@@ -486,6 +486,17 @@ class RedTeamExpertAgent(BaseMetaAgent):
             "agent": "expert", "status": "thinking", "phase": phase, "mode": "post",
         })
 
+        # Engagement-integrity backstop: never let a DIFFERENT session's findings
+        # drive this engagement's mission_phase/progress (the Niagara/Fox bleed).
+        # Drop known-foreign-origin items; legacy items without _origin are kept.
+        try:
+            _sid = str(getattr(self, "_session_id", "") or "")
+            findings = [f for f in (findings or [])
+                        if not (isinstance(f, dict) and (f.get("_origin") or {}).get("session_id")
+                                and str((f.get("_origin") or {}).get("session_id")) != _sid)]
+        except Exception:
+            pass
+
         # RAG: ground on findings & pivot opportunities
         finding_titles = ", ".join(
             f.get("title", "") for f in findings[:6] if isinstance(f, dict)

@@ -118,6 +118,7 @@ const API = (() => {
 
     // ── Report ────────────────────────────────────────────────────────
     reportUrl: (id, fmt='html') => `${BASE}/sessions/${id}/report?format=${fmt}`,
+    reportThemes: ()            => get('/report/themes'),
 
     // ── Shells ────────────────────────────────────────────────────────
     createShell:    (body)         => post('/shells/create', body),

@@ -83,14 +83,58 @@ def genuine_success(intel: Dict[str, Any]) -> Tuple[bool, List[str]]:
     return (len(reasons) > 0, reasons)
 
 
-def _scrub(text: str, target: str) -> str:
-    """Remove engagement-specific identifiers that aren't reusable: the target
-    IP/host, raw 32-64 hex flag tokens.  Keeps product/version/CVE/method."""
+def _scrub(text: str, target: str, intel: Any = None) -> str:
+    """Generalise a lesson so it is reusable on a DIFFERENT host next time.
+
+    A learned technique must NOT bake in THIS engagement's identifiers — the IP,
+    hostname/vhost/domain, MAC, recovered credentials, or flag — because the next
+    target's address is different.  We keep everything that makes the method
+    reusable (product/version, CVE, port/protocol, function codes, tool, payload,
+    generic paths) and replace the engagement-specific identifiers with
+    placeholders.  Host identifiers are scrubbed both generically (IPv4/IPv6/MAC)
+    and SPECIFICALLY (the exact hosts this engagement saw, from intel)."""
     t = str(text or "")
+    intel = intel if isinstance(intel, dict) else {}
+
+    # 1) The exact host identifiers from THIS engagement (most precise; longest
+    #    first so an FQDN is replaced before its short hostname).  Word-bounded so
+    #    a short domain token never corrupts an unrelated word.
+    hosts = set()
     if target:
-        t = t.replace(target, "the target")
-    t = re.sub(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", "the target", t)          # IPs
-    t = re.sub(r"\b[0-9a-fA-F]{32,64}\b", "<flag>", t)                   # flag tokens
+        hosts.add(str(target))
+    for k in ("target", "target_host", "target_hostname", "domain", "fqdn"):
+        v = intel.get(k)
+        if v:
+            hosts.add(str(v))
+    for vh in (intel.get("vhosts") or []):
+        hosts.add(str(vh.get("vhost") if isinstance(vh, dict) else vh))
+    for h in (intel.get("hostnames") or []):
+        hosts.add(str(h))
+    for h in sorted((h for h in hosts if h and len(h) >= 3), key=len, reverse=True):
+        try:
+            t = re.sub(r"\b" + re.escape(h) + r"\b", "<host>", t)
+        except re.error:
+            t = t.replace(h, "<host>")
+
+    # 2) Generic network identifiers.  MAC before IPv6 (a MAC also looks like a
+    #    short colon-hex run); IPv6 requires >=4 groups or '::' so timestamps
+    #    like 12:34:56 are not mistaken for an address.
+    t = re.sub(r"\b(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}\b", "<mac>", t)
+    t = re.sub(r"\b(?:[0-9a-fA-F]{1,4}:){4,}[0-9a-fA-F]{1,4}\b", "<host>", t)
+    t = re.sub(r"\b[0-9a-fA-F]{1,4}::[0-9a-fA-F:]{0,}\b", "<host>", t)
+    t = re.sub(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", "<host>", t)              # IPv4
+
+    # 3) Recovered credentials — never store this engagement's loot in a lesson.
+    for c in (intel.get("credentials") or []):
+        if not isinstance(c, dict):
+            continue
+        for key in ("password", "pass", "username", "user", "hash", "secret", "token"):
+            val = c.get(key)
+            if val and len(str(val)) >= 4:
+                t = t.replace(str(val), "<redacted>")
+
+    # 4) Flag tokens.
+    t = re.sub(r"\b[0-9a-fA-F]{32,64}\b", "<flag>", t)
     return t.strip()
 
 
@@ -249,7 +293,7 @@ async def distill_and_store(*, master: Any, intel: Dict[str, Any], session_id: s
             text = str(les.get("technique") or les.get("text") or "").strip()
             title = str(les.get("title") or "").strip()
             full = (f"{title}\n{text}" if title else text).strip()
-            full = _scrub(full, target)
+            full = _scrub(full, target, intel)
             if not _lesson_quality_ok(full):
                 continue
             cat = str(les.get("category") or "exploit").strip().lower()

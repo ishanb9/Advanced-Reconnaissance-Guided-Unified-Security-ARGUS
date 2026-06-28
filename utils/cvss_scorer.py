@@ -337,8 +337,119 @@ def rank_chains(chains: List[Dict[str, Any]],
     return scored
 
 
+# ── AIVSS: AI-aware risk scoring (Slice 3) ──────────────────────────────
+#
+# AI/LLM findings don't fit CVSS cleanly: the "exploit" is probabilistic (a
+# measured Attack Success Rate, not a binary), and agentic capabilities
+# (tool use, autonomy, persistence) amplify impact beyond a single host.  This
+# is an AIVSS-aligned heuristic (OWASP AI Vulnerability Scoring System spirit):
+#
+#     AIVSS = clamp( CVSS_base × reliability(ASR) × (1 + agentic_amplification) )
+#
+# where reliability scales by the measured ASR (a probe that never succeeded is
+# half-weighted) and agentic_amplification reflects how much the attack class
+# lets the model *act* (excessive agency > memory persistence > injection).
+# Transparent + conservative; content-agnostic (reads finding metadata only).
+
+# attack-class → agentic amplification factor (0.0–0.6).  Keyed on the OWASP-LLM
+# category / attack_vector carried in finding.extra.
+_AGENTIC_AMP: Dict[str, float] = {
+    "excessive_agency":     0.60,   # tool misuse / confused deputy — model takes actions
+    "memory_poisoning":     0.45,   # persistence across sessions
+    "indirect_injection":   0.40,   # crosses a trust boundary (RAG/tool/web content)
+    "jailbreak":            0.30,   # guardrail bypass
+    "insecure_output":      0.30,   # downstream XSS/SQLi from model output
+    "prompt_injection":     0.25,
+    "system_prompt_leak":   0.15,
+    "unbounded_consumption":0.20,   # denial-of-wallet
+}
+
+
+@dataclass
+class AIVSSScore:
+    finding_id:  str
+    title:       str
+    cvss_base:   float
+    asr:         float
+    agentic:     float
+    aivss_score: float
+    severity:    str
+    vector:      str
+    rationale:   str = ""
+
+
+def _ai_category(finding: Dict[str, Any]) -> str:
+    extra = finding.get("extra") if isinstance(finding.get("extra"), dict) else {}
+    cat = str(extra.get("attack_vector") or extra.get("category") or "").lower()
+    if cat:
+        return cat
+    # fall back to OWASP-LLM id → coarse class
+    owasp = str(extra.get("owasp_llm") or "").upper()
+    if "LLM06" in owasp:
+        return "excessive_agency"
+    if "LLM04" in owasp:
+        return "memory_poisoning"
+    if "LLM05" in owasp:
+        return "insecure_output"
+    if "LLM07" in owasp:
+        return "system_prompt_leak"
+    if "LLM10" in owasp:
+        return "unbounded_consumption"
+    return "prompt_injection"
+
+
+def score_ai_finding(finding: Dict[str, Any]) -> AIVSSScore:
+    """AIVSS-aligned score for one AI/LLM finding (uses finding.extra: asr,
+    owasp_llm, attack_vector).  Returns an AIVSSScore (CVSS parity + AI factors)."""
+    extra = finding.get("extra") if isinstance(finding.get("extra"), dict) else {}
+    cvss_base = infer_vector(finding)[1]
+    if cvss_base <= 0.0:
+        # No CVSS keyword rule matched (typical for AI findings) — derive the
+        # base from the finding's severity so AIVSS never collapses to zero when
+        # there is a real measured ASR.
+        cvss_base = {"CRITICAL": 9.0, "HIGH": 7.5, "MEDIUM": 5.0,
+                     "LOW": 3.1, "INFO": 2.0}.get(
+            str(finding.get("severity") or "").upper(), 4.0)
+    try:
+        asr = float(extra.get("asr"))
+    except (TypeError, ValueError):
+        asr = 0.0
+    asr = max(0.0, min(1.0, asr))
+    cat = _ai_category(finding)
+    agentic = _AGENTIC_AMP.get(cat, 0.20)
+    reliability = 0.5 + 0.5 * asr          # asr=1 → full base, asr=0 → half
+    aivss = min(10.0, round(cvss_base * reliability * (1.0 + agentic), 1))
+    owasp = str(extra.get("owasp_llm") or "").split()[0] if extra.get("owasp_llm") else ""
+    vector = (f"AIVSS/ASR:{asr:.2f}/AG:{agentic:.2f}"
+              + (f"/OWASP:{owasp}" if owasp else ""))
+    return AIVSSScore(
+        finding_id  = str(finding.get("finding_id") or finding.get("id") or ""),
+        title       = str(finding.get("title") or ""),
+        cvss_base   = cvss_base,
+        asr         = asr,
+        agentic     = agentic,
+        aivss_score = aivss,
+        severity    = severity_band(aivss),
+        vector      = vector,
+        rationale   = (f"CVSS {cvss_base:.1f} × reliability {reliability:.2f}(ASR={asr:.0%}) "
+                       f"× agentic {1.0 + agentic:.2f}({cat}) = {aivss:.1f}"),
+    )
+
+
+def score_ai_findings(findings: List[Dict[str, Any]]) -> List[AIVSSScore]:
+    """Score every AI finding (those with extra.ai_finding) highest-first."""
+    out: List[AIVSSScore] = []
+    for f in findings:
+        extra = f.get("extra") if isinstance(f.get("extra"), dict) else {}
+        if extra.get("ai_finding") or extra.get("asr") is not None or f.get("tool_used") == "ai_red_team":
+            out.append(score_ai_finding(f))
+    out.sort(key=lambda x: x.aivss_score, reverse=True)
+    return out
+
+
 __all__ = [
     "calculate_base", "vector_to_string", "severity_band",
     "infer_vector", "score_findings", "score_chain", "rank_chains",
     "FindingScore", "ChainScore",
+    "score_ai_finding", "score_ai_findings", "AIVSSScore",
 ]

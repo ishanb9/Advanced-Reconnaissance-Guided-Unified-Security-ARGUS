@@ -120,6 +120,8 @@ const INIT = {
   sessionMode:       'single',  // 'single' | 'cidr' | 'multi'
   discoveredHosts:   [],        // [{ip, status, findings_count, severity_counts}]
   hostFilter:        null,      // null = show all; 'x.x.x.x' = filter to this host
+  hostPlans:         {},        // { host: {hypothesis, assessment, phase, steps} } — per-host attack-phase view in a multi-host scan
+  hostData:          {},        // { host: {status, score, phase, findings, toolLines, creds, ports, services} } — multi-host overview grid + drill-down
 
   // New architecture state
   attackTree:   null,   // attack planner output
@@ -174,6 +176,8 @@ const INIT = {
 
   // Tool timeout popup — set when a tool exceeds its deadline
   toolTimeoutWarning: null,     // null | {tool, subagent, elapsed_sec, deadline_sec}
+  tokenBudgetPrompt:  null,     // null | {target, tokens_used, budget, wait_sec} — human extend/cut-off gate
+  blockerPrompt:      null,     // null | {target, kind, detail} — connectivity blocker (target unreachable) human resume/abort gate
 
   // Phase time-extension popup — set when a phase hits its operator-configured timeout
   phaseTimeExtension: null,     // null | {phase, timeout_secs, message}
@@ -204,14 +208,7 @@ const INIT = {
   engagementContext:     null,       // {engagement_type, title, context_summary, objectives, ...}
   operatorQuestions:     [],         // clarifying questions waiting for operator response
 
-  // ── Meta-agent state ─────────────────────────────────────────────────────────
-  metaCheckerState: {
-    status:      'idle',   // 'idle' | 'thinking'
-    phase:       '',
-    history:     [],       // [{role:'user'|'assistant', content, thought_id, ts}]
-    corrections: [],       // Correction objects (newest first, max 200)
-    stats: { total: 0, blocking: 0, advisory: 0, phasesReviewed: 0 },
-  },
+  // ── Meta-agent state (Master Checker removed — dead plan-auditor) ─────────────
   metaValidatorState: {
     status:      'idle',
     phase:       '',
@@ -240,6 +237,38 @@ const INIT = {
     maxIterations:  0,
     attempts:       [],       // [{ attempt, plan, language, code, run_command,
                               //    output, verdict, evidence }]
+  },
+  // Human-controlled Fuzzing Lab (client feedback #6) — fed by the
+  // fuzz_status / fuzz_result / fuzz_finding WS event family.
+  fuzzLab: {
+    status:   'idle',         // idle | running | completed | stopped | error
+    jobId:    '',
+    target:   '',
+    techType: '',
+    fuzzerId: '',
+    safety:   '',
+    command:  '',
+    feedback: true,
+    hits:     0,
+    lines:    0,
+    elapsed:  0,
+    message:  '',
+    results:  [],             // [{ line, hit, n }]
+    findings: [],             // [{ title, evidence, raw_output, ... }]
+  },
+
+  // Fuzz Campaign — the custom-exploit-development workshop (fuzz→develop→prove).
+  fuzzCampaign: {
+    status:       'idle',     // idle | running
+    jobId:        '',
+    modality:     '',
+    target:       '',
+    stages:       [],         // [{ stage, ts, ... }]
+    anomalies:    [],         // [{ type, exploit_class, evidence }]
+    exploitSteps: [],         // [{ iteration, exploit_class, proven, reason }]
+    proofs:       [],         // [{ exploit_class, proven, reason }]
+    findings:     [],         // proven/unverified findings from the campaign
+    approvals:    [],         // [{ exploit_class, target, reason }]
   },
 
   // Target Selection — domain subdomain hunt → human picks which to engage
@@ -759,6 +788,43 @@ function reducer(state, action) {
     case 'SET_HOST_FILTER':
       return { ...state, hostFilter: action.payload };
 
+    case 'HOST_PLAN_UPDATE': {
+      // Per-host attack-phase view for a multi-host scan: merge whatever fields
+      // arrived (hypothesis / assessment / phase / steps) for THIS host, so the
+      // Mission Control panel can show the SELECTED host's plan instead of a
+      // single global blur.  Additive — the global plan* fields are untouched.
+      const hp = action.payload || {};
+      const host = hp.host;
+      if (!host) return state;
+      const prev = state.hostPlans[host] || {};
+      const next = { ...prev };
+      if (hp.hypothesis != null && hp.hypothesis !== '') next.hypothesis = hp.hypothesis;
+      if (hp.assessment != null && hp.assessment !== '') next.assessment = hp.assessment;
+      if (hp.phase) next.phase = hp.phase;
+      if (Array.isArray(hp.steps) && hp.steps.length) next.steps = hp.steps;
+      return { ...state, hostPlans: { ...state.hostPlans, [host]: next } };
+    }
+
+    case 'HOST_DATA_UPDATE': {
+      // Richer per-host bucket for the multi-host overview grid + drill-down:
+      // status / promise score / phase / findings / tool lines / creds / surface.
+      const p = action.payload || {};
+      const host = p.host;
+      if (!host) return state;
+      const prev = state.hostData[host] || { findings: [], toolLines: [], creds: [] };
+      const next = { ...prev };
+      if (p.status != null) next.status = p.status;
+      if (p.score != null) next.score = p.score;
+      if (p.phase) next.phase = p.phase;
+      if (Array.isArray(p.ports)) next.ports = p.ports;
+      if (Array.isArray(p.services)) next.services = p.services;
+      if (p.foothold) next.foothold = true;
+      if (p.finding) next.findings = [p.finding, ...(prev.findings || [])].slice(0, 200);
+      if (p.toolLine) next.toolLines = [...(prev.toolLines || []), p.toolLine].slice(-400);
+      if (p.cred) next.creds = [p.cred, ...(prev.creds || [])].slice(0, 100);
+      return { ...state, hostData: { ...state.hostData, [host]: next } };
+    }
+
     case 'EVIDENCE_ADDED':
       return { ...state, evidence: [...state.evidence, action.payload].slice(-100) };
 
@@ -1045,6 +1111,20 @@ function reducer(state, action) {
       return { ...state, subagentStates: newSubagentStates, findingsSummary: fs, ...extraSlice };
     }
 
+    // ── Operational severity re-grade: keep the live tiles in sync with Mongo ──
+    // The report reads the re-graded severity from Mongo; the live tiles were only
+    // counting CREATION-time severity, so a re-grade (e.g. MEDIUM→HIGH) silently
+    // diverged the dashboard from the report. Move the count between buckets.
+    case 'REGRADE_FINDING_SEVERITY': {
+      const ov = String(action.payload?.old || '').toLowerCase();
+      const nv = String(action.payload?.new || '').toLowerCase();
+      if (!nv || ov === nv) return state;
+      const fs = { ...state.findingsSummary };
+      if (fs[ov] !== undefined && fs[ov] > 0) fs[ov]--;
+      if (fs[nv] !== undefined) fs[nv]++;
+      return { ...state, findingsSummary: fs };
+    }
+
     case 'SUBAGENT_TOOL_LINE': {
       // Append a tool output line for a specific subagent, capped at 500 lines
       const { subagent, tool, line, ts } = action.payload;
@@ -1202,6 +1282,18 @@ function reducer(state, action) {
     case 'TOOL_TIMEOUT_CLEAR':
       return { ...state, toolTimeoutWarning: null };
 
+    case 'TOKEN_BUDGET_PROMPT':
+      return { ...state, tokenBudgetPrompt: action.payload };
+
+    case 'TOKEN_BUDGET_CLEAR':
+      return { ...state, tokenBudgetPrompt: null };
+
+    case 'BLOCKER_PROMPT':
+      return { ...state, blockerPrompt: action.payload };
+
+    case 'BLOCKER_CLEAR':
+      return { ...state, blockerPrompt: null };
+
     case 'PHASE_TIME_EXTENSION':
       return { ...state, phaseTimeExtension: action.payload };
 
@@ -1220,7 +1312,6 @@ function reducer(state, action) {
       const { agent, status, phase } = action.payload;
       const a = (agent || '').toLowerCase();
       const key = a.includes('error') ? 'metaErrorAnalyzerState'
-                : a.includes('checker') ? 'metaCheckerState'
                 : 'metaValidatorState';
       return {
         ...state,
@@ -1232,7 +1323,6 @@ function reducer(state, action) {
       const { agent, chunk, thought_id, ts } = action.payload;
       const a = (agent || '').toLowerCase();
       const key = a.includes('error') ? 'metaErrorAnalyzerState'
-                : a.includes('checker') ? 'metaCheckerState'
                 : 'metaValidatorState';
       const prev = state[key];
       let history = [...prev.history];
@@ -1250,7 +1340,6 @@ function reducer(state, action) {
       const corr = action.payload;
       const src = (corr.source || '').toLowerCase();
       const key = src.includes('error') ? 'metaErrorAnalyzerState'
-                : src.includes('checker') ? 'metaCheckerState'
                 : 'metaValidatorState';
       const prev = state[key];
       const corrections = [corr, ...prev.corrections].slice(0, 200);
@@ -1261,17 +1350,6 @@ function reducer(state, action) {
         advisory: prev.stats.advisory + (corr.tier === 'advisory' ? 1 : 0),
       };
       return { ...state, [key]: { ...prev, corrections, stats } };
-    }
-
-    case 'META_CHECKER_PHASE_DONE': {
-      const prev = state.metaCheckerState;
-      return {
-        ...state,
-        metaCheckerState: {
-          ...prev,
-          stats: { ...prev.stats, phasesReviewed: (prev.stats.phasesReviewed || 0) + 1 },
-        },
-      };
     }
 
     case 'META_VALIDATOR_TOOL_DONE': {
@@ -1308,6 +1386,34 @@ function reducer(state, action) {
           stats: { ...prev.stats, ...(action.payload || {}) },
         },
       };
+    }
+
+    case 'META_VALIDATOR_STATS': {
+      // Authoritative stats snapshot from the backend validation_analysis
+      // event — keeps the Issue-Validator panel's accepted/rejected counters
+      // live for the finding-gate.
+      const prev = state.metaValidatorState;
+      return {
+        ...state,
+        metaValidatorState: {
+          ...prev,
+          stats: { ...prev.stats, ...(action.payload || {}) },
+        },
+      };
+    }
+
+    case 'META_VALIDATOR_CORRECTIONS': {
+      // Self-contained snapshot of gated findings from validation_analysis —
+      // reconstructs the Corrections list even if individual meta_correction
+      // events were dropped, so the badge count and the list always agree.
+      const prev = state.metaValidatorState;
+      const incoming = action.payload || [];
+      const seen = new Set((prev.corrections || []).map(c => c.description));
+      const merged = [
+        ...incoming.filter(c => c && !seen.has(c.description)),
+        ...(prev.corrections || []),
+      ].slice(0, 200);
+      return { ...state, metaValidatorState: { ...prev, corrections: merged } };
     }
 
     // ── Exploit Lab (Tier-2 LLM exploit synthesis) live view ────────────
@@ -1360,6 +1466,63 @@ function reducer(state, action) {
       }
       lab.attempts = attempts;
       return { ...state, exploitLab: lab };
+    }
+
+    // ── Fuzzing Lab reducers (client feedback #6) ───────────────────────
+    case 'FUZZ_STATUS': {
+      const d = action.payload || {};
+      const prev = state.fuzzLab || {};
+      // A fresh 'running' status starts a new run — clear prior output.
+      const isNewRun = d.status === 'running' && d.job_id && d.job_id !== prev.jobId;
+      return {
+        ...state,
+        fuzzLab: {
+          ...prev,
+          status:   d.status   || prev.status,
+          jobId:    d.job_id   || prev.jobId,
+          target:   d.target   != null ? d.target   : prev.target,
+          techType: d.tech_type|| prev.techType,
+          fuzzerId: d.fuzzer_id|| prev.fuzzerId,
+          safety:   d.safety   != null ? d.safety   : prev.safety,
+          command:  d.command  != null ? d.command  : prev.command,
+          feedback: d.feedback != null ? d.feedback : prev.feedback,
+          hits:     d.hits     != null ? d.hits     : prev.hits,
+          lines:    d.lines    != null ? d.lines    : prev.lines,
+          elapsed:  d.elapsed  != null ? d.elapsed  : prev.elapsed,
+          message:  d.message  || prev.message,
+          results:  isNewRun ? [] : (prev.results || []),
+          findings: isNewRun ? [] : (prev.findings || []),
+        },
+      };
+    }
+    case 'FUZZ_RESULT': {
+      const d = action.payload || {};
+      const prev = state.fuzzLab || {};
+      // Cap retained lines so a long run cannot grow state unbounded.
+      const results = [...(prev.results || []), { line: d.line || '', hit: !!d.hit, n: d.n }].slice(-1200);
+      return { ...state, fuzzLab: { ...prev, results,
+                                    hits: d.hit ? (prev.hits || 0) + 1 : prev.hits } };
+    }
+    case 'FUZZ_FINDING': {
+      const d = action.payload || {};
+      const prev = state.fuzzLab || {};
+      const findings = [...(prev.findings || []), d].slice(-200);
+      return { ...state, fuzzLab: { ...prev, findings } };
+    }
+    case 'FUZZ_CAMPAIGN_EVENT': {
+      const { kind, data } = action.payload || {};
+      const c = { ...(state.fuzzCampaign || {}) };
+      const push = (k) => { c[k] = [...(c[k] || []), data].slice(-200); };
+      if (kind === 'stage') {
+        push('stages'); c.status = data.stage === 'record' ? 'idle' : 'running';
+        c.jobId = data.job_id || c.jobId; c.modality = data.modality || c.modality;
+        c.target = data.target || c.target;
+      } else if (kind === 'anomaly') push('anomalies');
+      else if (kind === 'exploit_step') push('exploitSteps');
+      else if (kind === 'proof') push('proofs');
+      else if (kind === 'finding') push('findings');
+      else if (kind === 'approval') push('approvals');
+      return { ...state, fuzzCampaign: c };
     }
 
     // ── Red-Team Expert reducers ────────────────────────────────────────
@@ -1632,9 +1795,16 @@ function StoreProvider({ children }) {
         dispatch({ type: 'SET_LLM_STATUS', payload: {
           available: llmOk,
           provider:  s.llm_provider || '',
+          llm_provider: s.llm_provider || '',
           model:     s.model || '',
           message:   llmOk ? `LLM online (${s.llm_provider || 'ollama'}/${s.model || '?'})`
                             : (s.llm_message || 'LLM offline'),
+          llm_message: s.llm_message || '',
+          // Secondary / backup LLM health (e.g. a local Ollama model).
+          llm_fallback_provider:  s.llm_fallback_provider || '',
+          llm_fallback_model:     s.llm_fallback_model || '',
+          llm_fallback_available: !!s.llm_fallback_available,
+          llm_fallback_message:   s.llm_fallback_message || '',
         }});
       } catch {
         dispatch({ type: 'SET_SYS_STATUS', payload: {
@@ -1726,6 +1896,14 @@ function routeWsEvent(msg, dispatch, shellListeners, sessionId) {
     case 'phase_start':
       // Mark previous phase as done when a new one starts
       dispatch({ type: 'PHASE_CHANGE', payload: { phase: normalizePhase(data.phase) } });
+      // Per-host (multi-host scan): also record THIS host's current phase so the
+      // Mission Control panel reflects the selected host, not a global blur.
+      if (msg.host_id) {
+        dispatch({ type: 'HOST_PLAN_UPDATE', payload: {
+          host: msg.host_id, phase: normalizePhase(data.phase) } });
+        dispatch({ type: 'HOST_DATA_UPDATE', payload: {
+          host: msg.host_id, phase: normalizePhase(data.phase), status: 'exploiting' } });
+      }
       // Also mark prior phases complete via PHASE_DONE implicitly
       break;
 
@@ -2049,7 +2227,11 @@ function routeWsEvent(msg, dispatch, shellListeners, sessionId) {
       });
       // Track per-host counts for multi-host sessions
       const findingHost = f.host || msg.host_id;
-      if (findingHost) dispatch({ type: 'HOST_FINDING_COUNT', payload: { host: findingHost, severity: f.severity } });
+      if (findingHost) {
+        dispatch({ type: 'HOST_FINDING_COUNT', payload: { host: findingHost, severity: f.severity } });
+        dispatch({ type: 'HOST_DATA_UPDATE', payload: { host: findingHost, finding: {
+          title: f.title || f.name || 'finding', severity: f.severity || 'info' } } });
+      }
       break;
     }
 
@@ -2115,12 +2297,34 @@ function routeWsEvent(msg, dispatch, shellListeners, sessionId) {
       dispatch({ type: 'HOST_DISCOVERED', payload: { host: data.host || msg.host_id } });
       break;
 
+    // Phase A: a host finished lightweight triage — score + surface for the grid.
+    case 'host_triage_complete': {
+      const t = data || msg;
+      const h = t.host || msg.host_id;
+      if (h) {
+        dispatch({ type: 'HOST_DATA_UPDATE', payload: {
+          host: h, status: 'triaged', score: t.promise_score || 0,
+          ports: t.open_ports || [], services: t.services || [] } });
+        dispatch({ type: 'FEED_ENTRY', payload: {
+          ts, agent: 'orchestrator', eventType: 'host_triage_complete',
+          message: `🔭 Triaged ${h} — score ${t.promise_score || 0} (${t.surface_summary || ''})`,
+          data: t, host: h } });
+      }
+      break;
+    }
+
     case 'host_scan_start':
+      if (data.host || msg.host_id) {
+        dispatch({ type: 'HOST_DATA_UPDATE', payload: { host: data.host || msg.host_id, status: 'exploiting' } });
+      }
       dispatch({ type: 'FEED_ENTRY', payload: { ts, agent: 'orchestrator', eventType: 'host_scan_start', message: `Started testing ${data.host || msg.host_id}`, data, host: data.host || msg.host_id } });
       break;
 
     case 'host_scan_complete':
       dispatch({ type: 'HOST_COMPLETE', payload: { host: data.host || msg.host_id } });
+      if (data.host || msg.host_id) {
+        dispatch({ type: 'HOST_DATA_UPDATE', payload: { host: data.host || msg.host_id, status: 'done' } });
+      }
       dispatch({ type: 'FEED_ENTRY', payload: { ts, agent: 'orchestrator', eventType: 'host_scan_complete', message: `Completed testing ${data.host || msg.host_id}`, data, host: data.host || msg.host_id } });
       break;
 
@@ -2229,6 +2433,16 @@ function routeWsEvent(msg, dispatch, shellListeners, sessionId) {
     case 'plan_skeleton':
       // Fired immediately when master plan is created — shows skeleton before recon starts
       dispatch({ type: 'SET_PLAN_SKELETON', payload: data });
+      // Per-host (multi-host scan): record THIS host's hypothesis + plan so the
+      // panel shows the selected host's plan, not just whichever emitted last.
+      if (msg.host_id) {
+        dispatch({ type: 'HOST_PLAN_UPDATE', payload: {
+          host:       msg.host_id,
+          hypothesis: data?.hypothesis || '',
+          assessment: data?.assessment_type || '',
+          steps:      (data?.steps || []).map(s => ({ ...s, status: s.status || 'pending' })),
+        }});
+      }
       dispatch({ type: 'FEED_ENTRY', payload: {
         ts, agent: 'master', eventType: 'plan_skeleton',
         message: `Attack plan: ${(data?.steps||[]).length} phases — ${data?.assessment_type||''}`,
@@ -2353,7 +2567,11 @@ function routeWsEvent(msg, dispatch, shellListeners, sessionId) {
       dispatch({ type: 'SUBAGENT_FINDING', payload: { subagent: saName, finding } });
       // Track per-host counts for multi-host sessions
       const sfHost = (finding.host) || msg.host_id;
-      if (sfHost) dispatch({ type: 'HOST_FINDING_COUNT', payload: { host: sfHost, severity: finding.severity } });
+      if (sfHost) {
+        dispatch({ type: 'HOST_FINDING_COUNT', payload: { host: sfHost, severity: finding.severity } });
+        dispatch({ type: 'HOST_DATA_UPDATE', payload: { host: sfHost, finding: {
+          title: finding.title || finding.name || 'finding', severity: finding.severity || 'info' } } });
+      }
       break;
     }
 
@@ -2690,6 +2908,74 @@ function routeWsEvent(msg, dispatch, shellListeners, sessionId) {
         subagent:     saD.subagent     || '',
         elapsed_sec:  saD.elapsed_sec  || 0,
         deadline_sec: saD.deadline_sec || 600,
+      }});
+      break;
+    }
+
+    // ── Per-target LLM-token budget (human-set) ────────────────────────────
+    // The target hit its human-set token cap; ARGUS has PAUSED it and is asking
+    // the operator to extend the budget or cut the target off.
+    case 'token_budget_reached': {
+      const tb = data || msg;
+      dispatch({ type: 'TOKEN_BUDGET_PROMPT', payload: {
+        target:      tb.target      || '',
+        tokens_used: tb.tokens_used || 0,
+        budget:      tb.budget      || 0,
+        wait_sec:    tb.wait_sec    || 1800,
+      }});
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'operator', eventType: 'token_budget',
+        message: `🪙 Token budget reached on ${tb.target || 'target'} — ${tb.tokens_used}/${tb.budget}. Awaiting your decision (extend / cut off).`,
+        data: tb,
+      }});
+      break;
+    }
+    // Decision applied (or auto cut-off) → clear the modal + log the outcome.
+    case 'token_budget_extended': {
+      const tb = data || msg;
+      dispatch({ type: 'TOKEN_BUDGET_CLEAR' });
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'operator', eventType: 'token_budget',
+        message: `🪙 Token budget extended on ${tb.target || 'target'} → ${tb.budget}. Resuming.`, data: tb,
+      }});
+      break;
+    }
+    case 'token_budget_cutoff': {
+      const tb = data || msg;
+      dispatch({ type: 'TOKEN_BUDGET_CLEAR' });
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'operator', eventType: 'token_budget',
+        message: `🪙 Token budget cut-off on ${tb.target || 'target'} at ${tb.tokens_used} tokens (${tb.reason || 'timeout'}) — finalizing its report.`, data: tb,
+      }});
+      break;
+    }
+
+    // ── Connectivity blocker (target unreachable / VPN down) ───────────────
+    // ARGUS detected the target is unreachable and PAUSED instead of spinning
+    // doomed scans; surface a prominent card so the human can fix the VPN/route
+    // and resume, or abort the target.
+    case 'engagement_blocker': {
+      const bk = data || msg;
+      dispatch({ type: 'BLOCKER_PROMPT', payload: {
+        target: bk.target || '',
+        kind:   bk.kind   || 'unreachable',
+        detail: bk.detail || 'Target unreachable — check connectivity.',
+        wait_sec: bk.wait_sec || 0,
+      }});
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'operator', eventType: 'blocker',
+        message: `⛔ Blocker on ${bk.target || 'target'}: ${bk.detail || 'unreachable'}`,
+        data: bk,
+      }});
+      break;
+    }
+    case 'engagement_blocker_resolved': {
+      const bk = data || msg;
+      dispatch({ type: 'BLOCKER_CLEAR' });
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'operator', eventType: 'blocker',
+        message: `⛔ Blocker on ${bk.target || 'target'} ${bk.decision === 'resume' ? 'resolved — resuming' : 'ended (' + (bk.decision || 'abort') + ') — finalizing honestly'}.`,
+        data: bk,
       }});
       break;
     }
@@ -3392,14 +3678,6 @@ function routeWsEvent(msg, dispatch, shellListeners, sessionId) {
       dispatch({ type: 'TARGET_SELECTION_RESOLVE', payload: data });
       break;
 
-    case 'meta_checker_pre_phase':
-      dispatch({ type: 'FEED_ENTRY', payload: {
-        ts, agent: 'master_checker', eventType: 'meta_checker_pre_phase',
-        message: `🔎 Master Checker [pre-${data.phase}]: ${data.summary || ''} — ${data.blocking || 0} blocking, ${data.advisory || 0} advisory`,
-        data,
-      }});
-      break;
-
     // ── Error Analyzer ───────────────────────────────────────────────────
     case 'error_analysis': {
       const cls   = data.classification || 'other';
@@ -3453,16 +3731,6 @@ function routeWsEvent(msg, dispatch, shellListeners, sessionId) {
       break;
     }
 
-    case 'meta_checker_post_phase': {
-      dispatch({ type: 'META_CHECKER_PHASE_DONE' });
-      dispatch({ type: 'FEED_ENTRY', payload: {
-        ts, agent: 'master_checker', eventType: 'meta_checker_post_phase',
-        message: `✅ Master Checker [post-${data.phase}]: ${data.summary || ''} — ${data.blocking || 0} blocking, ${data.advisory || 0} advisory`,
-        data,
-      }});
-      break;
-    }
-
     case 'meta_validator_tool':
       dispatch({ type: 'META_VALIDATOR_TOOL_DONE' });
       dispatch({ type: 'FEED_ENTRY', payload: {
@@ -3481,11 +3749,25 @@ function routeWsEvent(msg, dispatch, shellListeners, sessionId) {
       }});
       break;
 
+    // Issue Validator finding GATE — live accepted/gated stats snapshot.
+    case 'validation_analysis': {
+      if (data.stats) dispatch({ type: 'META_VALIDATOR_STATS', payload: data.stats });
+      if (Array.isArray(data.corrections) && data.corrections.length) {
+        dispatch({ type: 'META_VALIDATOR_CORRECTIONS', payload: data.corrections });
+      }
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'issue_validator', eventType: 'validation_analysis',
+        message: `🔍 Issue Validator: ${data.accepted || 0} verified, ${data.rejected || 0} gated out of report${data.last_reason ? ' (' + data.last_reason + ')' : ''}`,
+        data,
+      }});
+      break;
+    }
+
     case 'meta_agents_status':
       if (data.available) {
         dispatch({ type: 'FEED_ENTRY', payload: {
           ts, agent: 'meta', eventType: 'meta_agents_status',
-          message: `🛡 Meta-Agents online — Checker + Validator active`,
+          message: `🛡 Meta-Agents online — Validator + Error Analyzer active`,
           data,
         }});
       } else {
@@ -3626,6 +3908,105 @@ function routeWsEvent(msg, dispatch, shellListeners, sessionId) {
       break;
     }
 
+    case 'intel_cascade_status': {
+      // Real-time latest-CVE / public-exploit lookup on identified tech (#5).
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'osint', eventType: 'intel_cascade_status',
+        message: data.message || `🌐 Latest-CVE lookup: ${data.signals || 0} signal(s) queued`,
+        data,
+      }});
+      break;
+    }
+
+    // ── Fuzzing Lab (client feedback #6) ──
+    case 'fuzz_status': {
+      dispatch({ type: 'FUZZ_STATUS', payload: data });
+      if (data.message) {
+        dispatch({ type: 'FEED_ENTRY', payload: {
+          ts, agent: 'fuzz_lab', eventType: 'fuzz_status',
+          message: `🎯 Fuzz Lab: ${data.message}`, data,
+        }});
+      }
+      break;
+    }
+    case 'fuzz_result': {
+      dispatch({ type: 'FUZZ_RESULT', payload: data });
+      break;
+    }
+    case 'fuzz_finding': {
+      dispatch({ type: 'FUZZ_FINDING', payload: data });
+      if (data && data.source === 'fuzz_campaign') {
+        dispatch({ type: 'FUZZ_CAMPAIGN_EVENT', payload: { kind: 'finding', data } });
+      }
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'fuzz_lab', eventType: 'fuzz_finding',
+        message: `🎯 Fuzz hit fed to agents: ${data.title || 'finding'}`, data,
+      }});
+      break;
+    }
+
+    // ── Fuzz Campaign (custom exploit-development workshop) ──
+    case 'fuzz_campaign_stage': {
+      dispatch({ type: 'FUZZ_CAMPAIGN_EVENT', payload: { kind: 'stage', data } });
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'fuzz_campaign', eventType: 'fuzz_campaign_stage',
+        message: `🧪 ${String(data.stage || '').toUpperCase()} — ${data.target || ''}`
+                 + (data.message ? ` (${data.message})` : ''), data,
+      }});
+      break;
+    }
+    case 'fuzz_anomaly': {
+      dispatch({ type: 'FUZZ_CAMPAIGN_EVENT', payload: { kind: 'anomaly', data } });
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'fuzz_campaign', eventType: 'fuzz_anomaly',
+        message: `❗ Anomaly: ${data.type} → ${data.exploit_class} — ${data.evidence || ''}`, data,
+      }});
+      break;
+    }
+    case 'exploit_dev_step': {
+      dispatch({ type: 'FUZZ_CAMPAIGN_EVENT', payload: { kind: 'exploit_step', data } });
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'exploit_dev', eventType: 'exploit_dev_step',
+        message: `${data.proven ? '✅' : '🔁'} PoC iter ${data.iteration} `
+                 + `(${data.exploit_class}): ${data.proven ? 'PROVEN' : data.reason || 'refining'}`, data,
+      }});
+      break;
+    }
+    case 'proof_verdict': {
+      dispatch({ type: 'FUZZ_CAMPAIGN_EVENT', payload: { kind: 'proof', data } });
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'exploit_dev', eventType: 'proof_verdict',
+        message: `${data.proven ? '🟢 EXPLOIT PROVEN' : '⚪ unproven'} (${data.exploit_class})`
+                 + (data.reason ? ` — ${data.reason}` : ''), data,
+      }});
+      break;
+    }
+    case 'fuzz_approval_request': {
+      dispatch({ type: 'FUZZ_CAMPAIGN_EVENT', payload: { kind: 'approval', data } });
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'fuzz_campaign', eventType: 'fuzz_approval_request',
+        message: `⏸ Approval needed to PROVE a ${data.exploit_class} exploit on ${data.target} `
+                 + `(above intrusiveness ceiling)`, data,
+      }});
+      break;
+    }
+
+    // ── Operational severity re-grade (evidence escalated a finding) ──
+    case 'finding_regraded': {
+      const _ov = String(data.old_severity || '').toUpperCase();
+      const _nv = String(data.new_severity || '').toUpperCase();
+      // Keep the severity tiles consistent with the report (Mongo source of truth).
+      dispatch({ type: 'REGRADE_FINDING_SEVERITY',
+                 payload: { old: data.old_severity, new: data.new_severity } });
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'master', eventType: 'finding_regraded',
+        message: `⬆ Severity re-graded ${_ov} → ${_nv}: ${data.title || 'finding'}`
+                 + (data.rationale ? ` — ${data.rationale}` : ''),
+        data,
+      }});
+      break;
+    }
+
     default: break;
   }
 }
@@ -3658,8 +4039,6 @@ function extractFeedMessage(type, agent, data) {
     case 'report_ready':          return `Report ready`;
     case 'guidance_applied':      return `${data?.message}`;
     case 'meta_agents_status':    return data?.available ? `🛡 Meta-Agents online` : `⚠ Meta-Agents unavailable: ${data?.reason||''}`;
-    case 'meta_checker_pre_phase': return `🔎 Checker [pre-${data?.phase}]: ${data?.correction_count||0} correction(s)`;
-    case 'meta_checker_post_phase': return `✅ Checker [post-${data?.phase}]: ${data?.correction_count||0} correction(s)`;
     case 'meta_validator_tool':   return `🔍 Validator [${data?.tool}]: ${data?.flagged||0} issue(s)`;
     case 'meta_validator_phase':  return `📋 Validator [${data?.phase}]: ${data?.correction_count||0} correction(s)`;
     case 'meta_correction':       return `${data?.tier === 'blocking' ? '⛔' : '💡'} [${data?.source}] ${(data?.description||'').slice(0,80)}`;

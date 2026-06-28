@@ -11,6 +11,7 @@ const TARGET_TYPES = [
   { value: 'ctf',      label: 'CTF / HTB / THM',   icon: '🏁' },
   { value: 'network',  label: 'Network Range',     icon: '📡' },
   { value: 'ad',       label: 'Active Directory',  icon: '🏢' },
+  { value: 'ai',       label: 'AI / LLM Target',   icon: '🤖' },
   { value: 'unknown',  label: 'Unknown / Auto',    icon: '❓' },
 ];
 
@@ -76,6 +77,11 @@ function TargetConfig() {
     target_ip:          '',
     target_hostname:    '',
     target_type:        'unknown',
+    // AI / LLM target adapter config (used when target_type === 'ai')
+    ai_target:          { type: 'http_chat', url: '', auth_header: '', model: '',
+                          request_template: '', response_path: '' },
+    // Human-set scan-intrusiveness ceiling (#5): safe | intrusive | disruptive
+    scan_intrusiveness: 'safe',
     scope:              '',
     notes:              '',
     auto_exploit:       false,
@@ -86,6 +92,9 @@ function TargetConfig() {
     threading_enabled:  true,
     max_threads:        5,
     max_parallel_hosts: 5,
+    // Human-set LLM-token budget PER TARGET (0 = unlimited). At this many
+    // tokens on a target, ARGUS pauses it and asks you to extend or cut off.
+    token_budget_per_target: 0,
     phases:             ALL_PHASES.map(p => p.key),
     // ── Mission Brief (Improvement #1) ─────────────────────────────────
     mb_objective:        'Establish foothold, capture flags, and demonstrate impact.',
@@ -538,6 +547,84 @@ function TargetConfig() {
       )
     ),
 
+    // AI target configuration (shown when target_type === 'ai')
+    form.target_type === 'ai' && React.createElement('div', { style: card },
+      React.createElement('div', { style: { ...label, marginBottom: 10 } }, '🤖 AI Target — adapter & endpoint'),
+      React.createElement('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 } },
+        React.createElement('div', null,
+          React.createElement('div', { style: label }, 'Adapter'),
+          React.createElement('select', {
+            value: form.ai_target.type,
+            onChange: e => set('ai_target', { ...form.ai_target, type: e.target.value }),
+            style: { ...inp, cursor: 'pointer' },
+          },
+            React.createElement('option', { value: 'http_chat' },       'http_chat — OpenAI / Ollama / JSON chat'),
+            React.createElement('option', { value: 'agentic' },         'agentic — tool-using / MCP agent'),
+            React.createElement('option', { value: 'single_endpoint' }, 'single_endpoint — raw template'),
+          )
+        ),
+        React.createElement('div', null,
+          React.createElement('div', { style: label }, 'Model'),
+          React.createElement('input', { value: form.ai_target.model,
+            placeholder: 'gpt-4o-mini / llama3 / claude-…',
+            onChange: e => set('ai_target', { ...form.ai_target, model: e.target.value }), style: inp })
+        )
+      ),
+      React.createElement('div', { style: { marginTop: 10 } },
+        React.createElement('div', { style: label }, 'Endpoint URL'),
+        React.createElement('input', { value: form.ai_target.url,
+          placeholder: 'https://api.example.com/v1/chat/completions',
+          onChange: e => set('ai_target', { ...form.ai_target, url: e.target.value }), style: inp })
+      ),
+      React.createElement('div', { style: { marginTop: 10 } },
+        React.createElement('div', { style: label }, 'Auth header (optional)'),
+        React.createElement('input', { value: form.ai_target.auth_header,
+          placeholder: 'Bearer sk-…',
+          onChange: e => set('ai_target', { ...form.ai_target, auth_header: e.target.value }), style: inp })
+      ),
+      form.ai_target.type === 'single_endpoint' && React.createElement('div', { style: { marginTop: 10 } },
+        React.createElement('input', { value: form.ai_target.request_template,
+          placeholder: 'request template, e.g. {"input": "{{prompt}}"}',
+          onChange: e => set('ai_target', { ...form.ai_target, request_template: e.target.value }), style: inp }),
+        React.createElement('input', { value: form.ai_target.response_path,
+          placeholder: 'response path, e.g. choices[0].message.content',
+          onChange: e => set('ai_target', { ...form.ai_target, response_path: e.target.value }), style: { ...inp, marginTop: 8 } })
+      ),
+      React.createElement('div', { style: { fontSize: 10, color: 'var(--text-muted)', marginTop: 8, lineHeight: 1.5 } },
+        'ARGUS runs a knowledge-driven AI probe catalog (prompt injection, jailbreak, system-prompt leak, excessive agency, …) and measures ASR. Aggressive probes are human-gated. Authorized testing only.')
+    ),
+
+    // Scan intrusiveness ceiling (#5) — how far ARGUS may go (safe-by-default for OT)
+    React.createElement('div', { style: card },
+      React.createElement('div', { style: { ...label, marginBottom: 10 } }, 'Scan intrusiveness'),
+      React.createElement('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8 } },
+        [
+          { value: 'safe',       icon: '🛡️', label: 'safe',       desc: 'read-only / passive' },
+          { value: 'intrusive',  icon: '🔎', label: 'intrusive',  desc: 'active enumeration' },
+          { value: 'disruptive', icon: '⚠️', label: 'disruptive', desc: 'writes / state-changing' },
+        ].map(t =>
+          React.createElement('div', {
+            key: t.value, onClick: () => set('scan_intrusiveness', t.value),
+            style: {
+              padding: '10px 8px', borderRadius: 6, textAlign: 'center', cursor: 'pointer',
+              border: `1px solid ${form.scan_intrusiveness === t.value ? 'var(--cyan)' : 'var(--border)'}`,
+              background: form.scan_intrusiveness === t.value ? 'rgba(0,212,255,0.07)' : 'transparent',
+              transition: 'all 0.15s'
+            }
+          },
+            React.createElement('div', { style: { fontSize: 18, marginBottom: 4 } }, t.icon),
+            React.createElement('div', { style: {
+              fontSize: 11, color: form.scan_intrusiveness === t.value ? 'var(--cyan)' : 'var(--text-primary)',
+              fontFamily: 'var(--font-mono)' } }, t.label),
+            React.createElement('div', { style: { fontSize: 9, color: 'var(--text-muted)', marginTop: 2 } }, t.desc)
+          )
+        )
+      ),
+      React.createElement('div', { style: { fontSize: 10, color: 'var(--text-muted)', marginTop: 8, lineHeight: 1.5 } },
+        'The engagement-wide ceiling for technology quick-wins. OT/ICS targets stay read-only ' +
+        'regardless unless explicitly authorized; life-safety points (elevators/fire/locks) never auto-actuate.')
+    ),
+
     // Scope + Notes
     React.createElement('div', { style: card },
       React.createElement('div', { style: row },
@@ -645,6 +732,28 @@ function TargetConfig() {
             : form.autonomy === 'manual'
               ? 'Operator asks before every exploit, payload, shell, or write.'
               : 'Operator asks once before the first exploit, then proceeds.'))
+      ),
+      // LLM token budget PER TARGET — you set the cap; ARGUS never sets its own.
+      // At the cap, ARGUS pauses that target and asks you to extend or cut off.
+      React.createElement('div', null,
+        React.createElement('div', {
+          style: { fontSize: 11, fontWeight: 600, color: 'var(--text-secondary)', marginBottom: 6 }
+        }, 'LLM token budget / target'),
+        React.createElement('input', {
+          type: 'number', min: 0, step: 1000,
+          value: form.token_budget_per_target,
+          onChange: e => set('token_budget_per_target', Math.max(0, Number(e.target.value) || 0)),
+          placeholder: '0 = unlimited',
+          style: {
+            width: '100%', padding: '8px 11px', borderRadius: 7,
+            border: '1px solid var(--border-light)', background: 'var(--bg-elevated)',
+            color: 'var(--text-primary)', fontSize: 12, fontFamily: 'var(--font-mono)'
+          }
+        }),
+        React.createElement('div', { style: { fontSize: 9, color: 'var(--text-muted)', marginTop: 5 } },
+          (Number(form.token_budget_per_target) > 0
+            ? `At ${Number(form.token_budget_per_target).toLocaleString()} LLM tokens on a target, ARGUS pauses it and asks you to extend or cut off. Applied per target.`
+            : 'Unlimited — ARGUS never caps token spend (you can still stop a target anytime). Set a number to be asked per target.'))
       ),
       // Hunt-subdomains toggle — only meaningful for a domain target
       targetMode === 'DOMAIN' && React.createElement('div', {

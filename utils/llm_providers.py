@@ -135,6 +135,15 @@ class LLMProvider:
     def describe(self) -> Dict[str, str]:
         return {"provider": self.name, "model": self.model}
 
+    async def detect_capabilities(self) -> Dict[str, Any]:
+        """Probe whether THIS model can actually do what ARGUS needs (native
+        tool-calling, adequate context).  Best-effort + additive: hosted providers
+        (Anthropic/OpenAI/Gemini) are tool-calling by contract, so the default just
+        reports that; local providers override this to inspect the real model.
+        Returns {tool_calling, context_length, degraded, warnings[]}."""
+        return {"tool_calling": True, "context_length": None,
+                "degraded": False, "warnings": [], "available": True}
+
 
 # ── Ollama ─────────────────────────────────────────────────────────────────
 
@@ -165,6 +174,19 @@ class OllamaProvider(LLMProvider):
             return True, f"Ollama online — {self.model} at {self.base_url}", available
         except Exception as exc:
             return False, f"Ollama unreachable at {self.base_url}: {exc}", []
+
+    async def detect_capabilities(self) -> Dict[str, Any]:
+        """Inspect the local model (Ollama /api/show) so ARGUS can warn the operator
+        when a self-hosted model lacks native tool-calling — the failure mode that
+        quietly wrecks agentic runs.  Best-effort; never raises."""
+        try:
+            from utils.model_capability import detect_capabilities, capability_gate
+            caps = await detect_capabilities(self.model, self.base_url)
+            verdict = capability_gate(caps)
+            return {**caps, **verdict}
+        except Exception as exc:   # noqa: BLE001
+            logger.debug("ollama capability detection failed: %s", exc)
+            return {"tool_calling": None, "degraded": False, "warnings": [], "available": False}
 
     async def stream(self, messages, timeout=600):
         # Explicit context window.  Ollama's server default (often 2048/4096)

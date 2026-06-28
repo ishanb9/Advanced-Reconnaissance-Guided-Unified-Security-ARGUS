@@ -1,0 +1,34 @@
+/*  vulnerable_module.usp - INTENTIONALLY VULNERABLE SIMPL+ test target.
+    For validating agents/avot/sast/simpl_scan.py ONLY.
+    DO NOT compile or deploy. Each block is a deliberate, well-known bug class. */
+
+#SYMBOL_NAME "Vulnerable AV Control Module"
+
+STRING_INPUT  rx[50];        // untrusted network / serial input
+DIGITAL_INPUT trigger;
+STRING_OUTPUT tx;
+
+STRING gPassword[50];        // credential storage
+STRING gApiKey[64];
+STRING smallBuf[8];          // undersized buffer
+
+FUNCTION SendCommand(STRING data)
+{
+    STRING cmd[100];
+    MakeString(cmd, "CTRL %s", data);   // command built from caller-supplied data
+    SocketSend(cmd);                    // ... and sent on the wire
+}
+
+CHANGE rx
+{
+    STRING tmp[8];
+    tmp = rx;                 // 50-byte source into an 8-byte buffer
+    smallBuf = rx;
+    SendCommand(rx);          // acts on network input; no auth check in this handler
+}
+
+FUNCTION Main()
+{
+    gPassword = "admin";                     // hardcoded credential
+    gApiKey   = "sk-1234567890ABCDEF";       // hardcoded API key
+}

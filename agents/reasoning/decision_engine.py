@@ -138,6 +138,7 @@ class DecisionEngine:
         session_id:             str,
         auto_execute_threshold: float = 0.70,
         voi_rank_fn:            Optional[Callable[[List[Dict[str, Any]]], List[Dict[str, Any]]]] = None,
+        tool_reliability_fn:    Optional[Callable[[], Dict[str, Any]]] = None,
     ) -> None:
         self._think_json  = think_json_fn
         self._emit        = emit_fn
@@ -148,6 +149,10 @@ class DecisionEngine:
         # Signature: rank_actions(list[dict]) -> list[dict] sorted by VoI desc,
         # each dict augmented with voi_score / voi_factors / voi_reasons / voi_dropped.
         self._voi_rank_fn = voi_rank_fn
+        # Optional tool-reliability telemetry reader injected by MasterAgent (Gap #7).
+        # Signature: () -> {tool_name: {"success": int, "fail": int}}.  Consumed to
+        # softly demote tools that keep failing this engagement.  None → no-op.
+        self._tool_reliability_fn = tool_reliability_fn
 
     # ------------------------------------------------------------------
     # Public API
@@ -413,6 +418,12 @@ class DecisionEngine:
                 await self._emit_reasoning(f"VoI ranking failed: {exc}")
                 ranked = candidates
 
+        # ── Phase 2b: tool-reliability re-rank (Gap #7) ─────────────────────
+        # Consume the per-tool success/fail telemetry ARGUS records so a tool that
+        # keeps failing THIS engagement is softly demoted.  Re-orders only — the
+        # action is never dropped, and a strong VoI score still wins.
+        ranked = await self._apply_tool_reliability(ranked)
+
         if not ranked:
             return None
 
@@ -449,6 +460,36 @@ class DecisionEngine:
 
         await self._emit_action(action)
         return action
+
+    async def _apply_tool_reliability(
+        self, ranked: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """Re-order ``ranked`` candidate actions by the per-tool reliability telemetry
+        ARGUS records (Gap #7).  Best-effort + additive: no telemetry reader injected,
+        empty telemetry, or any error → the order is returned unchanged."""
+        if not ranked or self._tool_reliability_fn is None:
+            return ranked
+        try:
+            telemetry = self._tool_reliability_fn() or {}
+        except Exception as exc:   # noqa: BLE001
+            await self._emit_reasoning(f"tool-reliability read failed: {exc}")
+            return ranked
+        if not telemetry:
+            return ranked
+        try:
+            from agents.reasoning.tool_ranking import apply_reliability
+            before = ranked[0].get("tool")
+            reordered = apply_reliability(ranked, telemetry)
+            if reordered and reordered[0].get("tool") != before:
+                top = reordered[0]
+                await self._emit_reasoning(
+                    f"[tool-reliability] promoted '{top.get('tool')}' "
+                    f"(reliability={top.get('tool_reliability')}, "
+                    f"{top.get('tool_attempts')} prior attempts) over a less reliable tool")
+            return reordered
+        except Exception as exc:   # noqa: BLE001
+            await self._emit_reasoning(f"tool-reliability re-rank skipped: {exc}")
+            return ranked
 
     async def build_pre_execution_plan(
         self,

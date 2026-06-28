@@ -76,7 +76,11 @@ def _safe_port(value: Any) -> Optional[int]:
 # environment at startup.  This agent does NOT hold its own provider URL
 # any more — it routes through the unified provider exactly like every
 # other ARGUS agent so a single configuration drives the whole platform.
-LLM_TIMEOUT  = 180     # seconds — per-call upper bound (any provider)
+# Per-call upper bound.  Locally-hosted LLMs (Ollama / LM Studio / llama.cpp) are
+# much slower than a cloud API, so the default is generous (600s = 10 min) and
+# overridable for very slow hosts.  Was 180s, which timed out local models.
+LLM_TIMEOUT  = int(os.environ.get("ARGUS_ATTACKGRAPH_TIMEOUT",
+                                  os.environ.get("LOCAL_LLM_TIMEOUT", "600")))
 POLL_INTERVAL = 35     # seconds between polls
 NEW_FINDINGS_THRESHOLD = 3  # min new findings before re-analysis
 MAX_FINDINGS_PER_PROMPT = 40  # cap to keep prompt manageable
@@ -425,7 +429,7 @@ class AttackGraphAgent:
             logger.warning("[AttackGraphAgent] LLM call failed: %s", exc)
             await self._emit("chain_analysis_status", {
                 "status":  "error",
-                "message": f"LLM analysis failed: {exc}",
+                "message": f"LLM analysis failed: {str(exc).strip() or type(exc).__name__}",
             })
             # Re-raise so the outer loop's consecutive_errors counter
             # increments and the loop self-terminates after 5 failures
@@ -636,8 +640,12 @@ class AttackGraphAgent:
             # Bubble up with the provider name so the event-feed message
             # tells the operator WHICH backend is failing, not just
             # "All connection attempts failed".
+            _emsg = str(exc).strip() or (
+                f"{type(exc).__name__} (no detail — usually a read timeout or "
+                "connection reset; the local LLM may be slow/down, raise the "
+                "timeout via ARGUS_ATTACKGRAPH_TIMEOUT or check it is running)")
             raise RuntimeError(
-                f"{provider.name} ({provider.model or '?'}) failed: {exc}"
+                f"{provider.name} ({provider.model or '?'}) failed: {_emsg}"
             ) from exc
 
         if not tokens:

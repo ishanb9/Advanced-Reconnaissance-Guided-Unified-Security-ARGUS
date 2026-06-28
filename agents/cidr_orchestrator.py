@@ -203,22 +203,19 @@ class CIDROrchestrator:
                 "message": f"Resuming — skipping {len(hosts_done)} already-completed host(s)",
             })
 
-        # ── Step 4: Bounded parallel execution ────────────────
-        semaphore = asyncio.Semaphore(self.max_parallel_hosts)
-        tasks     = [self._run_host(host, semaphore) for host in pending_hosts]
-        results   = await asyncio.gather(*tasks, return_exceptions=True)
-        # Inject placeholder results for already-completed hosts
-        for h in hosts_done:
-            live_hosts_order = live_hosts  # keep original order for summary
-        live_hosts = pending_hosts   # results align with pending_hosts
-
-        summary = {}
-        for host, res in zip(live_hosts, results):
-            summary[host] = res if not isinstance(res, Exception) else str(res)
+        # ── Step 4: Execute ───────────────────────────────────
+        # Default: two-phase (triage ALL hosts in parallel → exploit in promise
+        # order with bounded concurrency + hand-off on no-progress).  Revert to
+        # the legacy single-phase semaphore model with ARGUS_CIDR_TWO_PHASE=0.
+        two_phase = os.environ.get("ARGUS_CIDR_TWO_PHASE", "1") != "0"
+        if two_phase:
+            summary = await self._run_two_phase(pending_hosts)
+        else:
+            summary = await self._run_single_phase(pending_hosts)
 
         await self._emit("cidr_scan_complete", {
-            "hosts_tested": len(live_hosts),
-            "message":      f"All {len(live_hosts)} hosts tested",
+            "hosts_tested": len(summary),
+            "message":      f"All {len(summary)} hosts tested",
         })
         return summary
 
@@ -259,6 +256,141 @@ class CIDROrchestrator:
                 "message": f"Pentest complete on {host}",
             }, host_id=host)
             return result
+
+    # ── Two-phase triage → prioritized exploit ──────────────────────────────────
+    TRIAGE_PHASES = ["recon"]
+
+    async def _triage_host(self, host: str, sem: asyncio.Semaphore) -> dict:
+        """Phase A: a LIGHT, recon-only pass on one host (bounded by `sem`), so
+        EVERY live host gets covered quickly.  Reuses the recon pipeline via
+        master.run(phases=recon).  Returns {host, intel, score}; never raises."""
+        await self._pause_event.wait()
+        async with sem:
+            if self._stop:
+                return {"host": host, "intel": {}, "score": 0.0}
+            timeout = float(os.environ.get("ARGUS_CIDR_TRIAGE_TIMEOUT_SEC", "300"))
+            master = MasterAgent(broadcast=self._make_host_broadcast(host))
+            self._active_masters.append(master)
+            intel: Dict[str, Any] = {}
+            try:
+                kw = dict(self.session_kwargs)
+                kw["phases"] = self.TRIAGE_PHASES
+                await asyncio.wait_for(
+                    master.run(session_id=self.session_id, target=host, **kw),
+                    timeout=timeout)
+                intel = getattr(master, "_intel", {}) or {}
+            except asyncio.TimeoutError:
+                intel = getattr(master, "_intel", {}) or {}
+            except Exception as exc:   # noqa: BLE001
+                logger.warning("[CIDR] triage %s failed: %s", host, exc)
+                intel = getattr(master, "_intel", {}) or {}
+            finally:
+                try:
+                    self._active_masters.remove(master)
+                except ValueError:
+                    pass
+            score = self._score_host(intel)
+            surface = {"open_ports": intel.get("open_ports") or [],
+                       "services": list((intel.get("services") or {}).keys())}
+            try:
+                await _db.set_host_triage(self.session_id, host, score, "triaged", surface)
+            except Exception:
+                pass
+            await self._emit("host_triage_complete", {
+                "host": host, "promise_score": score,
+                "open_ports": surface["open_ports"], "services": surface["services"],
+                "os_guess": intel.get("os_guess", ""),
+                "surface_summary": f"{len(surface['open_ports'])} ports, "
+                                   f"{len(surface['services'])} services",
+            }, host_id=host)
+            return {"host": host, "intel": intel, "score": score}
+
+    async def _run_two_phase(self, pending_hosts: List[str]) -> Dict:
+        """Phase A: triage ALL hosts in parallel (high concurrency).  Phase B:
+        run full engagements on hosts in promise-rank order through a small
+        semaphore, each bounded by a per-host depth budget so a stalled host
+        releases its slot to the next-ranked host."""
+        # Honour the operator's "max parallel hosts" choice from the UI.  The
+        # deep-exploit lane USED to be hard-pinned at 3, so raising the slider had
+        # no effect and multiple targets appeared to be tested one-at-a-time.  Now
+        # the exploit lane defaults to the slider value; triage (cheaper) runs at
+        # least as wide.  Env vars still override for fine-tuning / CI.
+        _mph             = max(1, int(getattr(self, "max_parallel_hosts", 5) or 5))
+        exploit_parallel = max(1, int(os.environ.get("ARGUS_CIDR_EXPLOIT_PARALLEL", str(_mph))))
+        triage_parallel  = max(exploit_parallel,
+                               int(os.environ.get("ARGUS_CIDR_TRIAGE_PARALLEL", str(max(8, _mph)))))
+        host_sec         = max(0, int(os.environ.get("ARGUS_CIDR_EXPLOIT_HOST_SEC", "1800")))
+
+        # ── Phase A — triage every host ──
+        await self._emit("cidr_phase", {
+            "phase": "triage", "hosts": len(pending_hosts),
+            "message": f"Triaging {len(pending_hosts)} hosts in parallel"})
+        tsem = asyncio.Semaphore(triage_parallel)
+        triaged = await asyncio.gather(
+            *[self._triage_host(h, tsem) for h in pending_hosts],
+            return_exceptions=True)
+        scored = [r for r in triaged if isinstance(r, dict)]
+        # Highest promise first (stable tiebreak on host string).
+        scored.sort(key=lambda r: (r.get("score", 0.0), r.get("host", "")), reverse=True)
+        ranked_hosts = [r["host"] for r in scored]
+        await self._emit("cidr_phase", {
+            "phase": "exploit", "hosts": len(ranked_hosts),
+            "ranking": [{"host": r["host"], "score": r["score"]} for r in scored],
+            "message": f"Exploiting {len(ranked_hosts)} hosts in promise order"})
+
+        # ── Phase B — bounded, ranked deep exploitation with hand-off ──
+        esem = asyncio.Semaphore(exploit_parallel)
+
+        async def _deep(host: str) -> Any:
+            await self._pause_event.wait()
+            async with esem:
+                if self._stop:
+                    return "stopped"
+                # Self-heal the data layer before each host: a mid-run server
+                # reload / lifespan teardown could have closed Mongo, which would
+                # otherwise fail this host's entire exploit phase with
+                # "MongoDB not initialized".
+                try:
+                    from db.mongo_client import ensure_setup
+                    await ensure_setup()
+                except Exception:
+                    pass
+                await self._emit("host_scan_start",
+                                 {"host": host, "message": f"Exploiting {host}"}, host_id=host)
+                master = MasterAgent(broadcast=self._make_host_broadcast(host))
+                self._active_masters.append(master)
+                try:
+                    kw = dict(self.session_kwargs)
+                    if host_sec > 0:
+                        kw["max_seconds"] = host_sec   # progress-gated: only stalls hand off
+                    result = await master.run(session_id=self.session_id, target=host, **kw)
+                except Exception as exc:   # noqa: BLE001
+                    logger.warning("[CIDR] exploit %s failed: %s", host, exc)
+                    result = {"error": str(exc)}
+                finally:
+                    try:
+                        self._active_masters.remove(master)
+                    except ValueError:
+                        pass
+                await _db.mark_host_complete(self.session_id, host)
+                await self._emit("host_scan_complete",
+                                 {"host": host, "message": f"Done {host}"}, host_id=host)
+                return result
+
+        results = await asyncio.gather(*[_deep(h) for h in ranked_hosts],
+                                       return_exceptions=True)
+        return {h: (r if not isinstance(r, Exception) else str(r))
+                for h, r in zip(ranked_hosts, results)}
+
+    async def _run_single_phase(self, pending_hosts: List[str]) -> Dict:
+        """Legacy model (ARGUS_CIDR_TWO_PHASE=0): bounded full engagements, no
+        triage/ranking — preserved verbatim as the revert path."""
+        semaphore = asyncio.Semaphore(self.max_parallel_hosts)
+        results = await asyncio.gather(
+            *[self._run_host(h, semaphore) for h in pending_hosts],
+            return_exceptions=True)
+        return {h: (r if not isinstance(r, Exception) else str(r))
+                for h, r in zip(pending_hosts, results)}
 
     # ── Live host discovery ────────────────────────────────────────────────────
 
@@ -391,6 +523,35 @@ class CIDROrchestrator:
                 await self.broadcast(msg)
 
         return _host_broadcast
+
+    # ── Triage scoring ──────────────────────────────────────────────────────────
+    def _score_host(self, intel: dict) -> float:
+        """Content-agnostic 'promise' score for ranking which host to exploit first.
+
+        Derived ONLY from generic surface signals (open-port count, high-value
+        service CLASSES, count of version→CVE leads, presence of an auth surface) —
+        never from any CVE id / product / payload literal, so the engine stays
+        clean against the no-hardcoded-content guard.  Higher = more promising."""
+        if not isinstance(intel, dict):
+            return 0.0
+        ports = intel.get("open_ports") or []
+        services = intel.get("services") or {}
+        score = 0.0
+        score += 1.0 * len(ports) if isinstance(ports, (list, tuple)) else 0.0
+        _HIGH_VALUE = ("http", "https", "smb", "ssh", "rdp", "ftp", "mysql",
+                       "postgres", "mssql", "mongodb", "redis", "ldap", "vnc", "telnet")
+        svc_blob = " ".join(
+            str((v.get("service") if isinstance(v, dict) else v) or "").lower()
+            for v in (services.values() if isinstance(services, dict) else [])
+        )
+        for cls in _HIGH_VALUE:
+            if cls in svc_blob:
+                score += 2.0
+        cves = intel.get("cves") or []
+        score += 1.5 * len(cves) if isinstance(cves, (list, tuple)) else 0.0
+        if intel.get("login_pages") or "login" in svc_blob:
+            score += 1.0
+        return float(round(score, 2))
 
     # ── Emit helper ────────────────────────────────────────────────────────────
 

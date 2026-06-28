@@ -163,10 +163,12 @@ def _assess_severity(url: str, combined_output: str, technologies: list[str]) ->
     if version_tech:
         return "MEDIUM", f"Version disclosure: {', '.join(version_tech[:3])}"
 
-    # CMS detected
+    # CMS detected — bare presence of a CMS is an OBSERVATION (attack surface),
+    # not a confirmed vulnerability. INFO, not MEDIUM. (Version disclosure above
+    # is a genuine minor info-leak and keeps its MEDIUM rating + CVE cross-ref.)
     cms_found = [t for t in technologies if t in _CMS_PATTERNS]
     if cms_found:
-        return "MEDIUM", f"CMS detected: {', '.join(cms_found)}"
+        return "INFO", f"CMS detected: {', '.join(cms_found)}"
 
     return "INFO", "Web service fingerprinted"
 
@@ -380,7 +382,9 @@ class WebFingerprintSubagent(BaseSubagent):
                         f"A Web Application Firewall ({waf_name}) was detected in front of "
                         f"{target}. This may affect exploit delivery and scan accuracy."
                     ),
-                    severity="MEDIUM",
+                    # A WAF is a defensive control — detecting it is an OBSERVATION
+                    # (useful for evasion planning), not a vulnerability. INFO, not MEDIUM.
+                    severity="INFO",
                     evidence=wafw_out[:500],
                     tool="wafw00f",
                     host=target,

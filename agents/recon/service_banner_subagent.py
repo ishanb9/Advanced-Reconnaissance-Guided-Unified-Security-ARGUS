@@ -662,6 +662,7 @@ class ServiceBannerSubagent(BaseSubagent):
                     f"can be captured by a network sniffer."
                 ),
                 severity="CRITICAL",
+                signals={"confirmed": True, "chainable": True},
                 evidence=banner.get("raw", "")[:400],
                 tool="nmap",
                 host=target,
@@ -685,6 +686,7 @@ class ServiceBannerSubagent(BaseSubagent):
                     f"Attackable for RCE via CONFIG SET / slave replication."
                 ),
                 severity="CRITICAL",
+                signals={"confirmed": True, "directly_exploitable": True, "compromise": "total_data"},
                 evidence=banner.get("raw", "")[:500],
                 tool="nmap",
                 host=target,
@@ -707,6 +709,7 @@ class ServiceBannerSubagent(BaseSubagent):
                     f"Data is fully readable and writable."
                 ),
                 severity="CRITICAL",
+                signals={"confirmed": True, "directly_exploitable": True, "compromise": "total_data"},
                 evidence=banner.get("raw", "")[:500],
                 tool="nmap",
                 host=target,
@@ -727,6 +730,7 @@ class ServiceBannerSubagent(BaseSubagent):
                     f"Attacker can upload files (webshells, SSH keys) → potential RCE."
                 ),
                 severity="CRITICAL",
+                signals={"confirmed": True, "directly_exploitable": True},
                 evidence=banner.get("raw", "")[:500],
                 tool="nmap",
                 host=target,
@@ -747,6 +751,7 @@ class ServiceBannerSubagent(BaseSubagent):
                     f"Unauthenticated users can list and download accessible files."
                 ),
                 severity="HIGH",
+                signals={"confirmed": True, "chainable": True},
                 evidence=banner.get("raw", "")[:500],
                 tool="nmap",
                 host=target,
@@ -767,6 +772,7 @@ class ServiceBannerSubagent(BaseSubagent):
                     + (f"Base DN: {base_dn}." if base_dn else "")
                 ),
                 severity="HIGH",
+                signals={"confirmed": True, "directly_exploitable": True},
                 evidence=banner.get("raw", "")[:500],
                 tool="ldapsearch",
                 host=target,
@@ -795,6 +801,7 @@ class ServiceBannerSubagent(BaseSubagent):
                     + (f"Readable shares: {read_shares}. " if read_shares else "")
                 ),
                 severity=sev,
+                signals=({"confirmed": True, "directly_exploitable": True} if write_shares else {"confirmed": True, "chainable": True}),
                 evidence=banner.get("raw", "")[:600],
                 tool="enum4linux-ng",
                 host=target,
@@ -817,6 +824,7 @@ class ServiceBannerSubagent(BaseSubagent):
                     f"May be vulnerable to CVE-2018-15473 (user enum) and others."
                 ),
                 severity="HIGH",
+                signals={"confirmed": True, "chainable": True},
                 evidence=banner.get("raw", "")[:400],
                 tool="nmap",
                 host=target,
@@ -838,6 +846,7 @@ class ServiceBannerSubagent(BaseSubagent):
                     f"(DH-group1-SHA1, arcfour, 3DES-CBC, etc.)."
                 ),
                 severity="MEDIUM",
+                signals={"confirmed": True, "info_leak_only": True},
                 evidence=banner.get("raw", "")[:400],
                 tool="nmap",
                 host=target,

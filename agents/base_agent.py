@@ -1180,6 +1180,60 @@ Return JSON:
 
         phase_to_use = phase or self.phase
 
+        # ── Execution-boundary safety governor (Gap #5) ───────────────────
+        # One chokepoint for every tool ARGUS runs (master, subagents, and the
+        # operator all reach the MCP server through here).  Best-effort: any
+        # governor error falls through to 'allow' so it can NEVER break a
+        # legitimate run.  We hard-enforce only the checks that are always safe
+        # to enforce — rewriting a host-destructive op (disk wipe, fork-bomb,
+        # shutdown) to a no-op, and blocking intrusive OT/life-safety actions
+        # without authorization — plus SCOPE, but only when an explicit
+        # authorised-scope list has been set (so discovered/pivoted in-scope
+        # hosts are never wrongly blocked).
+        try:
+            from knowledge import safety_governor as _gov
+            _scope_hosts = getattr(self, "_governor_scope_hosts", None) or []
+            _enforce = ["destructive", "ot_life_safety"]
+            if _scope_hosts:
+                _enforce.insert(0, "scope")
+            _intel = getattr(self, "intel", None) or {}
+            _verdict = _gov.evaluate({
+                "tool_name":   tool_name,
+                "args":        args,
+                "target_host": target or getattr(self, "_target_host", "")
+                               or (_intel.get("target_host") if isinstance(_intel, dict) else ""),
+                "scope_hosts": _scope_hosts,
+                "ceiling":     getattr(self, "_scan_intrusiveness", None)
+                               or (_intel.get("scan_intrusiveness") if isinstance(_intel, dict) else None)
+                               or "intrusive",
+                "domain":      getattr(self, "_target_domain", None)
+                               or (_intel.get("domain") if isinstance(_intel, dict) else None) or "IT",
+                "life_safety": bool(getattr(self, "_life_safety", False)),
+                "authorized":  bool(getattr(self, "_destructive_authorized", False)),
+            }, enforce=_enforce)
+            _decision = _verdict.get("decision")
+            if _decision == "deny":
+                try:
+                    await self._emit("governor_block", {
+                        "tool": tool_name, "reason": _verdict.get("reason"),
+                        "checks": _verdict.get("checks"), "args": str(args)[:300]})
+                except Exception:
+                    pass
+                logger.warning("safety governor BLOCKED %s: %s", tool_name, _verdict.get("reason"))
+                return {"stdout": "", "stderr": f"[safety-governor] blocked: {_verdict.get('reason')}",
+                        "exit_code": -1, "output_id": None, "governor": _verdict}
+            if _decision == "rewrite" and _verdict.get("rewritten_args") is not None:
+                try:
+                    await self._emit("governor_rewrite", {
+                        "tool": tool_name, "reason": _verdict.get("reason"),
+                        "original": str(args)[:300]})
+                except Exception:
+                    pass
+                logger.warning("safety governor REWROTE %s: %s", tool_name, _verdict.get("reason"))
+                args = _verdict["rewritten_args"]
+        except Exception as _gov_exc:
+            logger.debug("safety governor skipped: %s", _gov_exc)
+
         # ── Self-sabotage guard: never delete the target's own vhost ──────
         # The error-analyzer sometimes mis-flags a discovered vhost (e.g.
         # cctv.htb) as "scope drift", and the planner then emits
@@ -2356,6 +2410,17 @@ Return JSON:
         _ptok = int(_usage.get("prompt_tokens") or 0)
         _ctok = int(_usage.get("completion_tokens") or 0)
         _ttok = int(_usage.get("total_tokens") or (_ptok + _ctok))
+        # Per-target token accounting — each MasterAgent drives ONE target, so the
+        # running sum on the agent IS this target's LLM-token spend.  The operator
+        # reads it to enforce the human-set per-target budget.  When the provider
+        # exposes no usage, fall back to a chars/4 estimate so the budget still
+        # advances (never silently free).
+        try:
+            _acc = _ttok or max(1, (sum(len(m.get("content", "")) for m in messages)
+                                    + len(content)) // 4)
+            self._tokens_used = int(getattr(self, "_tokens_used", 0) or 0) + _acc
+        except Exception:
+            pass
         try:
             await self._emit("llm_response", {
                 "agent":    str(self.name),
@@ -2495,6 +2560,66 @@ Return JSON:
 
     # ─── Finding Storage ──────────────────────────────────────
 
+    async def regrade_findings_for_host(self, host: str, new_signals: Dict,
+                                        match: Optional[Dict] = None,
+                                        reason: str = "") -> int:
+        """Dynamic operational re-grade.  Merge ``new_signals`` into the stored
+        evidence of this host's matching finding(s), recompute severity via the
+        central policy, and — when severity ESCALATES — update the DB record and
+        emit a ``finding_regraded`` event so live counts + the report stay correct.
+
+        ``match`` narrows which findings receive the evidence:
+          {"cve": "CVE-..."}              → the finding for that CVE
+          {"port": 3389, "service": ...}  → the finding on that port/service
+        Omit ``match`` to apply to every finding on the host.  Best-effort; never
+        raises into the caller (a compromise must still be recorded even if the
+        re-grade query fails)."""
+        try:
+            from knowledge import severity_policy as _sp
+            existing = await db.get_findings(self._session_id, host=host, limit=500)
+        except Exception:
+            return 0
+        regraded = 0
+        for f in (existing or []):
+            # ── match filter ──
+            if match:
+                cve = str(match.get("cve") or "").upper()
+                if cve:
+                    fcves = [str(c).upper() for c in (f.get("cves") or [])]
+                    if cve not in fcves and cve not in str(f.get("title", "")).upper():
+                        continue
+                elif match.get("port") is not None:
+                    if str(f.get("port")) != str(match.get("port")):
+                        continue
+                elif match.get("service"):
+                    if str(match.get("service")).lower() not in str(f.get("service", "")).lower():
+                        continue
+            ex = f.get("extra") or {}
+            merged = _sp.merge_signals(ex.get("severity_signals") or {}, new_signals)
+            verdict = _sp.grade(merged)
+            old_sev = str(f.get("severity", "info")).lower().replace("findingseverity.", "")
+            new_sev = str(verdict["severity"]).lower()
+            if not _sp.is_escalation(old_sev, new_sev):
+                continue
+            try:
+                ok = await db.regrade_finding(
+                    f.get("id") or f.get("_id"), new_sev,
+                    {"severity_signals":   merged,
+                     "severity_rationale": verdict["rationale"],
+                     "evidence_tag":       verdict["evidence_tag"]})
+            except Exception:
+                ok = False
+            if ok:
+                regraded += 1
+                try:
+                    await self._emit("finding_regraded", {
+                        "id": f.get("id"), "host": host, "title": f.get("title"),
+                        "old_severity": old_sev, "new_severity": new_sev,
+                        "rationale": verdict["rationale"], "reason": reason})
+                except Exception:
+                    pass
+        return regraded
+
     async def store_finding(
         self,
         severity:    FindingSeverity,
@@ -2509,9 +2634,29 @@ Return JSON:
         raw_output:  Optional[str]  = None,
         extra:       Dict           = None,
         evidence:    Optional[str]  = None,
-        remediation: Optional[str]  = None
+        remediation: Optional[str]  = None,
+        signals:     Optional[Dict] = None,
     ) -> Dict:
-        """Store a finding to DB and broadcast to frontend."""
+        """Store a finding to DB and broadcast to frontend.
+
+        ``signals`` (optional): an evidence dict scored by the central operational
+        severity policy (knowledge/severity_policy.py).  When supplied it OVERRIDES
+        ``severity`` with what ARGUS actually demonstrated/assessed (compromise,
+        applicable public exploit, chainability) — not raw CVSS.  Omit it and the
+        passed ``severity`` is used unchanged (legacy callers are unaffected)."""
+        # ── Operational severity policy (single source of truth) ────────────
+        _sev_signals = signals if (isinstance(signals, dict) and signals) else None
+        _sev_rationale = None
+        _sev_tag = None
+        if _sev_signals:
+            try:
+                from knowledge import severity_policy as _sp
+                _verdict = _sp.grade(_sev_signals)
+                severity = FindingSeverity(str(_verdict["severity"]).lower())
+                _sev_rationale = _verdict.get("rationale")
+                _sev_tag = _verdict.get("evidence_tag")
+            except Exception:
+                pass   # policy is best-effort; never block a finding write
         # ── CVSS auto-scoring (E10 wiring) ──────────────────────────────
         # Estimate a CVSS v3.1 base score + vector from the finding shape
         # so the FindingsBoard + report can sort/filter by real impact.
@@ -2552,6 +2697,77 @@ Return JSON:
             _merged_extra.setdefault("cvss_base",   _cvss_score)
             if _cvss_vector:
                 _merged_extra.setdefault("cvss_vector", _cvss_vector)
+        # Operational severity provenance (for the report's rationale + evidence tag,
+        # and so a later re-grade can recompute from the same evidence).
+        if _sev_signals:
+            _merged_extra.setdefault("severity_signals",   _sev_signals)
+        if _sev_rationale:
+            _merged_extra.setdefault("severity_rationale", _sev_rationale)
+        if _sev_tag:
+            _merged_extra.setdefault("evidence_tag",       _sev_tag)
+        # Reproduction status (Gap #1) for the operator/main path — an honest label
+        # ('reproduced' when a compromise was demonstrated, 'evidence_confirmed' for
+        # single-path tool/exploit evidence, 'unreproduced' for an unbacked
+        # high/critical) + gate into the 'unverified' lane.  Best-effort.
+        try:
+            from agents.reasoning import repro_verifier as _rv
+            _sv_str = (str(severity.value) if hasattr(severity, "value") else str(severity)).lower()
+            _rf = {"severity": _sv_str,
+                   "evidence_tag":     _merged_extra.get("evidence_tag"),
+                   "severity_signals": _merged_extra.get("severity_signals"),
+                   "browser_verified": _merged_extra.get("browser_verified"),
+                   "extra": {}}
+            _rstat = _rv.repro_status(_rf)
+            _merged_extra["reproduce_status"] = _rstat
+            if _rstat == "unreproduced" and _sv_str in ("high", "critical"):
+                _merged_extra.setdefault("report_section", "unverified")
+                _merged_extra.setdefault("unverified_reason",
+                                         "high/critical finding not independently reproduced")
+        except Exception:
+            pass
+
+        # ── Issue-Validator WRITE-TIME GATE ─────────────────────────────
+        # Deterministic (no LLM, hot-path safe).  A high/critical claim with
+        # NO concrete evidence (or whose 'evidence' is actually a tool error),
+        # a foreign-engagement item, or a duplicate is persisted with
+        # verified=False + a gated_reason so the REPORT excludes it (the
+        # read-time gate filters on `verified`) — the goal: no faulty/silly
+        # findings in the client report.  Accepted findings are verified=True.
+        _verified = True
+        try:
+            import os as _os
+            if _os.environ.get("ARGUS_ISSUE_VALIDATOR", "1") != "0":
+                from agents.meta.issue_validator_agent import get_validator
+                _iv = get_validator(getattr(self, "_session_id", "") or "")
+                if _iv is not None:
+                    _origin_fn = getattr(self, "_engagement_origin", None)
+                    _cur = _origin_fn() if callable(_origin_fn) else None
+                    if _cur:
+                        _merged_extra.setdefault("_origin", _cur)
+                    _sev_str = (str(severity.value) if hasattr(severity, "value")
+                                else str(severity)).lower().replace("findingseverity.", "")
+                    _f_gate = {
+                        "title": title, "name": title, "severity": _sev_str,
+                        "evidence": evidence or raw_output or description or "",
+                        "raw_output": raw_output or "", "description": description,
+                        "tool": tool_used or "", "host": host, "port": port,
+                        "cve": (cves[0] if cves else ""),
+                        "_origin": _merged_extra.get("_origin"),
+                    }
+                    # Only regex-ground when REAL tool stdout is present; an
+                    # operator/prose finding (raw_output empty) must not be
+                    # grounded against raw-output regexes or real RCE/foothold/
+                    # credential trophies would be hidden from the report.
+                    _has_raw = bool(raw_output and str(raw_output).strip())
+                    _v = _iv.validate_finding(_f_gate, current_origin=_cur,
+                                              has_raw_output=_has_raw)
+                    _verified = bool(_v.get("accept", True))
+                    if not _verified:
+                        _merged_extra["gated_reason"] = _v.get("reason", "")
+                    _iv.ingest_finding(_f_gate, _v)
+        except Exception:
+            _verified = True   # never block the write on a gate error
+        _merged_extra["verified"] = _verified
 
         finding = await db.store_finding(
             session_id  = self._session_id,

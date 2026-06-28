@@ -6,6 +6,8 @@ false positives, missed severity ratings, and objectives gaps.
 """
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import json
 import logging
 from typing import Any, Dict, List, Optional
@@ -127,9 +129,194 @@ class IssueValidatorAgent(BaseMetaAgent):
 
     def __init__(self, **kwargs):
         super().__init__(name=AgentName.ISSUE_VALIDATOR, **kwargs)
+        # ── Real finding GATE (event-driven, mirrors ErrorAnalyzer) ──────
+        self._queue: asyncio.Queue = asyncio.Queue(maxsize=200)
+        self._stop_requested: bool = False
+        self._seen_fp: set = set()
+        self._master = None
+        self._stats = {"total": 0, "accepted": 0, "rejected": 0,
+                       "blocking": 0, "advisory": 0}
+
+    def bind_master(self, master) -> None:
+        """Back-ref so the gate can surface rejects to the operator transcript
+        via master._pending_corrections (the channel the operator drains)."""
+        self._master = master
 
     def _build_system_prompt(self) -> str:
         return _SYSTEM_PROMPT
+
+    # ── Deterministic WRITE-TIME gate (no LLM; safe in the hot path) ──────
+    @staticmethod
+    def _finding_fp(finding: Dict[str, Any]) -> str:
+        import re as _re
+        t = _re.sub(r"\W+", " ", str(finding.get("title") or finding.get("name") or "")).strip().lower()
+        basis = "|".join([t, str(finding.get("host", "")), str(finding.get("port", "")),
+                          str(finding.get("cve", ""))])
+        return hashlib.sha1(basis.encode("utf-8", "ignore")).hexdigest()
+
+    def validate_finding(self, finding: Dict[str, Any],
+                         current_origin: Optional[Dict[str, str]] = None,
+                         has_raw_output: bool = True) -> Dict[str, Any]:
+        """Synchronous, deterministic verdict used as the WRITE-TIME gate.
+
+        Rejects (a) a high/critical claim NOT backed by concrete evidence (or
+        whose 'evidence' is actually a tool error), (b) a finding from a
+        DIFFERENT engagement (foreign origin), (c) a duplicate.  Low / info /
+        generic findings are ACCEPTED — the goal is to stop FAULTY high-severity
+        trophies (the 'silly critical with no evidence' case), not to swallow
+        legitimate low findings.
+
+        ``has_raw_output`` MUST be False for operator/prose findings (whose
+        'evidence' is a human-readable summary, not raw tool stdout).  When
+        False the narrow raw-output grounding regexes are NOT applied — a
+        high/critical is accepted as long as it carries *some* evidence — so
+        real RCE/foothold/credential findings declared in prose are never
+        hidden from the report.  Only with real tool stdout do we regex-ground."""
+        title    = str(finding.get("title") or finding.get("name") or "")
+        sev      = str(finding.get("severity") or "").lower()
+        evidence = str(finding.get("evidence") or finding.get("raw_output")
+                       or finding.get("output") or finding.get("description") or "")
+        tool     = str(finding.get("tool") or "")
+        mitre    = str(finding.get("mitre_technique") or finding.get("mitre") or "")
+        cls = "generic"
+        grounded = bool(evidence.strip())
+        failure = False
+        try:
+            from agents.reasoning.issue_validator import validate_grounding, infer_class
+            cls = infer_class(statement=title, mitre=mitre, tool=tool)
+            _iv = validate_grounding(statement=title, mitre=mitre, tool=tool,
+                                     stdout=evidence, issue_class=cls)
+            grounded = bool(_iv.grounded)
+            failure = bool(_iv.failure_signal)
+        except Exception:
+            pass
+        # severity sanity — a high/critical MUST be evidence-backed
+        if sev in ("critical", "high"):
+            if not has_raw_output:
+                # Operator/prose finding: no raw tool stdout to regex-ground.
+                # Require SOME evidence (catches a totally bare 'Critical RCE')
+                # but never apply the narrow raw-output regexes to prose, else
+                # real RCE/foothold/cred findings would be hidden from the report.
+                severity_ok = bool(evidence.strip())
+            elif failure:
+                severity_ok = False
+            elif cls != "generic":
+                severity_ok = grounded
+            else:
+                severity_ok = bool(evidence.strip())
+        else:
+            severity_ok = True
+        # provenance (degrade to OK when either side is unstamped)
+        origin_ok = True
+        o = finding.get("_origin")
+        if o and current_origin:
+            origin_ok = (str(o.get("session_id", "")) == str(current_origin.get("session_id", ""))
+                         and str(o.get("target", "")) == str(current_origin.get("target", "")))
+        # dedup
+        fp = self._finding_fp(finding)
+        duplicate = fp in self._seen_fp
+        if not duplicate:
+            self._seen_fp.add(fp)
+        accept = severity_ok and origin_ok and not duplicate
+        reason = ("" if accept else
+                  ("ungrounded" if not severity_ok else
+                   "foreign-origin" if not origin_ok else "duplicate"))
+        return {"accept": accept, "grounded": grounded, "severity_ok": severity_ok,
+                "origin_ok": origin_ok, "duplicate": duplicate, "cls": cls, "reason": reason}
+
+    # ── Async queue consumer (stats + live broadcast off the hot path) ───
+    def ingest_finding(self, finding: Dict[str, Any],
+                       verdict: Optional[Dict[str, Any]] = None) -> None:
+        """Non-blocking — hand a (finding, verdict) to the background loop for
+        stats + live broadcast.  Safe to call from the write-time gate."""
+        if not self._enabled:
+            return
+        try:
+            self._queue.put_nowait((finding, verdict or {}))
+        except asyncio.QueueFull:
+            try:
+                self._queue.get_nowait(); self._queue.task_done()
+                self._queue.put_nowait((finding, verdict or {}))
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def request_stop(self) -> None:
+        self._stop_requested = True
+
+    async def run(self) -> None:
+        """Background loop — spawned at engagement start on the operator path."""
+        if not self._enabled:
+            return
+        logger.info("[issue_validator] started for session %s", self._session_id)
+        while not self._stop_requested:
+            try:
+                finding, verdict = await asyncio.wait_for(self._queue.get(), timeout=10.0)
+            except asyncio.TimeoutError:
+                continue
+            except Exception:
+                continue
+            try:
+                await self._handle_finding(finding, verdict)
+            except Exception as exc:                               # noqa: BLE001
+                logger.warning("[issue_validator] handler error: %s", exc)
+            finally:
+                self._queue.task_done()
+        logger.info("[issue_validator] stopped for session %s", self._session_id)
+
+    async def _handle_finding(self, finding: Dict[str, Any], verdict: Dict[str, Any]) -> None:
+        accept = bool(verdict.get("accept", True))
+        reason = str(verdict.get("reason", ""))
+        self._stats["total"] += 1
+        if accept:
+            self._stats["accepted"] += 1
+        else:
+            self._stats["rejected"] += 1
+            self._stats["advisory"] += 1
+            title = str(finding.get("title") or finding.get("name") or "finding")
+            corr = None
+            try:
+                corr = Correction(
+                    source="issue_validator", scan_id=self._session_id or "",
+                    phase=self._current_phase or "", confidence=0.9,
+                    issue_type="false_positive",
+                    description=f"Finding gated out of the report ({reason}): {title}",
+                    recommended_action=(f"Excluded from the client report ({reason}). "
+                                        "Re-confirm with concrete current-session evidence "
+                                        "before this is reported."),
+                    affected_finding_ids=[str(finding.get("_id") or finding.get("id") or "")],
+                )
+                await self.emit_correction(corr)
+                # Keep a rolling snapshot so the GUI can reconstruct the
+                # corrections list even if an individual meta_correction WS
+                # event is missed (the badge count + the list must agree).
+                self._recent_corrections = ([corr.to_dict()]
+                                            + list(getattr(self, "_recent_corrections", [])))[:60]
+            except Exception:
+                pass
+            # live bridge: surface the rejection to the operator transcript.
+            # master._pending_corrections is an asyncio.Queue (drained via
+            # get_nowait), so push with put_nowait — NOT append.
+            m = getattr(self, "_master", None)
+            if corr is not None and m is not None and hasattr(m, "_pending_corrections"):
+                try:
+                    m._pending_corrections.put_nowait(corr)
+                except Exception:
+                    pass
+        try:
+            await self._emit("validation_analysis", {
+                "agent":       "issue_validator",
+                "accepted":    self._stats["accepted"],
+                "rejected":    self._stats["rejected"],
+                "last_reason": reason,
+                "stats":       dict(self._stats),
+                # Self-contained snapshot of the gated findings so the Corrections
+                # tab is populated even if a per-item event was dropped.
+                "corrections": list(getattr(self, "_recent_corrections", []))[:60],
+            })
+        except Exception:
+            pass
 
     async def evaluate(self, **kwargs) -> List[Correction]:
         """Route to tool or phase validation based on 'mode' kwarg."""
@@ -315,3 +502,30 @@ class IssueValidatorAgent(BaseMetaAgent):
             phase, len(corrections),
         )
         return corrections
+
+
+# ── Per-session registry (mirrors error_analyzer) ───────────────────────
+# Lets the write-time finding gate (base_agent.store_finding) look up THIS
+# session's validator without threading it through constructors.
+_GLOBAL_REGISTRY: Dict[str, "IssueValidatorAgent"] = {}
+
+
+def register_validator(session_id: str, agent: "IssueValidatorAgent") -> None:
+    if agent is None or not session_id:
+        return
+    _GLOBAL_REGISTRY[str(session_id)] = agent
+
+
+def get_validator(session_id: str) -> Optional["IssueValidatorAgent"]:
+    return _GLOBAL_REGISTRY.get(str(session_id or ""))
+
+
+def unregister_validator(session_id: str) -> None:
+    _GLOBAL_REGISTRY.pop(str(session_id or ""), None)
+
+
+__all__ = [
+    "IssueValidatorAgent",
+    "register_validator", "get_validator", "unregister_validator",
+    "_GLOBAL_REGISTRY",
+]

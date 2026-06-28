@@ -23,7 +23,8 @@ c_ok()    { printf '\033[1;32m[+] %s\033[0m\n' "$*"; }
 c_warn()  { printf '\033[1;33m[!] %s\033[0m\n' "$*"; }
 
 # ── The complete ARGUS tool registry (mcp-server.js) — 356 binaries ──────────
-REGISTRY_BINS="403fuzzer GodPotato PCredz PrintSpoofer SweetPotato adidnsdump aircrack-ng airgeddon airmon-ng altdns amass amicontained apktool arjun arp-scan arping arpspoof assetfinder atk6-alive6 aws awsrecon az bandit base58 base64 beef-xss beroot bettercap binwalk bloodhound-ce-python bloodhound-python botb bulk_extractor bully byp4xx cariddi cdk certipy certipy-ad cewl cewl-ng chameleon checksec chisel chntpw cloud_enum cloudbrute cloudsplaining coercer commix corsy crackmapexec credmaster crictl crosslinked crunch cryptcat cupp curl cutter cutycapt dalfox davtest deepce dig dirb dmitry dns2tcp dnschef dnsenum dnsmap dnsrecon dnsvalidator dnsx docker donpapi donut droopescan dsniff eaphammer emailharvester enum4linux enum4linux-ng enumerate-iam ettercap evil-winrm exiv2 eyewitness feroxbuster ffuf fierce file find fping freeze gau gcloud gcpbucketbrute gdb getcap ghidra gitleaks go-socks5 gobuster gospider gowitness gpp-decrypt graudit grype gsutil h8mail hakrawler hash-identifier hashcat hashid hcxdumptool hcxhashtool holehe host hostapd-wpe hping3 httprobe httpx hydra id ike-scan impacket-GetADUsers impacket-GetNPUsers impacket-GetUserSPNs impacket-addcomputer impacket-atexec impacket-dacledit impacket-dcomexec impacket-findDelegation impacket-getArch impacket-getPac impacket-getST impacket-getTGT impacket-lookupsid impacket-mssqlclient impacket-ntlmrelayx impacket-owneredit impacket-psexec impacket-rbcd impacket-rpcdump impacket-secretsdump impacket-services impacket-smbexec impacket-smbserver impacket-ticketer impacket-wmiexec inetsim invoke-obfuscation iodine jadx john joomscan jq jwt_tool katana kerberoast kerbrute kismet kube-bench kube-hunter kubeaudit kubectl kubesec kwp64 lazagne lazys3 lbd ldapdomaindump ldapsearch ligolo-ng linenum.sh linkfinder linpeas.sh linux-exploit-suggester linux-exploit-suggester-2 log4shell-scanner lsassy ltrace macchanger magescan maltego masscan massdns medusa mentalist metagoofil mimikatz mitm6 mitmdump mitmproxy mp64 msfconsole msfpc msfvenom nbtscan nc ncrack ndiff net-creds netdiscover netexec netsniff-ng ngrep nikto nmap nosqlmap nslookup nuclei nxc o365spray objdump onesixtyone openvas-scanner openvpn ophcrack pacu param-miner patator patchelf pdf-parser pdfid photon phuip-fpizda pipal pixiewps polenum popeye powershell-empire powerup pp64 pretender privesccheck prowler proxychains4 pspy64 pth-winexe puredns pwn pwncat pwndb pwndbg pwsh pypykatz python3 r2 rdesktop readelf reaver recon-ng responder retire revsocks rlwrap routersploit rpcclient rpivot rsmangler ruler s3scanner samdump2 scalpel scarecrow scout scp screen searchsploit seatbelt semgrep sendEmail setoolkit shellter sherlock shiro-exploit shodan shuffledns skipfish sliver sliver-server smbclient smbmap smtp-user-enum snmpcheck snmpget snmpwalk socat socialscan spiderfoot sprayhound spring4shell-scan sqlmap ssh sshdump sshpass sshuttle sslscan sslyze ssrfmap starkiller strace strings struts-pwn stunnel4 subfinder sudo swaks tcpdump tcpick tcpreplay testdisk testssl.sh theHarvester tmux tplmap traceroute trevorspray trivy trufflehog tshark udptunnel uname unicornscan unix-privesc-check upx urlcrazy veil vol wafw00f wapiti watson waybackurls wce weevely wes wfuzz whatweb whoami whois wifiphisher wifite windapsearch windows-exploit-suggester winpeas.exe winrm-cli wpscan xfreerdp xfreerdp3 xsstrike xxd yara ysoserial zenmap"
+REGISTRY_BINS="403fuzzer GodPotato PCredz PrintSpoofer SweetPotato adidnsdump aircrack-ng airgeddon airmon-ng altdns amass amicontained apktool arjun arp-scan arping arpspoof assetfinder atk6-alive6 aws awsrecon az bandit base58 base64 beef-xss beroot bettercap binwalk bloodhound-ce-python bloodhound-python botb bulk_extractor bully byp4xx cariddi cdk certipy certipy-ad cewl cewl-ng chameleon checksec chisel chntpw cloud_enum cloudbrute cloudsplaining coercer commix corsy crackmapexec credmaster crictl crosslinked crunch cryptcat cupp curl cutter cutycapt dalfox davtest deepce dig dirb dmitry dns2tcp dnschef dnsenum dnsmap dnsrecon dnsvalidator dnsx docker donpapi donut droopescan dsniff eaphammer emailharvester enum4linux enum4linux-ng enumerate-iam ettercap evil-winrm exiv2 eyewitness feroxbuster ffuf fierce file find fping freeze gau gcloud gcpbucketbrute gdb getcap ghidra gitleaks go-socks5 gobuster gospider gowitness gpp-decrypt graudit grype gsutil h8mail hakrawler hash-identifier hashcat hashid hcxdumptool hcxhashtool holehe host hostapd-wpe hping3 httprobe httpx hydra id ike-scan impacket-GetADUsers impacket-GetNPUsers impacket-GetUserSPNs impacket-addcomputer impacket-atexec impacket-dacledit impacket-dcomexec impacket-findDelegation impacket-getArch impacket-getPac impacket-getST impacket-getTGT impacket-lookupsid impacket-mssqlclient impacket-ntlmrelayx impacket-owneredit impacket-psexec impacket-rbcd impacket-rpcdump impacket-secretsdump impacket-services impacket-smbexec impacket-smbserver impacket-ticketer impacket-wmiexec inetsim invoke-obfuscation iodine jadx john joomscan jq jwt_tool katana kerberoast kerbrute kismet kube-bench kube-hunter kubeaudit kubectl kubesec kwp64 lazagne lazys3 lbd ldapdomaindump ldapsearch ligolo-ng linenum.sh linkfinder linpeas.sh linux-exploit-suggester linux-exploit-suggester-2 log4shell-scanner lsassy ltrace macchanger magescan maltego masscan massdns medusa mentalist metagoofil mimikatz mitm6 mitmdump mitmproxy mp64 msfconsole msfpc msfvenom nbtscan nc ncrack ndiff net-creds netdiscover netexec netsniff-ng ngrep nikto nmap nosqlmap nslookup nuclei nxc o365spray objdump onesixtyone openvas-scanner openvpn ophcrack pacu param-miner patator patchelf pdf-parser pdfid photon phuip-fpizda pipal pixiewps polenum popeye powershell-empire powerup pp64 pretender privesccheck prowler proxychains4 pspy64 pth-winexe puredns pwn pwncat pwndb pwndbg pwsh pypykatz python3 r2 rdesktop readelf reaver recon-ng responder retire revsocks rlwrap routersploit rpcclient rpivot rsmangler ruler s3scanner samdump2 scalpel scarecrow scout scp screen searchsploit seatbelt semgrep sendEmail setoolkit shellter sherlock shiro-exploit shodan shuffledns skipfish sliver sliver-server smbclient smbmap smtp-user-enum snmpcheck snmpget snmpwalk socat socialscan spiderfoot sprayhound spring4shell-scan sqlmap ssh sshdump sshpass sshuttle sslscan sslyze ssrfmap starkiller strace strings struts-pwn stunnel4 subfinder sudo swaks tcpdump tcpick tcpreplay testdisk testssl.sh theHarvester tmux tplmap traceroute trevorspray trivy trufflehog tshark udptunnel uname unicornscan unix-privesc-check upx urlcrazy veil vol wafw00f wapiti watson waybackurls wce weevely wes wfuzz whatweb whoami whois wifiphisher wifite windapsearch windows-exploit-suggester winpeas.exe winrm-cli wpscan xfreerdp xfreerdp3 xsstrike xxd yara ysoserial zenmap \
+afl-fuzz radamsa zzuf honggfuzz"
 
 verify_registry() {
     c_info "Verifying ARGUS tool registry against PATH ..."
@@ -79,8 +80,57 @@ apti() { if apt-get install -y "$1" >>"$APT_LOG" 2>&1; then c_ok "apt: $1"; \
 
 c_info "Runtime prerequisites"
 for rp in nodejs npm golang-go python3 python3-pip python3-venv pipx git curl jq \
-          default-jre-headless metasploit-framework seclists wordlists; do
+          default-jre-headless metasploit-framework seclists wordlists \
+          mongodb docker.io; do
     apti "$rp"
+done
+
+# ── MongoDB server (REQUIRED — agent_server.py will not boot without it) ──────
+# ARGUS stores ALL engagement state in MongoDB on localhost:27017. Missing it
+# is fatal at startup (ServerSelectionTimeoutError / Errno 111). The apt pkg is
+# 'mongodb' on Debian/Kali; if the repo no longer ships it we fall back to the
+# official mongo:6 Docker image. End state either way: a server on 27017.
+ensure_mongodb() {
+    if ss -tlnp 2>/dev/null | grep -q ':27017\b'; then
+        c_ok "MongoDB already listening on 27017"; return
+    fi
+    # Native service installed via apt? enable + start it.
+    if command -v mongod >/dev/null 2>&1 \
+       || systemctl list-unit-files 2>/dev/null | grep -qiE '^mongod(b)?\.service'; then
+        for svc in mongod mongodb; do
+            systemctl enable --now "$svc" >/dev/null 2>&1 && { c_ok "started service: $svc"; break; }
+        done
+    fi
+    # Still down? use Docker (mongo:6, persistent volume, auto-restart).
+    if ! ss -tlnp 2>/dev/null | grep -q ':27017\b'; then
+        if command -v docker >/dev/null 2>&1; then
+            systemctl enable --now docker >/dev/null 2>&1 || true
+            if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx argus-mongo; then
+                docker start argus-mongo >/dev/null 2>&1 && c_ok "restarted argus-mongo container"
+            else
+                c_info "Provisioning MongoDB via Docker (mongo:6)"
+                docker run -d --name argus-mongo --restart unless-stopped \
+                    -p 27017:27017 -v argus-mongo:/data/db mongo:6 >/dev/null 2>&1 \
+                    && c_ok "mongo:6 container started" || c_warn "docker mongo start failed (see: docker logs argus-mongo)"
+            fi
+        fi
+    fi
+    sleep 2
+    if ss -tlnp 2>/dev/null | grep -q ':27017\b'; then
+        c_ok "MongoDB is up on 27017"
+    else
+        c_warn "MongoDB NOT running on 27017 — agent_server.py will fail to start."
+        c_warn "  apt:    sudo apt install mongodb && sudo systemctl enable --now mongodb"
+        c_warn "  docker: sudo docker run -d --name argus-mongo --restart unless-stopped -p 27017:27017 -v argus-mongo:/data/db mongo:6"
+    fi
+}
+ensure_mongodb
+
+# weasyprint (server-side styled PDF report export) needs Pango/Cairo/GDK-Pixbuf.
+# Best-effort; the report still exports a styled PDF via browser print-to-PDF if absent.
+c_info "Installing weasyprint system libs (pango/cairo) for styled PDF export"
+for _wlib in libpango-1.0-0 libpangocairo-1.0-0 libgdk-pixbuf-2.0-0 libcairo2 libffi-dev; do
+    apti "$_wlib"
 done
 
 # The giant Kali meta-package (pulls most of the registry) is OFF by default —
@@ -93,6 +143,7 @@ fi
 c_info "Best-effort apt for individual registry tools (skips any not in repo)"
 APT_TOOLS="nmap masscan netdiscover arp-scan arping fping hping3 nbtscan unicornscan \
 nikto gobuster droopescan joomscan dirb wfuzz ffuf whatweb wafw00f wapiti skipfish \
+aflplusplus radamsa zzuf honggfuzz \
 sqlmap commix davtest wpscan weevely cutycapt feroxbuster nuclei httpx katana gau \
 waybackurls hakrawler gospider arjun amass subfinder dnsx dnsrecon dnsenum dnsmap \
 fierce theharvester recon-ng spiderfoot dmitry whois trufflehog gitleaks sherlock \
@@ -158,38 +209,52 @@ else
     c_warn "go not found — skipping Go tools (apt install golang-go to enable)"
 fi
 
-# ── 4. git clones → /opt with PATH wrappers ──────────────────────────────────
-c_info "git tools → /opt (+ /usr/local/bin wrappers)"
+# ── 4. git clones → /opt, each in an ISOLATED venv ───────────────────────────
+# A tool's Python deps go into its OWN venv, never the system site-packages —
+# that system-wide `pip install` is exactly how a stray `bson` can shadow
+# pymongo and crash ARGUS. perl / py2 tools get a plain wrapper.
+c_info "git tools → /opt (isolated venvs + /usr/local/bin wrappers)"
 mkdir -p /opt
 clone() { [ -d "$2" ] && return 0; git clone --depth 1 "$1" "$2" >/dev/null 2>&1 \
     && c_ok "git: $(basename "$2")" || c_warn "git-skip: $(basename "$2")"; }
+# plain wrapper (no venv) — perl / py2 tools
 wrap()  { printf '#!/usr/bin/env bash\nexec %s "$@"\n' "$2" > "/usr/local/bin/$1"; chmod +x "/usr/local/bin/$1"; }
+# venv wrapper — $1 cmd, $2 /opt/dir, $3 entry.py. Installs requests + the tool's
+# own requirements.txt INTO the venv only; the wrapper runs the venv's python.
+vwrap() {
+    local d="$2"; [ -d "$d" ] || return 0
+    if [ ! -x "$d/.venv/bin/python" ]; then
+        python3 -m venv "$d/.venv" >/dev/null 2>&1 \
+            || { c_warn "venv-skip: $1 (using system python)"; wrap "$1" "python3 $d/$3"; return 0; }
+    fi
+    "$d/.venv/bin/pip" install -q -U pip requests >/dev/null 2>&1 || true
+    [ -f "$d/requirements.txt" ] && "$d/.venv/bin/pip" install -q -r "$d/requirements.txt" >/dev/null 2>&1 || true
+    printf '#!/usr/bin/env bash\nexec "%s/.venv/bin/python" "%s/%s" "$@"\n' "$d" "$d" "$3" > "/usr/local/bin/$1"
+    chmod +x "/usr/local/bin/$1"; c_ok "venv: $1"
+}
 
 clone https://github.com/epinna/tplmap          /opt/tplmap
-[ -d /opt/tplmap ]   && wrap tplmap   "python3 /opt/tplmap/tplmap.py"
+[ -d /opt/tplmap ]   && wrap tplmap   "python2 /opt/tplmap/tplmap.py"     # py2 (legacy)
 clone https://github.com/codingo/NoSQLMap       /opt/nosqlmap
-[ -d /opt/nosqlmap ] && wrap nosqlmap "python3 /opt/nosqlmap/nosqlmap.py"
+[ -d /opt/nosqlmap ] && wrap nosqlmap "python2 /opt/nosqlmap/nosqlmap.py" # py2 (legacy)
 clone https://github.com/s0md3v/XSStrike        /opt/XSStrike
-[ -d /opt/XSStrike ] && wrap xsstrike "python3 /opt/XSStrike/xsstrike.py"
+vwrap xsstrike    /opt/XSStrike xsstrike.py
 clone https://github.com/s0md3v/Corsy           /opt/Corsy
-[ -d /opt/Corsy ]    && wrap corsy    "python3 /opt/Corsy/corsy.py"
+vwrap corsy       /opt/Corsy corsy.py
 clone https://github.com/lobuhi/byp4xx          /opt/byp4xx
-[ -d /opt/byp4xx ]   && wrap byp4xx   "python3 /opt/byp4xx/byp4xx.py"
+vwrap byp4xx      /opt/byp4xx byp4xx.py
 clone https://github.com/ticarpi/jwt_tool       /opt/jwt_tool
-[ -d /opt/jwt_tool ] && wrap jwt_tool "python3 /opt/jwt_tool/jwt_tool.py"
+vwrap jwt_tool    /opt/jwt_tool jwt_tool.py
 clone https://github.com/mazen160/struts-pwn    /opt/struts-pwn
-[ -d /opt/struts-pwn ] && wrap struts-pwn "python3 /opt/struts-pwn/struts-pwn.py"
+vwrap struts-pwn  /opt/struts-pwn struts-pwn.py
 clone https://github.com/jondonas/linux-exploit-suggester-2 /opt/les2
 [ -d /opt/les2 ] && wrap linux-exploit-suggester-2 "perl /opt/les2/linux-exploit-suggester-2.pl"
-clone https://github.com/swisskyrepo/SSRFmap        /opt/ssrfmap
-[ -d /opt/ssrfmap ] && { pip install -r /opt/ssrfmap/requirements.txt >/dev/null 2>&1 || true; \
-    wrap ssrfmap "python3 /opt/ssrfmap/ssrfmap.py"; }
-clone https://github.com/vladko312/SSTImap          /opt/sstimap
-[ -d /opt/sstimap ] && { pip install -r /opt/sstimap/requirements.txt >/dev/null 2>&1 || true; \
-    wrap sstimap "python3 /opt/sstimap/sstimap.py"; }
-clone https://github.com/GerbenJavado/LinkFinder    /opt/LinkFinder
-[ -d /opt/LinkFinder ] && { pip install -r /opt/LinkFinder/requirements.txt >/dev/null 2>&1 || true; \
-    wrap linkfinder "python3 /opt/LinkFinder/linkfinder.py"; }
+clone https://github.com/swisskyrepo/SSRFmap    /opt/ssrfmap
+vwrap ssrfmap     /opt/ssrfmap ssrfmap.py
+clone https://github.com/vladko312/SSTImap      /opt/sstimap
+vwrap sstimap     /opt/sstimap sstimap.py
+clone https://github.com/GerbenJavado/LinkFinder /opt/LinkFinder
+vwrap linkfinder  /opt/LinkFinder linkfinder.py
 
 # ── 5. Downloads: PEASS-ng, pspy, ysoserial, suggesters ──────────────────────
 c_info "binary downloads → /usr/local/bin"
@@ -211,3 +276,15 @@ verify_registry
 c_info "Done. Re-run 'bash install-kali-tools.sh --verify' anytime to re-check."
 c_warn "Windows-only privesc bins (GodPotato/PrintSpoofer/SweetPotato/Seatbelt/Watson) and a"
 c_warn "few niche tools install on-demand; ARGUS skips any that remain missing."
+
+# ── Headless-browser verification (Gap #2) ───────────────────────────────────
+# Playwright + Chromium for browser-driven confirmation of IDOR / auth-bypass /
+# XSS / business-logic web findings.  Optional — ARGUS degrades gracefully if
+# this is skipped (browser verification simply does not run).
+echo "[*] Installing Playwright Chromium for browser verification (optional)…"
+if python3 -c "import playwright" 2>/dev/null; then
+  python3 -m playwright install --with-deps chromium || \
+    echo "[!] playwright chromium install failed — browser verification will be skipped"
+else
+  echo "[!] playwright not installed (pip install playwright) — browser verification disabled"
+fi
