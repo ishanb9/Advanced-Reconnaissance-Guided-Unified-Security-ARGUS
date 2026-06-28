@@ -14,6 +14,10 @@
 #      ARGUS_VENV=~/argus bash setup.sh   # use a custom venv location
 #      bash setup.sh --verify             # only verify an existing venv
 #
+#  It also ensures the browser vendor assets that must be served locally
+#  (xterm.js/css for the live PTY terminal — CORB-blocked from a CDN) are
+#  present, fetching them only if a checkout is missing them.
+#
 #  Then:
 #      source <venv>/bin/activate && python3 agent_server.py
 # ─────────────────────────────────────────────────────────────────────────────
@@ -66,12 +70,34 @@ mongo_check() {
     fi
 }
 
+# Browser vendor assets that must be served locally. Most are committed under
+# static/vendor/; xterm.js/css are the ones that break (CORB) if loaded from a
+# CDN, so re-fetch them if (and only if) a checkout is missing them. Folded in
+# from the former standalone setup_vendor.sh so there is one setup entrypoint.
+vendor_check() {
+    local vd="$HERE/static/vendor"
+    mkdir -p "$vd"
+    local miss=0
+    if [ ! -s "$vd/xterm.min.js" ]; then
+        curl -sL "https://cdnjs.cloudflare.com/ajax/libs/xterm/5.3.0/xterm.min.js" -o "$vd/xterm.min.js" \
+          || curl -sL "https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js" -o "$vd/xterm.min.js"
+        [ -s "$vd/xterm.min.js" ] && info "fetched xterm.min.js" || { err "could not fetch xterm.min.js (PTY terminal)"; miss=1; }
+    fi
+    if [ ! -s "$vd/xterm.min.css" ]; then
+        curl -sL "https://cdnjs.cloudflare.com/ajax/libs/xterm/5.3.0/xterm.min.css" -o "$vd/xterm.min.css" \
+          || curl -sL "https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" -o "$vd/xterm.min.css"
+        [ -s "$vd/xterm.min.css" ] && info "fetched xterm.min.css" || { err "could not fetch xterm.min.css"; miss=1; }
+    fi
+    [ "$miss" = "0" ] && ok "vendor assets present (static/vendor/)"
+}
+
 # ── verify-only mode ─────────────────────────────────────────────────────────
 if [ "${1:-}" = "--verify" ]; then
     [ -x "$PY" ] || { err "no venv at $VENV — run 'bash setup.sh' first"; exit 1; }
     info "Verifying venv at $VENV"
     if verify; then ok "venv OK"; else err "venv has problems (see above)"; exit 1; fi
     mongo_check
+    vendor_check
     exit 0
 fi
 
@@ -113,6 +139,7 @@ info "Verifying environment"
 if verify; then
     ok "Environment verified — ARGUS is ready."
     mongo_check
+    vendor_check
     echo
     echo "    source \"$VENV/bin/activate\""
     echo "    python3 agent_server.py"
