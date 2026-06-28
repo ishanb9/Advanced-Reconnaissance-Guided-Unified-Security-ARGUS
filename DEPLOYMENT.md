@@ -3,7 +3,7 @@
 End-to-end deployment guide focused on first-login, owner password
 configuration, and integration with the enterprise auth module.
 
-For deeper architecture detail see `auth/README.md`.
+For deeper architecture detail see [the README → Enterprise authentication](README.md#enterprise-authentication).
 
 ---
 
@@ -37,6 +37,11 @@ first login forces a password rotation.
 > **After first login, delete `AUTH_INITIAL_OWNER_PASSWORD` from your
 > env file.** The owner's real password is now hashed in the DB; the
 > env entry was only a bootstrap seed.
+
+> **This quick start brings up the platform (auth + UI + SSO).** Running an actual
+> *engagement* also needs the tool gateway, a data store, an LLM, and the Kali attack
+> tools — `node mcp-server.js`, MongoDB, Ollama, `install-kali-tools.sh`. See
+> **§8 · What actually runs (the full engagement runtime)** for the complete set.
 
 ### Even-simpler dev mode (zero arguments)
 
@@ -192,6 +197,34 @@ All settings are 12-factor — env-var with sensible defaults.
 | `AUTH_SCIM_TOKEN_TTL_DAYS` | `365` | SCIM bearer-token TTL |
 | `AUTH_SCIM_DEFAULT_ROLE` | `ANALYST` | Role for JIT-provisioned users |
 
+### Engagement runtime (the pentest engine)
+
+The auth vars above run the *platform*; these run the *engagement*. All have safe
+defaults — set them to point ARGUS at your data stores, LLM, and proof oracle.
+
+| Var | Default | Notes |
+|-----|---------|-------|
+| `MONGO_URI` | `mongodb://localhost:27017` | Engagement state + findings store |
+| `MONGO_DB` | `argus` | Database name |
+| `OLLAMA_URL` | `http://localhost:11434` | LLM provider endpoint (local or remote) |
+| `OLLAMA_MODEL` | *(provider default)* | Operator model; the tiered fallback is configured in `utils/llm_providers.py` |
+| `ARGUS_OLLAMA_NUM_CTX` | model default | Context window for long operator transcripts |
+| `NEO4J_URI` / `NEO4J_PASSWORD` | (unset) | *Optional* — semantic attack graph |
+| `ARGUS_OOB_BASE` | (unset) | **Important** — public base URL ARGUS-controlled OOB callbacks resolve to (proves blind RCE / SSRF). Set to a reachable host:port for the fuzzing/exploit proof oracles |
+| `ARGUS_LHOST` / `ARGUS_LPORT` | auto / `4444` | Reverse-shell callback host/port for exploit payloads |
+| `ARGUS_OPERATOR_MAX_ITERS` | `60` | Operator loop step budget (advisory once progress exists) |
+| `ARGUS_OPERATOR_MAX_SECONDS` | `3000` | Operator wall-clock budget per target |
+| `ARGUS_ISSUE_VALIDATOR` | `1` | Read-time finding gate (set `0` to render rejected findings) |
+| `ARGUS_BROWSER_VERIFY` | `1` | Headless-browser (Playwright) verification of web findings (`0` disables) |
+| `ARGUS_BROWSER_VERIFY_TIMEOUT` | `30` | Per-finding browser-verify timeout (s) |
+| `ARGUS_COMMIT_MAX_ADAPT` · `ARGUS_COMMIT_WALL_SEC` · `ARGUS_COMMIT_MIN_CONF` | `10` · `1200` · `0.7` | Committed-exploitation loop bounds (adaptations / wall-clock / confidence floor) |
+| `ARGUS_FUZZ_MAX_SEC` · `ARGUS_FUZZ_THROTTLE_DELAY` · `ARGUS_FUZZ_STOP_POLL` | `1800` · `3` · `0.5` | Fuzz campaign budget / scan-priority throttle / stop responsiveness |
+| `ARGUS_BRUTE_BACKGROUND` · `ARGUS_BRUTE_BACKGROUND_MAX` · `ARGUS_BRUTE_CEILING_SEC` | `1` · `4` · `7200` | Background brute-forcing: on/off · max concurrent · generous (uncapped) ceiling |
+| `ARGUS_LOG_DIR` · `ARGUS_ARTIFACT_DIR` | session dir | Per-scan logs + captured PoC artifacts |
+
+> The operator never sets its own LLM-token cap — only a human does, per target, from the
+> cockpit. See the README's *autonomous engagement engine* section for what each subsystem does.
+
 ### Production env template (`.env.prod`)
 
 ```dotenv
@@ -323,7 +356,7 @@ python -m auth.bootstrap ensure-default-tenant
 
 ## 5 · Role & default-skin mapping
 
-The first OWNER → all subsequent users.  See `auth/README.md §2` for
+The first OWNER → all subsequent users.  See [the README → Enterprise authentication](README.md#enterprise-authentication) for
 the full hierarchy.  The auth module suggests a default skin for each
 role on first login (user can override anytime via the SkinChooser):
 
@@ -420,6 +453,16 @@ The role_mapping → group claim is provider-specific:
 - [ ] DR-test runbook exercised: restore from `argus_auth.db` backup
 - [ ] SCIM tokens issued per IdP; reviewed quarterly
 
+**Engagement runtime**
+
+- [ ] MongoDB reachable (`MONGO_URI`) and on a backup schedule
+- [ ] LLM reachable (`OLLAMA_URL`) with a model pulled; tiered fallback configured
+- [ ] `node mcp-server.js` running; `bash install-kali-tools.sh --verify` is clean
+- [ ] `ARGUS_OOB_BASE` points at a host the targets can reach (else blind RCE / SSRF can't be proven)
+- [ ] Browser-verify deps installed (`playwright install --with-deps chromium`) or `ARGUS_BROWSER_VERIFY=0`
+- [ ] WeasyPrint system libs present for server-side PDF reports (else the browser print fallback is used)
+- [ ] Authorization-and-scope acknowledgement enforced before any engagement starts
+
 ### Backup OWNER pattern
 
 ```bash
@@ -435,13 +478,42 @@ The role_mapping → group claim is provider-specific:
 
 ## 8 · Common deployment topologies
 
-### Single-process dev
+### What actually runs (the full engagement runtime)
+
+The auth/UI is a single FastAPI app, but a real **engagement** also needs the tool
+gateway, a data store, an LLM, and the attack tools on the host:
+
+| Component | Process / dependency | Notes |
+|-----------|----------------------|-------|
+| **App + auth + UI + WebSocket** | `uvicorn agent_server:app` | The FastAPI app you log into |
+| **Tool gateway** | `node mcp-server.js` *(separate process)* | Bridges ~380 pentest binaries to the agents via MCP |
+| **Engagement store** | MongoDB | Per-engagement state + findings (`MONGO_URI`) |
+| **LLM operator** | Ollama (local) or remote | Tiered operator/secondary models (`OLLAMA_URL`) |
+| **Attack tools** | Kali binaries | `sudo bash install-kali-tools.sh` (apt+go+pipx+git); `--verify` lists what's missing. Includes the fuzzers AFL++ · radamsa · zzuf · honggfuzz · boofuzz · schemathesis |
+| **Browser verification** | Playwright + Chromium | `pip install playwright && playwright install --with-deps chromium` (or `ARGUS_BROWSER_VERIFY=0`) |
+| **PDF reports** | WeasyPrint + pango/cairo | Server-side themed PDF; browser print-to-PDF is the zero-dep fallback |
+| **Attack graph** | Neo4j *(optional)* | Semantic graph (`NEO4J_URI`) |
+| **Out-of-band oracle** | a reachable host:port | `ARGUS_OOB_BASE` — proves blind RCE / SSRF callbacks |
+
+Bring it up (dev — run Mongo/Ollama here or point the env at remote ones):
+
+```bash
+mongod --dbpath /var/lib/mongodb &           # → MONGO_URI
+ollama serve &                               # → OLLAMA_URL
+sudo bash install-kali-tools.sh              # attack tooling (once)
+pip install playwright && playwright install --with-deps chromium
+node mcp-server.js &                          # tool gateway (separate process)
+uvicorn agent_server:app --host 0.0.0.0 --port 8000
+```
+
+### Single-process dev (UI / auth only)
 
 ```bash
 uvicorn agent_server:app --port 8000 --reload
 ```
 
-Auth runs in-process.  SQLite for everything.
+Auth runs in-process. SQLite for everything. Fine for exploring the UI, SSO, and RBAC —
+but a live scan still needs Mongo + Ollama + `node mcp-server.js` (above).
 
 ### Behind a reverse proxy (nginx / Caddy)
 
@@ -484,22 +556,30 @@ another).
 
 ### Docker
 
+The app image carries the FastAPI app, the Node tool gateway, and the PDF libs. The
+**attack tools themselves** (nmap, metasploit, AFL++, …) are huge and host-specific —
+base the image on `kalilinux/kali-rolling` + `install-kali-tools.sh`, or run
+`node mcp-server.js` + the tools on a dedicated **Kali host** the container reaches.
+
 ```Dockerfile
 FROM python:3.12-slim
 WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libxml2-dev libxmlsec1-dev libxmlsec1-openssl pkg-config \
+      nodejs npm pkg-config \
+      libxml2-dev libxmlsec1-dev libxmlsec1-openssl \
+      libpango-1.0-0 libpangocairo-1.0-0 libcairo2 \
     && rm -rf /var/lib/apt/lists/*
 COPY requirements.txt auth/requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt && \
-    pip install --no-cache-dir -r auth/requirements.txt
+    pip install --no-cache-dir -r auth/requirements.txt && \
+    playwright install --with-deps chromium || true
 COPY . .
 EXPOSE 8000
 CMD ["uvicorn", "agent_server:app", "--host", "0.0.0.0", "--port", "8000"]
 ```
 
 ```yaml
-# docker-compose.yml
+# docker-compose.yml — app + auth DB + engagement store + LLM
 services:
   argus:
     build: .
@@ -512,16 +592,30 @@ services:
       AUTH_INITIAL_OWNER_EMAIL:    ${AUTH_INITIAL_OWNER_EMAIL}
       AUTH_INITIAL_OWNER_PASSWORD: ${AUTH_INITIAL_OWNER_PASSWORD}
       AUTH_COOKIE_DOMAIN: ${AUTH_COOKIE_DOMAIN}
-    depends_on: [db]
-  db:
+      # ── Engagement runtime ──
+      MONGO_URI:      mongodb://mongo:27017
+      OLLAMA_URL:     http://ollama:11434
+      ARGUS_OOB_BASE: ${ARGUS_OOB_BASE}
+    depends_on: [db, mongo, ollama]
+  db:                      # auth state (users / sessions / audit)
     image: postgres:16
     environment:
       POSTGRES_USER: argus
       POSTGRES_PASSWORD: argus
       POSTGRES_DB: argus_auth
     volumes: ["pgdata:/var/lib/postgresql/data"]
-volumes: { pgdata: }
+  mongo:                   # engagement state + findings
+    image: mongo:7
+    volumes: ["mongodata:/data/db"]
+  ollama:                  # LLM operator (pull a model after first boot)
+    image: ollama/ollama
+    volumes: ["ollama:/root/.ollama"]
+volumes: { pgdata: , mongodata: , ollama: }
 ```
+
+> The `argus` container above runs the app + gateway but **not** the Kali attack tools —
+> run those on a Kali host/image and point the agents at it, or extend the image from
+> `kalilinux/kali-rolling`.
 
 ---
 
@@ -752,7 +846,7 @@ evidence sufficient for SOX §404 ITGC + PCI 10.5.5 requirements.
 
 ## 12 · Where to go next
 
-- `auth/README.md` — full architecture, RBAC matrix, ABAC predicates, flows
+- [the README → Enterprise authentication](README.md#enterprise-authentication) — full architecture, RBAC matrix, ABAC predicates, flows
 - `auth/security/passwords.py` — Argon2id parameters + pepper rotation
 - `auth/security/mfa.py` — TOTP + backup-code internals
 - `auth/providers/oidc.py` and `saml.py` — IdP integration internals

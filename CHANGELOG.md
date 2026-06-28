@@ -15,6 +15,60 @@ The format is grouped by:
 
 ## Unreleased
 
+### Added — Autonomous engagement engine
+
+- **Tiered-LLM OPERATOR engine** (`agents/operator_agent/`) — an
+  LLM-driven operator that calls `run_tool` directly through its own
+  decision loop (`operator_core._do_run_tool`) rather than waiting on a
+  fixed phase script.  It uses two model tiers — `tier="bulk"` for
+  high-volume work and `tier="reason"` for planning/judgement — and
+  rebuilds a live surface model + objective-aware hypotheses between
+  steps.  `MasterAgent` (`agents/master_agent.py`) still runs the
+  LLM-consulted phase machine; the two cooperate.
+- **28 specialist agent folders** under `agents/` — including
+  `ai_red_team/`, `avot/`, `c2/`, `campaign/`, `cloud/`, `container/`,
+  `evasion/`, `evidence/`, `exploit/`, `forensics/`, `fuzzing/`,
+  `iot/`, `lateral/`, `meta/`, `mission/`, `operator_agent/`, `osint/`,
+  `ot/`, `playbook/`, `post/`, `privesc/`, `reasoning/`, `recon/`,
+  `traffic/`, `training/`, `vuln/`, `web/`, and `wireless/`.
+- **Committed-exploitation loop**
+  (`agents/operator_agent/committed_exploit.py`) — drives an exploit
+  attempt to a definitive outcome instead of bailing after one probe,
+  recording only flags/creds the model explicitly submits in-band (no
+  fabricated success).
+- **Fuzz → develop → PROVE workshop** (`agents/fuzzing/`) — a
+  campaign that fuzzes a target, develops an exploit, and proves it
+  (`fuzz_lab.py`, `campaign.py`, `exploit_dev.py`, `oracle.py`,
+  `proof.py`, `poc_runner.py`).  Wraps **6 fuzz engines** — AFL++,
+  honggfuzz, radamsa, zzuf, boofuzz, and schemathesis — behind a
+  common `FuzzEngine` base (binary-coverage, file-format, live-HTTP,
+  live-protocol, tool, and AI-target engine classes).
+- **Operational severity model** (`knowledge/severity_policy.py`) —
+  `grade(signals)` returns one canonical, deterministic verdict
+  (critical/high/medium/low/info) keyed to what ARGUS actually proved
+  on the target, with `merge_signals`, `is_escalation`, `is_noise`,
+  and `normalize_finding` helpers.
+- **5 report themes** under `report/themes/` — `compliance`,
+  `editorial`, `executive`, `operator_dark`, and `threat_intel`
+  (`.html.j2`), rendered by `report/generator.py`.
+- **Smart background brute-forcing** (`knowledge/brute_strategy.py`) —
+  picks credential/wordlist strategy and runs it as a background
+  effort rather than blocking the main loop.
+- **Safety governor** (`knowledge/safety_governor.py`) — gates
+  potentially destructive actions before they execute.
+- **`technique_search`** (`knowledge/technique_search.py`) — technique
+  lookup consumed by the operator and the fuzzing/exploit-dev path.
+- **Self-learning skill registry** (`knowledge/skill_registry.py`) —
+  scores detections by severity × exploitability × CVE-recency ×
+  learned weight, where the learned weight is updated from engagement
+  telemetry.
+- **Browser verification subagent**
+  (`agents/web/browser_verify_subagent.py`) — Playwright-driven
+  confirmation of web findings in a real browser.
+- **Evaluation harness** (`evals/`) — `runner.py`, `scorer.py`,
+  `catalog.py`, `baseline.json`, plus `fixtures/` and `targets/` for
+  benchmarking agent behavior against known cases.
+
 ### Changed
 - **Default value of `AUTH_COOKIE_SECURE` is now derived from
   `AUTH_DEPLOYMENT_ENV`.**  Previously it was hard-coded to `true`,
@@ -59,18 +113,20 @@ The format is grouped by:
   environments where session cookies can't be set (corporate proxies
   that strip cookies, HTTP-only dev servers, etc.).
 - **18 runtime-switchable visual skins** across 3 family tabs
-  (Aesthetic / Operator / Management) — see
-  [`static/css/skins/README.md`](static/css/skins/README.md).
+  (Aesthetic / Operator / Management) — 17 skin override files under
+  `static/css/skins/` plus the default "Stellar" skin in `main.css` —
+  see the README's **Frontend & visual skins** section.
 - **Cinematic LoginPage** with canvas particle network, animated
   gradient mesh, RGB-chromatic-split wordmark, status telemetry strip
-  — see [`static/README.md`](static/README.md).
+  — see the README's **Frontend & visual skins** section.
 - **Enterprise auth module** under `auth/` — local + OIDC + SAML 2.0
   + SCIM 2.0, TOTP MFA + backup codes, 8 hierarchical roles, RBAC +
   ABAC engine, DB-backed sessions with refresh-token rotation +
   theft detection, append-only audit log with optional hash chain
-  + OWNER-only deletion — see [`auth/README.md`](auth/README.md).
-- **Folder-level READMEs**: `agents/`, `static/`, `static/css/skins/`,
-  `utils/`, `db/`, `docs/`.
+  + OWNER-only deletion — see the README's **Enterprise authentication** section.
+- **Consolidated documentation** — every per-folder README and the two
+  knowledge guides folded into sections in the main `README.md`; only
+  `README.md`, `CHANGELOG.md`, and `DEPLOYMENT.md` remain as top-level docs.
 - **`DEPLOYMENT.md`** — complete deployment guide covering quickstart,
   first-login, env-var reference, Docker, reverse proxy, PostgreSQL,
   SSO setup, compliance mapping, and troubleshooting.
@@ -123,6 +179,8 @@ The format is grouped by:
   CLI-only, with a CRITICAL audit row written *before* the delete.
   Optional SHA-256 hash chain (`AUTH_AUDIT_HASH_CHAIN=true`) for
   tamper-evidence sufficient for SOX §404 ITGC + PCI 10.5.5.
+- **Safety governor** (`knowledge/safety_governor.py`) gates
+  destructive operator actions before they run.
 
 ### Migration
 
@@ -163,7 +221,6 @@ If you're upgrading from a pre-auth-module ARGUS deployment:
 
 The platform predates this changelog file.  Earlier work is captured in:
 
-- [`docs/project-state/PROGRESS.md`](docs/project-state/PROGRESS.md)
-- [`docs/superpowers/specs/`](docs/superpowers/specs/)
-- [`docs/superpowers/plans/`](docs/superpowers/plans/)
+- [`docs/superpowers/specs/`](docs/superpowers/specs/) — design specs
+- [`docs/superpowers/plans/`](docs/superpowers/plans/) — implementation plans
 - Git history
