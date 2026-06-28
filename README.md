@@ -2,15 +2,18 @@
 
 **Advanced Reconnaissance & Guided Unified Security**
 
-An AI-driven autonomous penetration testing platform with enterprise
-identity, granular RBAC/ABAC, full SCIM 2.0 + SSO, 18 visual skins
-spanning operator + management personas, and a fleet of specialist
-agents orchestrated by a local LLM.
+An AI-driven autonomous penetration-testing platform. A tiered-LLM **operator** drives
+the whole engagement — recon → exploit → post-exploit → report — backed by a
+committed-exploitation loop that *develops and proves* custom exploits, a
+fuzzing-to-exploit workshop, smart adaptive brute-forcing, an operational severity
+model that grades by demonstrated impact, and AI/LLM red-teaming. All of it is wrapped
+in enterprise identity (granular RBAC/ABAC, full SCIM 2.0 + SSO), 18 visual skins, and a
+fleet of 28 specialist agent folders.
 
-> ARGUS turns a single operator into a senior red team. The platform
-> plans the engagement, runs the tools, validates the findings, scores
-> the risk, and writes the report — under the supervision of role-
-> appropriate humans.
+> ARGUS turns a single operator into a senior red team. The operator LLM plans the
+> engagement, runs the tools, *develops and proves* exploits, validates the findings,
+> grades them by what was actually demonstrated, and writes the report — under the
+> supervision of role-appropriate humans.
 
 ```
         ┌──────────────────────────────────────────────────────────────┐
@@ -24,9 +27,9 @@ agents orchestrated by a local LLM.
         │     Append-only audit log · 7-year retention · hash-chain    │
         ├──────────────────────────────────────────────────────────────┤
         │   Pentest core                                               │
-        │     MasterAgent + 23 specialist agent folders · MITRE T-IDs  │
-        │     RAG-powered reasoning · CVSS scoring · attack graph      │
-        │     Manual override · pause/resume · live PTY shells         │
+        │     LLM operator + MasterAgent + 28 specialist folders       │
+        │     Committed exploitation · fuzz→exploit · smart brute      │
+        │     Operational severity · AI red-team · live PTY shells     │
         └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -62,13 +65,14 @@ SCIM, retention, troubleshooting) see [`DEPLOYMENT.md`](DEPLOYMENT.md).
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│  PILLAR 1 · Pentest core                       see agents/README │
+│  PILLAR 1 · Autonomous engagement engine       see agents/README │
 │  ──────────────────────────────────────────────────────────────  │
-│  MasterAgent (LLM-driven) → AgentBus → 23 specialist agents      │
+│  Tiered-LLM OPERATOR drives run_tool directly · MasterAgent runs │
+│  the phase machine · 28 specialist agent folders:                │
 │    recon · osint · vuln · web · exploit · privesc · lateral      │
-│    post · evasion · c2 · cloud · container · iot · wireless      │
-│    traffic · forensics · evidence · reasoning · campaign · …     │
-│  Tooling via MCP server · MITRE ATT&CK techniques on every step  │
+│    post · evasion · c2 · cloud · container · iot · ot · wireless  │
+│    fuzzing · ai_red_team · reasoning · campaign · operator_agent  │
+│  Committed-exploit loop · fuzz→develop→PROVE · MITRE every step  │
 └──────────────────────────────────────────────────────────────────┘
 ┌──────────────────────────────────────────────────────────────────┐
 │  PILLAR 2 · Enterprise auth                      see auth/README │
@@ -93,6 +97,34 @@ SCIM, retention, troubleshooting) see [`DEPLOYMENT.md`](DEPLOYMENT.md).
 
 ---
 
+## The autonomous engagement engine
+
+ARGUS is **operator-driven**: a tiered-LLM operator (primary → secondary fallback on
+every call) reasons over live intel and calls tools directly, while the MasterAgent runs
+the phase machine (RECON → ENUM → VULN_ID → WEB → EXPLOIT → POST → PRIVESC → REPORT) and
+the RAG knowledge base feeds it grounded technique guidance. Beyond "run the scanners,"
+the engine adds:
+
+| Capability | What it does |
+|------------|--------------|
+| **Committed exploitation loop** | On a high-confidence candidate (fingerprinted app + matched public CVE/PoC, or a verified injection) ARGUS *locks on* and runs a bounded **develop → run → verify → refine** loop — adapting parameters until a deterministic oracle (`uid=` / canary / OOB callback) proves execution — instead of thrashing across CVEs. `agents/operator_agent/committed_exploit.py` |
+| **Fuzzing → custom-exploit workshop** | A parallel **SELECT → GENERATE → FUZZ → TRIAGE → DEVELOP → GATE → PROVE → RECORD** campaign across six engines — **web · api · network · file-format · binary (AFL++/honggfuzz) · AI/LLM** — turning anomalies into LLM-synthesised PoCs proven by deterministic oracles. Driven from the **Fuzzing Lab** (live status, chance-of-success meter, stop button) or auto, ceiling-gated. `agents/fuzzing/` |
+| **Operational severity model** | Findings graded by **what was demonstrated**, not raw CVSS: CRITICAL only for proven compromise (or a validated critical CVE), unproven RCE capped pending proof, service-discovery → INFO, tool-noise dropped — one canonical verdict, identical across every report theme. `knowledge/severity_policy.py` |
+| **Smart adaptive brute-forcing** | Brute / heavy-enum tools run in the **background** (never block the scan) and **escalate** — fast curated lists → larger lists → rainbow tables / offline hash-cracking with rules, plus technique changes (password-spray, AS-REP roast, Kerberoast) — feeding creds back when ready. `knowledge/brute_strategy.py` |
+| **AI / LLM red-teaming** | Treats an LLM endpoint as a target: prompt-injection, jailbreak, system-prompt leak and the rest of the OWASP LLM Top 10. `agents/ai_red_team/` |
+| **Universal tech coverage + self-learning** | A knowledge-driven **skill registry** matches the target's tech (IT / OT / IoT) to deterministic playbooks; a learning loop distils lessons into per-skill weights over time. `knowledge/skill_registry.py` |
+| **Execution-boundary safety governor** | Every `run_tool` / MCP call is gated on **scope · RBAC · intrusiveness ceiling · argument validation** — fail-closed, OT-safe by default. `knowledge/safety_governor.py` |
+| **Technique search** | Grounds the operator in an offensive corpus (HackTricks / PayloadsAllTheThings) at decision time. `knowledge/technique_search.py` |
+| **Independent verification** | Headless-browser (Playwright) verification of web findings, an independent **reproduction loop** with captured PoC artifacts, and a `reproduce_status` gate so the report only claims what re-runs. |
+| **Engagement integrity** | Per-finding provenance stamping, scrub-on-seed and cross-session boundary filters so a prior engagement's data can never bleed into this one's report. |
+| **Capability benchmark** | `evals/` scores ARGUS against deterministic targets so capability regressions are caught per change. |
+
+Every engagement renders through **five professional report themes** (executive ·
+compliance · editorial · operator-dark · threat-intel) from one normalized finding set —
+severity-sorted, stable IDs, single headline rating — with WeasyPrint PDF export.
+
+---
+
 ## Documentation map
 
 | Document | Purpose |
@@ -109,6 +141,7 @@ SCIM, retention, troubleshooting) see [`DEPLOYMENT.md`](DEPLOYMENT.md).
 | **[knowledge/TROUBLESHOOTING.md](knowledge/TROUBLESHOOTING.md)** | RAG ingestion + retrieval troubleshooting |
 | **[db/README.md](db/README.md)** | Data stores · Mongo · Neo4j · cache |
 | **[utils/README.md](utils/README.md)** | Small utility helpers · CVSS · LLM provider abstraction |
+| **[evals/README.md](evals/README.md)** | Capability benchmark · scored targets · regression baseline |
 | **[docs/README.md](docs/README.md)** | Design specs + implementation plans |
 
 ---
@@ -141,10 +174,11 @@ SCIM, retention, troubleshooting) see [`DEPLOYMENT.md`](DEPLOYMENT.md).
                │  AgentBus (typed Instructions, pub/sub)
                ▼
         ┌──────────────────────────────────────────────────────┐
-        │  23 specialist agent folders                         │
-        │  recon · osint · vuln · web · exploit · privesc      │
-        │  lateral · post · evasion · c2 · cloud · container   │
-        │  iot · wireless · traffic · forensics · reasoning …  │
+        │  LLM operator (operator_agent) + 28 specialist folders│
+        │  recon · osint · vuln · web · exploit · privesc       │
+        │  lateral · post · evasion · c2 · cloud · container    │
+        │  iot · ot · wireless · traffic · forensics · reasoning│
+        │  fuzzing · ai_red_team · campaign · mission · meta …  │
         └──────────────────────────────────────────────────────┘
                │
                ▼
@@ -164,8 +198,14 @@ SCIM, retention, troubleshooting) see [`DEPLOYMENT.md`](DEPLOYMENT.md).
 
 | Surface | Highlights |
 |---------|-----------|
-| **Agents** | Reconnaissance · OSINT · vulnerability scan · web (WSTG) · exploit · privilege escalation · lateral movement · post-exploitation · evasion (AV bypass) · C2 (Sliver) · cloud (AWS/Azure/GCP) · container/K8s · IoT · wireless · network traffic · digital forensics · evidence chain · campaign mgmt · reasoning loop · meta-agents · training |
-| **Reasoning** | Hypothesis-driven tree · LLM-led plan-execute-validate loop · MITRE ATT&CK technique annotation on every action · per-finding evidence chain · explainable next-step suggestions |
+| **Agents (28 folders)** | Reconnaissance · OSINT · vulnerability scan · web (WSTG) · exploit · privilege escalation · lateral movement · post-exploitation · evasion (AV bypass) · C2 (Sliver) · cloud (AWS/Azure/GCP) · container/K8s · IoT · **OT/ICS** (Modbus/BACnet/OPC-UA/S7/Crestron) · wireless · network traffic · digital forensics · evidence chain · campaign · mission · **fuzzing** · **ai_red_team** · **operator_agent** · reasoning · meta · playbook · training |
+| **Engine** | Tiered-LLM **operator** drives `run_tool` directly · MasterAgent phase machine · committed-exploitation loop · parallel fuzz→exploit campaigns · background smart brute-forcing · per-target LLM-token budget with human extend/cutoff |
+| **Reasoning** | Hypothesis-driven tree · LLM-led plan-execute-validate loop · MITRE ATT&CK technique annotation on every action · per-finding evidence chain · technique-search grounding · explainable next-step suggestions |
+| **Exploit development** | Verify-or-refine PoC loop · deterministic proof oracles (`uid=` / canary / OOB callback) · public-PoC reflex (version→CVE→GitHub PoC) · governor-gated, fail-closed PoC execution |
+| **Fuzzing workshop** | OWASP application/protocol/file-format fuzzing · six engines (web/api/network/file/binary/AI) · AFL++ · radamsa · zzuf · honggfuzz · boofuzz · schemathesis · LLM-synthesised PoCs · ceiling-gated weaponisation |
+| **Severity & reporting** | Operational severity (graded by demonstrated impact) · single canonical verdict · noise filtering · five themed reports (executive/compliance/editorial/operator-dark/threat-intel) · WeasyPrint PDF · engagement-integrity / cross-session isolation |
+| **AI red-team** | OWASP LLM Top 10 against an LLM endpoint: prompt injection · jailbreak · system-prompt leak · insecure output · excessive agency |
+| **Safety** | Execution-boundary governor (scope · RBAC · intrusiveness ceiling · arg validation) · OT-safe-by-default · authorization-and-scope acknowledgement before any engagement |
 | **Authentication** | Local (Argon2id RFC 9106 + per-deployment pepper) · OIDC w/ PKCE-S256 · SAML 2.0 (XSW-resistant via python3-saml) · SCIM 2.0 RFC 7644 (Okta + Azure + Google + OneLogin + JumpCloud + Auth0) |
 | **MFA** | TOTP (RFC 6238, ±1 step skew, Fernet-encrypted secrets) · 10 single-use backup codes (argon2-hashed) · WebAuthn interface ready |
 | **RBAC + ABAC** | 8 hierarchical roles: OWNER · PLATFORM_ADMIN · SECURITY_MANAGER · OPERATOR · ANALYST · EXECUTIVE · AUDITOR · CLIENT · ABAC predicates for engagement scoping + severity filters + client-redaction |
@@ -173,8 +213,8 @@ SCIM, retention, troubleshooting) see [`DEPLOYMENT.md`](DEPLOYMENT.md).
 | **Audit log** | Append-only by design · OWNER-only deletion w/ reason · admin-configurable retention · optional SHA-256 hash chain · JSONL export before purge |
 | **Visual skins** | 18 runtime-switchable skins across 3 families · live preview · per-user persistence · WebGL skin lazy-loads Three.js scene · all use free fonts (Google Fonts + Press Start 2P + IBM Plex) |
 | **Audience modes** | OPERATOR / BRIEFING / PRESENT / CLIENT — F1–F4 hotkeys · hub visibility per mode · severity-redaction for CLIENT |
-| **Knowledge base** | 4-tier RAG retriever · ~1.1 GB embedder + reranker · YAML-authored deterministic playbooks · auto-ingestion of scan outputs |
-| **Pentest tooling** | Via MCP tool gateway — nmap, masscan, rustscan, nuclei, sqlmap, gobuster, ffuf, hydra, crackmapexec, impacket, metasploit, bloodhound, mimikatz, sliver, evil-winrm, … (full list in `mcp-server.js`) |
+| **Knowledge base** | 4-tier RAG retriever · ~1.1 GB embedder + reranker · YAML playbooks · skill registry (IT/OT/IoT) · severity policy · brute strategy · safety governor · technique search · self-learning lesson loop · auto-ingestion of scan outputs · RAG observability |
+| **Pentest tooling** | Via MCP tool gateway — nmap, masscan, rustscan, nuclei, sqlmap, gobuster, ffuf, hydra, kerbrute, crackmapexec/netexec, impacket, metasploit, bloodhound, mimikatz, sliver, evil-winrm, hashcat, **AFL++, radamsa, zzuf, honggfuzz, boofuzz, schemathesis**, … (full list in `mcp-server.js` / `requirements-kali.txt`) |
 
 ---
 
@@ -189,29 +229,35 @@ SCIM, retention, troubleshooting) see [`DEPLOYMENT.md`](DEPLOYMENT.md).
 | Data — RAG | ChromaDB · sentence-transformers (bge-small) |
 | Crypto | argon2-cffi · cryptography · PyJWT[crypto] · pyotp |
 | SSO | authlib (OIDC) · python3-saml (SAML 2.0) |
-| LLM | Ollama (local) · pluggable via `utils/llm_providers.py` |
+| LLM | Tiered operator (primary → secondary fallback) · Ollama (local) · pluggable via `utils/llm_providers.py` |
 | Tooling gateway | Node MCP server (`mcp-server.js`) bridging pentest tools |
+| Reporting | Jinja2 themes (×5) · WeasyPrint (PDF) |
+| Verification | Playwright (headless-browser finding verification) · deterministic proof oracles |
+| Fuzzing | AFL++ · honggfuzz · radamsa · zzuf · boofuzz · schemathesis |
 
 ---
 
 ## Pentest methodology
 
-8-phase lifecycle, each phase driven by the MasterAgent in conversation
-with the LLM and the knowledge base:
+8-phase lifecycle. The **LLM operator** drives each phase — reasoning over live intel,
+calling tools directly, and committing to exploits — while the MasterAgent advances the
+phase machine and the knowledge base grounds every decision:
 
 1. **Reconnaissance** — scope discovery, host enumeration, OSINT
 2. **Scanning** — port + service + version detection (nmap, masscan, rustscan)
-3. **Enumeration** — deep service interrogation per protocol
-4. **Vulnerability assessment** — nuclei + version-CVE correlation + CVSS scoring
-5. **Exploitation** — chained payloads, attack-graph traversal, evasion ladders
+3. **Enumeration** — deep service interrogation per protocol (background, smart brute-forcing)
+4. **Vulnerability assessment** — nuclei + version→CVE→public-PoC reflex + CVSS scoring
+5. **Exploitation** — committed develop→run→**PROVE** loop · attack-graph traversal · evasion · parallel fuzz→exploit campaigns
 6. **Post-exploitation** — credential harvest, privilege escalation, persistence
-7. **Lateral movement** — pivoting, AD enumeration, kerberoasting, NTLM relay
-8. **Reporting** — exec summary · technical detail · evidence chain · MITRE mapping
+7. **Lateral movement** — pivoting, AD enumeration, AS-REP roast / Kerberoast, NTLM relay
+8. **Reporting** — operational severity · five themed reports · evidence chain · MITRE mapping
 
 Each phase emits findings into the operational DB with full provenance
-(tool · raw output · CVSS · MITRE technique · timestamp · operator).
-The reasoning agent stitches them into a hypothesis tree visible in the
-cockpit.
+(tool · raw output · CVSS · operational severity · MITRE technique · timestamp ·
+`reproduce_status`). Findings are graded by **what was demonstrated**, deterministic
+oracles confirm exploitation, and an engagement-integrity layer keeps each session's
+data isolated. The reasoning agent stitches everything into a hypothesis tree visible
+in the cockpit.
 
 ---
 
@@ -332,6 +378,11 @@ All endpoints return JSON unless noted.
 | Engagement | `POST /api/scan/start` | Begin a new pentest engagement |
 | Engagement | `GET /api/sessions/{id}` | Engagement state |
 | Engagement | `WS /api/ws/{session_id}` | Live event stream |
+| Fuzzing | `POST /fuzz/campaign/start` | Launch a fuzz→develop→prove campaign (standalone or alongside a scan) |
+| Fuzzing | `POST /fuzz/campaign/stop` | Operator stop for a running campaign |
+| Fuzzing | `GET /fuzz/campaigns` | Live campaign status · stage · chance-of-success |
+| Fuzzing | `GET /fuzz/engines` | Fuzz modalities + installed-tool availability |
+| Report | `GET /report/{session_id}?theme=` | Themed report (executive/compliance/editorial/operator-dark/threat-intel) · HTML or PDF |
 
 Full OpenAPI surface auto-generated by FastAPI at `/docs` once
 ARGUS is running.
@@ -359,6 +410,10 @@ python knowledge/auto_ingest_scans.py          # ingest fresh scan output
 # ── Engagement-time ──
 uvicorn agent_server:app --host 0.0.0.0 --port 8000
 node mcp-server.js                             # start tool gateway (separate process)
+
+# ── Tests & capability benchmark ──
+python -X utf8 agents/test_architecture_integration.py   # architecture harness → RESULT: PASS
+#   evals/  — capability benchmark library (run_benchmark / compare_to_baseline); see evals/README.md
 ```
 
 ---
@@ -375,14 +430,15 @@ ARGUS/
 ├── schemas.py                 ← root engagement schemas
 ├── mcp-server.js              ← Node tool gateway
 │
-├── agents/                    ← MasterAgent + 23 specialist folders
+├── agents/                    ← LLM operator + MasterAgent + 28 specialist folders
 │   ├── README.md
-│   ├── master_agent.py
-│   ├── base_agent.py
-│   ├── base_subagent.py
+│   ├── master_agent.py · base_agent.py · base_subagent.py
+│   ├── operator_agent/        ← LLM operator core + committed_exploit + tool catalog
+│   ├── fuzzing/               ← fuzz→develop→PROVE workshop (campaign + 6 engines)
+│   ├── ai_red_team/           ← OWASP LLM Top 10 against an LLM endpoint
 │   ├── recon/  osint/  vuln/  web/  exploit/  privesc/  lateral/
-│   ├── post/   evasion/  c2/   cloud/  container/  iot/  wireless/
-│   ├── traffic/  forensics/  evidence/  reasoning/  campaign/
+│   ├── post/   evasion/  c2/   cloud/  container/  iot/  ot/  wireless/
+│   ├── traffic/  forensics/  evidence/  reasoning/  campaign/  avot/
 │   ├── mission/  meta/   playbook/  training/
 │   └── …
 │
@@ -410,10 +466,19 @@ ARGUS/
 │
 ├── templates/index.html       ← cockpit HTML shell
 │
-├── knowledge/                 ← RAG knowledge base
+├── knowledge/                 ← RAG knowledge base + decision "brains"
 │   ├── README.md · PLAYBOOK_GUIDE.md · TROUBLESHOOTING.md
 │   ├── build_kb.py · knowledge_base.py · dedupe_kb.py · …
+│   ├── severity_policy.py · brute_strategy.py · safety_governor.py
+│   ├── technique_search.py · skill_registry.py · skill_telemetry.py · fuzz_targeting.py
+│   ├── skills/                ← IT / OT / IoT skill files (deterministic playbooks)
 │   └── data/                  ← 300+ corpus files (PDFs, MDs, playbooks)
+│
+├── report/                    ← Themed report generator (5 themes + WeasyPrint PDF)
+│   ├── generator.py
+│   └── themes/                ← executive · compliance · editorial · operator_dark · threat_intel
+│
+├── evals/                     ← Capability benchmark (deterministic scored targets)
 │
 ├── db/                        ← Data-store adapters
 │   ├── README.md
