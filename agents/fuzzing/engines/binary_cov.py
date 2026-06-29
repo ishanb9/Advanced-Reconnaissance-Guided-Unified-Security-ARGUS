@@ -73,7 +73,7 @@ class BinaryCovEngine(FuzzEngine):
         try:
             while time.time() < deadline:
                 await asyncio.sleep(5)
-                await self._harvest(crashdir, seen, sink)
+                await self._harvest(crashdir, seen, sink, target_bin)
                 if proc.returncode is not None:
                     break
         finally:
@@ -81,13 +81,14 @@ class BinaryCovEngine(FuzzEngine):
                 proc.kill()
             except Exception:
                 pass
-            await self._harvest(crashdir, seen, sink)
+            await self._harvest(crashdir, seen, sink, target_bin)
             # Driller-style escalation hint when AFL stalled with no crash.
             if not seen and self._has_angr():
                 logger.debug("no crash from AFL — a concolic (angr/Driller) pass would help")
 
     async def _harvest(self, crashdir: str, seen: set,
-                       sink: Callable[[Observation], Awaitable[None]]) -> None:
+                       sink: Callable[[Observation], Awaitable[None]],
+                       target_bin: str = "") -> None:
         try:
             files = os.listdir(crashdir)
         except Exception:
@@ -102,10 +103,24 @@ class BinaryCovEngine(FuzzEngine):
             except Exception:
                 continue
             stack_hash = hashlib.sha1(data[:256]).hexdigest()[:12]
+            signal = {"crash": True, "stack_hash": stack_hash, "input_path": path}
+            # Revive the ASan oracle: re-run the crashing input under the sanitized target to
+            # recover a real sanitizer class + symbolized stack-hash.  Best-effort — when the
+            # binary isn't sanitizer-built (or nothing is found) we keep the byte-hash above,
+            # so existing behaviour is preserved.
+            if target_bin:
+                try:
+                    from agents.fuzzing.crash_triage import triage as _ctriage
+                    t = _ctriage(path, target_bin)
+                    if t.get("sanitizer"):
+                        signal["sanitizer"] = t["sanitizer"]
+                        signal["summary"] = t.get("summary", "")
+                        if t.get("stack_hash"):
+                            signal["stack_hash"] = t["stack_hash"]
+                except Exception:
+                    pass
             await sink(Observation(case_id=f"bin-{name}", input=data[:64],
-                                   signal={"crash": True, "stack_hash": stack_hash,
-                                           "input_path": path},
-                                   raw=data[:256].hex()))
+                                   signal=signal, raw=data[:256].hex()))
 
     @staticmethod
     def _has_angr() -> bool:

@@ -1813,6 +1813,34 @@ async def fuzz_campaign_start(body: dict):
     return {"job_id": job_id, "status": "started", "target": target, "modality": modality}
 
 
+@app.post("/fuzz/lab/upload")
+async def fuzz_lab_upload(body: dict):
+    """Lab-only: stage an uploaded binary / source archive (base64 in JSON — no extra deps,
+    air-gap safe) for a `binary_blackbox` campaign.  Returns the local path the campaign
+    should fuzz.  Staging only — the operator still must check 'authorized' to launch."""
+    import os as _os, uuid as _uuid, re as _re, base64 as _b64
+    body = body or {}
+    b64 = body.get("content_b64") or ""
+    if not b64:
+        raise HTTPException(status_code=400, detail="content_b64 is required")
+    try:
+        data = _b64.b64decode(b64, validate=False)
+    except Exception as exc:   # noqa: BLE001
+        raise HTTPException(status_code=400, detail=f"bad base64: {exc}")
+    base = _os.environ.get("ARGUS_FUZZ_LAB_DIR") or _os.path.join("logs", "fuzz_lab_uploads")
+    safe_sess = _re.sub(r"[^A-Za-z0-9_.-]", "_", str(body.get("session_id") or "standalone"))[:40] or "standalone"
+    dest_dir = _os.path.join(base, safe_sess)
+    safe_name = _re.sub(r"[^A-Za-z0-9_.-]", "_", _os.path.basename(str(body.get("filename") or "upload.bin")))[:80] or "upload.bin"
+    dest = _os.path.join(dest_dir, f"{_uuid.uuid4().hex[:8]}_{safe_name}")
+    try:
+        _os.makedirs(dest_dir, exist_ok=True)
+        with open(dest, "wb") as fh:
+            fh.write(data)
+    except Exception as exc:   # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"write failed: {exc}")
+    return {"path": dest, "name": safe_name, "bytes": len(data)}
+
+
 @app.post("/fuzz/campaign/stop")
 async def fuzz_campaign_stop(body: dict):
     from agents.fuzzing import campaign as _camp
@@ -1862,11 +1890,14 @@ async def fuzz_engines():
         "binary":  ("Binary (coverage-guided)", "AFL++/honggfuzz/libFuzzer over a harness → crash discovery",
                     [("afl-fuzz (AFL++)", "bin", _bin("afl-fuzz")), ("honggfuzz", "bin", _bin("honggfuzz")),
                      ("radamsa", "bin", _bin("radamsa"))]),
+        "binary_blackbox": ("Binary / 0-day lab", "Closed-source greybox (AFL++ QEMU + ASan) → memory-corruption 0-days · LLM harness synthesis · triage + offline novelty",
+                    [("afl-fuzz (AFL++)", "bin", _bin("afl-fuzz")), ("afl-qemu-trace", "bin", _bin("afl-qemu-trace")),
+                     ("clang", "bin", _bin("clang")), ("casr", "bin", _bin("casr"))]),
         "ai":      ("AI / LLM endpoint", "Adversarial prompts → system-prompt leak / jailbreak",
                     [("built-in red-team probes", "builtin", True), ("httpx", "lib", _pylib("httpx"))]),
     }
     out = []
-    for m in ("web", "api", "network", "file", "binary", "ai"):
+    for m in ("web", "api", "network", "file", "binary", "binary_blackbox", "ai"):
         try:
             eng = _eng.get_engine(m)
             ok, why = (eng.is_available() if eng else (False, "engine missing"))

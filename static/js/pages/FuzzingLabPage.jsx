@@ -84,6 +84,13 @@ function FuzzingLabPage() {
   const [sampleFile, setSampleFile] = _flUseState('');
   const [parseCmd,   setParseCmd]   = _flUseState('');
   const [binaryPath, setBinaryPath] = _flUseState('');
+  // ── Binary / 0-day lab (binary_blackbox modality) — additive, default OFF ──
+  const [sourcePath,  setSourcePath]  = _flUseState('');     // source/headers for harness synthesis
+  const [synthHarness, setSynthHarness] = _flUseState(false); // synthesize libFuzzer harness from source
+  const [triageOn,    setTriageOn]    = _flUseState(false);   // triage + novelty/dedup gate (enrich-only)
+  const [authorized,  setAuthorized]  = _flUseState(false);   // REQUIRED authorized-lab-target gate
+  const [seedsPath,   setSeedsPath]   = _flUseState('');      // optional corpus/seeds dir
+  const [uploading,   setUploading]   = _flUseState(false);   // base64 upload in flight
   const [campMaxSec, setCampMaxSec] = _flUseState(1800);   // campaign time budget (s)
   const [campFeedback, setCampFeedback] = _flUseState(true);
   const [campSnap, setCampSnap] = _flUseState(null);       // live snapshot from /fuzz/campaigns
@@ -184,12 +191,38 @@ function FuzzingLabPage() {
       .catch(e => { setBusy(false); setErr(String(e.message || e)); });
   };
 
+  // Binary / 0-day lab: stage an uploaded binary or source via base64 JSON
+  // (no multipart). On success the returned {path} populates binaryPath or sourcePath.
+  const uploadLabFile = (file, into) => {
+    if (!file) return;
+    setErr('');
+    setUploading(true);
+    const reader = new FileReader();
+    reader.onerror = () => { setUploading(false); setErr('Could not read the selected file.'); };
+    reader.onload = () => {
+      // reader.result is a data URL: "data:<mime>;base64,<payload>" — keep only the payload.
+      const res = String(reader.result || '');
+      const content_b64 = res.indexOf(',') >= 0 ? res.slice(res.indexOf(',') + 1) : res;
+      fetch('/fuzz/lab/upload', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: sessionId, filename: file.name, content_b64 }),
+      }).then(async r => { const d = await r.json().catch(() => ({})); if (!r.ok) throw new Error(d.detail || `HTTP ${r.status}`); return d; })
+        .then(d => { setUploading(false); if (d && d.path) { if (into === 'source') setSourcePath(d.path); else setBinaryPath(d.path); } })
+        .catch(e => { setUploading(false); setErr(String(e.message || e)); });
+    };
+    reader.readAsDataURL(file);
+  };
+
   const startCampaign = () => {
     setErr('');
     // Standalone-capable: a typed in-scope target is sufficient — no live scan required.
-    if (!target) { setErr('Enter a target host (or start a pentest to pick from identified scope).'); return; }
+    if (modality !== 'binary_blackbox' && !target) { setErr('Enter a target host (or start a pentest to pick from identified scope).'); return; }
     if (modality === 'file' && !sampleFile) { setErr('File-format fuzzing needs a sample file to mutate.'); return; }
     if (modality === 'binary' && !binaryPath) { setErr('Binary fuzzing needs a target harness binary.'); return; }
+    if (modality === 'binary_blackbox') {
+      if (!binaryPath && !sourcePath) { setErr('Binary / 0-day lab needs a target binary or a source path to synthesize a harness from.'); return; }
+      if (!authorized) { setErr('You must confirm this is an authorized lab target before launching.'); return; }
+    }
     setBusy(true);
     const surface = {};
     if (modality === 'file') {
@@ -197,10 +230,20 @@ function FuzzingLabPage() {
       surface.parse_cmd = parseCmd.trim() ? parseCmd.trim().split(/\s+/) : [];
     } else if (modality === 'binary') {
       surface.binary = binaryPath;
+    } else if (modality === 'binary_blackbox') {
+      surface.greybox_mode = 'qemu';
+      surface.synthesize_harness = synthHarness;
+      surface.triage = triageOn;
+      if (binaryPath) surface.binary = binaryPath;
+      if (sourcePath) surface.source_path = sourcePath;
+      if (seedsPath)  surface.seeds_path = seedsPath;
     } else if (port) { surface.port = String(port); }
+    // binary_blackbox fuzzes a LOCAL file, not a host — the backend still requires a
+    // non-empty `target`, so fall back to the binary/source path when no host is typed.
+    const effTarget = (modality === 'binary_blackbox' && !target) ? (binaryPath || sourcePath) : target;
     fetch('/fuzz/campaign/start', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ session_id: sessionId, target, modality, ceiling, surface,
+      body: JSON.stringify({ session_id: sessionId, target: effTarget, modality, ceiling, surface, authorized: authorized,
                              max_sec: Number(campMaxSec) || 1800, feedback: !!campFeedback }),
     }).then(async r => { const d = await r.json().catch(() => ({})); if (!r.ok) throw new Error(d.detail || `HTTP ${r.status}`); return d; })
       .then(() => setBusy(false))
@@ -329,9 +372,54 @@ function FuzzingLabPage() {
         modality === 'file' && FLField({ label: 'Sample file (seed)', hint: 'a valid file to mutate', children: React.createElement('input', { value: sampleFile, onChange: e => setSampleFile(e.target.value), placeholder: '/path/to/sample.pdf', style: _FL_INPUT }) }),
         modality === 'file' && FLField({ label: 'Parser command', hint: 'use {input} for the mutated file', children: React.createElement('input', { value: parseCmd, onChange: e => setParseCmd(e.target.value), placeholder: 'pdfinfo {input}', style: _FL_INPUT }) }),
         modality === 'binary' && FLField({ label: 'Target binary (harness)', children: React.createElement('input', { value: binaryPath, onChange: e => setBinaryPath(e.target.value), placeholder: '/path/to/harness', style: _FL_INPUT }) }),
+        // ── Binary / 0-day lab fields (binary_blackbox) ──
+        modality === 'binary_blackbox' && FLField({ label: 'Target binary', hint: 'closed-source binary to fuzz (greybox)', children: React.createElement('input', { value: binaryPath, onChange: e => setBinaryPath(e.target.value), placeholder: '/path/to/target', style: _FL_INPUT }) }),
+        modality === 'binary_blackbox' && FLField({ label: 'Source path', hint: 'for libFuzzer harness synthesis', children: React.createElement('input', { value: sourcePath, onChange: e => setSourcePath(e.target.value), placeholder: '/path/to/src or headers', style: _FL_INPUT }) }),
+        modality === 'binary_blackbox' && FLField({ label: 'Greybox mode', hint: 'instrumentation reach', children: React.createElement('select', { value: 'qemu', disabled: true, style: { ..._FL_INPUT, opacity: 0.85, cursor: 'not-allowed' } }, React.createElement('option', { value: 'qemu' }, 'QEMU user-mode')) }),
+        modality === 'binary_blackbox' && FLField({ label: 'Seeds path', hint: 'optional starting corpus dir', children: React.createElement('input', { value: seedsPath, onChange: e => setSeedsPath(e.target.value), placeholder: '/path/to/seeds (optional)', style: _FL_INPUT }) }),
         FLField({ label: 'Time budget (s)', hint: 'campaign auto-stops after this', children: React.createElement('input', { type: 'number', value: campMaxSec, onChange: e => setCampMaxSec(Number(e.target.value)), style: _FL_INPUT }) }),
         FLField({ label: 'Feed proven exploits back', children: React.createElement('label', { style: { display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--text-secondary)', cursor: 'pointer', padding: '7px 0' } },
           React.createElement('input', { type: 'checkbox', checked: campFeedback, onChange: e => setCampFeedback(e.target.checked) }), 'as findings to the agents') }),
+      ),
+      // ── Binary / 0-day lab: upload, toggles, and the required authorization gate ──
+      modality === 'binary_blackbox' && React.createElement('div', {
+        style: { display: 'flex', flexDirection: 'column', gap: 10, padding: 14, borderRadius: 8, marginBottom: 14, background: 'var(--bg-panel, #161b22)', border: '1px solid rgba(160,100,200,0.30)' },
+      },
+        React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' } },
+          React.createElement('span', { style: { fontSize: 13, fontWeight: 700, color: 'var(--text, #c9d1d9)' } }, '🧪 Binary / 0-day lab'),
+          FLBadge({ text: 'lab-gated', color: 'var(--warn, #d29922)' }),
+          React.createElement('span', { style: { fontSize: 10, color: 'var(--text-muted)' } }, 'AFL++ QEMU greybox · ASan/QASan oracle · offline novelty check'),
+        ),
+        // Upload binary/source — FileReader → base64 → JSON POST /fuzz/lab/upload
+        React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' } },
+          React.createElement('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 11, fontWeight: 700, cursor: uploading ? 'wait' : 'pointer', padding: '6px 12px', borderRadius: 6, border: '1px solid var(--accent, #58a6ff)', color: 'var(--accent, #58a6ff)', background: 'transparent' } },
+            uploading ? '⏳ Uploading…' : '⬆ Upload binary/source',
+            React.createElement('input', { type: 'file', disabled: uploading, onChange: e => { const f = e.target.files && e.target.files[0]; uploadLabFile(f, 'binary'); e.target.value = ''; }, style: { display: 'none' } })),
+          React.createElement('label', { style: { display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 11, fontWeight: 700, cursor: uploading ? 'wait' : 'pointer', padding: '6px 12px', borderRadius: 6, border: '1px solid var(--border-light, #30363d)', color: 'var(--text-secondary)', background: 'transparent' } },
+            '⬆ Upload as source',
+            React.createElement('input', { type: 'file', disabled: uploading, onChange: e => { const f = e.target.files && e.target.files[0]; uploadLabFile(f, 'source'); e.target.value = ''; }, style: { display: 'none' } })),
+          React.createElement('span', { style: { fontSize: 10, color: 'var(--text-muted)' } }, 'staged to a per-session lab dir; the returned path fills the field above'),
+        ),
+        // Toggles: harness synthesis + triage/novelty
+        React.createElement('div', { style: { display: 'flex', flexDirection: 'column', gap: 8 } },
+          React.createElement('label', { style: { display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: 'var(--text-secondary)', cursor: 'pointer' } },
+            React.createElement('input', { type: 'checkbox', checked: synthHarness, onChange: e => setSynthHarness(e.target.checked) }),
+            'Synthesize harness from source ', React.createElement('span', { style: { fontSize: 10, color: 'var(--text-muted)' } }, '(LLM writes a libFuzzer driver; the compiler is the oracle)')),
+          React.createElement('label', { style: { display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: 'var(--text-secondary)', cursor: 'pointer' } },
+            React.createElement('input', { type: 'checkbox', checked: triageOn, onChange: e => setTriageOn(e.target.checked) }),
+            'Triage + novelty ', React.createElement('span', { style: { fontSize: 10, color: 'var(--text-muted)' } }, '(dedup, exploitability, offline 0-day check)')),
+        ),
+        // REQUIRED authorization gate — red bordered; launch blocked unless checked
+        React.createElement('label', {
+          style: { display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, fontWeight: 700, cursor: 'pointer', padding: '8px 12px', borderRadius: 6,
+                   color: authorized ? 'var(--good, #3fb950)' : 'var(--bad, #f85149)',
+                   border: `1px solid ${authorized ? 'var(--good, #3fb950)' : 'var(--bad, #f85149)'}`,
+                   background: authorized ? 'rgba(63,185,80,0.08)' : 'rgba(248,81,73,0.08)' },
+        },
+          React.createElement('input', { type: 'checkbox', checked: authorized, onChange: e => setAuthorized(e.target.checked) }),
+          '✔ I confirm this is an authorized lab target',
+          React.createElement('span', { style: { fontSize: 10, fontWeight: 400, color: 'var(--text-muted)' } }, '— required; the campaign will not launch without it'),
+        ),
       ),
       // ── Engine tool availability — surfaces the installed fuzzers (radamsa/zzuf/AFL++/…) ──
       selEngine && Array.isArray(selEngine.tools) && selEngine.tools.length > 0 && React.createElement('div', {
@@ -349,14 +437,25 @@ function FuzzingLabPage() {
       // ── Live status: what's happening, progress vs budget, chance of success ──
       _flCampaignStatus(campSnap),
       React.createElement('div', { style: { display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', marginBottom: 14 } },
-        React.createElement('button', { onClick: startCampaign, disabled: busy || !target || (campSnap && campSnap.active),
-          style: { padding: '8px 20px', borderRadius: 6, border: 'none', cursor: busy ? 'not-allowed' : 'pointer', fontWeight: 700, fontSize: 13, opacity: (busy || !target || (campSnap && campSnap.active)) ? 0.5 : 1, background: 'var(--accent, #58a6ff)', color: '#04121f' } }, '🧬 Start Exploit Campaign'),
+        (function () {
+          // binary_blackbox is target-host-less; it launches on a local binary/source
+          // plus the required authorization. Other modalities still require a target.
+          const blDisabled = modality === 'binary_blackbox'
+            ? (!authorized || (!binaryPath && !sourcePath))
+            : !target;
+          const campDisabled = busy || blDisabled || (campSnap && campSnap.active);
+          return React.createElement('button', { onClick: startCampaign, disabled: campDisabled,
+            style: { padding: '8px 20px', borderRadius: 6, border: 'none', cursor: busy ? 'not-allowed' : 'pointer', fontWeight: 700, fontSize: 13, opacity: campDisabled ? 0.5 : 1, background: 'var(--accent, #58a6ff)', color: '#04121f' } },
+            modality === 'binary_blackbox' ? '🧬 Launch 0-day Lab' : '🧬 Start Exploit Campaign');
+        })(),
         React.createElement('button', { onClick: stopCampaign, disabled: !(campSnap && campSnap.active),
           style: { padding: '8px 20px', borderRadius: 6, cursor: (campSnap && campSnap.active) ? 'pointer' : 'not-allowed', fontWeight: 700, fontSize: 13, opacity: (campSnap && campSnap.active) ? 1 : 0.4, border: '1px solid var(--bad, #f85149)', background: 'transparent', color: 'var(--bad, #f85149)' } }, '■ Stop Fuzzing'),
         err && React.createElement('span', { style: { fontSize: 12, color: 'var(--bad, #f85149)' } }, `⚠ ${err}`),
       ),
       // Live campaign view
       _flCampaignView(camp),
+      // Per-finding triage / novelty cards (only when a finding carries a triage object)
+      _flTriageFindings(camp),
     ),
   );
 }
@@ -364,6 +463,71 @@ function FuzzingLabPage() {
 function _flPromiseColor(p) {
   return p >= 70 ? 'var(--good, #3fb950)' : p >= 35 ? 'var(--warn, #d29922)'
        : p > 0 ? 'var(--accent, #58a6ff)' : 'var(--text-muted, #8b949e)';
+}
+
+// Exploitability band → colour. probable = red, likely = orange, unlikely/unknown = grey.
+function _flExploitColor(e) {
+  return e === 'probable' ? 'var(--bad, #f85149)'
+       : e === 'likely'   ? 'var(--warn, #d29922)'
+       : 'var(--text-muted, #8b949e)';
+}
+
+// Compact triage / novelty card for a single campaign finding's optional `triage` object.
+// Additive: findings WITHOUT a triage object render exactly as before (this returns null).
+function _flTriageCard(t) {
+  if (!t) return null;
+  const ec = _flExploitColor(t.exploitability);
+  const novel = t.novelty_label;
+  // Novelty headline: candidate-0day stands out amber; known-nday / undetermined stay grey.
+  const isCandidate = novel === 'no-known-public-match';
+  const nc = isCandidate ? 'var(--warn, #d29922)' : 'var(--text-muted, #8b949e)';
+  const nText = isCandidate ? 'CANDIDATE 0-DAY — no known public CVE match'
+              : novel === 'known-nday' ? 'known issue'
+              : 'undetermined';
+  return React.createElement('div', {
+    style: { display: 'flex', flexDirection: 'column', gap: 5, padding: '7px 9px', borderRadius: 6, marginTop: 4,
+             background: isCandidate ? 'rgba(210,153,34,0.08)' : 'var(--bg-deep, #0d1117)',
+             border: `1px solid ${isCandidate ? 'var(--warn, #d29922)' : 'var(--border-light, #30363d)'}` },
+  },
+    React.createElement('div', { style: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' } },
+      t.cluster_id && FLBadge({ text: `cluster ${String(t.cluster_id).slice(0, 12)}`, color: 'var(--text-muted, #8b949e)' }),
+      t.exploitability && FLBadge({ text: `exploit: ${t.exploitability}`, color: ec }),
+      FLBadge({ text: nText, color: nc }),
+    ),
+    t.novelty_evidence && React.createElement('div', { style: { fontSize: 10, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } }, t.novelty_evidence),
+  );
+}
+
+// Findings list that surfaces the per-finding triage / novelty card (binary / 0-day lab).
+// Only rendered when at least one finding carries a `triage` object — pure addition.
+function _flTriageFindings(camp) {
+  const findings = (camp.findings || []).filter(f => f && f.triage);
+  if (!findings.length) return null;
+  return React.createElement('div', { style: { marginTop: 14 } },
+    React.createElement('div', { style: { fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.6, color: 'var(--warn, #d29922)', marginBottom: 6 } }, `Triage & novelty (${findings.length})`),
+    React.createElement('div', { style: { display: 'flex', flexDirection: 'column', gap: 8, maxHeight: 320, overflow: 'auto' } },
+      findings.slice(-30).reverse().map((f, i) => React.createElement('div', { key: i, style: { padding: '6px 8px', borderRadius: 6, background: 'var(--bg-panel, #161b22)', border: '1px solid var(--border-light, #30363d)' } },
+        React.createElement('div', { style: { fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text, #c9d1d9)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' } }, `${f.exploit_class || f.type || 'crash'} — ${(f.title || '').slice(0, 70)}`),
+        _flTriageCard(f.triage)))));
+}
+
+// Greybox (binary / 0-day lab) live counters: execs/sec, crashes, unique clusters.
+// Strictly additive — renders nothing unless the snapshot carries at least one of them,
+// so non-binary campaigns are unaffected.
+function _flGreyboxCounters(snap) {
+  const pick = (keys) => { for (const k of keys) { if (snap[k] != null) return snap[k]; } return null; };
+  const execs    = pick(['execs_per_sec', 'execs_sec', 'exec_per_sec', 'execs_per_second']);
+  const crashes  = pick(['crashes', 'crash_count', 'total_crashes']);
+  const clusters = pick(['clusters', 'unique_clusters', 'cluster_count']);
+  if (execs == null && crashes == null && clusters == null) return null;
+  const cell = (label, val, color) => React.createElement('div', { style: { display: 'flex', flexDirection: 'column', gap: 2 } },
+    React.createElement('span', { style: { fontSize: 9, fontWeight: 700, textTransform: 'uppercase', letterSpacing: 0.6, color: 'var(--text-muted)' } }, label),
+    React.createElement('span', { style: { fontFamily: 'var(--font-mono)', fontSize: 14, fontWeight: 700, color: color || 'var(--text, #c9d1d9)' } }, val));
+  const kids = [];
+  if (execs != null)    kids.push(cell('Execs/sec', String(execs), 'var(--accent, #58a6ff)'));
+  if (crashes != null)  kids.push(cell('Crashes', String(crashes), 'var(--bad, #f85149)'));
+  if (clusters != null) kids.push(cell('Unique clusters', String(clusters), 'var(--warn, #d29922)'));
+  return React.createElement('div', { style: { display: 'flex', gap: 22, flexWrap: 'wrap', marginTop: 10, paddingTop: 10, borderTop: '1px solid var(--border-light, #30363d)' } }, kids);
 }
 
 // Live status board: status + stage + chance-of-success + time budget + counts.
@@ -398,6 +562,8 @@ function _flCampaignStatus(snap) {
       stat('Anomalies', snap.anomalies || 0, 'var(--warn, #d29922)'),
       stat('Proven', snap.proven || 0, 'var(--good, #3fb950)'),
       stat('Awaiting approval', snap.awaiting_approval || 0, 'var(--accent, #58a6ff)')),
+    // Greybox live counters — only surfaced when the snapshot actually carries them.
+    _flGreyboxCounters(snap),
     snap.note && React.createElement('div', { style: { marginTop: 8, fontSize: 11, color: 'var(--text-muted)', fontStyle: 'italic' } }, snap.note));
 }
 

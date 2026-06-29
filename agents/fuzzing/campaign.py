@@ -130,6 +130,22 @@ class FuzzCampaign:
                 return self.snapshot()
 
             await self._stage("select", surface=self.ctx.surface)
+
+            # GENERATE-HARNESS (additive, opt-in): synthesize a libFuzzer harness from source
+            # when the engine has no runnable binary yet.  No-op unless explicitly flagged with
+            # a source path — so existing campaigns take the identical path below.
+            if (self.ctx.surface.get("synthesize_harness")
+                    and self.ctx.surface.get("source_path")
+                    and not self.ctx.surface.get("binary")):
+                await self._stage("generate_harness", source=self.ctx.surface.get("source_path"))
+                try:
+                    from agents.fuzzing import harness_synth as _hsynth
+                    res = await _hsynth.synthesize_harness(self.ctx)
+                    if not res:
+                        await self._stage("error", message="harness synthesis failed (no runnable target)")
+                except Exception as exc:   # noqa: BLE001
+                    logger.debug("harness synth error: %s", exc)
+
             await self._stage("generate")
             payloads = await _payloadgen.generate(self.ctx)
             self.ctx.surface.setdefault("payloads", payloads)
@@ -292,6 +308,15 @@ class FuzzCampaign:
         if poc is not None:
             finding["poc"] = poc.to_dict()
             finding["evidence_tag"] = "DEMONSTRATED" if proven else "OBSERVED"
+        # TRIAGE-PLUS (additive, opt-in, modality-general): attach root-cause dedup +
+        # exploitability + offline novelty.  Enrich-only — never drops/blocks the finding.
+        if self.ctx.surface.get("triage"):
+            try:
+                from agents.fuzzing import triage as _triage
+                t = _triage.triage_crash(anomaly, self.ctx, anomaly.evidence or note or "")
+                finding["triage"] = t.to_dict()
+            except Exception as exc:   # noqa: BLE001
+                logger.debug("triage-plus error: %s", exc)
         self.findings.append(finding)
         await self.ctx.emit_event("fuzz_finding", {"job_id": self.job_id, **finding})
         if self._on_finding is not None:

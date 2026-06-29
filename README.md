@@ -118,6 +118,7 @@ the engine adds:
 | **Independent verification** | Headless-browser (Playwright) verification of web findings, an independent **reproduction loop** with captured PoC artifacts, and a `reproduce_status` gate so the report only claims what re-runs. |
 | **Engagement integrity** | Per-finding provenance stamping, scrub-on-seed and cross-session boundary filters so a prior engagement's data can never bleed into this one's report. |
 | **Capability benchmark** | `evals/` scores ARGUS against deterministic targets so capability regressions are caught per change. |
+| **Goal-conditioned, value-driven planning** | Each engagement carries a **mission brief** with explicit `win_conditions`; the reasoning loop scores candidate actions by **value-of-information** (decisions are stamped `[VoI=…]`) and maintains a **goal timeline** (emits `goal_timeline_updated` — "win condition met at step N"), so the operator thinks *toward the objective* instead of running tools blindly. `db/schemas.py::MissionBrief` · `agents/reasoning/decision_engine.py` · `agents/reasoning/goal_timeline.py` |
 
 Every engagement renders through **five professional report themes** (executive ·
 compliance · editorial · operator-dark · threat-intel) from one normalized finding set —
@@ -143,7 +144,9 @@ Everything is in this one README, plus two companion files —
 [API surface](#api-surface) ·
 [CLI](#cli) ·
 [Project layout](#project-layout) ·
-[Roles](#roles-in-one-screen)
+[Roles](#roles-in-one-screen) ·
+[Sovereign LLM stack](#sovereign-llm-stack) ·
+[Production-safety model](#production-safety-model)
 
 **Component reference** (folded in from the former per-folder READMEs) ·
 [Enterprise authentication](#enterprise-authentication) ·
@@ -247,6 +250,31 @@ Everything is in this one README, plus two companion files —
 | Reporting | Jinja2 themes (×5) · WeasyPrint (PDF) |
 | Verification | Playwright (headless-browser finding verification) · deterministic proof oracles |
 | Fuzzing | AFL++ · honggfuzz · radamsa · zzuf · boofuzz · schemathesis |
+
+---
+
+## Sovereign LLM stack
+
+**Frontier when you can, fully local when you must — with automatic failover.** ARGUS
+is *not* tied to one model or a phone-home API. One provider abstraction
+(`utils/llm_providers.py`) drives every LLM call through five interchangeable backends:
+
+| Backend | Use |
+|---------|-----|
+| **Anthropic** (Claude) · **Gemini** · **OpenAI-compatible** (vLLM · Groq · OpenRouter · LM Studio · llama.cpp · TGI) | Frontier capability where connectivity + policy allow |
+| **Claude Code subscription** (`claude_code`) | Frontier Claude via a Pro/Max OAuth session — no API key |
+| **Ollama** (local) | 100% offline / air-gapped — nothing leaves the box |
+
+Selection is one env var (`LLM_PROVIDER`, default `auto`). A **tiered chain**
+(`provider_chain` → `stream_tiered`) runs a primary model and **fails over** to a backup —
+including an implicit local-Ollama fallback — on outage, auth failure, a zero-token
+completion, or a **frontier policy refusal** (`looks_like_refusal` re-routes the same prompt
+to the local model). Every call is primary→secondary by construction.
+
+This dual-mode design is the **sovereignty differentiator** a frontier-only competitor
+structurally cannot match: run frontier Claude where it's allowed, degrade gracefully to a
+local model on a refusal or outage, and run **completely offline** in an air-gapped /
+regulated / OT enclave.
 
 ---
 
@@ -355,6 +383,28 @@ PostgreSQL URL).
 
 Full audit-evidence-chain options + tamper proofs are documented in
 **[`auth/audit.py`](auth/audit.py)** and **[`DEPLOYMENT.md §11`](DEPLOYMENT.md#11--compliance-notes)**.
+
+---
+
+## Production-safety model
+
+Autonomy that can reach a live target needs guardrails that are **part of the engine, not
+optional**. ARGUS gates every action and bounds every loop:
+
+| Control | Mechanism |
+|---------|-----------|
+| **Execution-boundary governor** | `knowledge/safety_governor.py::evaluate` runs at the `run_tool`/MCP boundary *and* again in `agents/fuzzing/poc_runner.py` — checks scope · RBAC · intrusiveness ceiling · argument validation · life-safety before a tool executes |
+| **Bounded exploitation** | the committed-exploit loop (`committed_exploit.py`) and fuzz campaigns (`agents/fuzzing/campaign.py`) cap adaptations · wall-clock · early-exit — no unbounded hammering |
+| **OT-safe by default** | OT/ICS modules are read-only; the AV/OT path is **dry-run by default**, requires `--authorized` + an allowlisted scope, and trips an OT **circuit breaker** on repeated faults |
+| **Non-blocking brute / heavy enum** | runs in the background under a generous ceiling and escalates smartly (`knowledge/brute_strategy.py`) — never stalls or floods the engagement |
+| **Noise throttle** | `utils/opsec_profiles.py` (`fast`/`quiet`/`stealth`/`paranoid`) strips loud flags; a parallel fuzz campaign yields LLM/tool budget to a live scan |
+| **Connectivity gate** | a preflight + circuit-breaker pauses for a human instead of thrashing a dead route |
+| **Budgeted** | per-target LLM-token / wall-clock budget with human extend / cut-off |
+
+Every gated decision is an auditable event, and findings are graded by **demonstrated
+impact** (`knowledge/severity_policy.py`) — a service banner is never a "critical." On the
+roadmap: a **fail-closed** governor mode for OT engagements and a per-engagement
+**blast-radius report** rolled up from these governor events.
 
 ---
 

@@ -22,6 +22,9 @@ _REGISTRY = {
     "tool":    "agents.fuzzing.engines.tool_engine:ToolEngine",
     "binary":  "agents.fuzzing.engines.binary_cov:BinaryCovEngine",   # Slice 2
     "ai":      "agents.fuzzing.engines.ai_target:AiTargetEngine",     # Slice 3
+    # Closed-source greybox (AFL++ QEMU user-mode + ASan/QASan oracle).  Lab-only,
+    # opt-in modality — never auto-selected by the autonomous engine.
+    "binary_blackbox": "agents.fuzzing.engines.binary_greybox:BinaryGreyboxEngine",
 }
 
 
