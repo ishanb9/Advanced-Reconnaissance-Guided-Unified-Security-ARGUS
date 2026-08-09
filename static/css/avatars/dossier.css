@@ -1,0 +1,150 @@
+/* ═══════════════════════════════════════════════════════════════════════
+   AVATAR · DOSSIER — classified intel brief
+   Client readout of THIS engagement. Redacted field-dossier: parchment,
+   ink, stamp-red, typewriter/serif, evidence plates, print & projector
+   safe. Low density — few big figures and prose.
+   ═══════════════════════════════════════════════════════════════════════ */
+:root[data-avatar="dossier"] {
+  --avatar-name: 'DOSSIER';
+
+  /* SURFACE — light parchment (default per D4) */
+  --bg-base:      #EDE9DF;
+  --bg-void:      #EDE9DF;
+  --bg-surface:   #F7F4EC;
+  --bg-panel:     #F7F4EC;
+  --bg-elevated:  #FFFDF7;
+  --bg-glass:     rgba(247, 244, 236, 0.88);
+  --bg-sidebar:   #E4DFD2;
+
+  /* BORDERS — pencil rules */
+  --border-dim:   #D3CCBA;
+  --border:       #B3A992;
+  --border-light: #B3A992;
+  --border-bright:#8C816A;
+  --border-focus: var(--accent);
+
+  /* PRIMARY — stamp red */
+  --accent:       #A8321F;
+  --accent-dim:   #7C2416;
+  --accent-glow:  rgba(168, 50, 31, 0.18);
+  --accent-subtle:rgba(168, 50, 31, 0.06);
+
+  --cyan:         #1F4D6B;
+  --violet:       #5C4A7A;
+  --violet-glow:  rgba(92, 74, 122, 0.22);
+
+  /* TEXT — ink on paper */
+  --text-primary: #1C1A16;
+  --text-secondary:#4A4539;
+  --text-muted:   #7A7263;
+
+  /* SEVERITY — print-safe, deepened for paper */
+  --critical:     #A8121F;
+  --high:         #B85C10;
+  --medium:       #96770B;
+  --amber:        #96770B;
+  --low:          #1E6B3C;
+  --info:         #1F4D6B;
+  --supernova:    #8E1F5C;
+  --critical-bg:  rgba(168, 18, 31, 0.10);   --critical-bd: rgba(168, 18, 31, 0.45);
+  --high-bg:      rgba(184, 92, 16, 0.10);   --high-bd:     rgba(184, 92, 16, 0.42);
+  --medium-bg:    rgba(150,119, 11, 0.10);   --medium-bd:   rgba(150,119, 11, 0.42);
+  --low-bg:       rgba( 30,107, 60, 0.10);   --low-bd:      rgba( 30,107, 60, 0.40);
+  --info-bg:      rgba( 31, 77,107, 0.10);   --info-bd:     rgba( 31, 77,107, 0.40);
+
+  /* TYPE — typewriter + serif body */
+  --font-ui:      Georgia, 'Times New Roman', serif;
+  --font-display: Georgia, 'Times New Roman', serif;
+  --font-mono:    'JetBrains Mono', 'Courier New', monospace;
+
+  /* SURFACE LANGUAGE — paper plates, no glow */
+  --panel-radius: 3px;
+  --panel-border: 1px solid var(--border-dim);
+  --panel-bg: var(--bg-surface);
+  --panel-shadow: 0 1px 2px rgba(28,26,22,.10), 0 6px 18px -14px rgba(28,26,22,.30);
+  --rail-gradient: linear-gradient(90deg, var(--accent), transparent 60%);
+
+  /* DENSITY / MOTION / TEXTURE */
+  --density: 1.30;             /* low density, generous leading */
+  --tex-opacity: 0.18;         /* paper grain */
+  --dur-3: 260ms; --dur-4: 420ms;
+  --radius: 3px; --radius-md: 4px; --radius-lg: 5px; --radius-xl: 8px;
+  --shadow-sm: 0 1px 2px rgba(28,26,22,.10);
+  --shadow-md: 0 3px 10px rgba(28,26,22,.14);
+  --shadow-lg: 0 10px 26px rgba(28,26,22,.18);
+}
+
+/* Dark folder variant */
+:root[data-avatar="dossier"][data-avatar-variant="folder"] {
+  --bg-base:      #17150F;
+  --bg-void:      #17150F;
+  --bg-surface:   #1F1C14;
+  --bg-panel:     #1F1C14;
+  --bg-elevated:  #29251A;
+  --bg-sidebar:   #110F0A;
+  --border-dim:   #332E20;
+  --border:       #4C4530;
+  --border-bright:#6B6144;
+  --text-primary: #EDE6D4;
+  --text-secondary:#B3A98C;
+  --text-muted:   #7D7359;
+  --accent:       #D9553C;
+  --panel-bg:     var(--bg-surface);
+}
+
+/* Document chrome: titles read as file headers */
+:root[data-avatar="dossier"] .page-title {
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  font-weight: 700;
+  border-bottom: 2px solid var(--text-primary);
+  padding-bottom: 6px;
+  display: inline-block;
+}
+:root[data-avatar="dossier"] .section-title {
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+}
+
+/* Classification banner */
+:root[data-avatar="dossier"] .a-classification {
+  display: block; text-align: center;
+  font-family: var(--font-mono); font-size: 10px; font-weight: 700;
+  letter-spacing: 0.34em; text-transform: uppercase;
+  color: var(--accent);
+  border-top: 1px solid var(--accent);
+  border-bottom: 1px solid var(--accent);
+  padding: 4px 0; margin-bottom: 12px;
+}
+
+/* Evidence plate — bordered artefact frame */
+:root[data-avatar="dossier"] .a-evidence-plate {
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  padding: 10px 12px;
+  font-family: var(--font-mono); font-size: 11px;
+  position: relative;
+}
+:root[data-avatar="dossier"] .a-evidence-plate::before {
+  content: "EVIDENCE";
+  position: absolute; top: -7px; left: 10px;
+  background: var(--bg-surface); padding: 0 6px;
+  font-size: 8px; letter-spacing: .2em; color: var(--text-muted);
+}
+
+/* Redaction bar — used for masked/withheld values only */
+:root[data-avatar="dossier"] .a-redacted {
+  background: var(--text-primary);
+  color: transparent !important;
+  user-select: none;
+  border-radius: 1px;
+}
+
+/* Print: drop chrome, keep the document */
+@media print {
+  :root[data-avatar="dossier"] #argus-avatar-tex,
+  :root[data-avatar="dossier"] .app-sidebar { display: none !important; }
+  :root[data-avatar="dossier"] .panel { box-shadow: none; border-color: #999; }
+}

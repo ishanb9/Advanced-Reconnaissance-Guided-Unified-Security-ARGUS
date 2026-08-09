@@ -7,10 +7,19 @@ file (no code).  Mirrors agents/ai_red_team/discovery (same matcher + FP guard).
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 _SKILLS_DIR = Path(__file__).resolve().parent / "skills"
+
+def _token_in_blob(tok, blob: str) -> bool:
+    t = str(tok).lower().strip()
+    if not t:
+        return False
+    if any(c in t for c in ":._") and len(t) >= 4:
+        return t in blob
+    return re.search(r"(?<![a-z0-9])" + re.escape(t) + r"(?![a-z0-9])", blob) is not None
 
 # Code-level FP guard (shared with discovery): a shared web port never fires a
 # detection on its own — only a technology-dedicated port match alone suffices.
@@ -121,12 +130,34 @@ def match_skills(intel: Dict[str, Any]) -> List[Dict[str, Any]]:
                 hit_ports.append(pi); ev.append(f"{pi}/tcp")
                 if pi not in _SHARED_PORTS:
                     dedicated = True
-        banner = any(str(b).lower() in blob for b in s["match"]["banners"] if b)
-        marker = any(str(m).lower() in blob for m in s["match"]["markers"] if m)
+        banner_hits = [b for b in s["match"]["banners"] if b and _token_in_blob(b, blob)]
+        marker_hits = [m for m in s["match"]["markers"] if m and _token_in_blob(m, blob)]
+        banner = bool(banner_hits)
+        marker = bool(marker_hits)
         if banner:
             ev.append("banner-match")
         if marker:
             ev.append("marker-match")
+        # Transport-aware FP gate: a non-IP-transport technology (RF / ARINC /
+        # CAN / serial) cannot appear in an IP-scan banner/header blob — there is
+        # no TCP port carrying a TCAS RF frame or an ARINC-429 FADEC word. So for
+        # such a skill with NO dedicated-port hit, suppress a TEXT-ONLY match
+        # unless the intel was passively sourced (PCAP / SDR / SPAN), which sets
+        # intel['passive_capture']. l2 (on-segment Ethernet GOOSE/PROFINET) is
+        # intentionally excluded — it is carried on the wire we can observe.
+        if (s.get("transport", "ip") in ("rf", "arinc", "can", "serial")
+                and not dedicated and not intel.get("passive_capture")):
+            continue
+        # Corroboration gate (client-defensibility): a TEXT-ONLY match (no technology-
+        # dedicated port) on a SINGLE short/generic token is the #1 false-positive source
+        # — a VoIP phone "matching" TCAS/ECDIS/SharePoint on one loose word.  Require a
+        # dedicated port, OR banner AND marker, OR >=2 distinct token hits, OR one strong
+        # (>=8-char) token (keeps "Crestron Webserver"-style single-strong-banner hits).
+        _text_hits = banner_hits + marker_hits
+        _strong = any(len(str(t).strip()) >= 8 for t in _text_hits)
+        if (banner or marker) and not (dedicated or (banner and marker)
+                                       or len(_text_hits) >= 2 or _strong):
+            continue
         if not (dedicated or banner or marker):
             continue
         out.append({
@@ -156,12 +187,18 @@ def finding_for(detection: Dict[str, Any]) -> Dict[str, Any]:
     transport_note = ("" if transport == "ip"
                       else f" Active testing requires {_bridge.get(transport, 'dedicated hardware')} — "
                            "the matched quick-wins are operator guidance, not auto-executed.")
+    # Surface the skill's quick-win COMMANDS as report/operator guidance (they were
+    # computed by match_skills but dropped here).  Appended to the DESCRIPTION only:
+    # the finding stays operationally INFO (severity is hardcoded above + the caller
+    # tags signals={'detection_only':True}), and description never feeds the
+    # is_noise/evidence-contradiction drops.  Empty/absent quick_wins → "" → the
+    # description is byte-identical to before.
+    _qw_cmds = [str(q.get("cmd", "")).strip()
+                for q in (detection.get("quick_wins") or [])
+                if isinstance(q, dict) and str(q.get("cmd", "")).strip()]
+    _qw_note = (" Operator quick-win commands (guidance, not auto-executed): "
+                + " | ".join(_qw_cmds[:6]) + ".") if _qw_cmds else ""
     return {
-        # A bare detection is an OBSERVATION of attack surface → INFO. The skill's
-        # inherent-risk class drives PRIORITISATION only (priority_score / rank_matches
-        # read it straight off the detection dict, knowledge/skill_registry.py), never
-        # the finding severity. Real HIGH/CRITICAL is reserved for a confirmed issue
-        # (version-applicable CVE, proven misconfig, or an exploited/foothold finding).
         "severity": "info",
         "inherent_risk": (detection.get("severity") or "info"),
         "title": f"{tech} detected" + (" (OT — fragile)" if ot else ""),
@@ -170,7 +207,7 @@ def finding_for(detection: Dict[str, Any]) -> Dict[str, Any]:
                         + (f" References: {refs}." if refs else "")
                         + (" OT/ICS: reachability can equal control — test read-only first."
                            if ot else "")
-                        + transport_note),
+                        + transport_note + _qw_note),
         "evidence": ev,
         "remediation": ("Inventory and segment this asset; restrict access to authorized "
                         "management networks; apply vendor advisories"

@@ -125,8 +125,12 @@ async def _create_indexes():
     )
 
     # ── tool_outputs ────────────────────────────────────────────────────────
+    # [40] store_tool_output persists the timestamp as `created_at` and never writes
+    # `started_at` (that is only a computed @property on the schema).  Index + sort on
+    # `created_at` so the documented newest-first per-host ordering is actually backed
+    # by a usable index instead of a null-tie sort that returned arbitrary order.
     await db.tool_outputs.create_index(
-        [("session_id", ASCENDING), ("host", ASCENDING), ("started_at", DESCENDING)]
+        [("session_id", ASCENDING), ("host", ASCENDING), ("created_at", DESCENDING)]
     )
     await db.tool_outputs.create_index([("session_id", ASCENDING), ("agent", ASCENDING)])
     # backward-compat index on legacy `target` field
@@ -359,6 +363,10 @@ async def create_session(data: SessionCreate) -> Dict:
         "discovered_hosts":  [],
         "hosts_completed":   [],
         "host_count":        0,
+        # Per-host isolation: link a child (per-host) session to its multi-target parent
+        # so the report/UI roll children up.  None for a normal single / parent session.
+        "parent_session_id": getattr(data, "parent_session_id", None),
+        "child_session_ids": [],
         # Pause/resume
         "last_checkpoint_id": None,
         "pause_count":        0,
@@ -387,10 +395,58 @@ async def get_session(session_id: str) -> Optional[Dict]:
         return None
 
 
-async def list_sessions(limit: int = 50) -> List[Dict]:
-    """List all sessions, newest first."""
+def _sid_query(session_id):
+    """Match ONE session_id (str) OR any of several (list/tuple/set → $in) so the report
+    and aggregate views can pull a MULTI parent together with its per-host child sessions
+    in a single query.  Backward-compatible: a plain string behaves exactly as before."""
+    if isinstance(session_id, (list, tuple, set)):
+        return {"$in": [str(s) for s in session_id]}
+    return session_id
+
+
+async def get_child_session_ids(parent_session_id: str) -> List[str]:
+    """Session ids of the per-host CHILD sessions linked to a multi-target parent
+    (empty list when the session has no children — i.e. a normal single scan)."""
     db = get_db()
-    cursor = db.sessions.find().sort("started_at", DESCENDING).limit(limit)
+    try:
+        cursor = db.sessions.find({"parent_session_id": str(parent_session_id)}, {"_id": 1})
+        return [str(d["_id"]) for d in await cursor.to_list(length=1000)]
+    except Exception:
+        return []
+
+
+async def resolve_session_scope(session_id: str) -> List[str]:
+    """The full set of session ids an aggregate/report view should cover for
+    ``session_id``: the session itself PLUS any per-host child sessions.  For a plain
+    single or child session this is just ``[session_id]``."""
+    kids = await get_child_session_ids(session_id)
+    return [str(session_id)] + [k for k in kids if k != str(session_id)]
+
+
+async def _scope_for(session_id):
+    """Auto-aggregation resolver used by the finding/flag reads so EVERY consumer of a
+    multi-target PARENT session transparently sees its per-host children rolled up — no
+    per-caller change, so no view can go blank.  A list passes through unchanged; a
+    childless (single or child) session resolves to itself (no extra breadth)."""
+    if isinstance(session_id, (list, tuple, set)):
+        return list(session_id)
+    try:
+        kids = await get_child_session_ids(session_id)
+    except Exception:
+        kids = []
+    return ([session_id] + kids) if kids else session_id
+
+
+async def list_sessions(limit: int = 50) -> List[Dict]:
+    """List all sessions, newest first.
+
+    Excludes per-host CHILD sessions (those carry a parent_session_id) so a
+    multi-target/CIDR scan appears as the ONE launch session, never N host rows —
+    host isolation stays a pure backend detail.  Children remain individually
+    readable; they just don't clutter the history list."""
+    db = get_db()
+    cursor = (db.sessions.find({"parent_session_id": {"$in": [None, ""]}})
+              .sort("started_at", DESCENDING).limit(limit))
     return _serialize_list(await cursor.to_list(length=limit))
 
 
@@ -412,33 +468,73 @@ async def delete_session(session_id: str) -> bool:
     if not session:
         return False
 
+    # [46] Cascade to per-host CHILD sessions.  For a MULTI/CIDR parent, virtually all
+    # per-host data (findings, credentials, loot, checkpoints, evidence, tool_outputs, ...)
+    # is written under the CHILD session ids for isolation, so deleting ONLY the parent id
+    # orphaned all of it — an invisible data-retention/privacy leak (children are excluded
+    # from list_sessions) that broke the 'delete ALL related data' contract.  Delete the
+    # union of {parent, children} across every collection, then the child docs themselves.
+    _scope_ids = [session_id]
+    try:
+        for _c in (await get_child_session_ids(session_id)) or []:
+            if _c and str(_c) not in _scope_ids:
+                _scope_ids.append(str(_c))
+    except Exception:
+        pass
+    _scope_q = {"session_id": {"$in": _scope_ids}}
+
     # Delete all related collections in parallel
     import asyncio
     await asyncio.gather(
-        db.findings.delete_many({"session_id": session_id}),
-        db.tool_outputs.delete_many({"session_id": session_id}),
-        db.agent_logs.delete_many({"session_id": session_id}),
-        db.agent_logs_realtime.delete_many({"session_id": session_id}),
-        db.flags.delete_many({"session_id": session_id}),
-        db.attack_graph_nodes.delete_many({"session_id": session_id}),
-        db.attack_graph_edges.delete_many({"session_id": session_id}),
-        db.shell_sessions.delete_many({"session_id": session_id}),
-        db.payloads.delete_many({"session_id": session_id}),
-        db.osint_results.delete_many({"session_id": session_id}),
-        db.credentials.delete_many({"session_id": session_id}),
-        db.persistence.delete_many({"session_id": session_id}),
-        db.subagent_results.delete_many({"session_id": session_id}),
-        db.session_checkpoints.delete_many({"session_id": session_id}),
-        db.evidence.delete_many({"session_id": session_id}),
-        db.mitre_mappings.delete_many({"session_id": session_id}),
-        db.attack_tree.delete_many({"session_id": session_id}),
-        db.rag_history.delete_many({"session_id": session_id}),
-        db.hypotheses.delete_many({"session_id": session_id}),
-        db.negative_memory.delete_many({"session_id": session_id}),
-        db.action_scores.delete_many({"session_id": session_id}),
-        db.ranked_paths.delete_many({"session_id": session_id}),
+        db.findings.delete_many(_scope_q),
+        db.tool_outputs.delete_many(_scope_q),
+        db.agent_logs.delete_many(_scope_q),
+        db.agent_logs_realtime.delete_many(_scope_q),
+        db.flags.delete_many(_scope_q),
+        db.attack_graph_nodes.delete_many(_scope_q),
+        db.attack_graph_edges.delete_many(_scope_q),
+        db.shell_sessions.delete_many(_scope_q),
+        db.payloads.delete_many(_scope_q),
+        db.osint_results.delete_many(_scope_q),
+        db.credentials.delete_many(_scope_q),
+        db.persistence.delete_many(_scope_q),
+        db.subagent_results.delete_many(_scope_q),
+        db.session_checkpoints.delete_many(_scope_q),
+        db.evidence.delete_many(_scope_q),
+        db.mitre_mappings.delete_many(_scope_q),
+        db.attack_tree.delete_many(_scope_q),
+        # [6] chain_analyses is written per session (get_chain_analyses reads it) but was
+        # NOT in the delete set, so every deleted session leaked its chain-analysis docs —
+        # breaking the 'delete ALL related data' contract.
+        db.chain_analyses.delete_many(_scope_q),
+        db.rag_history.delete_many(_scope_q),
+        db.hypotheses.delete_many(_scope_q),
+        db.negative_memory.delete_many(_scope_q),
+        db.action_scores.delete_many(_scope_q),
+        db.ranked_paths.delete_many(_scope_q),
         return_exceptions=True  # don't fail if a collection doesn't exist
     )
+
+    # [46] Delete the per-host CHILD session documents too, so no orphan child sessions
+    # (and their would-be-invisible data) survive a parent delete.
+    try:
+        await db.sessions.delete_many({"parent_session_id": session_id})
+    except Exception:
+        pass
+
+    # [41] Remove the Neo4j attack graph for the whole {parent, children} scope too.
+    # delete_session_graph() existed but had ZERO callers, so the graph store leaked
+    # every deleted session's nodes/edges (a privacy/retention gap + cross-session
+    # graph bleed).  Best-effort: Neo4j is optional, so any failure is swallowed.
+    try:
+        from db.neo4j_client import delete_session_graph as _del_graph
+        for _sid in _scope_ids:
+            try:
+                await _del_graph(str(_sid))
+            except Exception:
+                pass
+    except Exception:
+        pass
 
     # Finally delete the session document itself
     result = await db.sessions.delete_one({"_id": oid})
@@ -543,14 +639,19 @@ async def set_host_triage(session_id: str, host: str, promise_score: float,
         pass
 
 
-async def mark_host_complete(session_id: str, host: str) -> None:
-    """Mark a specific host as fully tested."""
+async def mark_host_complete(session_id: str, host: str, status: str = "completed") -> None:
+    """Mark a specific host's engagement as terminated, recording HOW it ended
+    (``completed`` / ``time_capped`` / ``error``).  ``host_status`` is an append
+    log; the report reads the LAST entry per host so a later phase's terminal
+    status wins.  This is what lets the report honestly label a time-capped host
+    as PARTIAL instead of implying every host was fully assessed [I7]."""
     db = get_db()
     try:
         await db.sessions.update_one(
             {"_id": ObjectId(session_id)},
             {
                 "$addToSet": {"hosts_completed": host},
+                "$push":     {"host_status": {"host": host, "status": status}},
                 "$set":      {"updated_at": datetime.utcnow()},
             }
         )
@@ -889,7 +990,7 @@ async def get_findings(
     field are KEPT (cannot be proven faulty).  Used by the report read-path so
     faulty/silly findings never render."""
     db = get_db()
-    query = {"session_id": session_id}
+    query = {"session_id": _sid_query(await _scope_for(session_id))}
     if severity: query["severity"] = severity
     if phase:    query["phase"]    = phase
     if host:     query["host"]     = host
@@ -931,7 +1032,7 @@ async def get_findings_count(
 ) -> int:
     """Return the total count of findings matching the given filters."""
     db = get_db()
-    query = {"session_id": session_id}
+    query = {"session_id": _sid_query(await _scope_for(session_id))}
     if severity: query["severity"] = severity
     if phase:    query["phase"]    = phase
     if host:     query["host"]     = host
@@ -939,21 +1040,24 @@ async def get_findings_count(
 
 
 async def get_findings_summary(session_id: str, host: Optional[str] = None) -> Dict:
-    """Return count by severity, optionally scoped to a single host."""
+    """Return count by severity, optionally scoped to a single host.  ``session_id`` may
+    be a list to aggregate a MULTI parent + its per-host child sessions."""
     db = get_db()
-    match = {"session_id": session_id}
+    match = {"session_id": _sid_query(await _scope_for(session_id))}
     if host:
         match["host"] = host
     pipeline = [
         {"$match": match},
         {"$group": {"_id": "$severity", "count": {"$sum": 1}}}
     ]
-    results = await db.findings.aggregate(pipeline).to_list(length=10)
+    results = await db.findings.aggregate(pipeline).to_list(length=20)
     summary = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0, "total": 0}
     for r in results:
-        sev = r["_id"]
-        cnt = r["count"]
-        summary[sev] = cnt
+        # canonicalise case (legacy subagent docs stored UPPERCASE severities).
+        sev = str(r.get("_id") or "").lower().replace("findingseverity.", "").strip()
+        cnt = int(r.get("count") or 0)
+        if sev in summary:
+            summary[sev] += cnt
         summary["total"] += cnt
     return summary
 
@@ -1072,9 +1176,12 @@ async def get_tool_outputs(
 ) -> List[Dict]:
     """Get tool outputs for a session with optional pagination (skip/limit)."""
     db = get_db()
-    query = {"session_id": session_id}
+    query = {"session_id": _sid_query(await _scope_for(session_id))}
     if agent: query["agent"] = agent
-    cursor = db.tool_outputs.find(query).sort("started_at", DESCENDING).skip(skip).limit(limit)
+    # [40] sort on `created_at` — the field store_tool_output actually writes — so the
+    # documented newest-first ordering is real (the old `started_at` was never stored,
+    # so every doc tied and Mongo returned an arbitrary order).
+    cursor = db.tool_outputs.find(query).sort("created_at", DESCENDING).skip(skip).limit(limit)
     return _serialize_list(await cursor.to_list(length=limit))
 
 
@@ -1143,7 +1250,7 @@ async def get_agent_logs(
 ) -> List[Dict]:
     """Get agent logs, newest first, with optional pagination (skip/limit)."""
     db = get_db()
-    query = {"session_id": session_id}
+    query = {"session_id": _sid_query(await _scope_for(session_id))}
     if agent: query["agent"] = agent
     cursor = db.agent_logs.find(query).sort("timestamp", DESCENDING).skip(skip).limit(limit)
     return _serialize_list(await cursor.to_list(length=limit))
@@ -1220,7 +1327,7 @@ async def append_shell_command(shell_id: str, cmd: str, output: str):
 async def get_shell_sessions(session_id: str, active_only: bool = False) -> List[Dict]:
     """Get all shell sessions for a pentest session."""
     db = get_db()
-    query = {"session_id": session_id}
+    query = {"session_id": _sid_query(await _scope_for(session_id))}
     if active_only: query["active"] = True
     cursor = db.shell_sessions.find(query).sort("opened_at", DESCENDING)
     return _serialize_list(await cursor.to_list(length=50))
@@ -1265,9 +1372,10 @@ async def store_flag(
 
 
 async def get_flags(session_id: str) -> List[Dict]:
-    """Get all flags for a session."""
+    """Get all flags for a session (``session_id`` may be a list to aggregate a MULTI
+    parent + its per-host child sessions)."""
     db = get_db()
-    cursor = db.flags.find({"session_id": session_id}).sort("found_at", ASCENDING)
+    cursor = db.flags.find({"session_id": _sid_query(await _scope_for(session_id))}).sort("found_at", ASCENDING)
     return _serialize_list(await cursor.to_list(length=100))
 
 
@@ -1280,6 +1388,56 @@ async def get_flags(session_id: str) -> List[Dict]:
 # nothing in the codebase EVER inserted into that collection — so
 # the Foothold UI panel was always empty even after credentials were
 # captured.  `store_credential()` is the missing writer.
+
+async def store_persistence(
+    session_id: str,
+    host:       str,
+    mechanism:  str,
+    technique:  str           = "",
+    command:    str           = "",
+    confirmed:  bool          = True,
+    found_by:   Optional[str] = None,
+    phase:      str           = "post",
+    extra:      Optional[Dict] = None,
+) -> Dict:
+    """[0] Persist a CONFIRMED persistence mechanism so the /sessions/{id}/persistence
+    panel (which read a collection nothing ever wrote) populates.  Idempotent on
+    (session_id, host, mechanism, command)."""
+    db = get_db()
+    now = datetime.utcnow()
+    key = {"session_id": session_id, "host": host or "",
+           "mechanism": mechanism or "", "command": command or ""}
+    doc = {**key, "technique": technique or "", "confirmed": bool(confirmed),
+           "found_by": found_by or "", "phase": phase, "extra": extra or {},
+           "timestamp": now}
+    await db.persistence.update_one(
+        key, {"$set": doc, "$setOnInsert": {"created_at": now}}, upsert=True)
+    return _serialize(doc)
+
+
+async def store_tunnel(
+    session_id:  str,
+    tunnel_type: str,
+    local_port:  Optional[int] = None,
+    remote_host: str           = "",
+    remote_port: Optional[int] = None,
+    active:      bool          = True,
+    found_by:    Optional[str] = None,
+    extra:       Optional[Dict] = None,
+) -> Dict:
+    """[0] Persist an established tunnel / port-forward so the tunnels panel (a
+    collection with no writer) populates.  Idempotent on the tunnel's natural key."""
+    db = get_db()
+    now = datetime.utcnow()
+    key = {"session_id": session_id, "tunnel_type": tunnel_type or "",
+           "local_port": local_port, "remote_host": remote_host or "",
+           "remote_port": remote_port}
+    doc = {**key, "active": bool(active), "found_by": found_by or "",
+           "extra": extra or {}, "timestamp": now}
+    await db.tunnels.update_one(
+        key, {"$set": doc, "$setOnInsert": {"created_at": now}}, upsert=True)
+    return _serialize(doc)
+
 
 async def store_credential(
     session_id: str,
@@ -1330,7 +1488,7 @@ async def get_credentials(session_id: str,
                               cred_type: Optional[str] = None) -> List[Dict]:
     """Return stored credentials for a session."""
     db = get_db()
-    q: Dict[str, Any] = {"session_id": session_id}
+    q: Dict[str, Any] = {"session_id": _sid_query(await _scope_for(session_id))}
     if service:
         q["service"] = service
     if cred_type:
@@ -1415,11 +1573,13 @@ async def get_attack_graph(session_id: str) -> Dict:
 
     db = get_db()
 
+    # Aggregate per-host CHILD sessions so a multi-target parent shows the full graph.
+    _scope = _sid_query(await _scope_for(session_id))
     (raw_nodes, raw_edges, findings, flags, session) = await _asyncio.gather(
-        db.attack_graph_nodes.find({"session_id": session_id}).to_list(500),
-        db.attack_graph_edges.find({"session_id": session_id}).to_list(500),
-        db.findings.find({"session_id": session_id}).to_list(500),
-        db.flags.find({"session_id": session_id}).to_list(100),
+        db.attack_graph_nodes.find({"session_id": _scope}).to_list(500),
+        db.attack_graph_edges.find({"session_id": _scope}).to_list(500),
+        db.findings.find({"session_id": _scope}).to_list(500),
+        db.flags.find({"session_id": _scope}).to_list(100),
         db.sessions.find_one({"_id": __import__("bson").ObjectId(session_id)}
                               if len(session_id) == 24 else {"session_id": session_id}),
         return_exceptions=True
@@ -1613,7 +1773,8 @@ async def get_osint_results(session_id: str, min_relevance: float = 0.0) -> List
     """Get OSINT results sorted by relevance."""
     db = get_db()
     cursor = db.osint_results.find(
-        {"session_id": session_id, "relevance_score": {"$gte": min_relevance}}
+        {"session_id": _sid_query(await _scope_for(session_id)),
+         "relevance_score": {"$gte": min_relevance}}
     ).sort("relevance_score", DESCENDING)
     return _serialize_list(await cursor.to_list(length=200))
 
@@ -1804,7 +1965,7 @@ async def get_chain_analyses(session_id: str, limit: int = 10) -> List[Dict]:
     """Return the most recent chain analyses for a session."""
     db = get_db()
     cursor = db.chain_analyses.find(
-        {"session_id": session_id}
+        {"session_id": _sid_query(await _scope_for(session_id))}
     ).sort("created_at", DESCENDING).limit(limit)
     return _serialize_list(await cursor.to_list(length=limit))
 
@@ -1874,7 +2035,28 @@ async def recall_memory(
             {"_id": {"$in": ids}},
             {"$inc": {"use_count": 1}, "$set": {"last_used": datetime.utcnow()}}
         )
-    return _serialize_list(docs)
+    return [_scrub_cross_engagement(d) for d in _serialize_list(docs)]
+
+
+# ── Cross-engagement read boundary ──────────────────────────────────────────
+def _scrub_cross_engagement(doc: Dict) -> Dict:
+    """Strip client identifiers from a doc belonging to ANOTHER engagement.
+
+    long_term_memory and engagement_episodes are read cross-client BY DESIGN —
+    that is what makes ARGUS faster — but the reusable part is the TTP, never the
+    address.  Scrubbing HERE, at the one boundary every consumer goes through,
+    covers the prompt builders, intel_final.json, the WebSocket broadcast and the
+    operator transcript at once, and it also sanitises records written BEFORE the
+    write side was fixed, which no amount of writer-side hygiene can do.
+    """
+    try:
+        from knowledge.identifier_scrub import scrub_payload
+        return scrub_payload(doc)
+    except Exception:                                            # noqa: BLE001
+        # Fail CLOSED on the identifying fields we know by name.
+        from_keys = ("target", "target_ip", "target_host", "host", "hosts",
+                     "ip", "ips", "url", "domain", "fqdn", "summary")
+        return {k: v for k, v in (doc or {}).items() if k not in from_keys}
 
 
 async def update_memory_confidence(memory_id: str, delta: float) -> bool:
@@ -1990,7 +2172,7 @@ async def recall_similar_episodes(
     out = []
     for d in ranked:
         d.pop("_score", None)
-        out.append(_serialize(d))
+        out.append(_scrub_cross_engagement(_serialize(d)))
     return out
 
 
@@ -2031,7 +2213,7 @@ async def store_evidence(
 async def get_evidence(session_id: str, evidence_type: Optional[str] = None) -> List[Dict]:
     """Get all evidence for a session, optionally filtered by type."""
     db = get_db()
-    query: Dict = {"session_id": session_id}
+    query: Dict = {"session_id": _sid_query(await _scope_for(session_id))}
     if evidence_type:
         query["evidence_type"] = evidence_type
     cursor = db.evidence.find(query).sort("captured_at", ASCENDING)
@@ -2078,10 +2260,47 @@ async def store_mitre_mapping(
 
 
 async def get_mitre_mappings(session_id: str) -> List[Dict]:
-    """Get all MITRE ATT&CK mappings for a session."""
+    """Get MITRE ATT&CK mappings for a session, AGGREGATED across the scope.
+
+    [1] For a MULTI/CIDR parent, techniques are stored under the per-host CHILD
+    session ids, so a parent-only query returned an empty ATT&CK view; and results
+    were never collapsed per technique.  Union the {parent, children} scope (the
+    same aggregation contract finding/graph reads use) and return ONE row per
+    technique_id — merging the tools/hosts that exercised it and OR-ing success —
+    so the ATT&CK layer reflects the whole engagement without duplicate rows.
+    """
     db = get_db()
-    cursor = db.mitre_mappings.find({"session_id": session_id}).sort("tactic", ASCENDING)
-    return _serialize_list(await cursor.to_list(length=200))
+    scope = [session_id]
+    try:
+        for c in (await get_child_session_ids(session_id)) or []:
+            if c and str(c) not in scope:
+                scope.append(str(c))
+    except Exception:
+        pass
+    cursor = db.mitre_mappings.find(
+        {"session_id": {"$in": scope}}).sort("tactic", ASCENDING)
+    rows = _serialize_list(await cursor.to_list(length=1000))
+    agg: Dict[str, Dict] = {}
+    for r in rows:
+        tid = r.get("technique_id") or ""
+        if not tid:
+            continue
+        cur = agg.get(tid)
+        if cur is None:
+            cur = dict(r)
+            cur["tools"] = []
+            cur["hosts"] = []
+            cur["occurrences"] = 0
+            agg[tid] = cur
+        cur["occurrences"] += 1
+        cur["success"] = bool(cur.get("success")) or bool(r.get("success"))
+        _t = r.get("tool_used")
+        if _t and _t not in cur["tools"]:
+            cur["tools"].append(_t)
+        _h = r.get("host")
+        if _h and _h not in cur["hosts"]:
+            cur["hosts"].append(_h)
+    return list(agg.values())
 
 
 # ═══════════════════════════════════════════════════════════
@@ -2124,16 +2343,25 @@ async def store_checkpoint(
     pending_confirmations: List[str]     = None,
     in_flight_subagents:  List[str]      = None,
     master_config:        Dict[str, Any] = None,
+    parent_session_id:    Optional[str]  = None,
 ) -> str:
     """
     Serialise the full MasterAgent state to session_checkpoints.
     Returns the checkpoint ID (str).  The session document is updated
     with last_checkpoint_id and pause_count is incremented for manual pauses.
+
+    [45] parent_session_id links a per-host CHILD checkpoint to its MULTI/CIDR
+    parent.  MULTI/CIDR children write checkpoints under their own (child) session
+    id; without this stamp a COLD parent resume — where the orchestrator's in-memory
+    host->child map is gone — could not find them (get_latest_checkpoint(parent) is
+    empty), so a half-finished host silently restarted from scratch.  None for a
+    normal single/parent scan.
     """
     db = get_db()
     doc = {
         "_id":                   ObjectId(),
         "session_id":            session_id,
+        "parent_session_id":     parent_session_id,
         "host":                  host,
         "checkpoint_type":       checkpoint_type,
         "schema_version":        1,
@@ -2186,6 +2414,42 @@ async def get_latest_checkpoint(
         sort=[("created_at", DESCENDING)]
     )
     return _serialize(doc) if doc else None
+
+
+async def get_latest_child_checkpoint(
+    parent_session_id: str,
+    host:              str
+) -> Optional[Dict]:
+    """[45] The most recent checkpoint for a per-host CHILD of a MULTI/CIDR parent,
+    looked up by the PARENT id + host — the parent never learns the child session id
+    across a cold restart, so this is the only way a parent-level resume can recover a
+    half-finished host's progress.  Returns None when that host never checkpointed."""
+    db = get_db()
+    doc = await db.session_checkpoints.find_one(
+        {"parent_session_id": str(parent_session_id), "host": str(host)},
+        sort=[("created_at", DESCENDING)]
+    )
+    return _serialize(doc) if doc else None
+
+
+async def get_child_session_for_host(
+    parent_session_id: str,
+    host:              str
+) -> Optional[str]:
+    """[45] The session id of the per-host CHILD session for `host` under this MULTI/CIDR
+    parent, if one was already created (e.g. before a pause / crash).  Lets the orchestrator
+    REUSE the same child on a cold resume — a fresh child id would orphan that host's prior
+    findings, logs and checkpoint.  None when no child exists yet (a first-time host)."""
+    db = get_db()
+    try:
+        doc = await db.sessions.find_one(
+            {"parent_session_id": str(parent_session_id), "target_ip": str(host)},
+            sort=[("started_at", DESCENDING)],
+            projection={"_id": 1},
+        )
+        return str(doc["_id"]) if doc else None
+    except Exception:
+        return None
 
 
 async def get_checkpoints(
@@ -2370,11 +2634,14 @@ async def store_hypothesis(
         "phase":                   "hypothesis",
         "schema_version":          1,
         "extra":                   {},
-        "created_at":              now,
     }
+    # [43] created_at is the FIRST-seen time — it must go in $setOnInsert, not $set.
+    # Hypotheses are re-scored + re-upserted every reasoning iteration; keeping created_at
+    # in $set reset it to now() on every pass, turning it into a last-modified time and
+    # losing the original creation instant.
     result = await db_conn.hypotheses.update_one(
         {"session_id": session_id, "hypothesis_id": hypothesis_id},
-        {"$set": doc},
+        {"$set": doc, "$setOnInsert": {"created_at": now}},
         upsert=True,
     )
     if result.upserted_id:
@@ -2462,9 +2729,14 @@ async def store_negative_memory(
     result = await db_conn.negative_memory.update_one(
         {"session_id": session_id, "tool": tool, "target_service": target_service},
         {
+            # [39] MongoDB rejects mutating the SAME path with two operators.  The old
+            # code set attempt_count via BOTH $inc and $setOnInsert → error 40
+            # ConflictingUpdateOperators on EVERY call (including the first insert), so
+            # negative_memory was never written and never survived a resume/restart —
+            # the reasoning loop re-proposed dead-ends it had already proven futile.
+            # $inc alone already inserts attempt_count=1 on upsert, then increments.
             "$set":  base_doc,
             "$inc":  {"attempt_count": 1},
-            "$setOnInsert": {"attempt_count": 1},
         },
         upsert=True,
     )

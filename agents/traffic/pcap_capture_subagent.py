@@ -146,6 +146,21 @@ class PcapCaptureSubagent(BaseSubagent):
                 mitre_technique="T1040",
             ))
 
+            # [77] Populate the live Traffic Captures panel, which consumes a
+            # traffic_capture_added WS event that nothing ever emitted.
+            try:
+                await self._emit("traffic_capture_added", {
+                    "id":          f"cap_{target.replace('.', '_')}",
+                    "interface":   interface,
+                    "file":        pcap_file,
+                    "pcap_file":   pcap_file,
+                    "credentials": cred_lines[:20] if cred_lines else [],
+                    "duration":    duration,
+                    "summary":     f"Captured on {interface} for {duration}s",
+                })
+            except Exception:
+                pass
+
         result.findings    = list(self._findings)
         result.tool_outputs = dict(self._tool_outputs)
         return result

@@ -11,31 +11,31 @@ function ReportPage(props) {
 
   const [loading, setLoading]   = useState(false);
   const [previewing, setPreviewing] = useState(false);
-  const [themes, setThemes] = useState([]);
-  const [theme, setThemeState] = useState(
-    (window.localStorage && localStorage.getItem('argus_report_theme')) || 'executive');
   const iframeRef = useRef(null);
 
-  // Load the selectable report themes for the picker (default: executive).
+  // Two selectable report designs — Dark and Light. The chosen theme is threaded
+  // into every report URL (preview iframe, Export PDF, Print / Save-as-PDF), so the
+  // operator generates exactly the design they picked.
+  const [theme, setTheme] = useState('dark');
+  // [70] Drive the picker from the backend theme registry (/report/themes) so it
+  // can never drift from what the server actually renders.  The dark/light literal
+  // is kept as the fallback if the fetch fails (preserves today's behavior offline).
+  const [themes, setThemes] = useState([['dark', '◐ Dark'], ['light', '◑ Light']]);
   useEffect(() => {
-    if (window.API && window.API.reportThemes) {
-      window.API.reportThemes()
-        .then(list => { if (Array.isArray(list) && list.length) setThemes(list); })
-        .catch(() => {});
-    }
+    window.API.reportThemes()
+      .then(list => {
+        const arr = Array.isArray(list) ? list : (list && list.themes);
+        if (Array.isArray(arr) && arr.length) {
+          setThemes(arr.map(t => [t.key, t.name || t.key]));
+        }
+      })
+      .catch(() => {});
   }, []);
-
-  // Auto-preview when the session OR the chosen theme changes.
   useEffect(() => { if (sessionId) preview(); }, [sessionId, theme]);
 
-  // Report URL for the CURRENT theme (reportUrl already carries ?format=).
+  // Report URL (reportUrl carries ?format= and the selected &theme=).
   function reportUrlT(fmt) {
-    return window.API.reportUrl(sessionId, fmt) + '&theme=' + encodeURIComponent(theme);
-  }
-
-  function setTheme(key) {
-    setThemeState(key);
-    try { localStorage.setItem('argus_report_theme', key); } catch (e) {}
+    return window.API.reportUrl(sessionId, fmt, theme);
   }
 
   async function preview() {
@@ -94,7 +94,7 @@ function ReportPage(props) {
   const sevColor = { critical: 'var(--red)', high: 'var(--amber)',
                      medium: 'var(--amber)', low: 'var(--cyan)', info: 'var(--text-muted)' };
 
-  return React.createElement('div', {
+  return React.createElement('div', { 'data-slot': 'ReportPage.ReportPage',
     'data-view-mode': vm,
     className: vm === 'CLIENT' ? 'client-mode' : undefined,
     style: { fontSize: fontScale, height: '100%' },
@@ -109,16 +109,22 @@ function ReportPage(props) {
           `Target: ${activeSession.target_ip} · Session: ${sessionId?.slice(-8)}`)
       ),
       React.createElement('div', { style: { display: 'flex', gap: 8, alignItems: 'center' } },
-        // Report theme picker (5 selectable styles; remembered per browser)
-        React.createElement('select', {
-          value: theme, onChange: (e) => setTheme(e.target.value), disabled: !canExport,
-          title: 'Report theme',
-          style: { padding: '6px 10px', borderRadius: 6, border: '1px solid var(--border-light)',
-                   background: 'rgba(255,255,255,0.04)', color: 'var(--text-secondary)', fontSize: 12,
-                   cursor: canExport ? 'pointer' : 'not-allowed' }
+        // Report design selector — Dark / Light (segmented toggle).
+        React.createElement('div', {
+          style: { display: 'flex', border: '1px solid var(--border-light)', borderRadius: 6,
+                   overflow: 'hidden', marginRight: 4 },
+          title: 'Report design'
         },
-          (themes.length ? themes : [{ key: 'executive', name: 'Executive Consultancy' }]).map(t =>
-            React.createElement('option', { key: t.key, value: t.key }, t.name))
+          ...themes.map(([key, label]) =>
+            React.createElement('button', {
+              key,
+              onClick: () => setTheme(key),
+              style: { padding: '6px 12px', border: 'none', cursor: 'pointer', fontSize: 12,
+                       fontWeight: theme === key ? 700 : 400,
+                       background: theme === key ? 'var(--accent)' : 'transparent',
+                       color: theme === key ? '#0D0E14' : 'var(--text-secondary)' }
+            }, label)
+          )
         ),
         React.createElement('button', {
           style: { padding: '6px 14px', borderRadius: 6, border: '1px solid var(--border-light)',
@@ -195,7 +201,7 @@ function ReportPage(props) {
     },
       React.createElement('iframe', {
         ref: iframeRef,
-        src: window.API.reportUrl(sessionId, 'html'),
+        src: reportUrlT('html'),
         style: { width: '100%', height: '100%', border: 'none' },
         onLoad: () => setPreviewing(false)
       })

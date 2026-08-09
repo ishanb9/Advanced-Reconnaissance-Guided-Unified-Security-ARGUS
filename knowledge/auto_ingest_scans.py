@@ -73,6 +73,12 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+# Dual-mode: base_agent.py inserts knowledge/ on sys.path and does
+# `from auto_ingest_scans import capture_finding`, i.e. a FLAT import.
+try:
+    from knowledge.identifier_scrub import scrub_text as _scrub
+except ImportError:                                          # flat/script mode
+    from identifier_scrub import scrub_text as _scrub
 
 logger = logging.getLogger(__name__)
 
@@ -215,8 +221,10 @@ def build_markdown_summary(session_dir: Path) -> Optional[str]:
     # Build frontmatter + markdown body
     fm_lines = [
         "---",
-        f"scan_id: {session_id}",
-        f"target: {target}",
+        # NO scan_id and NO target.  Both identify a client engagement and the
+        # corpus is shared with every FUTURE engagement.  target_type is a
+        # technology class ("web", "linux", "ad") and is what makes the document
+        # retrievable, so it stays.
         f"target_type: {target_type}",
         f"duration_sec: {int(duration)}",
         f"findings_count: {len(findings)}",
@@ -229,9 +237,8 @@ def build_markdown_summary(session_dir: Path) -> Optional[str]:
     ]
 
     body_lines: List[str] = [
-        f"# Scan summary - {target} ({target_type})",
+        f"# Engagement summary — {target_type}",
         "",
-        f"- Session: `{session_id}`",
         f"- Started: {started}",
         f"- Duration: {_fmt_duration(duration)}",
         f"- Findings: {len(findings)} ({sum(1 for f in findings if str(f.get('severity') or '').upper() in ('CRITICAL','HIGH'))} high+)",
@@ -246,7 +253,10 @@ def build_markdown_summary(session_dir: Path) -> Optional[str]:
         body_lines.append("## Discovered services")
         for port in sorted(services):
             info = services[port]
-            body_lines.append(f"- `{port}/tcp` {info['service']} - {info['banner'][:100]}")
+            # Banners routinely embed the host's own FQDN or certificate CN.
+            body_lines.append(
+                f"- `{port}/tcp` {info['service']} - "
+                f"{_scrub(info['banner'][:100])}")
         body_lines.append("")
 
     if top_findings:
@@ -255,7 +265,7 @@ def build_markdown_summary(session_dir: Path) -> Optional[str]:
             body_lines.append(
                 f"- **{str(f.get('severity') or 'INFO').upper()}** "
                 f"`{f.get('port') or '?'}` "
-                f"{str(f.get('title') or 'untitled')[:160]}"
+                f"{_scrub(str(f.get('title') or 'untitled')[:160])}"
             )
         body_lines.append("")
 
@@ -263,7 +273,8 @@ def build_markdown_summary(session_dir: Path) -> Optional[str]:
         body_lines.append("## Successful tool runs (what worked)")
         for t in successful_tools[:10]:
             body_lines.append(
-                f"- `{t.get('tool')}` `{(t.get('args') or '')[:80]}` "
+                # The ARGUMENTS are the technique; the address inside them is not.
+                f"- `{t.get('tool')}` `{_scrub((t.get('args') or '')[:80])}` "
                 f"({t.get('duration_sec', 0):.1f}s)"
             )
         body_lines.append("")
@@ -318,7 +329,63 @@ def ingest_session(session_dir: Path, force: bool = False) -> Optional[Path]:
         except OSError:
             pass
         return None
+    index_document(out_file)
+    # The live-findings document is APPENDED to throughout the engagement, so it
+    # is only complete now.  Indexing it per-finding would re-embed a growing
+    # file over and over; indexing once here captures the finished set.
+    live = HISTORY_OUT / f"{session_dir.name}{LIVE_FINDINGS_SUFFIX}"
+    if live.exists():
+        index_document(live)
     return out_file
+
+
+def index_document(path: Path) -> int:
+    """Embed a written corpus document into Chroma NOW.  Returns chunks added.
+
+    Writing the markdown only put it on disk; nothing searched it until someone
+    remembered to run build_kb.py, so a finished engagement contributed nothing to
+    the next one until a manual rebuild.  This closes that gap: the document is
+    chunked, typed and embedded immediately, exactly as build_kb would do it.
+
+    Deliberately REUSES build_kb.ingest_file rather than re-implementing chunking
+    and metadata — one code path means the live index and a later full rebuild
+    cannot drift apart in what they extract.  The manifest is updated too, so a
+    subsequent `build_kb.py` sees the file as already ingested and skips it
+    instead of duplicating (ingest() also dedups by content hash, so a double
+    entry would be rejected anyway — this just avoids the wasted embedding).
+
+    Best-effort by design: a missing chromadb, a cold embedder or a locked index
+    must never break the scan that produced the document.
+    """
+    if os.environ.get("ARGUS_RAG_AUTOINDEX", "1") == "0":
+        logger.info("[scan-ingest] auto-index disabled (ARGUS_RAG_AUTOINDEX=0)")
+        return 0
+    try:
+        import knowledge.build_kb as _bkb
+        import knowledge.knowledge_base as _kb
+    except Exception as exc:                                     # noqa: BLE001
+        logger.warning("[scan-ingest] auto-index unavailable (%s) — run "
+                       "`python knowledge/build_kb.py` to embed %s", exc, path.name)
+        return 0
+    try:
+        res = _bkb.ingest_file(str(path), _kb)
+        added = int(res.get("added", 0) or 0)
+        try:
+            man = _bkb.load_manifest()
+            man[str(path)] = {"hash": _bkb.file_hash(str(path)),
+                              "timestamp": time.time(), "chunks": added}
+            _bkb.save_manifest(man)
+        except Exception as _mexc:                               # noqa: BLE001
+            # A stale manifest only costs a redundant re-ingest later, which the
+            # content-hash dedup absorbs.  Not worth failing the index for.
+            logger.debug("[scan-ingest] manifest update skipped: %s", _mexc)
+        logger.info("[scan-ingest] indexed %s (+%d chunk(s)) — searchable now",
+                    path.name, added)
+        return added
+    except Exception as exc:                                     # noqa: BLE001
+        logger.warning("[scan-ingest] auto-index failed for %s: %s — the file is "
+                       "on disk and `build_kb.py` will pick it up", path.name, exc)
+        return 0
 
 
 def ingest_all_sessions(force: bool = False) -> List[Path]:
@@ -337,6 +404,101 @@ def ingest_all_sessions(force: bool = False) -> List[Path]:
         if path is not None:
             out.append(path)
     return out
+
+
+# ── Per-finding live capture (real-time episodic priming) ────────────────
+# store_finding() calls capture_finding() for every high/critical finding.
+# We append it to a per-session markdown-with-frontmatter file that lives
+# INSIDE the RAG corpus (knowledge/data/scan_history/), which the chunker
+# walks recursively — so the finding is ingestible immediately and is also
+# rolled into the session summary ingest_session() writes at scan end.
+# This is the module the finding hook was always meant to reach; the hook
+# imported a nonexistent ``auto_ingest`` module, so it had been dead.
+
+LIVE_FINDINGS_SUFFIX = ".live.md"
+_CAPTURED_FINGERPRINTS: Dict[str, set] = {}
+
+
+def _finding_fingerprint(finding: Dict[str, Any]) -> str:
+    title = str(finding.get("title") or finding.get("name") or "").strip().lower()
+    host  = str(finding.get("host") or finding.get("target") or "").strip().lower()
+    port  = str(finding.get("port") or "").strip()
+    return f"{host}|{port}|{title}"
+
+
+def _capture_finding_sync(finding: Dict[str, Any], session_id: str,
+                          phase: str = "") -> Optional[Path]:
+    """Append one high-value finding to the session's live RAG corpus file.
+
+    Returns the written path, or None if skipped (low severity / duplicate /
+    no session id). Never raises.
+    """
+    try:
+        sev = str(finding.get("severity") or "").upper()
+        if sev not in ("HIGH", "CRITICAL"):
+            return None
+        sid = str(session_id or "").strip()
+        if not sid:
+            return None
+        fp = _finding_fingerprint(finding)
+        seen = _CAPTURED_FINGERPRINTS.setdefault(sid, set())
+        if fp in seen:
+            return None
+
+        title = str(finding.get("title") or finding.get("name") or "finding").strip()
+        host  = str(finding.get("host") or finding.get("target") or "").strip()
+        port  = str(finding.get("port") or "").strip()
+        desc  = str(finding.get("description") or finding.get("evidence") or "").strip()
+        cves  = finding.get("cves") or finding.get("cve") or []
+        if isinstance(cves, str):
+            cves = [cves]
+
+        HISTORY_OUT.mkdir(parents=True, exist_ok=True)
+        out_file = HISTORY_OUT / f"{sid}{LIVE_FINDINGS_SUFFIX}"
+        new_file = not out_file.exists()
+        with open(out_file, "a", encoding="utf-8") as f:
+            if new_file:
+                f.write(
+                    "---\n"
+                    "doc_type: live_findings\n"
+                    "---\n\n"
+                    "# Live findings\n\n"
+                    "High/critical findings captured during the engagement, "
+                    "primed into the RAG corpus for episodic recall.\n\n"
+                )
+            # The PORT is a technique detail worth keeping; the host is not.
+            f.write(f"## {sev} — {_scrub(str(title))}\n")
+            if port:
+                f.write(f"- Port: {port}\n")
+            if cves:
+                f.write(f"- CVEs: {', '.join(str(c) for c in cves[:8])}\n")
+            if phase:
+                f.write(f"- Phase: {phase}\n")
+            if desc:
+                f.write(f"- Detail: {desc[:400]}\n")
+            f.write("\n")
+        seen.add(fp)
+        return out_file
+    except Exception:
+        logger.debug("[live-capture] failed for session %s", session_id, exc_info=True)
+        return None
+
+
+async def capture_finding(finding: Dict[str, Any], session_id: str,
+                          phase: str = "") -> Optional[Path]:
+    """Async entry point used by BaseAgent.store_finding.
+
+    Off-loads the file write to a thread so it never blocks the event loop,
+    and never raises into the caller.
+    """
+    try:
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None, _capture_finding_sync,
+            dict(finding or {}), str(session_id or ""), str(phase or ""))
+    except Exception:
+        logger.debug("[live-capture] async wrapper failed", exc_info=True)
+        return None
 
 
 # ── CLI ─────────────────────────────────────────────────────────────────

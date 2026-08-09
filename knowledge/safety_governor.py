@@ -50,6 +50,62 @@ _SAFE_TOOLS = {
     "dnsrecon", "crt", "shodan", "sslscan", "openssl", "ping", "traceroute",
 }
 
+# ── OT / ICS detection (data-driven, vendor-agnostic, fail-closed) ────────────
+# Well-known industrial-control-system protocol ports.  Their presence means the
+# target is (or emulates) an OT/ICS device — an intrusive probe there can disrupt a
+# physical process, so it must require authorization EVEN WHEN no ARGUS skill matched
+# the specific vendor/model.  This closes the unsafe default where an unrecognised PLC
+# fell through to domain='IT'.  Keyed to PROTOCOLS, never to a vendor or the sample.
+_OT_PROTOCOL_PORTS = frozenset({
+    102,    # Siemens S7 / ISO-TSAP
+    502,    # Modbus/TCP
+    789,    # Red Lion Crimson
+    1089, 1090, 1091,  # Foundation Fieldbus HSE
+    1911, 4911,        # Niagara Fox (Tridium)
+    2222,   # EtherNet/IP (ODVA) implicit
+    2404,   # IEC 60870-5-104
+    2455,   # OMRON FINS
+    4000,   # (also non-OT) — excluded intentionally? kept out; ambiguous
+    4840,   # OPC-UA
+    9600,   # OMRON FINS (alt)
+    18245, 18246,      # GE SRTP
+    20000,  # DNP3
+    34962, 34963, 34964,  # PROFINET
+    44818,  # EtherNet/IP (ODVA) explicit
+    47808,  # BACnet/IP
+    55000, 55003,      # FL-net
+})
+# 4000 is ambiguous (common dev port) — do not treat as OT on its own.
+_OT_PROTOCOL_PORTS = _OT_PROTOCOL_PORTS - {4000}
+
+#: Device-classifier taxonomy kinds that denote an industrial control system.
+_OT_DEVICE_KINDS = frozenset({"iot_industrial"})
+
+
+def ot_suspected(*, open_ports=None, device_kind: str = "", banners=None) -> bool:
+    """True when the target is (or emulates) an OT/ICS device by DATA-DRIVEN signals:
+    an open industrial-protocol port, an industrial device classification, or an ICS
+    protocol name in a banner.  Used to fail closed (require authorization for intrusive
+    actions) on a control-system device that no vendor-specific skill recognised."""
+    try:
+        for p in (open_ports or []):
+            try:
+                if int(str(p).split("/")[0]) in _OT_PROTOCOL_PORTS:
+                    return True
+            except (ValueError, TypeError):
+                continue
+        if str(device_kind or "").strip().lower() in _OT_DEVICE_KINDS:
+            return True
+        blob = " ".join(str(b) for b in (banners.values() if isinstance(banners, dict)
+                                         else (banners or []))).lower()
+        if any(tok in blob for tok in ("modbus", "bacnet", "s7comm", "dnp3", "profinet",
+                                       "ethernet/ip", "iec-104", "opc-ua", "scada",
+                                       " plc ", "plc)", "(plc")):
+            return True
+    except Exception:
+        return False
+    return False
+
 
 def classify_intrusiveness(tool_name: str, args: str = "") -> str:
     """Return 'safe' | 'light' | 'intrusive' for a tool invocation."""
@@ -204,20 +260,73 @@ def _norm_host(h: str) -> str:
 
 
 def host_in_scope(host: str, scope_hosts: Iterable[str]) -> bool:
-    """Exact host, IP, or proper sub-domain of a scope entry.  Empty scope ⇒ unknown
-    (treated as in-scope — the governor only DENIES when scope is explicitly set)."""
-    scope = [_norm_host(s) for s in (scope_hosts or []) if str(s).strip()]
-    if not scope:
+    """Exact host, IP, proper sub-domain, OR membership of a CIDR scope entry.  Empty
+    scope ⇒ unknown (treated as in-scope — the governor only DENIES when scope is
+    explicitly set).  CIDR-aware so a MULTI/CIDR engagement's in-range IPs are never
+    wrongly denied [93]."""
+    raw = [str(s).strip() for s in (scope_hosts or []) if str(s).strip()]
+    if not raw:
         return True
     h = _norm_host(host)
     if not h:
         return True
-    for s in scope:
+    # CIDR / network membership first — a CIDR engagement's scope is a network, and
+    # _norm_host would otherwise strip the "/24" and never match.
+    import ipaddress as _ip
+    try:
+        _hip = _ip.ip_address(h)
+    except ValueError:
+        _hip = None
+    if _hip is not None:
+        for s in raw:
+            if "/" in s:
+                try:
+                    if _hip in _ip.ip_network(s, strict=False):
+                        return True
+                except ValueError:
+                    continue
+    for s in (_norm_host(x) for x in raw if "/" not in x):
         # In scope iff host IS a scope entry or a SUB-domain of one — NOT the reverse:
         # authorising app.example.com must NOT put the parent example.com in scope.
-        if h == s or h.endswith("." + s):
+        if s and (h == s or h.endswith("." + s)):
             return True
     return False
+
+
+# ── Argument validation [97] ──────────────────────────────────────────────────
+# The README advertises "argument validation" as an execution-boundary check, so it
+# must be REAL.  It complements destructive_match by catching COMMAND INJECTION into
+# an argv-style tool invocation — a pipe into a shell interpreter, a $(...)/backtick
+# command substitution, or a NUL byte.  These are never a legitimate part of a plain
+# argv tool call (real shell pipelines are dispatched through shell_exec, which is
+# exempt here and handled by destructive_match / the net-disrupt guards instead), so
+# their presence in e.g. `nmap`/`curl`/`sqlmap` args is an injection attempt.
+_ARG_PIPE_TO_INTERP_RE = re.compile(
+    r"\|\s*(?:sudo\s+)?(?:sh|bash|zsh|dash|python[0-9.]*|perl|ruby|php|nc|ncat|netcat)\b", re.I)
+_ARG_CMD_SUBST_RE = re.compile(r"\$\([^)]*\)|`[^`]+`")
+_ARG_FETCH_EXEC_RE = re.compile(
+    r"\b(?:curl|wget)\b[^|&;]*\|\s*(?:sudo\s+)?(?:sh|bash|zsh|python[0-9.]*|perl)\b", re.I)
+
+
+def validate_arguments(tool_name: str, args: str) -> "tuple[bool, str]":
+    """(ok, reason) — False when the invocation's ARGS carry a command-injection
+    vector into an argv tool.  Shell tools are exempt (legit pipelines run there and
+    are governed by destructive_match).  Pure; conservative (high-confidence only)."""
+    t = str(tool_name or "").rsplit("/", 1)[-1].lower().strip()
+    a = str(args or "")
+    if not a:
+        return True, ""
+    if "\x00" in a:
+        return False, "argument contains a NUL byte (malformed / injection)"
+    if t in _SHELLS:
+        return True, ""   # a real shell command — governed by destructive_match, not here
+    if _ARG_FETCH_EXEC_RE.search(a):
+        return False, "argument pipes a remote fetch into a shell interpreter (fetch-and-exec injection)"
+    if _ARG_PIPE_TO_INTERP_RE.search(a):
+        return False, "argument pipes tool output into a shell interpreter (command injection)"
+    if _ARG_CMD_SUBST_RE.search(a):
+        return False, "argument embeds a shell command substitution ($()/backticks) into an argv tool"
+    return True, ""
 
 
 # ── The governor ──────────────────────────────────────────────────────────────
@@ -242,9 +351,10 @@ def evaluate(invocation: Dict[str, Any],
     authorized = bool(inv.get("authorized"))
     ceiling = str(inv.get("ceiling") or "intrusive")
     destructive = destructive_match(tool, args)
+    arg_ok, arg_reason = validate_arguments(tool, args)
 
     checks = {"intrusiveness": intr, "in_scope": in_scope, "destructive": destructive,
-              "domain": domain, "life_safety": life_safety}
+              "domain": domain, "life_safety": life_safety, "arg_validation": arg_ok}
 
     def verdict(decision: str, reason: str, rewritten: Optional[str] = None) -> Dict[str, Any]:
         return {"decision": decision, "reason": reason,
@@ -260,6 +370,11 @@ def evaluate(invocation: Dict[str, Any],
         return verdict("rewrite",
                        f"neutralised host-destructive operation: {destructive!r}",
                        rewritten="true")
+
+    # 2b) ARGUMENT VALIDATION [97] — a command-injection vector in an argv tool's
+    #     args is a hard execution-boundary denial (shells are exempt; see above).
+    if "arg_validation" in enforce and not arg_ok:
+        return verdict("deny", f"argument validation failed — {arg_reason}")
 
     # 3) OT / LIFE-SAFETY — intrusive action on OT or a life-safety asset needs auth.
     if "ot_life_safety" in enforce and intr == "intrusive" and not authorized:

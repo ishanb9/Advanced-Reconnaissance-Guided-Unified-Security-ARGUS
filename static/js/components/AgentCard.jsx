@@ -25,7 +25,7 @@ function AgentCardGlobal({ name, status = 'idle', phase, message, onClick }) {
   };
   const dotColor = statusColors[status] || 'var(--border)';
 
-  return React.createElement('div', {
+  return React.createElement('div', { 'data-slot': 'AgentCard.AgentCardGlobal',
     onClick,
     style: {
       padding:    '9px 12px',

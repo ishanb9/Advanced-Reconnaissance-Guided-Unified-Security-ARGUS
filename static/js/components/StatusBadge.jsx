@@ -16,7 +16,7 @@ function StatusBadge({ status, label, size = 'sm', pulseSupernova }) {
   const text  = label || status || 'unknown';
   const cls   = 'status-badge' + (pulseSupernova ? ' motion-supernova' : '');
 
-  return React.createElement('span', {
+  return React.createElement('span', { 'data-slot': 'StatusBadge.StatusBadge',
     className: cls,
     style: {
       display:     'inline-flex',

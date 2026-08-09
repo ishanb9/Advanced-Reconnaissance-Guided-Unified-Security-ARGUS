@@ -16,7 +16,7 @@ const { useState, useEffect, useCallback } = React;
 // ─── Small reusable helpers ────────────────────────────────
 
 function SectionHeader({ label, count, countColor }) {
-  return React.createElement('div', {
+  return React.createElement('div', { 'data-slot': 'ReasoningEnginePage.SectionHeader',
     style: {
       display: 'flex', alignItems: 'center', gap: 8,
       marginBottom: 10, flexShrink: 0,
@@ -42,7 +42,7 @@ function SectionHeader({ label, count, countColor }) {
 }
 
 function MutedEmpty({ text }) {
-  return React.createElement('div', {
+  return React.createElement('div', { 'data-slot': 'ReasoningEnginePage.MutedEmpty',
     style: {
       color: 'var(--text-muted)', fontStyle: 'italic', fontSize: 11,
       padding: '18px 4px', textAlign: 'center',
@@ -51,7 +51,7 @@ function MutedEmpty({ text }) {
 }
 
 function InlineBadge({ label, color, bg, border }) {
-  return React.createElement('span', {
+  return React.createElement('span', { 'data-slot': 'ReasoningEnginePage.InlineBadge',
     style: {
       display: 'inline-flex', alignItems: 'center',
       padding: '1px 7px', borderRadius: 4, fontSize: 9,
@@ -73,7 +73,7 @@ function ConfidenceBar({ value, height }) {
       ? 'var(--medium)'
       : 'var(--critical)';
   const h = height || 4;
-  return React.createElement('div', {
+  return React.createElement('div', { 'data-slot': 'ReasoningEnginePage.ConfidenceBar',
     style: {
       width: '100%', height: h, borderRadius: h / 2,
       background: 'var(--bg-panel)', overflow: 'hidden',
@@ -119,7 +119,7 @@ function HypothesisCard({ hyp, pulse }) {
     || requiredEvidence.length > 0
     || nextActions.length > 0;
 
-  return React.createElement('div', {
+  return React.createElement('div', { 'data-slot': 'ReasoningEnginePage.HypothesisCard',
     className: pulse ? 'motion-phase-advance' : undefined,
     style: {
       background: 'var(--bg-surface)',
@@ -287,7 +287,7 @@ function HypothesisCard({ hyp, pulse }) {
 function PathNodeRow({ node }) {
   const score = ((node.likelihood || 0) * (node.impact || 0) * (node.ease || 0)).toFixed(3);
   const tools = node.tools || [];
-  return React.createElement('div', {
+  return React.createElement('div', { 'data-slot': 'ReasoningEnginePage.PathNodeRow',
     style: {
       padding: '6px 0', borderBottom: '1px solid var(--border)',
       fontSize: 11,
@@ -359,7 +359,7 @@ function AttackPathCard({ path }) {
   const nodes = path.nodes || [];
   const conf  = path.path_confidence || path.confidence || 0;
 
-  return React.createElement('div', {
+  return React.createElement('div', { 'data-slot': 'ReasoningEnginePage.AttackPathCard',
     style: {
       background: 'var(--bg-surface)',
       border: '1px solid var(--border)',
@@ -503,7 +503,7 @@ function JustifiedActionCard({ action }) {
     ? new Date(action.timestamp).toLocaleTimeString()
     : null;
 
-  return React.createElement('div', {
+  return React.createElement('div', { 'data-slot': 'ReasoningEnginePage.JustifiedActionCard',
     style: {
       background: 'var(--bg-surface)',
       border: '1px solid var(--border)',
@@ -644,7 +644,7 @@ function NegativeMemoryCard({ item }) {
   const toolService = [item.tool, item.service].filter(Boolean).join(' : ');
   const attempts = item.attempt_count || item.attempts || 1;
 
-  return React.createElement('div', {
+  return React.createElement('div', { 'data-slot': 'ReasoningEnginePage.NegativeMemoryCard',
     style: {
       background: 'var(--bg-surface)',
       border: '1px solid var(--border)',
@@ -758,7 +758,7 @@ function ReasoningEnginePage() {
     ? `+${actionScore}`
     : String(actionScore);
 
-  return React.createElement('div', {
+  return React.createElement('div', { 'data-slot': 'ReasoningEnginePage.ReasoningEnginePage',
     style: {
       display: 'flex', flexDirection: 'column', height: '100%',
       padding: 16, gap: 16, background: 'var(--bg-base)', overflowY: 'auto',

@@ -342,31 +342,37 @@ class IoTDeviceScanSubagent(BaseSubagent):
             server_m = re.search(r'(?i)server:\s*(.+)', raw)
             server   = server_m.group(1).strip() if server_m else ""
 
+            # Data-driven IDENTIFICATION labels only (server-string -> human label).  These
+            # NAME the surface; they do NOT rate severity.  Merely fingerprinting a vendor
+            # web UI is an INFO attack-surface observation — severity elevates ONLY on a
+            # CONFIRMED default-credential login or a matched CVE (produced elsewhere with
+            # real evidence), never from the presence of a vendor string.  (Was: HIGH/MEDIUM
+            # invented from the name alone — a fabrication that fails for every unlisted
+            # vendor and over-rates every listed one.)
             iot_signatures = {
-                "uhttpd":       ("OpenWRT Router Admin Panel", "MEDIUM"),
-                "lighttpd":     ("Embedded lighttpd Web Server (Router/Camera)", "INFO"),
-                "GoAhead":      ("GoAhead Embedded Web Server (IP Camera/Router)", "HIGH"),
-                "mini_httpd":   ("mini_httpd Embedded Server (IoT Device)", "MEDIUM"),
-                "Hikvision":    ("Hikvision IP Camera Web Interface", "HIGH"),
-                "Dahua":        ("Dahua IP Camera Web Interface", "HIGH"),
-                "Netgear":      ("Netgear Router Admin Panel", "MEDIUM"),
-                "D-Link":       ("D-Link Router Admin Panel", "MEDIUM"),
-                "TP-Link":      ("TP-Link Router Admin Panel", "MEDIUM"),
-                "RouterOS":     ("MikroTik RouterOS Web Interface", "MEDIUM"),
+                "uhttpd":       "OpenWRT Router Admin Panel",
+                "lighttpd":     "Embedded lighttpd Web Server (Router/Camera)",
+                "GoAhead":      "GoAhead Embedded Web Server (IP Camera/Router)",
+                "mini_httpd":   "mini_httpd Embedded Server (IoT Device)",
+                "Hikvision":    "Hikvision IP Camera Web Interface",
+                "Dahua":        "Dahua IP Camera Web Interface",
+                "Netgear":      "Netgear Router Admin Panel",
+                "D-Link":       "D-Link Router Admin Panel",
+                "TP-Link":      "TP-Link Router Admin Panel",
+                "RouterOS":     "MikroTik RouterOS Web Interface",
             }
 
-            severity = "INFO"
+            severity = "INFO"   # identification is attack-surface, never a graded finding
             title    = f"Web Interface on {scheme}://{target}:{port}"
             desc     = f"HTTP server: {server}. Check for default credentials and known CVEs."
 
-            for sig, (sig_title, sig_sev) in iot_signatures.items():
+            for sig, sig_title in iot_signatures.items():
                 if sig.lower() in server.lower() or sig.lower() in raw.lower():
-                    title    = sig_title + f" on port {port}"
-                    severity = sig_sev
-                    desc     = (
-                        f"Known IoT vendor web interface detected ({sig}). "
-                        "Search for default credentials and firmware-specific CVEs. "
-                        f"Server: {server}"
+                    title = sig_title + f" on port {port}"
+                    desc  = (
+                        f"Identified an embedded/IoT vendor web interface ({sig}) — attack "
+                        "surface only.  This is INFO: severity elevates ONLY on a confirmed "
+                        f"default-credential login or a matched CVE.  Server: {server}"
                     )
                     break
 

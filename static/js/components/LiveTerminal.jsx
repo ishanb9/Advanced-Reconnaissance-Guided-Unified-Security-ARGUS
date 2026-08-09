@@ -12,7 +12,7 @@ function LiveTerminal({ lines = [], height = 280, agentColor = 'var(--green)', t
     }
   }, [lines.length]);
 
-  return React.createElement('div', {
+  return React.createElement('div', { 'data-slot': 'LiveTerminal.LiveTerminal',
     className: 'motion-scanline',
     style: {
       height,

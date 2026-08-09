@@ -113,16 +113,18 @@ the engine adds:
 | **Smart adaptive brute-forcing** | Brute / heavy-enum tools run in the **background** (never block the scan) and **escalate** — fast curated lists → larger lists → rainbow tables / offline hash-cracking with rules, plus technique changes (password-spray, AS-REP roast, Kerberoast) — feeding creds back when ready. `knowledge/brute_strategy.py` |
 | **AI / LLM red-teaming** | Treats an LLM endpoint as a target: prompt-injection, jailbreak, system-prompt leak and the rest of the OWASP LLM Top 10. `agents/ai_red_team/` |
 | **Universal tech coverage + self-learning** | A knowledge-driven **skill registry** matches the target's tech (IT / OT / IoT) to deterministic playbooks; a learning loop distils lessons into per-skill weights over time. `knowledge/skill_registry.py` |
-| **Execution-boundary safety governor** | Every `run_tool` / MCP call is gated on **scope · RBAC · intrusiveness ceiling · argument validation** — fail-closed, OT-safe by default. `knowledge/safety_governor.py` |
+| **Execution-boundary safety governor** | Every `run_tool` / MCP call is gated on **scope · destructive-op neutralisation · intrusiveness ceiling · argument validation · OT/life-safety** — fail-closed, OT-safe by default. `knowledge/safety_governor.py` |
 | **Technique search** | Grounds the operator in an offensive corpus (HackTricks / PayloadsAllTheThings) at decision time. `knowledge/technique_search.py` |
 | **Independent verification** | Headless-browser (Playwright) verification of web findings, an independent **reproduction loop** with captured PoC artifacts, and a `reproduce_status` gate so the report only claims what re-runs. |
 | **Engagement integrity** | Per-finding provenance stamping, scrub-on-seed and cross-session boundary filters so a prior engagement's data can never bleed into this one's report. |
 | **Capability benchmark** | `evals/` scores ARGUS against deterministic targets so capability regressions are caught per change. |
 | **Goal-conditioned, value-driven planning** | Each engagement carries a **mission brief** with explicit `win_conditions`; the reasoning loop scores candidate actions by **value-of-information** (decisions are stamped `[VoI=…]`) and maintains a **goal timeline** (emits `goal_timeline_updated` — "win condition met at step N"), so the operator thinks *toward the objective* instead of running tools blindly. `db/schemas.py::MissionBrief` · `agents/reasoning/decision_engine.py` · `agents/reasoning/goal_timeline.py` |
 
-Every engagement renders through **five professional report themes** (executive ·
-compliance · editorial · operator-dark · threat-intel) from one normalized finding set —
-severity-sorted, stable IDs, single headline rating — with WeasyPrint PDF export.
+Every engagement renders through **one canonical, board-ready report** — a dark-hero /
+light-body design with server-side SVG charts (severity distribution, test coverage, MITRE
+tactic coverage, and the attack-path kill-chain) — from one normalized finding set:
+severity-sorted, stable IDs, a single headline rating, per-finding **reproduction steps**,
+and a documented **basis for any compromise claim**, with WeasyPrint PDF export.
 
 ---
 
@@ -219,9 +221,9 @@ Everything is in this one README, plus two companion files —
 | **Reasoning** | Hypothesis-driven tree · LLM-led plan-execute-validate loop · MITRE ATT&CK technique annotation on every action · per-finding evidence chain · technique-search grounding · explainable next-step suggestions |
 | **Exploit development** | Verify-or-refine PoC loop · deterministic proof oracles (`uid=` / canary / OOB callback) · public-PoC reflex (version→CVE→GitHub PoC) · governor-gated, fail-closed PoC execution |
 | **Fuzzing workshop** | OWASP application/protocol/file-format fuzzing · six engines (web/api/network/file/binary/AI) · AFL++ · radamsa · zzuf · honggfuzz · boofuzz · schemathesis · LLM-synthesised PoCs · ceiling-gated weaponisation |
-| **Severity & reporting** | Operational severity (graded by demonstrated impact) · single canonical verdict · noise filtering · five themed reports (executive/compliance/editorial/operator-dark/threat-intel) · WeasyPrint PDF · engagement-integrity / cross-session isolation |
+| **Severity & reporting** | Operational severity (graded by demonstrated impact) · single canonical verdict · noise filtering · one canonical report (dark-hero/light-body, SVG charts, reproduction steps, compromise-basis) · WeasyPrint PDF · engagement-integrity / cross-session isolation |
 | **AI red-team** | OWASP LLM Top 10 against an LLM endpoint: prompt injection · jailbreak · system-prompt leak · insecure output · excessive agency |
-| **Safety** | Execution-boundary governor (scope · RBAC · intrusiveness ceiling · arg validation) · OT-safe-by-default · authorization-and-scope acknowledgement before any engagement |
+| **Safety** | Execution-boundary governor (scope · destructive-op neutralisation · intrusiveness ceiling · arg validation · OT/life-safety) · OT-safe-by-default · authorization-and-scope acknowledgement before any engagement |
 | **Authentication** | Local (Argon2id RFC 9106 + per-deployment pepper) · OIDC w/ PKCE-S256 · SAML 2.0 (XSW-resistant via python3-saml) · SCIM 2.0 RFC 7644 (Okta + Azure + Google + OneLogin + JumpCloud + Auth0) |
 | **MFA** | TOTP (RFC 6238, ±1 step skew, Fernet-encrypted secrets) · 10 single-use backup codes (argon2-hashed) · WebAuthn interface ready |
 | **RBAC + ABAC** | 8 hierarchical roles: OWNER · PLATFORM_ADMIN · SECURITY_MANAGER · OPERATOR · ANALYST · EXECUTIVE · AUDITOR · CLIENT · ABAC predicates for engagement scoping + severity filters + client-redaction |
@@ -247,7 +249,7 @@ Everything is in this one README, plus two companion files —
 | SSO | authlib (OIDC) · python3-saml (SAML 2.0) |
 | LLM | Tiered operator (primary → secondary fallback) · Ollama (local) · pluggable via `utils/llm_providers.py` |
 | Tooling gateway | Node MCP server (`mcp-server.js`) bridging pentest tools |
-| Reporting | Jinja2 themes (×5) · WeasyPrint (PDF) |
+| Reporting | Jinja2/builder themes (dark + light) · WeasyPrint (PDF) |
 | Verification | Playwright (headless-browser finding verification) · deterministic proof oracles |
 | Fuzzing | AFL++ · honggfuzz · radamsa · zzuf · boofuzz · schemathesis |
 
@@ -291,7 +293,7 @@ phase machine and the knowledge base grounds every decision:
 5. **Exploitation** — committed develop→run→**PROVE** loop · attack-graph traversal · evasion · parallel fuzz→exploit campaigns
 6. **Post-exploitation** — credential harvest, privilege escalation, persistence
 7. **Lateral movement** — pivoting, AD enumeration, AS-REP roast / Kerberoast, NTLM relay
-8. **Reporting** — operational severity · five themed reports · evidence chain · MITRE mapping
+8. **Reporting** — operational severity · two themed reports (dark/light) · evidence chain · MITRE mapping
 
 Each phase emits findings into the operational DB with full provenance
 (tool · raw output · CVSS · operational severity · MITRE technique · timestamp ·
@@ -393,7 +395,7 @@ optional**. ARGUS gates every action and bounds every loop:
 
 | Control | Mechanism |
 |---------|-----------|
-| **Execution-boundary governor** | `knowledge/safety_governor.py::evaluate` runs at the `run_tool`/MCP boundary *and* again in `agents/fuzzing/poc_runner.py` — checks scope · RBAC · intrusiveness ceiling · argument validation · life-safety before a tool executes |
+| **Execution-boundary governor** | `knowledge/safety_governor.py::evaluate` runs at the `run_tool`/MCP boundary *and* again in `agents/fuzzing/poc_runner.py` — checks scope · destructive-op neutralisation · intrusiveness ceiling · argument validation · OT/life-safety before a tool executes (RBAC/ABAC is enforced separately in the `auth/` layer, not the governor) |
 | **Bounded exploitation** | the committed-exploit loop (`committed_exploit.py`) and fuzz campaigns (`agents/fuzzing/campaign.py`) cap adaptations · wall-clock · early-exit — no unbounded hammering |
 | **OT-safe by default** | OT/ICS modules are read-only; the AV/OT path is **dry-run by default**, requires `--authorized` + an allowlisted scope, and trips an OT **circuit breaker** on repeated faults |
 | **Non-blocking brute / heavy enum** | runs in the background under a generous ceiling and escalates smartly (`knowledge/brute_strategy.py`) — never stalls or floods the engagement |
@@ -446,7 +448,7 @@ All endpoints return JSON unless noted.
 | Fuzzing | `POST /fuzz/campaign/stop` | Operator stop for a running campaign |
 | Fuzzing | `GET /fuzz/campaigns` | Live campaign status · stage · chance-of-success |
 | Fuzzing | `GET /fuzz/engines` | Fuzz modalities + installed-tool availability |
-| Report | `GET /sessions/{session_id}/report?theme=&format=` | Themed report (executive/compliance/editorial/operator-dark/threat-intel) · HTML or PDF |
+| Report | `GET /sessions/{session_id}/report?format=` | Canonical ARGUS report · HTML or PDF (legacy `?theme=` accepted but ignored) |
 | Report | `GET /report/themes` | List available report themes |
 
 Full OpenAPI surface auto-generated by FastAPI at `/docs` once
@@ -534,9 +536,10 @@ ARGUS/
 │   ├── skills/                ← IT / OT / IoT skill files (deterministic playbooks)
 │   └── data/                  ← 300+ corpus files (PDFs, MDs, playbooks)
 │
-├── report/                    ← Themed report generator (5 themes + WeasyPrint PDF)
+├── report/                    ← Themed report generator (dark/light builder + WeasyPrint PDF)
 │   ├── generator.py
-│   └── themes/                ← executive · compliance · editorial · operator_dark · threat_intel
+│   ├── charts.py              ← server-side inline-SVG chart engine (WeasyPrint-safe)
+│   └── themes/                ← argus.html.j2 (single canonical report)
 │
 ├── evals/                     ← Capability benchmark (deterministic scored targets)
 │
@@ -621,7 +624,7 @@ Two architectural rules keep this tractable: the LLM lives behind a few callers 
 - **AI red-team** (`agents/ai_red_team/`, 9 files) — the `target_type="ai"` path. Probes are **DATA**, not code: catalog YAML lives in `knowledge/data/ai_security/` (one list per OWASP-LLM class); adding an attack = adding a YAML entry. `harness.py` runs probes with a dual scorer (`scorer.py`: deterministic detectors or LLM-judge → ASR), `target_adapter.py` covers http_chat/agentic/single_endpoint shapes, and findings map to OWASP-LLM / MITRE-ATLAS. `discovery.py` does shadow-AI fingerprinting during *normal* network engagements (exposed Ollama/vLLM/MCP surfaces → governance finding), and `reproducibility.py` exports the catalog to Promptfoo/garak/PyRIT. Destructive/jailbreak probes are gated (`destructive: true` + `ARGUS_AI_REDTEAM_AGGRESSIVE=1`); the whole path sits behind `ARGUS_AI_REDTEAM`.
 - **AV/OT control systems** (`agents/avot/`) — `recon.py` fingerprints networked AV/OT control systems (proprietary control protocols on dedicated ports, banner signatures → MITRE `T0846`); `sast/` is a heuristic control-language static analyzer (embedded control source) with 9 rules, runnable as a CI gate (`--fail-on HIGH --json`); `fuzz/` is a dependency-free, field-aware control-protocol fuzzer (`--scope-allow`/`--scope-deny` CIDR guards, `--seed-corpus`, and `--advisory` to emit a vendor-ready PSIRT minimal-repro stub). The pattern is vendor-agnostic — each supported control ecosystem is a self-contained recon+SAST+fuzz triad under `agents/avot/`. **Lab use only** — it is **dry-run by default**; sending requires `--authorized` *and* an allowlisted `--scope-allow` CIDR (with `--scope-deny` to fence off production ranges), and an OT circuit breaker (`--max-consec-fail`) halts on repeated crashes. **Hardware-safety preflight** (this gear bricks easily): isolated VLAN, an out-of-band serial console + a known power-cycle method, low `--max-consec-fail`, dry-run first, and a config/firmware backup. Findings go to the vendor PSIRT via **coordinated disclosure — never a public 0-day drop**. Graduate real campaigns into the shared `agents/fuzzing/` workshop.
 
-**Conventions & gotchas.** Files are `*_subagent.py` / `*_agent.py`; classes end `Subagent`/`Agent`; `AGENT_NAME` is lowercase. Always spawn tools via `asyncio.create_subprocess_exec(*argv)` — never a shell string (`collect_tool`/`run_tool` enforce this). Score with `utils.cvss_scorer.score()`, grade severity through `knowledge.severity_policy.grade()` (outcome-driven — a demonstrated compromise outranks a public-PoC CVE; do not invent ad-hoc severities), and set `mitre_technique` so the attack-graph builder can use it. The `opsec_profiles` knob (`fast`/`quiet`/`stealth`/`paranoid`, default from `ARGUS_OPSEC`) strips noisy default flags from tool argv and throttles behaviour; `paranoid` is the quietest. `knowledge/safety_governor.py` gates intrusive actions against scope/RoE before any tool runs. Reports render to 5 themes in `report/themes/`; `evals/` benchmarks the fleet.
+**Conventions & gotchas.** Files are `*_subagent.py` / `*_agent.py`; classes end `Subagent`/`Agent`; `AGENT_NAME` is lowercase. Always spawn tools via `asyncio.create_subprocess_exec(*argv)` — never a shell string (`collect_tool`/`run_tool` enforce this). Score with `utils.cvss_scorer.score()`, grade severity through `knowledge.severity_policy.grade()` (outcome-driven — a demonstrated compromise outranks a public-PoC CVE; do not invent ad-hoc severities), and set `mitre_technique` so the attack-graph builder can use it. The `opsec_profiles` knob (`fast`/`quiet`/`stealth`/`paranoid`, default from `ARGUS_OPSEC`) strips noisy default flags from tool argv and throttles behaviour; `paranoid` is the quietest. `knowledge/safety_governor.py` gates intrusive actions against scope/RoE before any tool runs. Reports render to 2 builder themes (dark/light); `evals/` benchmarks the fleet.
 
 **Add a specialist:** create `agents/<phase>/<name>_subagent.py` extending `BaseSubagent`, register it in the phase `__init__.py`'s `SUBAGENTS` map, optionally add it to `master_agent.py`'s phase-plan list and to `operator_agent/tool_catalog.py` (so `technique_search` surfaces it to the OPERATOR), then wire a dispatch button in the UI.
 
@@ -807,7 +810,7 @@ Long-form specs, plans, research, and report mockups live under `docs/superpower
 | `docs/superpowers/specs/` | 19 design docs — the *what + why* (motivation · goals · non-goals · design · alternatives · risks). Stable once approved. |
 | `docs/superpowers/plans/` | 8 implementation plans — *how + when*, a checklist of ~30-min tasks with file paths, snippets, and test commands. |
 | `docs/superpowers/research/` | 2 background notes (technology-coverage surveys) that inform specs. |
-| `docs/superpowers/report-options/` | 10 static HTML mockups (5 options + 5 previews) driving the 5 shipped themes in `report/themes/`. |
+| `docs/superpowers/report-options/` | 10 static HTML mockups (5 options + 5 previews); the shipped report renders in 2 builder themes (dark/light — the design lives in `report/argus_template`). |
 
 To add a spec: drop `specs/$(date +%F)-<slug>-design.md` (6 sections: motivation · goals · non-goals · design · alternatives · risks — copy any existing spec in `docs/superpowers/specs/` as a template); after maintainer sign-off, derive `plans/$(date +%F)-<slug>.md`. **Gotcha:** plans go stale once shipped — never edit an old plan, write a new spec. Not every spec gets a standalone plan (some ship integrated into an existing loop).
 

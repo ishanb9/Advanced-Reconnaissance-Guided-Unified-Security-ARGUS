@@ -119,7 +119,7 @@ function ToolWorkshop() {
     width: '100%', boxSizing: 'border-box'
   };
 
-  return React.createElement('div', {
+  return React.createElement('div', { 'data-slot': 'ToolWorkshop.ToolWorkshop',
     style: { display: 'flex', height: '100%', background: 'var(--bg-surface)', overflow: 'hidden' }
   },
 

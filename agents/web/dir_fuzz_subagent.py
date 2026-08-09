@@ -39,6 +39,16 @@ _ADMIN_PATH_RE = re.compile(
     re.IGNORECASE,
 )
 
+# [59 / F-07..F-18] Wildcard / catch-all responder — a server (Crestron / DIN-DLI / camera
+# web UI) that returns the SAME response (a 301/302 redirect or an identical page) for EVERY
+# path makes gobuster emit one bogus "finding" per wordlist entry.  gobuster warns about it;
+# we also infer it when one status dominates the results.
+_WILDCARD_RE = re.compile(
+    r"wildcard response|status code that matches|to force processing|"
+    r"to continue please exclude|catch-all|found:\s*/[0-9a-f]{16,}",
+    re.IGNORECASE,
+)
+
 # Backup / config file patterns
 _BACKUP_FILE_RE = re.compile(
     r"\.(bak|backup|old|orig|save|swp|tmp|temp|sql|dump|tar|gz|zip|rar|7z|"
@@ -179,11 +189,28 @@ class DirFuzzSubagent(BaseSubagent):
                     except Exception as exc:
                         logger.warning("[dir_fuzz] feroxbuster error for %s: %s", idir, exc)
 
+        # ── Wildcard / catch-all guard [59, F-07..F-18] ──────────────────────
+        # When the server returns the same response for EVERY path, gobuster's per-path
+        # "hits" are not real discoveries.  Detect it from the tool's own wildcard warning
+        # OR when one 2xx/3xx status dominates the results, and SUPPRESS the per-path
+        # findings (a wildcard-301 must never become 12 "Admin Panel Redirect" findings).
+        _raw_out = "\n".join(str(v) for v in self._tool_outputs.values())
+        _wildcard = bool(_WILDCARD_RE.search(_raw_out))
+        if not _wildcard and len(all_paths) >= 8:
+            from collections import Counter as _Counter
+            _top, _n = (_Counter(e.get("status") for e in all_paths).most_common(1)
+                        or [(None, 0)])[0]
+            if _top in (200, 301, 302) and _n >= max(8, int(0.8 * len(all_paths))):
+                _wildcard = True
+
         # ── Emit findings ─────────────────────────────────────────────────
         for entry in all_paths:
             severity = _classify_path_severity(entry)
             if severity == "INFO" and entry.get("status") not in (200, 301, 302, 403):
                 continue  # skip uninteresting non-hits
+            # A catch-all server "hosts" every path — none of its 2xx/3xx hits is real.
+            if _wildcard and entry.get("status") in (200, 301, 302):
+                continue
 
             await self.store_finding(Finding(
                 title=_path_finding_title(entry),
@@ -197,7 +224,25 @@ class DirFuzzSubagent(BaseSubagent):
                 exploit_suggestion=_path_exploit_hint(entry),
             ))
 
+        if _wildcard:
+            await self.store_finding(Finding(
+                title=f"Wildcard / catch-all HTTP responder on {target}",
+                description=(
+                    "The web server returns the same response (a redirect or an identical "
+                    "page) for EVERY requested path, including random non-existent ones, so "
+                    "directory-brute results are not real discoveries and were suppressed. "
+                    "Common on embedded appliances (Crestron / DIN-DLI power controllers / "
+                    "camera web UIs)."),
+                severity="INFO",
+                evidence=_raw_out[:500],
+                tool="gobuster",
+                host=target,
+                port=_port_from_url(urls[0] if urls else ""),
+                mitre_technique="T1590",
+            ))
+
         result.parsed_data["paths"] = all_paths
+        result.parsed_data["wildcard_responder"] = _wildcard
         result.findings             = self._findings
         result.tool_outputs         = self._tool_outputs
         result.duration_seconds     = time.monotonic() - wall_start

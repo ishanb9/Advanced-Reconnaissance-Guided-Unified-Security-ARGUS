@@ -1,0 +1,104 @@
+/* ═══════════════════════════════════════════════════════════════════════
+   AVATAR · PHOSPHOR — CRT terminal
+   Keyboard power-operator. DEC VT220 / tmux. Monospace everywhere, square
+   corners, zero chrome, ZERO motion, maximum density, scanline bloom.
+   ═══════════════════════════════════════════════════════════════════════ */
+:root[data-avatar="phosphor"] {
+  --avatar-name: 'PHOSPHOR';
+
+  /* SURFACE — near-black, flat (no gradients anywhere) */
+  --bg-base:      #040604;
+  --bg-void:      #040604;
+  --bg-surface:   #070B07;
+  --bg-panel:     #070B07;
+  --bg-elevated:  #0B110B;
+  --bg-glass:     rgba(7, 11, 7, 0.92);
+  --bg-sidebar:   #020402;
+
+  /* BORDERS — phosphor rules */
+  --border-dim:   #122112;
+  --border:       #1E3A1E;
+  --border-light: #1E3A1E;
+  --border-bright:#2F5C2F;
+  --border-focus: var(--accent);
+
+  /* PRIMARY — green phosphor */
+  --accent:       #33FF66;
+  --accent-dim:   #1FA843;
+  --accent-glow:  rgba(51, 255, 102, 0.25);
+  --accent-subtle:rgba(51, 255, 102, 0.07);
+
+  --cyan:         #7CFFA8;
+  --violet:       #B8FF7C;
+  --violet-glow:  rgba(184, 255, 124, 0.25);
+
+  /* TEXT */
+  --text-primary: #C8FFD4;
+  --text-secondary:#79B888;
+  --text-muted:   #46704F;
+
+  /* SEVERITY — phosphor-safe, still distinct + glyph-backed */
+  --critical:     #FF4A4A;
+  --high:         #FF9E3D;
+  --medium:       #FFE14A;
+  --amber:        #FFE14A;
+  --low:          #33FF66;
+  --info:         #7CFFA8;
+  --supernova:    #FF6BD6;
+  --critical-bg:  rgba(255, 74, 74, 0.14);   --critical-bd: rgba(255, 74, 74, 0.50);
+  --high-bg:      rgba(255,158, 61, 0.14);   --high-bd:     rgba(255,158, 61, 0.50);
+  --medium-bg:    rgba(255,225, 74, 0.14);   --medium-bd:   rgba(255,225, 74, 0.50);
+  --low-bg:       rgba( 51,255,102, 0.12);   --low-bd:      rgba( 51,255,102, 0.45);
+  --info-bg:      rgba(124,255,168, 0.12);   --info-bd:     rgba(124,255,168, 0.45);
+
+  /* TYPE — mono everywhere, fixed character grid */
+  --font-ui:      'JetBrains Mono', 'Courier New', monospace;
+  --font-display: 'JetBrains Mono', 'Courier New', monospace;
+  --font-mono:    'JetBrains Mono', 'Courier New', monospace;
+
+  /* SURFACE LANGUAGE — flat, square, no shadow, no gradient */
+  --panel-radius: 0px;
+  --panel-border: 1px solid var(--border);
+  --panel-bg: var(--bg-surface);
+  --panel-shadow: none;
+  --rail-gradient: linear-gradient(90deg, var(--accent), var(--accent));
+
+  /* DENSITY / MOTION / TEXTURE */
+  --density: 0.7;              /* very high density */
+  --tex-opacity: 0.55;         /* full-character CRT scanlines */
+  --tex-scanline-alpha: 0.05;
+  --radius: 0px; --radius-md: 0px; --radius-lg: 0px; --radius-xl: 0px;
+}
+
+/* Square everything; kill decorative depth */
+:root[data-avatar="phosphor"] .panel,
+:root[data-avatar="phosphor"] .stat-tile,
+:root[data-avatar="phosphor"] .a-panel,
+:root[data-avatar="phosphor"] .btn,
+:root[data-avatar="phosphor"] .sev-badge,
+:root[data-avatar="phosphor"] .header-pill {
+  border-radius: 0 !important;
+  box-shadow: none !important;
+  background-image: none;
+}
+
+/* Uppercase terse chrome */
+:root[data-avatar="phosphor"] .page-title,
+:root[data-avatar="phosphor"] .section-title,
+:root[data-avatar="phosphor"] .panel-head {
+  text-transform: lowercase;
+  letter-spacing: 0.04em;
+}
+
+/* Subtle CRT bloom on text */
+:root[data-avatar="phosphor"] .page-title,
+:root[data-avatar="phosphor"] .stat-value {
+  text-shadow: 0 0 6px color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+/* Block cursor tick — the only motion PHOSPHOR permits */
+@keyframes a-phosphor-cursor { 0%,49% { opacity: 1; } 50%,100% { opacity: 0; } }
+:root[data-avatar="phosphor"] .a-cursor::after {
+  content: "▊"; color: var(--accent);
+  animation: a-phosphor-cursor 1.06s step-end infinite;
+}

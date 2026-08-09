@@ -4,7 +4,7 @@ function FindingCard({ finding, compact }) {
   const ts = found_at ? new Date(found_at).toLocaleTimeString() : '';
 
   if (compact) {
-    return React.createElement('div', {
+    return React.createElement('div', { 'data-slot': 'FindingCard.FindingCard',
       style: { display: 'flex', alignItems: 'center', gap: 8, padding: '6px 0', borderBottom: '1px solid var(--border)' }
     },
       React.createElement('span', { className: `sev-badge ${severity}` }, severity),

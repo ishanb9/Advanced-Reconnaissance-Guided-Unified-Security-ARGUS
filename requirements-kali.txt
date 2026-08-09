@@ -227,10 +227,21 @@ ike-scan lbd inetsim pwn atk6-alive6 cewl-ng tcpick udptunnel
 #   /usr/share/seclists/Passwords/Common-Credentials/best110.txt
 #   /usr/share/wfuzz/wordlist/vulns/lfi.txt
 
-# Headless-browser verification of web findings (Gap #2 — IDOR/auth-bypass/XSS/business-logic).
-# OPTIONAL: ARGUS skips browser verification gracefully if absent.
-# After install, run: playwright install --with-deps chromium
+# Headless-browser verification of web findings + the primary report PDF engine.
+# OPTIONAL: ARGUS degrades gracefully if absent (report falls back to WeasyPrint).
+# After pip-install, download the browser via the PYTHON module:
+#     python3 -m playwright install chromium
+# NOTE: on Kali the apt `python3-playwright` delegates to the system Node driver at
+# /usr/share/nodejs/playwright, which CRASHES on Node >= 24 (babel/chalk getter error).
+# If `python3 -m playwright` throws that, you have the apt build — install from pip
+# instead (it bundles its own Node driver):  pip install --force-reinstall playwright
+# Chromium is OPTIONAL: the report auto-falls-back to WeasyPrint (set
+# ARGUS_PDF_ENGINE=weasyprint to skip the Chromium attempt entirely).
 playwright>=1.40
+
+# Crypto primitives for public-exploit PoCs (many HTB/CVE PoCs do `from Crypto...`).
+# Without it those PoCs die with ImportError mid-exploitation.
+pycryptodome>=3.19
 
 # ── Fuzzing → custom-exploit workshop (OWASP Fuzzing coverage) ────────────────
 # All OPTIONAL: each fuzzing engine degrades cleanly when its tool is absent.

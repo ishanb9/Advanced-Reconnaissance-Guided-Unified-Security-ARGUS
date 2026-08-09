@@ -166,7 +166,7 @@ except ImportError:
 try:
     _auto_ingest_dir = os.path.join(os.path.dirname(__file__), "..", "knowledge")
     sys.path.insert(0, _auto_ingest_dir)
-    from auto_ingest import capture_finding as _capture_finding
+    from auto_ingest_scans import capture_finding as _capture_finding
     _AUTO_INGEST_AVAILABLE = True
 except ImportError:
     _capture_finding = None
@@ -192,6 +192,41 @@ try:
     _RETRIEVER_V3 = True
 except Exception:   # pragma: no cover — silent best-effort
     _RETRIEVER_V3 = False
+
+
+#: The only values the safety governor understands for its `domain` check.
+SAFETY_DOMAINS = ("IT", "OT")
+
+
+def safety_domain(intel: Optional[Dict]) -> str:
+    """Resolve the governor's OT/IT SAFETY classification from intel.
+
+    `intel['domain']` carries two incompatible meanings.  Lateral movement writes
+    the Windows/AD domain there (paired with `dc_ip`, e.g. "corp.local"), while the
+    OT device classifier wrote the safety class there too ("OT").  Both then fed
+    the same governor check, so:
+
+      * once an AD domain was discovered, the governor's domain became
+        "corp.local" — neither "OT" nor "IT", so the OT gate could not fire on an
+        OT network; and
+      * when the classifier wrote "OT", the AD logic saw a Windows domain named
+        "OT" and `_has_domain` went true with no domain at all.
+
+    The safety class now lives in its own key, `intel['safety_domain']`.  A literal
+    "OT"/"IT" still found in `intel['domain']` is honoured so sessions and
+    checkpoints written before this keep classifying correctly; an AD domain name
+    there is ignored rather than misread.  Defaults to "IT" — an unknown network
+    is not silently treated as OT, and OT only ever arrives from a positive
+    classification.
+    """
+    d = intel or {}
+    v = str(d.get("safety_domain") or "").strip().upper()
+    if v in SAFETY_DOMAINS:
+        return v
+    legacy = str(d.get("domain") or "").strip().upper()
+    if legacy in SAFETY_DOMAINS:          # pre-split intel / old checkpoints
+        return legacy
+    return "IT"
 
 
 def _intel_for_retriever(self_obj) -> Dict:
@@ -484,8 +519,11 @@ class BaseAgent(ABC):
         self._active_tool_tasks: set  = set()   # asyncio.Tasks for MCP streams
         self._kill_current_tool_flag: bool = False  # one-shot: kill all running tools
 
-        agent_bus.register(str(name), self._handle_bus_message)
-        # Register in global registry so agent_server can reach us by name
+        # [18] The AgentBus master->slave pub/sub was dead wiring: AgentBus.send() had
+        # ZERO callers and _handle_bus_message was an empty stub, so this subscription
+        # was never fed.  Instructions are actually delivered by direct method calls
+        # (execute_tasks / execute_instruction).  Dropped the dead subscription.
+        # Register in global registry so agent_server can reach us by name.
         _AGENT_REGISTRY[str(name)] = self
 
     # ─── Abstract ─────────────────────────────────────────────
@@ -793,9 +831,19 @@ class BaseAgent(ABC):
 
     async def _kb(self, query: str, phase: str = None, top_k: int = 4) -> str:
         """Query KB for context; emits rag_query WS event."""
-        result = await asyncio.get_event_loop().run_in_executor(
-            None, lambda: _kb_context(query, phase=phase or str(self.phase), top_k=top_k)
-        )
+        # [72] Prefer the documented 4-tier retriever when it's importable.
+        # _kb_context_async runs Tier-0 playbooks -> hybrid (vector+BM25) ->
+        # HyDE -> BGE-reranker+MMR and self-heals to the legacy synchronous
+        # path on any error/empty result, so this is strictly a capability
+        # upgrade with no regression risk.  Nothing awaited this entry point
+        # before, so the multi-tier retriever was dead in the shipped path.
+        if _RETRIEVER_V3:
+            result = await _kb_context_async(
+                self, query, phase=phase or str(self.phase), top_k=top_k)
+        else:
+            result = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: _kb_context(query, phase=phase or str(self.phase), top_k=top_k)
+            )
         found = bool(result and result.strip())
         await self._emit("rag_query", {
             "agent": str(self.name), "query": query,
@@ -1148,16 +1196,11 @@ Return JSON:
         instruction.result = result
         instruction.status = "done" if result["exit_code"] == 0 else "failed"
 
-        # Report back to master via bus
-        await agent_bus.send_to_master({
-            "type":          "instruction_result",
-            "instruction_id": instruction.id,
-            "agent":         str(self.name),
-            "tool":          instruction.tool,
-            "exit_code":     result["exit_code"],
-            "stdout_len":    len(result.get("stdout", "")),
-            "result":        result
-        })
+        # [19] Results flow back to the master via `return result` and the direct-call
+        # dispatch path (execute_tasks/execute_instruction).  The old bus push queued the
+        # FULL result dict (entire tool stdout) onto AgentBus._master_queue — which NO
+        # code ever drains — so every instruction leaked memory unboundedly for a
+        # 'mechanism' that does nothing.  Removed.
         return result
 
     # ─── Tool Execution ───────────────────────────────────────
@@ -1191,25 +1234,64 @@ Return JSON:
         # authorised-scope list has been set (so discovered/pivoted in-scope
         # hosts are never wrongly blocked).
         try:
+            import os as _gos
             from knowledge import safety_governor as _gov
-            _scope_hosts = getattr(self, "_governor_scope_hosts", None) or []
-            _enforce = ["destructive", "ot_life_safety"]
+            # ── CRITICAL: resolve intel via the SAME chain the rest of this module
+            # uses.  This line previously read `getattr(self, "intel")` — the one
+            # fallback that exists on NO agent class (MasterAgent stores `_intel`,
+            # subagents stash `_intel`, specialists hold a `_master` ref).  So _intel
+            # was ALWAYS {} here, which silently neutered every intel-sourced governor
+            # input at the platform's main execution chokepoint:
+            #   scope_hosts -> []      => "scope" never added to enforce => NOT ENFORCED
+            #   domain      -> "IT"    => the OT/life-safety gate could never fire
+            #   life_safety -> False
+            #   authorized  -> False
+            # The scope/domain/life_safety values master computes were being written to
+            # self._intel and then never read.  _intel_for_retriever() walks
+            # (_intel, _master._intel, master_agent._intel, intel) and is what makes the
+            # gate — and the per-target authorization below — actually live.
+            _intel = _intel_for_retriever(self) or {}
+            if not isinstance(_intel, dict):
+                _intel = {}
+            # [93] REAL scope — the authorised engagement scope lives on intel
+            # (target_scope + scope_guard); the old _governor_scope_hosts attr was never
+            # set.  AUGMENT with the target's own identities + discovered vhosts/subdomains
+            # so a legitimate in-target pivot is NEVER wrongly denied (the vhost-pivot
+            # regression the comment above warns of).  CIDR-aware in host_in_scope.
+            _scope_hosts = list(getattr(self, "_governor_scope_hosts", None)
+                                or _intel.get("target_scope") or [])
+            if not _scope_hosts and isinstance(_intel.get("scope_guard"), dict):
+                _sg = _intel["scope_guard"]
+                _scope_hosts = list(_sg.get("hosts") or _sg.get("scope_hosts")
+                                    or _sg.get("in_scope") or [])
             if _scope_hosts:
+                for _k in ("target_host", "target_resolved_ip", "target", "target_url"):
+                    _v = _intel.get(_k)
+                    if _v:
+                        _scope_hosts.append(str(_v))
+                for _k in ("subdomains", "vhosts"):
+                    _scope_hosts += [str(x) for x in (_intel.get(_k) or []) if x]
+            _enforce = ["destructive", "ot_life_safety", "arg_validation"]
+            # Scope enforcement is populated + CIDR-aware; opt-out via ARGUS_GOVERNOR_SCOPE=0
+            # for the rare case a discovered pivot legitimately falls outside the seed scope.
+            if _scope_hosts and _gos.environ.get("ARGUS_GOVERNOR_SCOPE", "1") != "0":
                 _enforce.insert(0, "scope")
-            _intel = getattr(self, "intel", None) or {}
             _verdict = _gov.evaluate({
                 "tool_name":   tool_name,
                 "args":        args,
                 "target_host": target or getattr(self, "_target_host", "")
-                               or (_intel.get("target_host") if isinstance(_intel, dict) else ""),
+                               or _intel.get("target_host") or "",
                 "scope_hosts": _scope_hosts,
                 "ceiling":     getattr(self, "_scan_intrusiveness", None)
-                               or (_intel.get("scan_intrusiveness") if isinstance(_intel, dict) else None)
-                               or "intrusive",
-                "domain":      getattr(self, "_target_domain", None)
-                               or (_intel.get("domain") if isinstance(_intel, dict) else None) or "IT",
-                "life_safety": bool(getattr(self, "_life_safety", False)),
-                "authorized":  bool(getattr(self, "_destructive_authorized", False)),
+                               or _intel.get("scan_intrusiveness") or "intrusive",
+                # [94] domain + life_safety now REACH the governor from intel (master writes
+                # them from the device classification + matched OT/life-safety skill), so the
+                # OT/life-safety gate can finally fire.
+                "domain":      safety_domain(_intel),
+                "life_safety": bool(getattr(self, "_life_safety", False)
+                                    or _intel.get("life_safety")),
+                "authorized":  bool(getattr(self, "_destructive_authorized", False)
+                                    or _intel.get("ot_authorized") or _intel.get("authorized")),
             }, enforce=_enforce)
             _decision = _verdict.get("decision")
             if _decision == "deny":
@@ -1222,6 +1304,88 @@ Return JSON:
                 logger.warning("safety governor BLOCKED %s: %s", tool_name, _verdict.get("reason"))
                 return {"stdout": "", "stderr": f"[safety-governor] blocked: {_verdict.get('reason')}",
                         "exit_code": -1, "output_id": None, "governor": _verdict}
+            # ── PER-TARGET authorization (additive; only ever denies MORE) ──────
+            # The governor above is engagement-wide.  It cannot express "exploitation is
+            # authorized on the client's own box but needs a human on this public host,
+            # and is forbidden on that third-party CDN edge".  Resolve the per-target
+            # grant and apply it as a second, narrower gate.  Fail-closed on any error.
+            try:
+                _authz_map = _intel.get("target_authorization") or {}
+                if _authz_map:
+                    from knowledge.authorization import (AuthorizationPolicy as _AP,
+                                                         TargetAuthorization as _TA,
+                                                         check_action as _check_action,
+                                                         EXPLOIT_APPROVAL as _EX_APPROVE)
+                    _host_for_authz = str(target or _intel.get("target_host")
+                                          or _intel.get("target") or "")
+                    if "entries" in _authz_map or "default" in _authz_map:
+                        _authz = _AP.from_dict(_authz_map).resolve(_host_for_authz)
+                    else:
+                        _authz = _TA.from_dict(_authz_map)
+                    _intr = (_verdict.get("checks") or {}).get("intrusiveness") or "light"
+                    _ta_decision, _ta_reason = _check_action(
+                        _authz, intrusiveness=str(_intr), tool_name=tool_name, args=str(args))
+                    if _ta_decision == _EX_APPROVE:
+                        # A human may already have said yes.  Spend their grant if so:
+                        # require_approval means "ask a human", and once asked and
+                        # answered the action IS authorized.  Re-refusing here is what
+                        # made approve-to-exploit impossible on every public target.
+                        # Only require_approval is satisfiable — a deny never is.
+                        from knowledge.authorization import consume_approval as _consume
+                        _grant = _consume(_intel.get("authz_approvals") or {},
+                                          _host_for_authz, tool_name)
+                        if _grant:
+                            await self._emit("authorization_approval_consumed", {
+                                "tool": tool_name, "target": _host_for_authz,
+                                "granted_at": _grant.get("granted_at"),
+                                "approved_args": _grant.get("args"),
+                                "message": (f"Human-approved {tool_name} on "
+                                            f"{_host_for_authz} — single-use "
+                                            "authorization grant spent")})
+                            logger.warning("per-target authorization: spending a "
+                                           "HUMAN grant for %s on %s",
+                                           tool_name, _host_for_authz)
+                            _ta_decision = "allow"
+                    if _ta_decision != "allow":
+                        # Still not allowed.  run_tool cannot prompt a human, so
+                        # reaching here on require_approval means no human grant was
+                        # outstanding — the approve-to-exploit gate was bypassed or
+                        # the grant expired.  Refuse.
+                        _needs_human = (_ta_decision == _EX_APPROVE)
+                        await self._emit("authorization_block", {
+                            "tool": tool_name, "target": _host_for_authz,
+                            "decision": _ta_decision, "reason": _ta_reason,
+                            "owner": _authz.owner, "public": _authz.public,
+                            "ceiling": _authz.ceiling,
+                            "exploitation": _authz.exploitation,
+                            "needs_human_approval": _needs_human,
+                            "message": (
+                                f"Per-target authorization {_ta_decision.upper()} for "
+                                f"{tool_name} on {_host_for_authz}: {_ta_reason}")})
+                        logger.warning("per-target authorization %s for %s on %s: %s",
+                                       _ta_decision.upper(), tool_name,
+                                       _host_for_authz, _ta_reason)
+                        return {"stdout": "",
+                                "stderr": f"[authorization] {_ta_decision}: {_ta_reason}",
+                                "exit_code": -1, "output_id": None,
+                                "authorization": {"decision": _ta_decision,
+                                                  "reason": _ta_reason,
+                                                  "needs_human_approval": _needs_human,
+                                                  "authz": _authz.to_dict()}}
+            except Exception as _authz_exc:                       # noqa: BLE001
+                import os as _afc
+                if _afc.environ.get("ARGUS_AUTHZ_FAILOPEN", "0") == "1":
+                    logger.warning("per-target authorization errored; FAIL-OPEN "
+                                   "override active: %s", _authz_exc)
+                else:
+                    logger.error("per-target authorization errored — DENYING "
+                                 "(fail-closed): %s", _authz_exc)
+                    return {"stdout": "",
+                            "stderr": "[authorization] fail-closed: policy error",
+                            "exit_code": -1, "output_id": None,
+                            "authorization": {"decision": "deny",
+                                              "reason": str(_authz_exc)}}
+
             if _decision == "rewrite" and _verdict.get("rewritten_args") is not None:
                 try:
                     await self._emit("governor_rewrite", {
@@ -1232,7 +1396,22 @@ Return JSON:
                 logger.warning("safety governor REWROTE %s: %s", tool_name, _verdict.get("reason"))
                 args = _verdict["rewritten_args"]
         except Exception as _gov_exc:
-            logger.debug("safety governor skipped: %s", _gov_exc)
+            # [96] I4 — FAIL CLOSED: a governor error must DENY the tool, never silently run
+            # it.  Emergency override only: ARGUS_GOVERNOR_FAILOPEN=1 (restores prior behaviour).
+            import os as _gfo
+            if _gfo.environ.get("ARGUS_GOVERNOR_FAILOPEN", "0") == "1":
+                logger.warning("safety governor errored; FAIL-OPEN override active: %s", _gov_exc)
+            else:
+                logger.error("safety governor errored — DENYING the tool (fail-closed): %s", _gov_exc)
+                try:
+                    await self._emit("governor_block", {
+                        "tool": tool_name,
+                        "reason": f"governor error (fail-closed): {_gov_exc}"})
+                except Exception:
+                    pass
+                return {"stdout": "", "stderr": "[safety-governor] fail-closed: governor error",
+                        "exit_code": -1, "output_id": None,
+                        "governor": {"decision": "deny", "reason": str(_gov_exc)}}
 
         # ── Self-sabotage guard: never delete the target's own vhost ──────
         # The error-analyzer sometimes mis-flags a discovered vhost (e.g.
@@ -1603,6 +1782,16 @@ Return JSON:
                                 if chunk:
                                     await _emit_line(f"[STDERR] {chunk}", "stderr")
                             elif etype == "exit":
+                                # [37] mcp-server.js emits the `error` ('Unknown tool')
+                                # event THEN `exit` 127, so by the time the exit arrives
+                                # not_in_registry is already set.  Returning the 127 here
+                                # short-circuited the post-loop synthetic-404 raise, so the
+                                # documented LOCAL fallback for a tool missing from the MCP
+                                # registry never ran (agents just returned exit 127).  When
+                                # the tool is unknown, BREAK so the raise below fires and the
+                                # caller's `except httpx.HTTPStatusError` runs it locally.
+                                if not_in_registry:
+                                    break
                                 return int(event.get("code", 0))
                             elif etype == "error":
                                 msg = event.get("message") or event.get("data") or ""
@@ -1997,10 +2186,10 @@ Return JSON:
             "agentname.vuln":     "You are the Vulnerability Assessment AI. You identify vulnerabilities in exact service versions, run targeted NSE scripts, search ExploitDB, and assess exploitability. Be thorough and specific.",
             "agentname.web":      "You are the Web Application Testing AI. You follow OWASP methodology: directory bruteforce, injection testing, authentication bypass, file inclusion. You adapt your testing based on what each response reveals.",
             "agentname.osint":    "You are the OSINT Intelligence AI. You gather external intelligence: CVE databases, public exploits, service fingerprints. You translate discoveries into actionable exploit paths.",
-            "agentname.exploit":  "You are the Exploitation AI. You select and execute the most promising exploits based on discovered vulnerabilities. You adapt when exploits fail and try alternatives. You document every attempt.",
-            "agentname.privesc":  "You are the Privilege Escalation AI. Once inside, you systematically check every escalation vector: SUID, sudo, cron, capabilities, kernel exploits, path hijacking. You are thorough and persistent.",
-            "agentname.shell":    "You are the Shell Management AI. You manage interactive shells, execute commands, harvest credentials and flags.",
-            "agentname.payload":  "You are the Payload Generation AI. You craft payloads appropriate for the target platform and bypasses.",
+            "agentname.exploit":  "You are the Exploitation Assistant. You select and validate the most promising exploitable weaknesses based on the discovered vulnerabilities, confirming impact for the report. You adapt when an approach does not work and try alternatives. You document every attempt.",
+            "agentname.privesc":  "You are the Privilege Escalation Assistant. After access is established, you systematically assess every escalation vector: SUID, sudo, cron, capabilities, kernel issues, path hijacking. You are thorough and methodical.",
+            "agentname.shell":    "You are the Shell Management Assistant. You manage interactive sessions, run commands, and collect credentials and proof files for the report.",
+            "agentname.payload":  "You are the Payload Generation Assistant. You build test payloads appropriate for the target platform and its controls.",
         }
         agent_key = str(self.name).lower()
         system = system_context or _agent_systems.get(
@@ -2051,10 +2240,49 @@ Return JSON:
                     # HuggingFace TGI, OpenAI proper), Anthropic, and Gemini.
                     # Pick the active provider per-call so a hot-reload via
                     # set_provider_auto() takes effect on the next call.
-                    from utils.llm_providers import get_provider
+                    from utils.llm_providers import (get_provider,
+                                                     get_fallback_provider, OllamaProvider,
+                                                     looks_like_refusal as _tk_refusal,
+                                                     reframe_messages as _tk_reframe)
                     _provider = get_provider()
+                    # Backup failover for think() — the operator's converse() already
+                    # falls over to the backup on a primary failure, but think()
+                    # (every subagent + phase planner + finding-extractor) used ONLY
+                    # the primary, so a claude-code 401 / refusal / outage left them
+                    # empty (out=0ch) even while the operator kept running.  Give them
+                    # the same safety net: on a primary failure BEFORE the first token,
+                    # transparently switch to the backup provider.
+                    _backup = get_fallback_provider()
+                    if _backup is None and getattr(_provider, "name", "") != "ollama":
+                        _backup = OllamaProvider()
+                    if (_backup is not None and _backup.name == _provider.name
+                            and _backup.model == _provider.model):
+                        _backup = None
                     _model_for_log = _provider.model or MODEL_NAME
-                    async for tok in _provider.stream(messages, timeout=timeout):
+                    _fellback = False
+
+                    async def _stream_with_backup():
+                        nonlocal _fellback, _model_for_log
+                        _got = False
+                        try:
+                            async for _t in _provider.stream(messages, timeout=timeout):
+                                _got = True
+                                yield _t
+                            return
+                        except Exception as _pe:      # noqa: BLE001
+                            if _got or _backup is None:
+                                raise                 # mid-stream failure or no backup → let the handlers deal
+                            import logging as _lg
+                            _lg.getLogger(__name__).warning(
+                                "think() primary '%s' failed (%s) — failing over to backup '%s'",
+                                getattr(_provider, "name", "?"), type(_pe).__name__,
+                                getattr(_backup, "name", "?"))
+                            _fellback = True
+                            _model_for_log = (_backup.model or _model_for_log)
+                        async for _t in _backup.stream(messages, timeout=timeout):
+                            yield _t
+
+                    async for tok in _stream_with_backup():
                         # Respect a scan-stop request even mid-generation
                         if self._stop_requested:
                             break
@@ -2077,6 +2305,47 @@ Return JSON:
                             tokens.append(tok)
 
                 content = "".join(tokens)
+
+                # Refusal recovery for think() — the primary can return a policy
+                # refusal as a NORMAL completion (no exception), which _stream_with_backup
+                # does not catch, so every subagent/planner used to accept the refusal
+                # string as its answer.  Re-ask the SAME primary with the task restated
+                # in neutral, professional terms (applied only on this retry) before
+                # accepting it or downgrading to the backup.
+                if content and not _fellback and _tk_refusal(content):
+                    _rec = False
+                    for _att in (1, 2):
+                        _rtoks: List[str] = []
+                        try:
+                            async for _t in _provider.stream(_tk_reframe(messages, _att),
+                                                              timeout=timeout):
+                                if self._stop_requested:
+                                    break
+                                if _t:
+                                    _rtoks.append(_t)
+                        except Exception:
+                            _rtoks = []
+                        _rc = "".join(_rtoks)
+                        if _rc and not _tk_refusal(_rc):
+                            content = _rc
+                            _rec = True
+                            break
+                    if not _rec and _backup is not None:
+                        _btoks: List[str] = []
+                        try:
+                            async for _t in _backup.stream(messages, timeout=timeout):
+                                if self._stop_requested:
+                                    break
+                                if _t:
+                                    _btoks.append(_t)
+                        except Exception:
+                            _btoks = []
+                        _bc = "".join(_btoks)
+                        if _bc and not _tk_refusal(_bc):
+                            content = _bc
+                            _fellback = True
+                            _model_for_log = (_backup.model or _model_for_log)
+
                 self._llm_available = True   # confirmed responsive
                 # B1 — successful response → clear the circuit-breaker counter
                 _LLMCircuitState.consecutive_5xx = 0
@@ -2189,6 +2458,31 @@ Return JSON:
                         "available": False, "url": OLLAMA_URL, "model": MODEL_NAME,
                         "message":   msg, "error": "http_404",
                     })
+                    return ""
+
+                if status_code == 429:
+                    # Rate limit — TRANSIENT, not a bad request.  Back off (honour
+                    # Retry-After) and retry instead of failing; cloud-hosted backups
+                    # (e.g. Ollama "*-cloud") 429 under failover bursts.
+                    if attempt < _LLM_MAX_RETRIES:
+                        _ra = exc.response.headers.get("retry-after")
+                        try:
+                            _wait = float(_ra) if _ra else 0.0
+                        except (TypeError, ValueError):
+                            _wait = 0.0
+                        if _wait <= 0:
+                            _wait = min(_LLM_5XX_BACKOFF_MAX,
+                                        _LLM_5XX_BACKOFF_BASE * (_LLM_5XX_BACKOFF_FACTOR ** (attempt - 1)))
+                        _llm_log.getLogger(__name__).warning(
+                            "think() LLM HTTP 429 (rate limited) — backing off %.1fs (attempt %d/%d)",
+                            _wait, attempt, _LLM_MAX_RETRIES)
+                        await self._emit("llm_slow", {
+                            "agent":   str(self.name), "attempt": attempt, "of": _LLM_MAX_RETRIES,
+                            "http":    429,
+                            "message": f"LLM rate limited (429) — retrying in {_wait:.1f}s",
+                        })
+                        await asyncio.sleep(_wait)
+                        continue
                     return ""
 
                 if 400 <= status_code < 500:
@@ -2333,7 +2627,7 @@ Return JSON:
             "ts":     datetime.utcnow().isoformat(),
         })
 
-        async def _run_chain(_tier):
+        async def _run_chain(_tier, _msgs=None):
             tokens: List[str] = []
             prov_info: Dict[str, Any] = {"name": "", "model": "", "fellback": False,
                                          "usage": None}
@@ -2349,7 +2643,8 @@ Return JSON:
             _hb_t0 = time.monotonic()
             _hb_last = _hb_t0
             _hb_interval = float(os.environ.get("LLM_PROGRESS_INTERVAL_SEC", "30"))
-            async for tok in _llp.stream_tiered(messages, tier=_tier,
+            async for tok in _llp.stream_tiered(_msgs if _msgs is not None else messages,
+                                                tier=_tier,
                                                 timeout=timeout, on_provider=_on_prov,
                                                 on_usage=_on_usage):
                 if getattr(self, "_stop_requested", False):
@@ -2390,21 +2685,44 @@ Return JSON:
             })
             return ""
 
-        # Policy-refusal re-route: primary refused (not errored) → retry on backup.
+        # Policy-refusal recovery: the primary refused (did NOT error).  Rather than
+        # collapse straight onto a weaker/local backup — which degrades every
+        # subsequent turn of the scan — first RE-ASK THE SAME primary with the task
+        # restated in neutral, professional security-assessment terms plus a short,
+        # honest scope clarification.  A soft refusal usually clears on the reframe,
+        # keeping the capable model driving.  Only if it still declines do we route
+        # to the backup (as before).
         if (content and not prov_info.get("fellback")
-                and _llp.looks_like_refusal(content)
-                and _llp.has_fallback("reason")):
-            await self._emit("llm_slow", {
-                "agent":   str(self.name),
-                "message": ("Primary LLM refused an authorized-scope prompt — "
-                            "re-routing to the backup provider."),
-            })
-            try:
-                content2, _ = await _run_chain("bulk")   # backup-first
-                if content2 and not _llp.looks_like_refusal(content2):
-                    content = content2
-            except Exception:
-                pass
+                and _llp.looks_like_refusal(content)):
+            _recovered = False
+            for _att in (1, 2):
+                await self._emit("llm_slow", {
+                    "agent":   str(self.name),
+                    "message": ("Primary LLM declined an authorized-scope prompt — "
+                                f"re-asking with a neutral professional reframing "
+                                f"(attempt {_att})."),
+                })
+                try:
+                    _rc, _rp = await _run_chain("reason",
+                                                _llp.reframe_messages(messages, _att))
+                except Exception:
+                    _rc, _rp = "", {}
+                if _rc and not _llp.looks_like_refusal(_rc):
+                    content, prov_info = _rc, _rp
+                    _recovered = True
+                    break
+            if not _recovered and _llp.has_fallback("reason"):
+                await self._emit("llm_slow", {
+                    "agent":   str(self.name),
+                    "message": ("Primary still declined after reframing — "
+                                "routing to the backup provider."),
+                })
+                try:
+                    content2, _ = await _run_chain("bulk")   # backup-first
+                    if content2 and not _llp.looks_like_refusal(content2):
+                        content = content2
+                except Exception:
+                    pass
 
         _usage = prov_info.get("usage") or {}
         _ptok = int(_usage.get("prompt_tokens") or 0)
@@ -2726,12 +3044,45 @@ Return JSON:
         except Exception:
             pass
 
+        # ── MANDATORY provenance stamp + STRICT severity at WRITE time ──────
+        # Every finding is stamped with THIS engagement's origin (session + target)
+        # so a stale finding from a PRIOR scan can never masquerade as this one's,
+        # and the operational severity policy grades it NOW (not only at render) so
+        # the client report's severity scale is enforced and tool-noise / ARGUS-
+        # internal diagnostics are gated BEFORE they are ever stored.
+        _merged_extra.setdefault("_origin", {
+            "session_id": str(getattr(self, "_session_id", "") or ""),
+            "target":     str(getattr(self, "_target", "") or "")})
+        _policy_drop = False
+        _policy_reason = ""
+        try:
+            from knowledge import severity_policy as _sp2
+            _sv0 = (str(severity.value) if hasattr(severity, "value")
+                    else str(severity)).lower().replace("findingseverity.", "")
+            _nf = _sp2.normalize_finding({
+                "title": title, "description": description, "severity": _sv0,
+                "evidence": evidence or raw_output or "",
+                "reproduce_status": _merged_extra.get("reproduce_status"),
+                "evidence_tag": _merged_extra.get("evidence_tag"),
+                "signals": _sev_signals, "cves": cves or [], "source": (tool_used or "")})
+            if _nf.get("drop"):
+                _policy_drop, _policy_reason = True, (_nf.get("rationale")
+                    or "tool-noise / internal diagnostic — not a client finding")
+            else:
+                severity = FindingSeverity(str(_nf["severity"]).lower())
+                if _nf.get("rationale"):
+                    _merged_extra.setdefault("severity_rationale", _nf["rationale"])
+                if _nf.get("evidence_tag"):
+                    _merged_extra.setdefault("evidence_tag", _nf["evidence_tag"])
+        except Exception:
+            pass
+
         # ── Issue-Validator WRITE-TIME GATE ─────────────────────────────
         # Deterministic (no LLM, hot-path safe).  A high/critical claim with
         # NO concrete evidence (or whose 'evidence' is actually a tool error),
-        # a foreign-engagement item, or a duplicate is persisted with
-        # verified=False + a gated_reason so the REPORT excludes it (the
-        # read-time gate filters on `verified`) — the goal: no faulty/silly
+        # a foreign-engagement / out-of-scope item, or a duplicate is persisted
+        # with verified=False + a gated_reason so the REPORT excludes it (the
+        # read-time gate filters on `verified`) — the goal: no faulty/silly/stale
         # findings in the client report.  Accepted findings are verified=True.
         _verified = True
         try:
@@ -2741,9 +3092,10 @@ Return JSON:
                 _iv = get_validator(getattr(self, "_session_id", "") or "")
                 if _iv is not None:
                     _origin_fn = getattr(self, "_engagement_origin", None)
-                    _cur = _origin_fn() if callable(_origin_fn) else None
-                    if _cur:
-                        _merged_extra.setdefault("_origin", _cur)
+                    _cur = (_origin_fn() if callable(_origin_fn) else None) or {
+                        "session_id": str(getattr(self, "_session_id", "") or ""),
+                        "target":     str(getattr(self, "_target", "") or "")}
+                    _merged_extra.setdefault("_origin", _cur)
                     _sev_str = (str(severity.value) if hasattr(severity, "value")
                                 else str(severity)).lower().replace("findingseverity.", "")
                     _f_gate = {
@@ -2767,6 +3119,12 @@ Return JSON:
                     _iv.ingest_finding(_f_gate, _v)
         except Exception:
             _verified = True   # never block the write on a gate error
+        # The severity policy's DROP verdict (tool-noise / internal diagnostic) is
+        # authoritative regardless of the validator flag — such records never count as
+        # a verified client finding.
+        if _policy_drop:
+            _verified = False
+            _merged_extra.setdefault("gated_reason", _policy_reason)
         _merged_extra["verified"] = _verified
 
         finding = await db.store_finding(
@@ -2786,6 +3144,24 @@ Return JSON:
             extra       = _merged_extra,
         )
         await self._emit("finding", {"agent": str(self.name), "finding": finding})
+
+        # Durable findings.jsonl parity for the operator/master funnel.  The
+        # subagent gate already writes findings.jsonl; this funnel only wrote
+        # Mongo + the WS feed, so an operator-authored finding (e.g. the Crestron
+        # AV/OT detection) flashed live but never landed in the per-host file.
+        # Best-effort local import; scan_logger no-ops when no session logger is active.
+        try:
+            from utils.scan_logger import log_finding as _slog_find
+            _sv = (str(severity.value) if hasattr(severity, "value") else str(severity))
+            _sv = _sv.replace("FindingSeverity.", "").replace("findingseverity.", "").lower()
+            _slog_find(getattr(self, "_session_id", ""),
+                       severity=_sv, title=title, description=(description or "")[:500],
+                       finding_id=(finding.get("id") or str(finding.get("_id", ""))),
+                       phase=str(self.phase), agent=str(self.name),
+                       host=host, port=port, cves=(cves or []),
+                       verified=_merged_extra.get("verified"))
+        except Exception:
+            pass
 
         # Add finding to attack graph in real-time
         try:
@@ -3102,10 +3478,6 @@ Return JSON:
             )
         except Exception as e:
             print(f"[DB LOG ERROR] {e}")
-
-    async def _handle_bus_message(self, message: Dict):
-        """Override in subclass to handle inbound bus messages."""
-        pass
 
     async def check_tool_available(self, tool_name: str) -> Dict:
         """Check if a tool binary exists on the system.

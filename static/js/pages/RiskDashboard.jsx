@@ -80,7 +80,7 @@ function RiskGauge({ score, summary }) {
   const circ = Math.PI * radius;       // semicircle perimeter
   const dash = pct * circ;
 
-  return React.createElement('div', {
+  return React.createElement('div', { 'data-slot': 'RiskDashboard.RiskGauge',
     className: 'hero-card panel-ambient panel-hud',
     style: {
       background: 'var(--bg-surface)',
@@ -166,7 +166,7 @@ function KillChainStrip({ state }) {
   const stages = KILL_CHAIN_STAGES.map(stg => ({ ...stg, reached: !!stg.test(state) }));
   const reachedCount = stages.filter(s => s.reached).length;
 
-  return React.createElement('div', {
+  return React.createElement('div', { 'data-slot': 'RiskDashboard.KillChainStrip',
     style: {
       background: 'var(--bg-surface)',
       border: `1px solid ${'var(--border)'}`,
@@ -231,7 +231,7 @@ function KillChainStrip({ state }) {
 
 // ─── Stat tile ────────────────────────────────────────────────
 function StatTile({ label, value, sub, color, accent }) {
-  return React.createElement('div', {
+  return React.createElement('div', { 'data-slot': 'RiskDashboard.StatTile',
     style: {
       background: 'var(--bg-surface)',
       border: `1px solid ${'var(--border)'}`,
@@ -271,7 +271,7 @@ function SeverityTreemap({ summary }) {
     { sev: 'info',     count: summary?.info     || 0, color: 'var(--info)' },
   ];
 
-  return React.createElement('div', {
+  return React.createElement('div', { 'data-slot': 'RiskDashboard.SeverityTreemap',
     style: {
       background: 'var(--bg-surface)',
       border: `1px solid ${'var(--border)'}`,
@@ -349,7 +349,7 @@ function LootCard({ state }) {
     info:     evidence.filter(e => !['critical','high','medium','low'].includes((e.severity||'').toLowerCase())).length,
   };
 
-  return React.createElement('div', {
+  return React.createElement('div', { 'data-slot': 'RiskDashboard.LootCard',
     style: {
       background: 'var(--bg-surface)',
       border: `1px solid ${'var(--border)'}`,
@@ -423,7 +423,7 @@ function PrimerCoverageCard({ state }) {
   const overallPct = Math.round(overallCov * 100);
   const ringColor = overallCov >= 0.85 ? 'var(--low)' : overallCov >= 0.6 ? 'var(--medium)' : 'var(--high)';
 
-  return React.createElement('div', {
+  return React.createElement('div', { 'data-slot': 'RiskDashboard.PrimerCoverageCard',
     style: {
       background: 'var(--bg-surface)',
       border: `1px solid ${'var(--border)'}`,
@@ -488,7 +488,7 @@ function TopHypothesesCard({ state }) {
     .sort((a, b) => (b.confidence || 0) - (a.confidence || 0))
     .slice(0, 3);
 
-  return React.createElement('div', {
+  return React.createElement('div', { 'data-slot': 'RiskDashboard.TopHypothesesCard',
     style: {
       background: 'var(--bg-surface)',
       border: `1px solid ${'var(--border)'}`,
@@ -577,7 +577,7 @@ function DeviceTaxonomyCard({ state }) {
     return 'var(--text-muted)';
   };
 
-  return React.createElement('div', {
+  return React.createElement('div', { 'data-slot': 'RiskDashboard.DeviceTaxonomyCard',
     style: {
       background: 'var(--bg-surface)',
       border: `1px solid ${'var(--border)'}`,
@@ -705,7 +705,7 @@ function DeviceTaxonomyCard({ state }) {
 function SessionInfoCard({ state, sessionDuration }) {
   const sess = state.activeSession;
   if (!sess) {
-    return React.createElement('div', {
+    return React.createElement('div', { 'data-slot': 'RiskDashboard.SessionInfoCard',
       style: {
         background: 'var(--bg-surface)',
         border: `1px dashed ${'var(--border)'}`,
@@ -821,7 +821,7 @@ function RiskDashboard({ sessionId, activeSession, viewMode, client }) {
   const openPorts = hosts || (planDone > 0 ? planDone : 0);
   const services = (state.subagentStates && Object.keys(state.subagentStates).length) || 0;
 
-  return React.createElement('div', {
+  return React.createElement('div', { 'data-slot': 'RiskDashboard.RiskDashboard',
     'data-view-mode': vm,
     className: vm === 'CLIENT' ? 'client-mode' : undefined,
     style: { fontSize: fontScale },

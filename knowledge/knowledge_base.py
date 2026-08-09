@@ -22,6 +22,16 @@ import json
 import hashlib
 import logging
 from typing import Optional, List, Dict, Any, Tuple
+# Dual-mode import: this module is loaded BOTH as a package member
+# (`knowledge.knowledge_base`) and FLAT from inside knowledge/ — build_kb.py
+# does `import knowledge_base`, at which point the repo root is not on
+# sys.path and there is no `knowledge` package to import from.
+try:
+    from knowledge.identifier_scrub import (scrub_text as _scrub,
+                                            contains_identifier as _has_ident)
+except ImportError:                                          # flat/script mode
+    from identifier_scrub import (scrub_text as _scrub,
+                                  contains_identifier as _has_ident)
 
 logger = logging.getLogger("knowledge_base")
 
@@ -389,6 +399,51 @@ def _expand_query(query: str) -> List[str]:
     return queries[:3]
 
 
+def _tech_bias_from_intel(intel: Optional[Dict[str, Any]]) -> List[str]:
+    """Extract tech-IDENTITY tokens from intel to bias RAG retrieval toward the current
+    host's stack — matched technologies, service products, fired skill ids, device-router
+    device skills.  NEVER emits host/IP/credential/domain fields (keeps the cross-scan
+    redaction guarantee intact).  Pure read; returns [] on empty/missing intel so
+    retrieval is byte-identical when no technology is known.  Never raises."""
+    if not isinstance(intel, dict) or not intel:
+        return []
+    toks: List[str] = []
+
+    def _add(v: Any) -> None:
+        s = str(v or "").strip().lower()
+        if s and len(s) <= 40:
+            toks.append(s)
+
+    try:
+        for key in ("technologies", "web_tech"):
+            for v in (intel.get(key) or []):
+                _add(v)
+        _svcs = intel.get("services")
+        _svc_iter = (_svcs.values() if isinstance(_svcs, dict)
+                     else _svcs if isinstance(_svcs, list) else [])
+        for s in _svc_iter:
+            if isinstance(s, dict):
+                for k in ("product", "service", "name"):
+                    _add(s.get(k))
+        for sid in (intel.get("_fired_skills") or []):
+            _add(sid)
+        _dp = intel.get("device_playbook")
+        if isinstance(_dp, dict):
+            for s in (_dp.get("device_skills") or []):
+                if isinstance(s, dict):
+                    _add(s.get("id"))
+                    _add(s.get("technology"))
+    except Exception:
+        return []
+    seen: set = set()
+    out: List[str] = []
+    for t in toks:
+        if t and t not in seen:
+            seen.add(t)
+            out.append(t)
+    return out[:12]
+
+
 # ── Public API ──────────────────────────────────────────────────────────────────
 
 def ingest(
@@ -568,6 +623,7 @@ def search_raw(
     chunk_type_filter: Optional[str] = None,
     use_reranker: bool = True,
     expand_query: bool = True,
+    tech_bias: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
     """
     Semantic search returning structured result dicts.
@@ -606,6 +662,29 @@ def search_raw(
 
     # Multi-query expansion for better recall
     queries = _expand_query(query) if expand_query else [query]
+    # Tech-keyed bias: widen recall toward the CURRENT host's identified stack (tech /
+    # product / fired-skill names).  Guarded — empty tech_bias (or ARGUS_RAG_TECH_BIAS=0)
+    # → queries unchanged (byte-identical); it only ADDS one candidate-widening query and
+    # the reranker below still scores against the ORIGINAL query, so precision cannot drop.
+    if tech_bias:
+        import os as _bias_os
+        if _bias_os.environ.get("ARGUS_RAG_TECH_BIAS", "1") != "0":
+            _ql = query.lower()
+            _terms: List[str] = []
+            for _bt in tech_bias:
+                _bt = str(_bt or "").strip().lower()
+                if _bt and _bt not in _ql and _bt not in _terms:
+                    _terms.append(_bt)
+            if _terms:
+                _biased_q = f"{query} {' '.join(_terms[:8])}"
+                if _biased_q not in queries:
+                    queries.append(_biased_q)
+                    if _rl is not None:
+                        try:
+                            _rl.log_event("rag_tech_bias", query=query[:120],
+                                          terms=",".join(_terms[:8]), caller=_caller)
+                        except Exception:
+                            pass
     fetch_n  = min(RERANK_FETCH if use_reranker else top_k * 2, total)
 
     # Build ChromaDB where clause
@@ -727,6 +806,7 @@ def search(
     phase_filter: Optional[str] = None,
     outcome_filter: Optional[str] = None,
     chunk_type_filter: Optional[str] = None,
+    tech_bias: Optional[List[str]] = None,
 ) -> str:
     """
     Semantic search returning a formatted string ready for LLM injection.
@@ -739,6 +819,7 @@ def search(
         phase_filter=phase_filter,
         outcome_filter=outcome_filter,
         chunk_type_filter=chunk_type_filter,
+        tech_bias=tech_bias,
     )
 
     if not results:
@@ -756,9 +837,12 @@ def search(
         section = r.get("section_title", "")
 
         # Header line
-        header_parts = [f"{icon} [{source}"]
-        if box:
-            header_parts.append(f" · {box}")
+        # `source` is a filename that carried the originating session id, and
+        # `box` was scraped from the ingest "target:" line — both named a
+        # PREVIOUS client inside the NEXT client's prompt.
+        header_parts = [f"{icon} [{_scrub(str(source))}"]
+        if box and not _has_ident(str(box)):
+            header_parts.append(f" · {_scrub(str(box))}")
         if section:
             header_parts.append(f" § {section}")
         if phase:
@@ -797,14 +881,17 @@ def search(
         + "\n=== END KNOWLEDGE BASE ===\n"
         "Apply the above examples to inform your decisions. "
         "Prefer techniques and commands that previously succeeded. "
-        "These examples are from DIFFERENT past targets — host identifiers are "
-        "redacted to <host>/<mac>/<redacted>. Reuse the METHOD (product/version, "
+        "These examples are from DIFFERENT past engagements. Host identifiers are "
+        "removed at ingest AND again at render — if you nonetheless see an "
+        "address in one, treat it as a defect and ignore it, never as a target. "
+        "Reuse the METHOD (product/version, "
         "CVE, port, payload, technique), but ALWAYS substitute the CURRENT "
         "target's address/hostname/credentials — never reuse an old IP or host."
     )
 
 
-def search_commands(query: str, top_k: int = 5) -> List[str]:
+def search_commands(query: str, top_k: int = 5,
+                    tech_bias: Optional[List[str]] = None) -> List[str]:
     """
     Return raw command-type chunks relevant to the query.
     Useful for agents that need specific tool invocation examples.
@@ -814,15 +901,18 @@ def search_commands(query: str, top_k: int = 5) -> List[str]:
         top_k=top_k,
         chunk_type_filter="command",
         expand_query=True,
+        tech_bias=tech_bias,
     )
     if not results:
         # Fall back to any chunk type if no command chunks found
-        results = search_raw(query=query, top_k=top_k, expand_query=True)
+        results = search_raw(query=query, top_k=top_k, expand_query=True,
+                             tech_bias=tech_bias)
 
     return [r["text"] for r in results]
 
 
-def search_procedures(query: str, top_k: int = 3) -> List[str]:
+def search_procedures(query: str, top_k: int = 3,
+                      tech_bias: Optional[List[str]] = None) -> List[str]:
     """
     Return raw procedure-type chunks (step-by-step processes).
     """
@@ -831,11 +921,13 @@ def search_procedures(query: str, top_k: int = 3) -> List[str]:
         top_k=top_k,
         chunk_type_filter="procedure",
         expand_query=True,
+        tech_bias=tech_bias,
     )
     return [r["text"] for r in results]
 
 
-def search_scripts(query: str, top_k: int = 3) -> List[str]:
+def search_scripts(query: str, top_k: int = 3,
+                   tech_bias: Optional[List[str]] = None) -> List[str]:
     """
     Return raw script/payload-type chunks.
     """
@@ -844,6 +936,7 @@ def search_scripts(query: str, top_k: int = 3) -> List[str]:
         top_k=top_k,
         chunk_type_filter="script",
         expand_query=True,
+        tech_bias=tech_bias,
     )
     return [r["text"] for r in results]
 

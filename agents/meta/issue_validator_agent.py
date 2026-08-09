@@ -206,21 +206,31 @@ class IssueValidatorAgent(BaseMetaAgent):
                 severity_ok = bool(evidence.strip())
         else:
             severity_ok = True
-        # provenance (degrade to OK when either side is unstamped)
+        # provenance — STRICT: when the current engagement origin is known, a finding MUST
+        # carry a matching current-SESSION stamp.  A missing stamp or a PRIOR session's stamp
+        # is stale/foreign → REJECTED, so no finding from a previous scan reaches the report.
+        # (base_agent.store_finding now stamps every fresh finding with the live session, so a
+        # genuine current finding always passes; only recalled/persisted stale items fail.)
         origin_ok = True
-        o = finding.get("_origin")
-        if o and current_origin:
-            origin_ok = (str(o.get("session_id", "")) == str(current_origin.get("session_id", ""))
-                         and str(o.get("target", "")) == str(current_origin.get("target", "")))
+        _cur_sid = str((current_origin or {}).get("session_id", "") or "")
+        if _cur_sid:
+            o = finding.get("_origin") or {}
+            origin_ok = str(o.get("session_id", "") or "") == _cur_sid
         # dedup
         fp = self._finding_fp(finding)
         duplicate = fp in self._seen_fp
         if not duplicate:
             self._seen_fp.add(fp)
         accept = severity_ok and origin_ok and not duplicate
+        # Canonical, machine-readable reason codes — consumed verbatim by the
+        # write-time gates (base_agent / base_subagent compare against these exact
+        # strings), so they MUST stay short and stable.  "foreign-origin" covers
+        # both a prior scan's stamp and a missing stamp when the current origin is
+        # known (stale/foreign — must never reach the client report).
         reason = ("" if accept else
                   ("ungrounded" if not severity_ok else
-                   "foreign-origin" if not origin_ok else "duplicate"))
+                   "foreign-origin" if not origin_ok else
+                   "duplicate"))
         return {"accept": accept, "grounded": grounded, "severity_ok": severity_ok,
                 "origin_ok": origin_ok, "duplicate": duplicate, "cls": cls, "reason": reason}
 

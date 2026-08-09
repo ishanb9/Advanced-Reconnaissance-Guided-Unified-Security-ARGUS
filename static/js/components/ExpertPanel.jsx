@@ -28,7 +28,7 @@ function _priorityColor(p) {
 
 // ─── Stat cell used in Summary tab ────────────────────────────────────────────
 function _XStatCell({ value, label, color }) {
-  return React.createElement('div', {
+  return React.createElement('div', { 'data-slot': 'ExpertPanel._XStatCell',
     style: {
       textAlign: 'center', padding: '10px 6px',
       background: 'var(--bg-base)',
@@ -54,7 +54,7 @@ function _XStatCell({ value, label, color }) {
 
 // ─── Custom tab bar ───────────────────────────────────────────────────────────
 function _XTabBar({ tabs, active, onSelect }) {
-  return React.createElement('div', {
+  return React.createElement('div', { 'data-slot': 'ExpertPanel._XTabBar',
     style: {
       display: 'flex', gap: 0,
       borderBottom: '1px solid var(--border)',
@@ -110,7 +110,7 @@ function _MissionBar({ objectives }) {
   const pct   = Math.max(0, Math.min(100, Math.round((objectives && objectives.progress_pct) || 0)));
   const items = (objectives && objectives.objectives) || [];
 
-  return React.createElement('div', {
+  return React.createElement('div', { 'data-slot': 'ExpertPanel._MissionBar',
     style: {
       padding: '12px 14px',
       background: `linear-gradient(135deg, ${EXPERT_SOFT} 0%, var(--bg-base) 70%)`,
@@ -192,7 +192,7 @@ function _DirectiveCard({ directive: d }) {
   const cmds = Array.isArray(d.recommended_cmds) ? d.recommended_cmds : [];
   const refs = Array.isArray(d.rag_refs) ? d.rag_refs : [];
 
-  return React.createElement('div', {
+  return React.createElement('div', { 'data-slot': 'ExpertPanel._DirectiveCard',
     style: {
       background: 'var(--bg-base)',
       border: `1px solid ${col.bd}`,
@@ -311,7 +311,7 @@ function _FeedbackLine({ fb }) {
   const aColor = agent.includes('CHECK') ? 'var(--violet)' :
                  agent.includes('VALID') ? 'var(--cyan)'   :
                  EXPERT_ACCENT;
-  return React.createElement('div', {
+  return React.createElement('div', { 'data-slot': 'ExpertPanel._FeedbackLine',
     style: {
       padding: '7px 10px', marginBottom: 5,
       background: 'var(--bg-base)', border: '1px solid var(--border)',
@@ -386,7 +386,7 @@ function ExpertPanel() {
                     : thinking    ? EXPERT_BORDER
                     : 'var(--border)';
 
-  return React.createElement('div', {
+  return React.createElement('div', { 'data-slot': 'ExpertPanel.ExpertPanel',
     style: {
       marginTop:    12,
       background:   'var(--bg-surface)',

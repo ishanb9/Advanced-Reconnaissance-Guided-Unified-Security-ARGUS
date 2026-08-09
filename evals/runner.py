@@ -32,6 +32,10 @@ class BenchmarkReport:
     skipped: int
     score_sum: float
     score_pct: float
+    # [109] % of catalog cases that were actually SCORED (not skipped).  score_pct is
+    # averaged over scored cases only, so without this a run that silently skips 2/5
+    # capability classes still reports score_pct=100 — masking the coverage gap.
+    coverage_pct: float = 100.0
     cases: List[Dict[str, Any]] = field(default_factory=list)
     run_at: Optional[str] = None       # caller-supplied timestamp (kept out of logic)
 
@@ -82,6 +86,7 @@ def run_benchmark(cases: Optional[List[BenchmarkCase]] = None, *,
         skipped=skipped,
         score_sum=round(score_sum, 3),
         score_pct=round(100.0 * score_sum / denom, 1),
+        coverage_pct=round(100.0 * len(scored) / (len(results) or 1), 1),
         cases=[r.to_dict() for r in results],
         run_at=run_at,
     )

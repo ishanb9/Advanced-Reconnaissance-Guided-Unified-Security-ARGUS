@@ -189,10 +189,21 @@ def infer_vector(finding: Dict[str, Any]) -> Tuple[Dict[str, str], float, str]:
                         for k in ("title", "description", "evidence", "exploit_suggestion",
                                   "cve", "tags")).lower()
 
+    # The finding's OWN severity caps the keyword heuristic. A bare detection
+    # stored as INFO must NOT be re-inflated to a HIGH cvss_base just because its
+    # prose contains words like 'unauthenticated' / 'control' / 'exposed'. Reserve
+    # heuristic escalation for findings that already claim real severity, and never
+    # let the inferred score exceed the finding's own severity band.
+    _sev_in = str(finding.get("severity") or "INFO").upper().replace("FINDINGSEVERITY.", "")
+    _sev_cap = {"CRITICAL": 10.0, "HIGH": 8.9, "MEDIUM": 6.9,
+                "LOW": 3.9, "INFO": 0.0}.get(_sev_in, 0.0)
+    if _sev_cap <= 0.0:
+        # INFO / unknown: skip heuristic escalation entirely.
+        return {}, 0.0, _sev_in
     for keywords, vec, _floor in _HEURISTIC_RULES:
         for kw in keywords:
             if kw in haystack:
-                score = calculate_base(vec)
+                score = min(calculate_base(vec), _sev_cap)
                 return dict(vec), score, severity_band(score)
 
     # Default: low/info if no rule matched

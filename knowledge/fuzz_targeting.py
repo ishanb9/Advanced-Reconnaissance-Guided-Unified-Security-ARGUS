@@ -249,6 +249,21 @@ def enumerate_surfaces(intel: Dict[str, Any]) -> List[Dict[str, Any]]:
             out.append(_web_surface(host, p, "web", "file-upload", 0.90, "ffuf_content"))
         elif _is_api_path(p):
             out.append(_web_surface(host, p, "api", "api-grammar", 0.60, "ffuf_api"))
+
+    # OPT-IN sharper gate (default OFF → existing scores byte-identical): refine the
+    # reachable / input_controllable defaults from recon evidence so score_surface's gate
+    # reflects real attacker-controllability.  Enable with ARGUS_REACH_GATE=1.
+    import os as _os
+    if _os.environ.get("ARGUS_REACH_GATE"):
+        try:
+            from knowledge.reach_controllability import controllability_signals as _cs
+            for _surf in out:
+                _sig = _cs(_surf, intel)
+                _surf["input_controllable"] = bool(_sig.get("input_controllable",
+                                                            _surf.get("input_controllable", True)))
+                _surf["controllability"] = _sig.get("controllability", 0.0)
+        except Exception:
+            pass
     return out
 
 

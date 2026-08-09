@@ -222,6 +222,28 @@ def playbooks_for_kind(kind: TaxonomyKind) -> List[str]:
     return list(_PLAYBOOKS.get(kind, _PLAYBOOKS[TaxonomyKind.UNKNOWN]))
 
 
+# ── Mutually-exclusive archetype groups (for contradictory-identity de-confliction) ──
+# A single host is ONE OS and ONE physical archetype.  Web/database/mail/etc. are
+# SERVICES that legitimately co-reside on a host, so they are NOT exclusive.  When two
+# or more DIFFERENT exclusive groups both score strongly, the identity is contradictory
+# (e.g. a honeypot emulating Windows + Modbus + a printer at once) — the classifier must
+# LOWER its confidence and flag the ambiguity rather than confidently pick one.  This is
+# generic (keyed to the taxonomy, never to a vendor or the sample scan).
+_ARCHETYPE_GROUP: Dict[TaxonomyKind, str] = {
+    TaxonomyKind.WINDOWS_SERVER: "os:windows", TaxonomyKind.WINDOWS_DC: "os:windows",
+    TaxonomyKind.WINDOWS_WORKSTATION: "os:windows",
+    TaxonomyKind.LINUX_SERVER: "os:linux", TaxonomyKind.MACOS: "os:macos",
+    TaxonomyKind.IOT_CAMERA: "dev:camera", TaxonomyKind.IOT_PRINTER: "dev:printer",
+    TaxonomyKind.IOT_ROUTER: "dev:network", TaxonomyKind.NETWORK_DEVICE: "dev:network",
+    TaxonomyKind.IOT_VOIP: "dev:voip", TaxonomyKind.IOT_INDUSTRIAL: "dev:ics",
+    TaxonomyKind.IOT_MEDIA: "dev:media", TaxonomyKind.IOT_SMART_HOME: "dev:media",
+    TaxonomyKind.EMBEDDED_GENERIC: "dev:embedded",
+    TaxonomyKind.HYPERVISOR: "dev:hypervisor",
+    TaxonomyKind.CONTAINER_HOST: "dev:container", TaxonomyKind.KUBERNETES: "dev:container",
+}
+_ARCHETYPE_STRONG = 0.6   # a "strong" archetype signal
+
+
 # ────────────────────────────────────────────────────────────────────
 # Classifier
 # ────────────────────────────────────────────────────────────────────
@@ -543,6 +565,24 @@ def classify_device(
     best_kind = max(scores.keys(), key=lambda k: scores[k])
     best_score = scores[best_kind]
     confidence = max(0.0, min(1.0, best_score))
+
+    # ── Contradictory-identity de-confliction (generic, vendor-agnostic) ──────
+    # Count DISTINCT mutually-exclusive archetype groups that scored strongly.  A real
+    # host is one OS + one archetype; 2+ strong incompatible archetypes (a honeypot /
+    # emulator / mis-fingerprinted host) must not yield a confident single verdict.
+    _strong_groups = {
+        _ARCHETYPE_GROUP[k] for k, s in scores.items()
+        if k in _ARCHETYPE_GROUP and s >= _ARCHETYPE_STRONG
+    }
+    if len(_strong_groups) >= 2:
+        _n = len(_strong_groups)
+        # More contradictory archetypes → lower confidence (never below 0.15).
+        confidence = max(0.15, min(confidence, 0.55 - 0.12 * (_n - 1)))
+        labels.add("contradictory-identity")
+        if _n >= 4:
+            # Many incompatible archetypes at once = an emulator/honeypot signature.
+            confidence = min(confidence, 0.2)
+            labels.add("possible-honeypot-or-emulator")
 
     os_family = "unknown"
     if best_kind in (TaxonomyKind.LINUX_SERVER,):

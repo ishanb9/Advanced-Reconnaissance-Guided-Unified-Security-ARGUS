@@ -34,10 +34,26 @@ class WirelessAgent(BaseAgent):
         await self.set_status(AgentStatus.RUNNING, "Wireless assessment starting")
         kw = dict(session_id=session_id, target=target, broadcast=self.broadcast, db=db)
 
+        # [67] Aggregate each subagent's SubagentResult into the returned dict — it was
+        # built empty and returned empty because no .execute() result was ever captured,
+        # so callers got {all_findings: [], errors: []} no matter what the run found.
+        def _agg(res):
+            if isinstance(res, Exception):
+                result["errors"].append(f"{type(res).__name__}: {res}")
+                return
+            for _f in (getattr(res, "findings", None) or []):
+                try:
+                    result["all_findings"].append(_f.to_dict() if hasattr(_f, "to_dict") else _f)
+                except Exception:
+                    pass
+            _e = getattr(res, "error", None)
+            if _e:
+                result["errors"].append(str(_e))
+
         # Phase 1: Scan
-        await WifiScanSubagent(**kw).execute(
+        _agg(await WifiScanSubagent(**kw).execute(
             interface=interface, evidence_dir=evidence_dir
-        )
+        ))
 
         # Phase 2: WPA2 crack + optional evil twin in parallel
         tasks = [
@@ -54,7 +70,8 @@ class WirelessAgent(BaseAgent):
                 mode=evil_twin_mode, evidence_dir=evidence_dir,
             ))
 
-        await asyncio.gather(*tasks, return_exceptions=True)
+        for _res in await asyncio.gather(*tasks, return_exceptions=True):
+            _agg(_res)
 
         await self.set_status(AgentStatus.IDLE, "Wireless assessment complete")
         return result

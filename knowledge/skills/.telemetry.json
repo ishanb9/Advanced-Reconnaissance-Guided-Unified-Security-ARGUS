@@ -1,0 +1,20 @@
+{
+  "citrix_adc": {
+    "fired": 97,
+    "findings": 0,
+    "qw_attempts": 0,
+    "qw_success": 0,
+    "weight": 0.6,
+    "needs_review": true,
+    "sev": {}
+  },
+  "os-linux-ssh": {
+    "fired": 128,
+    "findings": 0,
+    "qw_attempts": 0,
+    "qw_success": 0,
+    "weight": 0.6,
+    "needs_review": true,
+    "sev": {}
+  }
+}

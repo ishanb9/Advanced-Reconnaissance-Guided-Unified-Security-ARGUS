@@ -156,13 +156,16 @@
     useEffect(() => {
       // Cheap probes — these endpoints exist on ARGUS already
       const probes = [
-        fetch('/api/system/status').then(r => r.ok ? r.json() : {}).catch(() => ({})),
+        // [3] The old probe hit a route the server never defines (its 404 was swallowed,
+        // so every status pill silently read 'warn').  The real endpoint is /api/status,
+        // which returns mcp as the string 'online'/'offline'.
+        fetch('/api/status').then(r => r.ok ? r.json() : {}).catch(() => ({})),
         fetch('/healthz/auth').then(r => ({ ok: r.ok })).catch(() => ({ ok: false })),
       ];
       Promise.all(probes).then(([sys, auth]) => {
         setStats(s => ({
           ...s,
-          mcp:    (sys?.mcp || sys?.status === 'ok') ? 'ok' : 'warn',
+          mcp:    (sys?.mcp === 'online' || sys?.status === 'ok') ? 'ok' : 'warn',
           vector: (sys?.knowledge_ready || sys?.rag) ? 'ok' : 'warn',
           tls:    location.protocol === 'https:' ? 'ok' : 'dev',
           env:    sys?.env || (window.location.hostname === 'localhost' ? 'dev' : 'prod'),

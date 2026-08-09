@@ -39,6 +39,29 @@ class PersistenceSubagent(BaseSubagent):
     AGENT_NAME: str = "post"
     SUBAGENT_NAME: str = "persistence"
 
+    async def _record_persistence(self, host: str, mechanism: str,
+                                  technique: str, confirmed: bool) -> None:
+        """[0/5] Record a CONFIRMED persistence mechanism to the persistence collection
+        (nothing wrote it → the /sessions/{id}/persistence panel was always empty) and
+        emit the persistence_planted WS event.  No-op when unconfirmed — only PROVEN
+        persistence is recorded."""
+        if not confirmed:
+            return
+        _host = str(host or self.target)
+        try:
+            import db.mongo_client as _dbm
+            await _dbm.store_persistence(
+                session_id=self.session_id, host=_host, mechanism=mechanism,
+                technique=technique, confirmed=True, found_by="persistence")
+        except Exception:
+            pass
+        try:
+            await self._emit("persistence_planted", {
+                "session_id": self.session_id, "host": _host,
+                "mechanism": mechanism, "technique": technique})
+        except Exception:
+            pass
+
     async def run(self, target: str, os_type: str = "linux", **kwargs: Any) -> SubagentResult:
         """
         Run persistence establishment toolchain.
@@ -95,6 +118,7 @@ class PersistenceSubagent(BaseSubagent):
             {"options": "-l"},
         )
         cron_confirmed = "pentest-persistence" in cron_verify
+        await self._record_persistence(target, "cron", "cron reverse-shell backdoor", cron_confirmed)
 
         await self.store_finding(Finding(
             title="Persistence: Cron Job Backdoor Established",
@@ -141,6 +165,7 @@ class PersistenceSubagent(BaseSubagent):
             {"options": "is-enabled health-monitor.service 2>&1"},
         )
         svc_confirmed = "enabled" in svc_verify.lower()
+        await self._record_persistence(target, "systemd_service", "systemd service reverse shell", svc_confirmed)
 
         await self.store_finding(Finding(
             title="Persistence: Systemd Service Backdoor Established",
@@ -180,6 +205,7 @@ class PersistenceSubagent(BaseSubagent):
             {"options": "-c \"cat ~/.ssh/authorized_keys 2>/dev/null | tail -3\""},
         )
         ssh_confirmed = "pentest@audit" in ssh_verify
+        await self._record_persistence(target, "ssh_authorized_key", "attacker key in authorized_keys", ssh_confirmed)
 
         await self.store_finding(Finding(
             title="Persistence: SSH Authorized Key Injected",
@@ -216,6 +242,7 @@ class PersistenceSubagent(BaseSubagent):
             {"options": "-c \"tail -5 ~/.bashrc\""},
         )
         bashrc_confirmed = "sys-update-check" in bashrc_verify
+        await self._record_persistence(target, "bashrc", "~/.bashrc login trigger", bashrc_confirmed)
 
         await self.store_finding(Finding(
             title="Persistence: .bashrc Backdoor Injected",
@@ -265,6 +292,7 @@ class PersistenceSubagent(BaseSubagent):
             {"options": "/query /tn \"WindowsUpdateCheck\" 2>&1"},
         )
         schtask_confirmed = "WindowsUpdateCheck" in schtask_verify
+        await self._record_persistence(target, "scheduled_task", "Windows scheduled task", schtask_confirmed)
 
         await self.store_finding(Finding(
             title="Persistence: Windows Scheduled Task Created",
@@ -305,6 +333,7 @@ class PersistenceSubagent(BaseSubagent):
             )},
         )
         reg_confirmed = "SysHealthCheck" in reg_verify
+        await self._record_persistence(target, "registry_run_key", "registry Run key", reg_confirmed)
 
         await self.store_finding(Finding(
             title="Persistence: Registry Run Key Backdoor Set",
@@ -342,6 +371,7 @@ class PersistenceSubagent(BaseSubagent):
             {"options": "/list /allusers 2>&1"},
         )
         bits_confirmed = "SysUpdate" in bits_verify
+        await self._record_persistence(target, "bits_job", "BITS transfer job", bits_confirmed)
 
         await self.store_finding(Finding(
             title="Persistence: BITS Job Persistence Configured",
@@ -397,6 +427,7 @@ class PersistenceSubagent(BaseSubagent):
             )},
         )
         wmi_confirmed = "PentestFilter" in wmi_verify
+        await self._record_persistence(target, "wmi_subscription", "WMI event subscription", wmi_confirmed)
 
         await self.store_finding(Finding(
             title="Persistence: WMI Event Subscription Established",

@@ -77,7 +77,7 @@ function resolveCssVar(token, fallback) {
 // ── Sub-components ────────────────────────────────────────────────────────────
 
 function TabBtn({ label, active, onClick, badge }) {
-  return React.createElement('button', {
+  return React.createElement('button', { 'data-slot': 'AttackGraph.TabBtn',
     onClick,
     style: {
       padding: '5px 14px', borderRadius: 6, cursor: 'pointer', fontSize: 11,
@@ -101,7 +101,7 @@ function TabBtn({ label, active, onClick, badge }) {
 
 function CopyBtn({ text }) {
   const [copied, setCopied] = useState(false);
-  return React.createElement('button', {
+  return React.createElement('button', { 'data-slot': 'AttackGraph.CopyBtn',
     onClick: (e) => { e.stopPropagation(); copyText(text); setCopied(true); setTimeout(() => setCopied(false), 1500); },
     style: {
       padding: '2px 8px', borderRadius: 4, border: '1px solid var(--border)',
@@ -114,7 +114,7 @@ function CopyBtn({ text }) {
 function StepCard({ step, index }) {
   const [expanded, setExpanded] = useState(false);
   const mitreColor = 'var(--cyan)';
-  return React.createElement('div', {
+  return React.createElement('div', { 'data-slot': 'AttackGraph.StepCard',
     style: {
       borderRadius: 6, border: '1px solid var(--border)',
       background: 'var(--bg-elevated)', overflow: 'hidden',
@@ -191,7 +191,7 @@ function ChainCard({ chain, isRecommended, isExpanded, onToggle }) {
   const pColor = IMPACT_COLOR[chain.impact] || 'var(--text-muted)';
   const pc = probColor(chain.probability || 0);
 
-  return React.createElement('div', {
+  return React.createElement('div', { 'data-slot': 'AttackGraph.ChainCard',
     style: {
       borderRadius: 8,
       border: `1px solid ${isRecommended ? 'rgba(0,229,160,0.4)' : 'var(--border)'}`,
@@ -328,7 +328,7 @@ function Neo4jSetup({ onConnected }) {
       }
     });
 
-  return React.createElement('div', {
+  return React.createElement('div', { 'data-slot': 'AttackGraph.Neo4jSetup',
     style: {
       maxWidth: 440, margin: '0 auto', padding: '24px 28px', borderRadius: 10,
       background: 'var(--bg-surface)', border: '1px solid var(--border)',
@@ -538,7 +538,7 @@ function StellarParticleCanvas({ nodes, edges }) {
 
   // ── Empty state ────────────────────────────────────────────────────────
   if (!nodes || nodes.length === 0) {
-    return React.createElement('div', {
+    return React.createElement('div', { 'data-slot': 'AttackGraph.StellarParticleCanvas',
       style: {
         display: 'flex', alignItems: 'center', justifyContent: 'center',
         height: '70vh', color: 'var(--text-muted)',
@@ -690,7 +690,7 @@ function AttackGraph(props) {
   const stellarEdges = liveEdges.length > 0 ? liveEdges : edges;
 
   // ── RENDER ─────────────────────────────────────────────────────────────────
-  return React.createElement('div', {
+  return React.createElement('div', { 'data-slot': 'AttackGraph.AttackGraph',
     'data-view-mode': vm,
     className: vm === 'CLIENT' ? 'client-mode' : undefined,
     style: { display:'flex', flexDirection:'column', height:'100%', padding:16, background:'var(--bg-base)', gap:12, overflowY:'auto' }

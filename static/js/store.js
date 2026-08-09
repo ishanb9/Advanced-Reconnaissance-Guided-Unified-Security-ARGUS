@@ -170,10 +170,6 @@ const INIT = {
   operatorMode:     'guided',   // 'guided' | 'auto'
   guidanceHistory:  [],         // [{directive, note, tool, dns_host, ts}] — last 20
 
-  // Ask bar state — last answered question result
-  lastQuestionResult: null,     // { question, answer, evidence, layer, state, finding_id } | null
-  questionHistory:    [],       // last 20 question/answer pairs
-
   // Tool timeout popup — set when a tool exceeds its deadline
   toolTimeoutWarning: null,     // null | {tool, subagent, elapsed_sec, deadline_sec}
   tokenBudgetPrompt:  null,     // null | {target, tokens_used, budget, wait_sec} — human extend/cut-off gate
@@ -1161,15 +1157,6 @@ function reducer(state, action) {
       return { ...state, guidanceHistory: [entry, ...state.guidanceHistory].slice(0, 20) };
     }
 
-    case 'QUESTION_ANSWERED': {
-      const qEntry = { ...action.payload, ts: new Date().toLocaleTimeString([], { hour12: false }) };
-      return {
-        ...state,
-        lastQuestionResult: qEntry,
-        questionHistory: [qEntry, ...state.questionHistory].slice(0, 20),
-      };
-    }
-
     // ── v3: Credentials ───────────────────────────────────
     case 'CREDENTIAL_FOUND': {
       const cred = action.payload;
@@ -1524,6 +1511,14 @@ function reducer(state, action) {
       else if (kind === 'approval') push('approvals');
       return { ...state, fuzzCampaign: c };
     }
+    case 'FUZZ_CAMPAIGN_APPROVAL_RESOLVED': {
+      // [90] A human approved/rejected a gated PoC — drop it from the pending column
+      // so the operator isn't asked to decide the same PoC twice.
+      const aid = (action.payload || {}).approval_id;
+      const c = { ...(state.fuzzCampaign || {}) };
+      c.approvals = (c.approvals || []).filter(a => a && a.approval_id !== aid);
+      return { ...state, fuzzCampaign: c };
+    }
 
     // ── Red-Team Expert reducers ────────────────────────────────────────
     case 'EXPERT_STATUS': {
@@ -1673,8 +1668,41 @@ function reducer(state, action) {
         selectionId: p.selection_id || '',
         domain:      p.domain || '',
         candidates:  Array.isArray(p.candidates) ? p.candidates : [],
+        // Full DNS record set (A/AAAA/NS/MX/TXT/SOA/CNAME/CAA/SRV/PTR + AXFR +
+        // wildcard) so the operator picks targets from the same data DNSDumpster
+        // would show.  Dropping these here is why the pick dialog had no context.
+        dnsRecords:  (p.dns_records && typeof p.dns_records === 'object') ? p.dns_records : null,
+        dnsSummary:  (p.dns_summary && typeof p.dns_summary === 'object') ? p.dns_summary : {},
+        // DERIVED per-host authorization, for pre-launch review.  The operator can
+        // change it per host; `authzOverrides` holds only what they actually changed
+        // so an untouched host keeps the fail-closed derived grant.
+        authorization: (p.authorization && typeof p.authorization === 'object') ? p.authorization : {},
+        authzProfiles: Array.isArray(p.authz_profiles) ? p.authz_profiles : [],
+        authzOverrides: {},
         progress:    (state.targetSelection?.progress) || [],
         resolved:    false,
+      }};
+    }
+
+    case 'TARGET_SELECTION_AUTHZ': {
+      // Operator changed one host's authorization in the pre-launch review.
+      const { host, profile } = action.payload || {};
+      if (!host) return state;
+      const prev = state.targetSelection || {};
+      const next = { ...(prev.authzOverrides || {}) };
+      if (profile) next[host] = profile; else delete next[host];
+      return { ...state, targetSelection: { ...prev, authzOverrides: next } };
+    }
+
+    case 'TARGET_SELECTION_DNS': {
+      // dns_records_complete can land before OR after the selection request.
+      const p = action.payload || {};
+      return { ...state, targetSelection: {
+        ...(state.targetSelection || {}),
+        dnsRecords: (p.records && typeof p.records === 'object') ? p.records
+                    : ((state.targetSelection || {}).dnsRecords || null),
+        dnsSummary: (p.summary && typeof p.summary === 'object') ? p.summary
+                    : ((state.targetSelection || {}).dnsSummary || {}),
       }};
     }
 
@@ -2475,15 +2503,6 @@ function routeWsEvent(msg, dispatch, shellListeners, sessionId) {
       }});
       break;
 
-    case 'question_answered':
-      // Store the latest answered question for the Ask bar to display
-      dispatch({ type: 'QUESTION_ANSWERED', payload: data });
-      dispatch({ type: 'FEED_ENTRY', payload: {
-        ts, agent: 'master', eventType: 'question_answered',
-        message: `Q: ${data.question} → ${data.answer || 'unanswerable'}`, data
-      }});
-      break;
-
     // ── v3: Subagent lifecycle events ─────────────────────
     // Events may arrive as flat dict (base_subagent raw broadcast, no .data wrapper)
     // OR as WebSocketMessage (msg.data = payload). Normalise both here.
@@ -2969,6 +2988,11 @@ function routeWsEvent(msg, dispatch, shellListeners, sessionId) {
       }});
       break;
     }
+    // [80] The backend confirms a resolved blocker with `engagement_blocker_ack`
+    // (agent_server.py), but the store only listened for the never-emitted
+    // `engagement_blocker_resolved`, so the confirmation feed entry never appeared.
+    // Handle both names with the same logic.
+    case 'engagement_blocker_ack':
     case 'engagement_blocker_resolved': {
       const bk = data || msg;
       dispatch({ type: 'BLOCKER_CLEAR' });
@@ -3246,6 +3270,21 @@ function routeWsEvent(msg, dispatch, shellListeners, sessionId) {
     }
 
     // ── Awaiting confirmation (exploit gate or web gate) ──
+    // [26] The reasoning loop emits reasoning_confirmation_required and BLOCKS on the
+    // key reasoning_{action_id}. The store had no case, so the gate was unsatisfiable
+    // from the UI (the operator could never confirm and the loop timed out). Surface
+    // it on the same feed the operator confirms from — the backend resolver
+    // (master.confirm_action) already accepts reasoning_{action_id}.
+    case 'reasoning_confirmation_required': {
+      const rd = data || msg;
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'master', eventType: 'awaiting_confirmation',
+        message: `⚠ Reasoning action needs confirmation: ${rd.action || rd.tool || rd.action_id || ''}`,
+        data: rd,
+      }});
+      break;
+    }
+
     case 'awaiting_confirmation': {
       const phase = data?.phase || '';
       if (phase === 'web_testing') {
@@ -3668,6 +3707,53 @@ function routeWsEvent(msg, dispatch, shellListeners, sessionId) {
       dispatch({ type: 'TARGET_SELECTION_SET', payload: data });
       break;
 
+    // ── Per-target authorization, made VISIBLE ──────────────────────────────
+    // These three were emitted by the enforcement path but had no handler, so a
+    // refusal happened silently: the operator saw a tool produce nothing and had
+    // no way to tell "found nothing" from "was not allowed to look".  An
+    // authorization decision is an operator-facing event, not a log line.
+    case 'target_authorization':
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'authz', eventType: 'target_authorization',
+        message: data?.message
+          || `Authorization for ${data?.target || ''}: ceiling=${data?.ceiling || '?'}, `
+             + `exploitation=${data?.exploitation || '?'}`,
+        data,
+      }});
+      break;
+
+    case 'authorization_block':
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'authz', eventType: 'authorization_block',
+        severity: data?.needs_human_approval ? 'warning' : 'error',
+        message: data?.message
+          || `Per-target authorization ${String(data?.decision || 'blocked').toUpperCase()} `
+             + `for ${data?.tool || 'tool'} on ${data?.target || ''}`
+             + (data?.needs_human_approval ? ' — awaiting your approval' : ''),
+        data,
+      }});
+      break;
+
+    case 'authorization_approval_consumed':
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'authz', eventType: 'authorization_approval_consumed',
+        severity: 'warning',
+        message: data?.message
+          || `Human-approved ${data?.tool || 'action'} on ${data?.target || ''} — `
+             + 'single-use authorization grant spent',
+        data,
+      }});
+      break;
+
+    case 'dns_records_complete':
+      dispatch({ type: 'TARGET_SELECTION_DNS', payload: data });
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'recon', eventType: 'dns_records_complete',
+        message: data?.message || `DNS record sweep complete for ${data?.domain || ''}`,
+        data,
+      }});
+      break;
+
     case 'subdomain_hunt_start':
     case 'subdomain_hunt_progress':
       dispatch({ type: 'TARGET_SELECTION_PROGRESS', payload: data });
@@ -4003,6 +4089,58 @@ function routeWsEvent(msg, dispatch, shellListeners, sessionId) {
         message: `⬆ Severity re-graded ${_ov} → ${_nv}: ${data.title || 'finding'}`
                  + (data.rationale ? ` — ${data.rationale}` : ''),
         data,
+      }});
+      break;
+    }
+
+    // ── Graph control plane (flag-gated engine) ──────────────────────────
+    // Without these the WS switch would fall through to `default: break` and every
+    // per-node event would be SILENTLY DROPPED — the operator would see a blank
+    // panel while the graph engine was actually running (G6).
+    case 'graph_engine_start':
+    case 'graph_engine_done':
+    case 'graph_node_start':
+    case 'graph_node_end':
+    case 'graph_node_failed':
+    case 'graph_safety_gate':
+    case 'graph_finding_promoted':
+    case 'graph_terminal':
+    case 'graph_report_handoff':
+    case 'graph_engine_rollback':
+    case 'graph_engine_failed_after_fallback':
+    case 'graph_engine_unavailable': {
+      const node = data?.node ? ` [${data.node}]` : '';
+      const hostTag = data?.host ? ` ${data.host}` : '';
+      let msg;
+      switch (type) {
+        case 'graph_engine_start':
+          msg = `▦ Graph engine started on${hostTag}`; break;
+        case 'graph_engine_done':
+          msg = `▦ Graph engine complete on${hostTag} — ${data?.terminal_reason || 'done'}`; break;
+        case 'graph_node_start':
+          msg = `▸ node${node} running${hostTag}`; break;
+        case 'graph_node_end':
+          msg = `✓ node${node} ok${hostTag}${typeof data?.duration_sec === 'number' ? ` (${data.duration_sec}s)` : ''}`; break;
+        case 'graph_node_failed':
+          msg = `✗ node${node} failed${hostTag}: ${data?.error || ''}${data?.will_retry ? ' — retrying' : ''}`; break;
+        case 'graph_safety_gate':
+          msg = `🛡 safety_gate ${String(data?.decision || '').toUpperCase()} ${data?.tool || ''}${hostTag}`
+                + (data?.reason ? ` — ${data.reason}` : ''); break;
+        case 'graph_finding_promoted':
+          msg = `🎯 finding promoted${hostTag}: [${String(data?.severity || 'info').toUpperCase()}] ${data?.title || ''}`; break;
+        case 'graph_terminal':
+          msg = `■ graph halted${hostTag} — ${data?.reason || 'terminal'}`; break;
+        case 'graph_report_handoff':
+          msg = `▦ graph → report handoff${hostTag}`; break;
+        case 'graph_engine_rollback':
+          msg = `⚠ DEGRADED${hostTag}: graph engine failed at${node} — continuing on the LOOP engine (${data?.reason || ''})`; break;
+        case 'graph_engine_failed_after_fallback':
+          msg = `⛔ graph engine failed AGAIN after its one fallback${hostTag} — not silently continuing`; break;
+        default:
+          msg = `⚠ graph engine unavailable${hostTag} — running the LOOP engine (${data?.error || ''})`;
+      }
+      dispatch({ type: 'FEED_ENTRY', payload: {
+        ts, agent: 'graph', eventType: type, message: msg, data,
       }});
       break;
     }

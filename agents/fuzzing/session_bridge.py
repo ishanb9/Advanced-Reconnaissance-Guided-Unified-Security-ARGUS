@@ -62,7 +62,15 @@ def build_ctx(*, session_id: str, agent: Any, target: str, modality: str,
     ctx.canary = _proof.new_canary()
     token = _proof.new_oob_token()
     _proof.arm_oob(token)
-    ctx.oob_url = _proof.oob_url(os.environ.get("ARGUS_OOB_BASE", ""), token)
+    # [91] The FastAPI receiver is mounted at /fuzz/oob/{token}, but the callback URL
+    # was built as {base}/{token} — so even a correct ARGUS_OOB_BASE 404'd, mark_oob_hit
+    # never fired, and the SSRF / blind-RCE OOB oracles could never register a hit.
+    # Prepend the real route so {base}/fuzz/oob/{token} matches (token stays the LAST
+    # segment so proof._oob_token()'s rsplit('/',1)[-1] recovery still works).  Unset
+    # still degrades to the non-routable http://oob.invalid/<token> (honestly inert).
+    _oob_base = os.environ.get("ARGUS_OOB_BASE", "")
+    ctx.oob_url = _proof.oob_url(
+        (_oob_base.rstrip("/") + "/fuzz/oob") if _oob_base else "", token)
     ctx.scope_hosts = _scope_hosts(agent)
     # Throttle this campaign when a LIVE scan is running (agent present) so the
     # engagement gets LLM/tool priority; a standalone campaign (no agent) runs full speed.

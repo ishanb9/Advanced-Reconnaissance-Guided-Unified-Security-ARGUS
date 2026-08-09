@@ -71,7 +71,7 @@ function LiveLog({ lines }) {
   useEffect(() => {
     if (ref.current) ref.current.scrollTop = ref.current.scrollHeight;
   }, [lines]);
-  return React.createElement('div', {
+  return React.createElement('div', { 'data-slot': 'SubagentConsolePage.LiveLog',
     ref,
     style: {
       background: 'var(--bg-surface)', border: '1px solid var(--border)', borderRadius: 4,
@@ -193,7 +193,7 @@ function SubagentConsolePage({ sessionId }) {
     grouped[group].push(name);
   });
 
-  return React.createElement('div', { style: { padding: 24 } },
+  return React.createElement('div', { 'data-slot': 'SubagentConsolePage.SubagentConsolePage', style: { padding: 24 } },
 
     React.createElement(Title, { level: 3, style: { color: 'var(--cyan)', marginBottom: 16 } },
       '🤖 Subagent Console'),

@@ -71,12 +71,22 @@ def _oob_or_canary(out: Dict[str, Any], ctx: CampaignCtx) -> bool:
 
 
 def _oracle_rce(out, ctx) -> Verdict:
-    if _canary_hit(out, ctx):
-        return Verdict(True, "canary", "command output returned the proof canary",
-                       _excerpt(out, ctx.canary))
+    # [89] Require EXECUTION proof, not mere reflection.  The exec-marker (the tagged
+    # arithmetic PRODUCT) can only appear if the target EVALUATED the injected expression;
+    # a target/PoC that merely echoes the input back returns the literal `$((a*b))`, whose
+    # product never appears — so it is NOT accepted as PROVEN RCE.  OOB callback also proves.
+    text = _text(out)
+    try:
+        from agents.fuzzing.payloadgen import rce_exec_probe
+        _, _exec_marker = rce_exec_probe(ctx.canary)
+    except Exception:
+        _exec_marker = ""
+    if _exec_marker and _exec_marker in text:
+        return Verdict(True, "exec", "target evaluated the injected expression (exec marker present)",
+                       _excerpt(out, _exec_marker))
     if oob_fired(_oob_token(ctx)):
         return Verdict(True, "oob", "target made the expected out-of-band callback")
-    return Verdict(False, "", "no canary in output and no OOB callback")
+    return Verdict(False, "", "no exec-marker in output and no OOB callback")
 
 
 def _oracle_sqli(out, ctx) -> Verdict:

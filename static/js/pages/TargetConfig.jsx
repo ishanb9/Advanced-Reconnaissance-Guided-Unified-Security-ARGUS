@@ -177,7 +177,7 @@ function TargetConfig() {
   const row = { marginBottom: 14 };
 
   if (launched) {
-    return React.createElement('div', {
+    return React.createElement('div', { 'data-slot': 'TargetConfig.TargetConfig',
       style: {
         maxWidth: 520, margin: '60px auto', padding: 40,
         display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 14,
@@ -252,7 +252,11 @@ function TargetConfig() {
         style: { fontSize: 10, color: 'var(--text-muted)', marginBottom: 8,
                  textTransform: 'uppercase', letterSpacing: 1, fontFamily: 'var(--font-mono)' }
       }, '⏱ Recent Targets'),
+      // OVERFLOW: recent targets is a wrapped card row that grows without bound
+      // as history accumulates. Capped + internally scrolled (.a-chiprow-wrap).
       React.createElement('div', {
+        className: 'a-chiprow-wrap',
+        'data-slot': 'TargetConfig.recentTargets',
         style: { display: 'flex', gap: 8, flexWrap: 'wrap' }
       },
         recentTargets.map((t, i) => {

@@ -1,0 +1,91 @@
+/* ═══════════════════════════════════════════════════════════════════════
+   AVATAR · REDCELL — offensive red-team rig
+   Active exploitation. Blood-and-black strike console: angular clipped
+   corners, hazard striping, bone text, sharp fast motion, threat-first.
+   ═══════════════════════════════════════════════════════════════════════ */
+:root[data-avatar="redcell"] {
+  --avatar-name: 'REDCELL';
+
+  /* SURFACE */
+  --bg-base:      #0A0607;
+  --bg-void:      #0A0607;
+  --bg-surface:   #120C0E;
+  --bg-panel:     #120C0E;
+  --bg-elevated:  #1B1113;
+  --bg-glass:     rgba(27, 17, 19, 0.84);
+  --bg-sidebar:   #070405;
+
+  /* BORDERS */
+  --border-dim:   #2A1518;
+  --border:       #472126;
+  --border-light: #472126;
+  --border-bright:#6E3138;
+  --border-focus: var(--accent);
+
+  /* PRIMARY — blood red */
+  --accent:       #E02435;
+  --accent-dim:   #9E1826;
+  --accent-glow:  rgba(224, 36, 53, 0.26);
+  --accent-subtle:rgba(224, 36, 53, 0.08);
+
+  --cyan:         #FF6B5A;
+  --violet:       #C2884A;          /* brass secondary */
+  --violet-glow:  rgba(194, 136, 74, 0.28);
+
+  /* TEXT — bone on black */
+  --text-primary: #F2E6E0;
+  --text-secondary:#B39A94;
+  --text-muted:   #6E5A57;
+
+  /* SEVERITY — escalated warm ramp */
+  --critical:     #FF2740;
+  --high:         #FF7A2F;
+  --medium:       #FFB627;
+  --amber:        #FFB627;
+  --low:          #6BD97F;
+  --info:         #C2884A;
+  --supernova:    #FF3D8A;
+  --critical-bg:  rgba(255, 39, 64, 0.14);   --critical-bd: rgba(255, 39, 64, 0.52);
+  --high-bg:      rgba(255,122, 47, 0.13);   --high-bd:     rgba(255,122, 47, 0.48);
+  --medium-bg:    rgba(255,182, 39, 0.13);   --medium-bd:   rgba(255,182, 39, 0.48);
+  --low-bg:       rgba(107,217,127, 0.11);   --low-bd:      rgba(107,217,127, 0.42);
+  --info-bg:      rgba(194,136, 74, 0.12);   --info-bd:     rgba(194,136, 74, 0.45);
+
+  /* TYPE — condensed grotesk + mono, heavy weights */
+  --font-ui:      'Inter', 'Arial Narrow', system-ui, sans-serif;
+  --font-display: 'Inter', 'Arial Narrow', system-ui, sans-serif;
+  --font-mono:    'JetBrains Mono', 'Courier New', monospace;
+
+  /* SURFACE LANGUAGE — angular, clipped, hard edges */
+  --panel-radius: 2px;
+  --panel-border: 1px solid var(--border);
+  --panel-bg: linear-gradient(180deg, #140D0F 0%, #0D0809 100%);
+  --panel-shadow: 0 6px 20px -12px rgba(0,0,0,.95),
+                  inset 0 1px 0 0 rgba(255,255,255,.03);
+  --rail-gradient: linear-gradient(90deg, var(--accent), transparent 70%);
+
+  /* DENSITY / MOTION / TEXTURE */
+  --density: 0.88;
+  --tex-opacity: 0.22;
+  --dur-1: 90ms; --dur-2: 140ms; --dur-3: 260ms; --dur-4: 420ms;
+  --radius: 2px; --radius-md: 3px; --radius-lg: 4px; --radius-xl: 6px;
+}
+
+/* Angular clipped corner on primary panels */
+:root[data-avatar="redcell"] .panel {
+  clip-path: polygon(0 0, calc(100% - 12px) 0, 100% 12px, 100% 100%, 0 100%);
+}
+
+/* Aggressive uppercase display chrome */
+:root[data-avatar="redcell"] .page-title,
+:root[data-avatar="redcell"] .section-title {
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 800;
+}
+
+/* Critical items get a hazard-stripe left edge */
+:root[data-avatar="redcell"] .crit-badge,
+:root[data-avatar="redcell"] .a-sev-critical {
+  border-left: 3px solid var(--critical);
+}

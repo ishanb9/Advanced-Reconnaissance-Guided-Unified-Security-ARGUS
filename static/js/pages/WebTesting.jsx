@@ -47,7 +47,7 @@ const DEFAULT_PHASES = [
 
 function StatusPill({ status }) {
   const meta = STATUS_META[status] || STATUS_META.pending;
-  return React.createElement('span', {
+  return React.createElement('span', { 'data-slot': 'WebTesting.StatusPill',
     style: {
       display: 'inline-flex', alignItems: 'center', gap: 4,
       padding: '2px 8px', borderRadius: 10, fontSize: 9, fontWeight: 700,
@@ -61,7 +61,7 @@ function StatusPill({ status }) {
 
 function PhaseCard({ phase, runtime, onClick, isOpen }) {
   const meta = STATUS_META[runtime?.status || 'pending'];
-  return React.createElement('div', {
+  return React.createElement('div', { 'data-slot': 'WebTesting.PhaseCard',
     onClick,
     style: {
       background: 'var(--bg-surface)',
@@ -100,7 +100,7 @@ function PhaseCard({ phase, runtime, onClick, isOpen }) {
 function EvidenceDrawer({ phase, runtime }) {
   if (!phase) return null;
   const meta = STATUS_META[runtime?.status || 'pending'];
-  return React.createElement('div', {
+  return React.createElement('div', { 'data-slot': 'WebTesting.EvidenceDrawer',
     style: {
       marginTop: 14, background: 'var(--bg-surface)',
       border: `1px solid ${meta.color}40`, borderRadius: 12, padding: 18,
@@ -159,7 +159,7 @@ function FindingsByPhase({ phaseId, findings }) {
     });
   }, [phaseId, findings]);
   if (!matched.length) return null;
-  return React.createElement('div', {
+  return React.createElement('div', { 'data-slot': 'WebTesting.FindingsByPhase',
     style: { marginTop: 10 }
   },
     React.createElement('div', {
@@ -216,7 +216,7 @@ function WebTesting({ sessionId, activeSession }) {
   const totalFindings = Object.values(phaseRuntime || {})
     .reduce((acc, r) => acc + (r.findings || 0), 0);
 
-  return React.createElement('div', {
+  return React.createElement('div', { 'data-slot': 'WebTesting.WebTesting',
     style: {
       maxWidth: 1400, margin: '0 auto',
       fontFamily: 'var(--font-ui)', color: 'var(--text-primary)', padding: '4px 0',

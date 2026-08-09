@@ -47,6 +47,7 @@ import asyncio
 import hashlib
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
@@ -363,20 +364,132 @@ class CredentialVault:
         return True
 
 
+# ── Spray planning (pure) ─────────────────────────────────────────────────
+# Ports / service-names that expose a credential auth surface the vault can spray.
+_AUTH_PORTS = {21: "ftp", 22: "ssh", 139: "smb", 445: "smb", 1433: "mssql",
+               3389: "rdp", 5985: "winrm", 5986: "winrm"}
+_AUTH_SVCNAMES = {
+    "ssh": "ssh", "ftp": "ftp", "smb": "smb", "microsoft-ds": "smb",
+    "netbios-ssn": "smb", "ms-wbt-server": "rdp", "rdp": "rdp",
+    "ms-sql-s": "mssql", "mssql": "mssql", "winrm": "winrm", "wsman": "winrm",
+}
+
+
+def _cred_from_intel(c: Dict[str, Any]) -> Optional["Credential"]:
+    """Adapt a loose ARGUS intel credential dict into a typed Credential.
+    Returns None for a cred with nothing sprayable (e.g. a bare note)."""
+    if not isinstance(c, dict):
+        return None
+    user = c.get("user") or c.get("username")
+    pwd = c.get("password") or c.get("pass")
+    secret = c.get("secret") or c.get("hash")
+    ctype = str(c.get("type") or "").lower()
+    if ctype not in CRED_TYPES:
+        ctype = "password" if pwd else ("ntlm_hash" if secret else "password")
+    if ctype == "password" and not (user and pwd):
+        return None
+    if ctype in ("ssh_key", "ntlm_hash", "api_token", "db_dsn") and not secret:
+        return None
+    return Credential(cred_type=ctype, username=user, password=pwd, secret=secret,
+                      domain=c.get("domain"),
+                      source_host=c.get("source_host") or c.get("host"),
+                      source_path=c.get("source_path"),
+                      notes=str(c.get("note") or ""))
+
+
+def spray_plan(intel: Dict[str, Any],
+               scope_hosts: Optional[set] = None
+               ) -> Tuple[List["Credential"], List[Tuple[str, int, str]]]:
+    """From ARGUS intel, derive (sprayable creds, auth targets) so a recovered
+    credential can be re-used across the in-scope auth surface — the pivot that
+    turns 'found a cred' into 'confirmed reuse / foothold'.  Pure + defensive.
+
+    Scope-safe: a host is only ever a target when it is in ``scope_hosts`` (or
+    scope_hosts is None → single-host intel, the intel's own target)."""
+    intel = intel or {}
+    creds: List[Credential] = []
+    for c in (intel.get("credentials") or []):
+        cred = _cred_from_intel(c)
+        if cred is not None:
+            creds.append(cred)
+
+    host = str(intel.get("target_host") or intel.get("target_ip")
+               or intel.get("web_host") or intel.get("target") or "").strip()
+    if host.startswith("http"):
+        host = re.sub(r"^https?://", "", host).split("/")[0].split(":")[0]
+    targets: List[Tuple[str, int, str]] = []
+    seen: set = set()
+
+    def _add(h: str, port: int, svc: str) -> None:
+        if not h or not svc:
+            return
+        if scope_hosts is not None and h not in scope_hosts:
+            return
+        key = (h, int(port), svc)
+        if key not in seen:
+            seen.add(key)
+            targets.append((h, int(port), svc))
+
+    svcs = intel.get("services")
+    if isinstance(svcs, dict):
+        for port, meta in svcs.items():
+            try:
+                p = int(str(port))
+            except (TypeError, ValueError):
+                continue
+            name = str((meta or {}).get("service") or "").lower() if isinstance(meta, dict) else ""
+            _add(host, p, _AUTH_SVCNAMES.get(name) or _AUTH_PORTS.get(p, ""))
+    for p in (intel.get("open_ports") or []):
+        try:
+            pi = int(str(p))
+        except (TypeError, ValueError):
+            continue
+        _add(host, pi, _AUTH_PORTS.get(pi, ""))
+    return creds, targets
+
+
 # ── Singleton accessor ───────────────────────────────────────────────────
 
-_VAULT: Optional[CredentialVault] = None
+# One vault PER ENGAGEMENT.  This was a single process-wide instance shared by
+# every agent and every session, so credentials harvested from one client stayed
+# live in memory — and sprayable — throughout the next client's engagement.  A
+# recovered credential is the most sensitive thing ARGUS holds and the least
+# transferable: it is worthless against a different client and catastrophic if
+# offered to one.  Keyed by session, dropped when the engagement ends.
+_VAULTS: Dict[str, CredentialVault] = {}
+
+#: Bucket used when a caller has no session in hand.  Kept so legacy call sites
+#: keep working, but it is NOT shared with any real engagement.
+_UNSCOPED = "__unscoped__"
 
 
-def get_vault() -> CredentialVault:
-    """Process-wide singleton.  All agents share the same vault."""
-    global _VAULT
-    if _VAULT is None:
-        _VAULT = CredentialVault()
-    return _VAULT
+def get_vault(session_id: Optional[str] = None) -> CredentialVault:
+    """Return the vault for ONE engagement.
+
+    Callers that know their session must pass it; anything else lands in an
+    isolated unscoped bucket rather than in another engagement's vault.
+    """
+    key = str(session_id or _UNSCOPED)
+    v = _VAULTS.get(key)
+    if v is None:
+        v = _VAULTS[key] = CredentialVault()
+    return v
+
+
+def drop_vault(session_id: Optional[str] = None) -> bool:
+    """Forget an engagement's credentials.  Call at engagement teardown.
+
+    Returns True when a vault was actually discarded.
+    """
+    return _VAULTS.pop(str(session_id or _UNSCOPED), None) is not None
+
+
+def vault_sessions() -> List[str]:
+    """Session keys currently holding credentials — for teardown assertions."""
+    return sorted(_VAULTS.keys())
 
 
 __all__ = [
-    "Credential", "SprayHit", "CredentialVault", "get_vault",
-    "CRED_TYPES",
+    "Credential", "SprayHit", "CredentialVault", "get_vault", "drop_vault",
+    "vault_sessions", "CRED_TYPES", "spray_plan",
 ]

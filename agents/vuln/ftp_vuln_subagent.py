@@ -119,7 +119,12 @@ class FtpVulnSubagent(BaseSubagent):
                 f"-P /usr/share/seclists/Passwords/Common-Credentials/best15.txt "
                 f"-t 4 -o /tmp/ftp_brute.txt ftp://{target}:{port} 2>&1 | tail -10\""
             )})
-        hydra_hits = re.findall(r'\[{port}\]\s*\[ftp\]\s*host:\s*\S+\s*login:\s*(\S+)\s*password:\s*(\S+)', hydra_out)
+        # [54] hydra prints the service port in brackets, e.g. "[21][ftp] host: ...".
+        # This MUST be an f-string so {port} interpolates the real port — the old plain
+        # r-string matched the literal characters "{port}", which never appear in hydra
+        # output, so every cracked FTP credential was silently dropped.
+        hydra_hits = re.findall(
+            rf'\[{port}\]\s*\[ftp\]\s*host:\s*\S+\s*login:\s*(\S+)\s*password:\s*(\S+)', hydra_out)
         if hydra_hits:
             await self.store_finding(Finding(
                 title=f"FTP: Brute-Force Credentials Found — {hydra_hits[0][0]}:{hydra_hits[0][1]}",

@@ -31,6 +31,7 @@ import json
 import os
 import re
 from typing import Any, Dict, List, Tuple
+from knowledge.identifier_scrub import scrub_text as _scrub2
 
 # Generic action verbs that mark a real *technique* (not a static finding).
 # These are universal methodology words, never a specific vuln/payload.
@@ -102,10 +103,18 @@ def _scrub(text: str, target: str, intel: Any = None) -> str:
     hosts = set()
     if target:
         hosts.add(str(target))
-    for k in ("target", "target_host", "target_hostname", "domain", "fqdn"):
+    # The original set missed the keys that hold MOST of the names: subdomains,
+    # virtual_hosts, certificate CN/SANs and the organisation name.
+    for k in ("target", "target_host", "target_hostname", "domain", "fqdn",
+              "target_url", "apex", "organisation", "organization", "org",
+              "cert_cn", "cert_subject", "dc_ip"):
         v = intel.get(k)
         if v:
             hosts.add(str(v))
+    for key in ("subdomains", "virtual_hosts", "cert_sans", "cert_names",
+                "discovered_hosts", "scope_hosts", "target_scope"):
+        for _h in (intel.get(key) or []):
+            hosts.add(str(_h.get("host") if isinstance(_h, dict) else _h))
     for vh in (intel.get("vhosts") or []):
         hosts.add(str(vh.get("vhost") if isinstance(vh, dict) else vh))
     for h in (intel.get("hostnames") or []):
@@ -299,7 +308,8 @@ async def distill_and_store(*, master: Any, intel: Dict[str, Any], session_id: s
             cat = str(les.get("category") or "exploit").strip().lower()
             try:
                 added = kb.ingest_tip(
-                    text=full, category=cat, source=f"engagement_lesson:{session_id}",
+                    # No session id — it is a join key back to the client target.
+                    text=_scrub2(full), category=cat, source="engagement_lesson",
                     extra_metadata={"source_type": "engagement_lesson",
                                     "target_type": target_type,
                                     "outcome": "confirmed"})

@@ -1,0 +1,224 @@
+/* ═══════════════════════════════════════════════════════════════════════
+   ARGUS — DATA-HEAVY PANEL CONTAINMENT
+   ───────────────────────────────────────────────────────────────────────
+   Generalises the MissionControl host-selector / FindingsBoard objectives
+   fixes to every other panel that renders an unbounded list.
+
+   THE DEFECT CLASS
+     A panel renders `items.map(...)` with no max-height. With real data
+     (50 targets, 300 findings, a long LLM trace, a 5k-line tool output) the
+     panel grows without bound and either overlaps its neighbours, starves a
+     sibling that needed the space, or breaks grid-row alignment.
+
+   THE TREATMENT
+     Cap the panel and move the overflow INSIDE it. Applied via the
+     data-slot hooks added across all pages, so no page code changes.
+     Because the inline styles never set max-height/overflow, plain CSS
+     wins — no !important needed anywhere in this file.
+
+   TWO HARD RULES
+     1. NEVER cap a PAGE ROOT (slot where Page === Component). Capping a
+        page root turns the entire page into a small scroll box.
+     2. NEVER cap an ATOM (badge, pill, bar, gauge, sparkline, stat cell).
+        Those are sized by content and must not scroll.
+     Both rules are enforced by explicit selectors — this file only ever
+     names the specific panels it caps.
+
+   Nothing here hides content: every rule is max-height + overflow, so all
+   data remains reachable by scrolling. Slot parity is unaffected.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/* ── Cap scale (density-aware, viewport-relative) ─────────────────────────
+   clamp(FLOOR, preferred, CEILING) — the px FLOOR is load-bearing, not
+   decoration. `min(46vh, 460px)` collapses to 0 wherever `vh` resolves to 0
+   (headless/non-composited/print contexts, some embedded webviews), which
+   would give the panel max-height:0 and HIDE its content. A capped panel
+   must never be able to hide data, so every cap has a hard px floor.      */
+:root {
+  --cap-log:   clamp(220px, 46vh, 460px); /* streaming logs / raw output   */
+  --cap-list:  clamp(200px, 38vh, 380px); /* record lists (creds, hosts)   */
+  --cap-card:  clamp(180px, 30vh, 300px); /* cards in a uniform grid       */
+  --cap-strip: calc(112px * var(--density)); /* wrapped chip/pill rows     */
+}
+
+/* ═══ 1 · STREAMING LOGS & RAW OUTPUT ════════════════════════════════════
+   These are the most dangerous: a long-running scan can emit thousands of
+   lines. Scroll inside, and keep the newest content anchored at the bottom
+   where a live log is actually read.                                     */
+[data-slot="SubagentConsolePage.LiveLog"],
+[data-slot="AIObservability.CodeBlock"],
+[data-slot="ExploitLabPage.ELCodeBlock"],
+[data-slot="AIObservability.ToolExecutions"],
+[data-slot="AIObservability.ToolWaterfall"],
+[data-slot="AIObservability.RAGInspector"],
+[data-slot="AIObservability.LLMDeepDive"] {
+  max-height: var(--cap-log);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+/* Live logs read newest-last — keep the tail pinned while streaming. */
+[data-slot="SubagentConsolePage.LiveLog"] {
+  overflow-anchor: auto;
+  scroll-behavior: smooth;
+}
+
+/* ═══ 2 · RECORD LISTS ═══════════════════════════════════════════════════
+   Credentials, hosts, OSINT hits, subagent rows, intelligence feed.      */
+[data-slot="AIObservability.IntelligenceFeed"],
+[data-slot="AgentConsole.SubagentsPanel"],
+[data-slot="AgentConsole.SubagentMatrix"],
+[data-slot="MissionControl.HostOverviewGrid"],
+[data-slot="MissionControl.OperatorConsole"],
+[data-slot="MissionControl.AttackPhasePanel"],
+[data-slot="WebTesting.FindingsByPhase"],
+[data-slot="WebTesting.EvidenceDrawer"],
+[data-slot="FuzzingLabPage._flTriageFindings"],
+[data-slot="FuzzingLabPage._flCampaignView"],
+[data-slot="ReasoningEnginePage.NegativeMemoryCard"],
+[data-slot="ReasoningEnginePage.AttackPathCard"],
+[data-slot="ReasoningEnginePage.JustifiedActionCard"],
+/* Wrapped list panes added by hand — also named here so containment is
+   guaranteed by the SLOT alone and does not depend on the class surviving
+   a future edit (defence in depth; the class and the slot agree). */
+[data-slot="LateralPostPage.lateralFindings"],
+[data-slot="LateralPostPage.postFindings"],
+[data-slot="LateralPostPage.captures"],
+[data-slot="LateralPostPage.evidence"] {
+  max-height: var(--cap-list);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+/* ═══ 3 · GRID CARDS ═════════════════════════════════════════════════════
+   These sit in multi-column grids. One card growing tall drags the whole
+   row with it and wrecks alignment, so they get the tightest cap.        */
+[data-slot="RiskDashboard.LootCard"],
+[data-slot="RiskDashboard.TopHypothesesCard"],
+[data-slot="RiskDashboard.DeviceTaxonomyCard"],
+[data-slot="RiskDashboard.PrimerCoverageCard"],
+[data-slot="RiskDashboard.SeverityTreemap"],
+[data-slot="RiskDashboard.SessionInfoCard"],
+[data-slot="CredentialsPage.CredTypeDonut"],
+[data-slot="FuzzingLabPage._flTriageCard"],
+[data-slot="FuzzingLabPage._flCampaignStatus"],
+[data-slot="AttackGraph.ChainCard"],
+[data-slot="ExploitLabPage.ELAttemptCard"],
+[data-slot="WebTesting.PhaseCard"],
+[data-slot="ReasoningEnginePage.HypothesisCard"] {
+  max-height: var(--cap-card);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+/* ═══ 4 · WRAPPED CHIP / PILL ROWS ═══════════════════════════════════════
+   The MissionControl host-selector defect, generalised. A wrapped pill row
+   with 50+ entries must scroll, not grow.                                */
+[data-slot="MissionControl.HostSelector"],
+[data-slot="MissionControl.hostSelector"],
+[data-slot="MissionControl.FuzzTargetsBadge"],
+[data-slot="TargetConfig.recentTargets"],
+[data-slot="OsintIntel.StatsBar"] {
+  max-height: var(--cap-strip);
+  overflow-y: auto;
+  overflow-x: hidden;
+  align-content: flex-start;
+}
+
+/* ═══ 5 · OPT-IN CLASS for lists rendered inline in a page root ══════════
+   Some pages (Credentials, Lateral/Post, TargetConfig, UserAdmin, OSINT,
+   SessionHistory, ToolWorkshop, PayloadBuilder) render their lists
+   directly in the page body with no sub-component to hook, so they get an
+   explicit class instead.                                                */
+.a-listpane {
+  max-height: var(--cap-list);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  min-height: 0;
+}
+.a-logpane {
+  max-height: var(--cap-log);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  min-height: 0;
+}
+/* Wrapped chip/tag rows (pivot targets, scope lists, Ant <Space wrap>).
+   Caps the wrap height so a large target set scrolls instead of growing. */
+.a-chiprow-wrap {
+  max-height: var(--cap-strip);
+  overflow-y: auto;
+  overflow-x: hidden;
+  align-content: flex-start;
+  overscroll-behavior: contain;
+}
+
+/* ═══ 5b · ANT DESIGN TABLES ═════════════════════════════════════════════
+   CredentialsPage, LateralPostPage and SubagentConsolePage render Ant
+   <Table> without a `scroll` cap, so every harvested credential / row is
+   laid out at full height and the page grows unbounded. Capping the table
+   BODY (not the header) keeps column headers pinned and scrolls the rows —
+   which is what the `scroll={{y}}` prop would have done, achieved without
+   changing component props.                                               */
+[data-slot="CredentialsPage.CredentialsPage"] .ant-table-body,
+[data-slot="LateralPostPage.LateralPostPage"] .ant-table-body,
+[data-slot="SubagentConsolePage.SubagentConsolePage"] .ant-table-body,
+.a-tablepane .ant-table-body {
+  max-height: var(--cap-list);
+  overflow-y: auto !important;   /* Ant sets inline overflow on this node */
+}
+/* Keep the header row visible while the body scrolls. */
+[data-slot="CredentialsPage.CredentialsPage"] .ant-table-thead > tr > th,
+[data-slot="LateralPostPage.LateralPostPage"] .ant-table-thead > tr > th,
+[data-slot="SubagentConsolePage.SubagentConsolePage"] .ant-table-thead > tr > th,
+.a-tablepane .ant-table-thead > tr > th {
+  position: sticky; top: 0; z-index: 2;
+  background: var(--bg-elevated);
+}
+
+/* ═══ 6 · SCROLL AFFORDANCE ══════════════════════════════════════════════
+   A capped panel must LOOK scrollable, or users assume data is missing.
+   Thin always-visible track + a soft bottom fade on hover-capable devices. */
+[data-slot][style], .a-listpane, .a-logpane { scrollbar-width: thin; }
+
+/* ═══ 7 · SAFETY RAILS ═══════════════════════════════════════════════════
+   Explicitly UNDO capping for page roots and atoms, in case a selector
+   above ever widens by accident. These must always win, so they are last.  */
+[data-slot="AIObservability.AIObservability"],
+[data-slot="AgentConsole.AgentConsole"],
+[data-slot="AttackGraph.AttackGraph"],
+[data-slot="CredentialsPage.CredentialsPage"],
+[data-slot="ExploitLabPage.ExploitLabPage"],
+[data-slot="FindingsBoard.FindingsBoard"],
+[data-slot="FuzzingLabPage.FuzzingLabPage"],
+[data-slot="KnowledgePage.KnowledgePage"],
+[data-slot="LateralPostPage.LateralPostPage"],
+[data-slot="MetricsDash.MetricsDash"],
+[data-slot="MissionControl.MissionControl"],
+[data-slot="OsintIntel.OsintIntel"],
+[data-slot="PayloadBuilder.PayloadBuilder"],
+[data-slot="ReasoningEnginePage.ReasoningEnginePage"],
+[data-slot="ReportPage.ReportPage"],
+[data-slot="RiskDashboard.RiskDashboard"],
+[data-slot="SessionHistory.SessionHistory"],
+[data-slot="SubagentConsolePage.SubagentConsolePage"],
+[data-slot="TargetConfig.TargetConfig"],
+[data-slot="ToolWorkshop.ToolWorkshop"],
+[data-slot="WebTesting.WebTesting"],
+[data-slot="ExpertPanel.ExpertPanel"],
+[data-slot="MetaAgentsPanel.MetaAgentsPanel"],
+/* atoms — sized by content, must never scroll */
+[data-slot$="Badge"], [data-slot$="Pill"], [data-slot$="Bar"],
+[data-slot$="StatTile"], [data-slot$="StatCell"], [data-slot$="SparkLine"],
+[data-slot$="CircularGauge"], [data-slot$="GaugeBar"], [data-slot$="ConfidenceBar"],
+[data-slot$="SevBadge"], [data-slot$="StatusBadge"], [data-slot$="CopyBtn"],
+[data-slot$="TabBtn"], [data-slot$="SectionHeader"], [data-slot$="MutedEmpty"] {
+  max-height: none;
+  overflow: visible;
+}
+
+/* Print: never clip evidence — capped panels expand fully on paper. */
+@media print {
+  [data-slot], .a-listpane, .a-logpane {
+    max-height: none !important;
+    overflow: visible !important;
+  }
+}

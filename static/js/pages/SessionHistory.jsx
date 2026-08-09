@@ -141,7 +141,7 @@ function SessionHistory() {
     padding: '3px 10px', borderRadius: 4, cursor: 'pointer', fontSize: 10, border: '1px solid'
   };
 
-  return React.createElement('div', {
+  return React.createElement('div', { 'data-slot': 'SessionHistory.SessionHistory',
     style: { padding: 16, height: '100%', overflowY: 'auto', background: 'var(--bg-surface)' }
   },
 

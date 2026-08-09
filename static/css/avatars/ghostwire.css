@@ -1,0 +1,111 @@
+/* ═══════════════════════════════════════════════════════════════════════
+   AVATAR · GHOSTWIRE — cyberpunk deck
+   Demo / war-room / big screen. Violet-black with magenta+cyan holo
+   gradients, chromatic seams, cinematic motion. Spectacle over density —
+   but numbers stay legible at projector distance.
+   ═══════════════════════════════════════════════════════════════════════ */
+:root[data-avatar="ghostwire"] {
+  --avatar-name: 'GHOSTWIRE';
+
+  /* SURFACE */
+  --bg-base:      #0A0616;
+  --bg-void:      #0A0616;
+  --bg-surface:   #120A24;
+  --bg-panel:     #120A24;
+  --bg-elevated:  #1B1036;
+  --bg-glass:     rgba(27, 16, 54, 0.80);
+  --bg-sidebar:   #070310;
+
+  /* BORDERS */
+  --border-dim:   #241645;
+  --border:       #3A2470;
+  --border-light: #3A2470;
+  --border-bright:#5B3AA8;
+  --border-focus: var(--accent);
+
+  /* PRIMARY — magenta, with cyan as the second rail */
+  --accent:       #F056C8;
+  --accent-dim:   #A8318A;
+  --accent-glow:  rgba(240, 86, 200, 0.28);
+  --accent-subtle:rgba(240, 86, 200, 0.08);
+
+  --cyan:         #3DE0F0;
+  --violet:       #9B6BFF;
+  --violet-glow:  rgba(155, 107, 255, 0.30);
+
+  /* TEXT — kept high-contrast on purpose (neon-on-dark is a WCAG trap) */
+  --text-primary: #F2E9FF;
+  --text-secondary:#B49BD8;
+  --text-muted:   #7B66A0;
+
+  /* SEVERITY */
+  --critical:     #FF3B6B;
+  --high:         #FF8F3D;
+  --medium:       #FFD54A;
+  --amber:        #FFD54A;
+  --low:          #4EF0A8;
+  --info:         var(--cyan);
+  --supernova:    #FF56E0;
+  --critical-bg:  rgba(255, 59,107, 0.15);   --critical-bd: rgba(255, 59,107, 0.50);
+  --high-bg:      rgba(255,143, 61, 0.14);   --high-bd:     rgba(255,143, 61, 0.48);
+  --medium-bg:    rgba(255,213, 74, 0.14);   --medium-bd:   rgba(255,213, 74, 0.48);
+  --low-bg:       rgba( 78,240,168, 0.13);   --low-bd:      rgba( 78,240,168, 0.45);
+  --info-bg:      rgba( 61,224,240, 0.13);   --info-bd:     rgba( 61,224,240, 0.45);
+
+  /* TYPE — wide technical display + mono */
+  --font-ui:      'Inter', system-ui, sans-serif;
+  --font-display: 'Inter', system-ui, sans-serif;
+  --font-mono:    'JetBrains Mono', 'Courier New', monospace;
+
+  /* SURFACE LANGUAGE — holographic, glowing edges */
+  --panel-radius: 12px;
+  --panel-border: 1px solid var(--border);
+  --panel-bg:
+     linear-gradient(180deg, rgba(240,86,200,.045) 0%, transparent 42%),
+     linear-gradient(180deg, #150C29 0%, #0C0619 100%);
+  --panel-shadow:
+     inset 0 1px 0 0 rgba(255,255,255,.05),
+     0 0 0 1px rgba(240,86,200,.07),
+     0 18px 44px -20px rgba(0,0,0,.95);
+  --rail-gradient: linear-gradient(90deg, var(--cyan), var(--accent), var(--violet));
+
+  /* DENSITY / MOTION / TEXTURE */
+  --density: 1.08;             /* spectacle > density */
+  --tex-opacity: 0.35;
+  --dur-3: 620ms; --dur-4: 1100ms;
+  --radius: 8px; --radius-md: 10px; --radius-lg: 12px; --radius-xl: 18px;
+}
+
+/* Holo rail on every panel */
+:root[data-avatar="ghostwire"] .panel { position: relative; overflow: hidden; }
+:root[data-avatar="ghostwire"] .panel::after {
+  content: ""; position: absolute; inset: 0 0 auto 0; height: 2px;
+  background: var(--rail-gradient); opacity: .85; pointer-events: none;
+}
+
+/* Display chrome gets the neon treatment */
+:root[data-avatar="ghostwire"] .page-title {
+  letter-spacing: 0.06em;
+  text-shadow: 0 0 14px color-mix(in srgb, var(--accent) 55%, transparent);
+}
+
+/* Chromatic seam on the primary metric — decorative only */
+@keyframes a-holo-drift { 0%,100% { background-position: 0% 50%; } 50% { background-position: 100% 50%; } }
+:root[data-avatar="ghostwire"] .stat-value {
+  background: linear-gradient(90deg, var(--cyan), var(--accent), var(--violet), var(--cyan));
+  background-size: 300% 100%;
+  -webkit-background-clip: text; background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: a-holo-drift 9s ease-in-out infinite;
+}
+/* Reduced motion / contrast boost must restore a solid legible figure */
+@media (prefers-reduced-motion: reduce) {
+  :root[data-avatar="ghostwire"] .stat-value {
+    animation: none; background: none;
+    -webkit-text-fill-color: var(--text-primary);
+  }
+}
+:root[data-avatar="ghostwire"][data-contrast="boost"] .stat-value {
+  animation: none; background: none;
+  -webkit-text-fill-color: var(--text-primary);
+}

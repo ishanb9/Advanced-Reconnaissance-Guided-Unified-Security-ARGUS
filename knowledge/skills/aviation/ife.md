@@ -8,7 +8,7 @@ safety_class: safe
 severity: high
 life_safety: true
 match:
-  ports: [23, 554, 1935, 4444, 9090]
+  ports: [23, 554, 1935, 4444]
   banners: ["Panasonic Avionics", "Thales InFlight", "Lumexis", "Zodiac IFE", "IFE", "PAVES", "TopSeries"]
   markers: ["panasonic-avionics", "thales-ife", "lumexis", "x-ife-server", "PAVES", "eX2", "eX3"]
 quick_wins:

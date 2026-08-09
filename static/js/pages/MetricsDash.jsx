@@ -8,7 +8,7 @@ const { useState, useEffect, useRef } = React;
 function GaugeBar({ label, value, max = 100, color, unit = '%', warn = 70, danger = 90 }) {
   const pct   = Math.min(100, (value / max) * 100);
   const barColor = pct >= danger ? 'var(--critical)' : pct >= warn ? 'var(--medium)' : color || 'var(--low)';
-  return React.createElement('div', { style: { marginBottom: 14 } },
+  return React.createElement('div', { 'data-slot': 'MetricsDash.GaugeBar', style: { marginBottom: 14 } },
     React.createElement('div', {
       style: { display: 'flex', justifyContent: 'space-between', marginBottom: 5, fontSize: 11 }
     },
@@ -42,7 +42,7 @@ function CircularGauge({ label, value, max = 100, color, unit = '%', warn = 70, 
   const arcLength     = 170; // 75% of circumference (270/360 sweep)
   const filled        = (pct / 100) * arcLength;
 
-  return React.createElement('div', {
+  return React.createElement('div', { 'data-slot': 'MetricsDash.CircularGauge',
     style: { display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2 }
   },
     React.createElement('svg', {
@@ -112,7 +112,7 @@ function SparkLine({ history, color = 'var(--cyan)', height = 40 }) {
     });
     ctx.stroke();
   }, [history]);
-  return React.createElement('canvas', {
+  return React.createElement('canvas', { 'data-slot': 'MetricsDash.SparkLine',
     ref: canvasRef, width: 200, height,
     style: { width: '100%', height, display: 'block', opacity: 0.8 }
   });
@@ -181,7 +181,7 @@ function MetricsDash() {
       })()
     : '--';
 
-  return React.createElement('div', {
+  return React.createElement('div', { 'data-slot': 'MetricsDash.MetricsDash',
     style: { padding: 16, height: '100%', overflowY: 'auto', background: 'var(--bg-base, #0a0a0a)' }
   },
     React.createElement('div', { className: 'page-header', style: { marginBottom: 16 } },

@@ -1,0 +1,84 @@
+/* ═══════════════════════════════════════════════════════════════════════
+   AVATAR · BLACKSITE — covert ops console
+   Default daily driver. Cold, disciplined, dense. Deep slate + ice cyan.
+   Bloomberg-terminal energy: depth over glow, severity strictly reserved.
+   ═══════════════════════════════════════════════════════════════════════ */
+:root[data-avatar="blacksite"] {
+  --avatar-name: 'BLACKSITE';
+
+  /* SURFACE */
+  --bg-base:      #070B14;
+  --bg-void:      #070B14;
+  --bg-surface:   #0C121F;
+  --bg-panel:     #0C121F;
+  --bg-elevated:  #131B2C;
+  --bg-glass:     rgba(19, 27, 44, 0.80);
+  --bg-sidebar:   #050810;
+
+  /* BORDERS */
+  --border-dim:   #1A2438;
+  --border:       #27344F;
+  --border-light: #27344F;
+  --border-bright:#3B4C6E;
+  --border-focus: var(--accent);
+
+  /* PRIMARY — ice cyan = SYSTEM, never "good" */
+  --accent:       #35C8DE;
+  --accent-dim:   #1E8FA3;
+  --accent-glow:  rgba(53, 200, 222, 0.22);
+  --accent-subtle:rgba(53, 200, 222, 0.07);
+
+  --cyan:         #4FE0F0;
+  --violet:       #6D7FF5;
+  --violet-glow:  rgba(109, 127, 245, 0.28);
+
+  /* TEXT */
+  --text-primary: #DCE5F2;
+  --text-secondary:#8B9AB8;
+  --text-muted:   #566179;
+
+  /* SEVERITY */
+  --critical:     #FF4560;
+  --high:         #FF8C42;
+  --medium:       #FFC83D;
+  --amber:        #FFC83D;
+  --low:          #4ADE80;
+  --info:         var(--accent);
+  --supernova:    #FF4D8F;
+  --critical-bg:  rgba(255, 69, 96, 0.12);   --critical-bd: rgba(255, 69, 96, 0.45);
+  --high-bg:      rgba(255,140, 66, 0.12);   --high-bd:     rgba(255,140, 66, 0.45);
+  --medium-bg:    rgba(255,200, 61, 0.12);   --medium-bd:   rgba(255,200, 61, 0.45);
+  --low-bg:       rgba( 74,222,128, 0.12);   --low-bd:      rgba( 74,222,128, 0.45);
+  --info-bg:      rgba( 53,200,222, 0.12);   --info-bd:     rgba( 53,200,222, 0.45);
+
+  /* TYPE */
+  --font-ui:      'Inter', system-ui, sans-serif;
+  --font-display: 'Inter', system-ui, sans-serif;
+  --font-mono:    'JetBrains Mono', 'Courier New', monospace;
+
+  /* SURFACE LANGUAGE — layered depth, hairline rails */
+  --panel-radius: 8px;
+  --panel-border: 1px solid var(--border-dim);
+  --panel-bg: linear-gradient(180deg, #0D1421 0%, #0A0F1A 100%);
+  --panel-shadow:
+      inset 0 1px 0 0 rgba(255,255,255,.035),
+      0 8px 24px -14px rgba(0,0,0,.92);
+  --rail-gradient: linear-gradient(90deg, transparent, var(--accent), transparent);
+
+  /* DENSITY / MOTION / TEXTURE */
+  --density: 0.92;
+  --tex-opacity: 0.30;         /* subtle grid — daily driver, legibility wins */
+  --radius: 6px; --radius-md: 8px; --radius-lg: 10px; --radius-xl: 14px;
+}
+
+/* Faint structural grid on the working canvas */
+:root[data-avatar="blacksite"] .app-content { position: relative; }
+
+/* Panels carry the hairline top rail */
+:root[data-avatar="blacksite"] .panel::before {
+  content: ""; position: absolute; inset: 0 0 auto 0; height: 1px;
+  background: linear-gradient(90deg, transparent,
+              color-mix(in srgb, var(--accent) 45%, transparent), transparent);
+  opacity: .6; pointer-events: none;
+}
+:root[data-avatar="blacksite"] .panel { position: relative; }

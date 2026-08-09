@@ -579,6 +579,75 @@ class BaseSubagent(ABC):
         except Exception:
             return {}
 
+    async def _authz_gate(self, tool_name: str, args: str,
+                          target: Optional[str] = None) -> Optional[Dict]:
+        """Per-target authorization gate for the SUBAGENT tool path.
+
+        ``BaseSubagent.run_tool`` is a separate SSE-streaming implementation that does
+        NOT call ``BaseAgent.run_tool`` and historically contained no governor call at
+        all — a complete bypass of the execution boundary.  This closes it: the same
+        engagement governor plus the per-target authorization both apply here.
+
+        Returns a blocked-result dict when the action is refused, else None.
+        Fail-closed: any error in the check DENIES (override: ARGUS_AUTHZ_FAILOPEN=1).
+        """
+        try:
+            from agents.base_agent import (_intel_for_retriever as _mk_intel,
+                                           safety_domain as _safety_domain)
+            from knowledge import safety_governor as _gov
+            _intel = _mk_intel(self) or {}
+            if not isinstance(_intel, dict):
+                _intel = {}
+            _host = str(target or _intel.get("target_host") or _intel.get("target") or "")
+            _scope = [h for h in (list(_intel.get("target_scope") or [])) if h]
+            _enforce = ["destructive", "arg_validation", "ot_life_safety"]
+            if _scope:
+                _enforce.append("scope")
+            _v = _gov.evaluate({
+                "tool_name": tool_name, "args": str(args), "target_host": _host,
+                "scope_hosts": _scope,
+                "ceiling": _intel.get("scan_intrusiveness") or "intrusive",
+                # Was intel['target_domain'] — a key NOTHING in the tree writes, so
+                # this gate resolved to "IT" on every call and could never fire.
+                "domain": _safety_domain(_intel),
+                "life_safety": bool(_intel.get("life_safety")),
+                "authorized": bool(_intel.get("authorized")),
+            }, enforce=tuple(_enforce))
+            if _v.get("decision") == "deny":
+                logger.warning("[subagent] governor BLOCKED %s: %s",
+                               tool_name, _v.get("reason"))
+                return {"stdout": "", "stderr": f"[safety-governor] blocked: {_v.get('reason')}",
+                        "exit_code": -1, "output_id": None, "governor": _v}
+
+            _map = _intel.get("target_authorization") or {}
+            if _map:
+                from knowledge.authorization import (AuthorizationPolicy as _AP,
+                                                     TargetAuthorization as _TA,
+                                                     check_action as _chk)
+                _authz = (_AP.from_dict(_map).resolve(_host)
+                          if ("entries" in _map or "default" in _map)
+                          else _TA.from_dict(_map))
+                _intr = (_v.get("checks") or {}).get("intrusiveness") or "light"
+                _d, _why = _chk(_authz, intrusiveness=str(_intr),
+                                tool_name=tool_name, args=str(args))
+                if _d != "allow":
+                    logger.warning("[subagent] per-target authorization %s for %s on %s: %s",
+                                   _d.upper(), tool_name, _host, _why)
+                    return {"stdout": "", "stderr": f"[authorization] {_d}: {_why}",
+                            "exit_code": -1, "output_id": None,
+                            "authorization": {"decision": _d, "reason": _why,
+                                              "authz": _authz.to_dict()}}
+            return None
+        except Exception as _exc:                                # noqa: BLE001
+            import os as _o
+            if _o.environ.get("ARGUS_AUTHZ_FAILOPEN", "0") == "1":
+                logger.warning("[subagent] authz check errored; FAIL-OPEN: %s", _exc)
+                return None
+            logger.error("[subagent] authz check errored — DENYING (fail-closed): %s", _exc)
+            return {"stdout": "", "stderr": "[authorization] fail-closed: policy error",
+                    "exit_code": -1, "output_id": None,
+                    "authorization": {"decision": "deny", "reason": str(_exc)}}
+
     async def run_tool(
         self,
         tool_name: str,
@@ -607,6 +676,25 @@ class BaseSubagent(ABC):
         """
         if options is None:
             options = {}
+
+        # ── EXECUTION BOUNDARY (was missing entirely on this path) ────────────
+        # This streaming implementation does not call BaseAgent.run_tool, so the
+        # engagement governor and the per-target authorization were both absent here:
+        # a subagent could send traffic no other path would have allowed.  Gate first,
+        # before any command is built or dispatched.
+        # Gate on what will ACTUALLY execute.  Below, a {"command": ...} entry is a
+        # full command override that wins over {"options": ...} — but the gate was
+        # only ever shown options["options"], so every bash/sh/python call arrived
+        # with an EMPTY argument string and the argument-pattern checks inside
+        # check_action had nothing to inspect.  Pass both, command first: gating on
+        # a superset of the real arguments can only ever refuse more, never less.
+        _o = options or {}
+        _gate_args = " ".join(s for s in (str(_o.get("command") or ""),
+                                          str(_o.get("options") or "")) if s)
+        _blocked = await self._authz_gate(tool_name, _gate_args, target)
+        if _blocked is not None:
+            yield str(_blocked.get("stderr") or "[blocked]")
+            return
 
         # Tools that must always run locally — MCP has no generic shell executor
         _LOCAL_SHELL_TOOLS = {"bash", "sh", "zsh", "cmd", "powershell",
@@ -1308,32 +1396,70 @@ class BaseSubagent(ABC):
         else:
             doc.setdefault("cves", [])
 
-        # ── Issue-Validator WRITE-TIME GATE (subagent path) ─────────────
-        # This raw insert used to bypass dedup + validation entirely.  Route it
-        # through the deterministic gate, but LENIENTLY: subagent findings are
-        # tool-derived, so only structural rejects (duplicate / foreign-origin)
-        # gate them — we must not swallow a real tool finding that simply lacks
-        # a populated `evidence` field.  Operator-declared findings get the full
-        # grounding gate via base_agent.store_finding.
+        # ── Noise + severity + validator gate (subagent path) ───────────────
+        # PREVIOUSLY this path was deliberately lenient (only duplicate/foreign-origin
+        # rejected) AND never ran severity_policy, so tool-noise ("SearchSploit: No
+        # Exploits Found", "Public Exploit: [STDERR] …", "Metasploit: Exploit Attempted",
+        # negative-result records) was stored verified=true with UPPERCASE severity.
+        # It now runs the SAME policy the operator path uses: normalize_finding drops
+        # tool-noise + caps unsubstantiated severities + lowercases the severity; then the
+        # deterministic validator gates duplicate / foreign-origin / ungrounded with a
+        # live current-origin stamp.  This is the strict finding gate — on the path that
+        # actually produces the noise.
+        _policy_drop = False
+        _policy_reason = ""
+        try:
+            from knowledge import severity_policy as _sp2
+            _sv0 = str(doc.get("severity") or "info").lower().replace("findingseverity.", "")
+            _nf = _sp2.normalize_finding({
+                "title": doc.get("title") or "", "description": doc.get("description") or "",
+                "severity": _sv0,
+                "evidence": doc.get("evidence") or doc.get("raw_output") or "",
+                "reproduce_status": doc.get("reproduce_status"),
+                "evidence_tag": doc.get("evidence_tag"),
+                "signals": (getattr(finding, "signals", None) or {}),
+                "cves": doc.get("cves") or [], "source": (self.SUBAGENT_NAME or "")})
+            if _nf.get("drop"):
+                _policy_drop = True
+                _policy_reason = _nf.get("rationale") or "tool-noise / operational record — not a client finding"
+            else:
+                doc["severity"] = str(_nf["severity"]).lower()
+                if _nf.get("rationale"):
+                    doc.setdefault("severity_rationale", _nf["rationale"])
+                if _nf.get("evidence_tag"):
+                    doc.setdefault("evidence_tag", _nf["evidence_tag"])
+        except Exception:
+            doc["severity"] = str(doc.get("severity") or "info").lower().replace("findingseverity.", "")
+        # Mandatory provenance so foreign/missing-origin can actually be enforced.
+        doc.setdefault("_origin", {"session_id": str(self.session_id or ""),
+                                   "target": str(doc.get("host") or "")})
+        _verified = True
+        _reason = ""
         try:
             import os as _os
             if _os.environ.get("ARGUS_ISSUE_VALIDATOR", "1") != "0":
                 from agents.meta.issue_validator_agent import get_validator
                 _iv = get_validator(self.session_id or "")
                 if _iv is not None:
-                    _v = _iv.validate_finding(doc)
-                    _accept = _v.get("reason") not in ("duplicate", "foreign-origin")
-                    doc["verified"] = _accept
-                    if not _accept:
-                        doc["gated_reason"] = _v.get("reason", "")
-                    _iv.ingest_finding(doc, {"accept": _accept,
-                                             "reason": "" if _accept else _v.get("reason", "")})
-                else:
-                    doc.setdefault("verified", True)
-            else:
-                doc.setdefault("verified", True)
+                    _cur = {"session_id": str(self.session_id or ""), "target": str(doc.get("host") or "")}
+                    _v = _iv.validate_finding(
+                        doc, current_origin=_cur,
+                        has_raw_output=bool(doc.get("evidence") or doc.get("raw_output")))
+                    _reason = _v.get("reason", "")
+                    # Reject structural problems AND ungrounded high/critical (raw
+                    # stderr / attempt logs) — the leniency that leaked noise is gone.
+                    _verified = _reason not in ("duplicate", "foreign-origin", "ungrounded")
+                    _iv.ingest_finding(doc, {"accept": _verified,
+                                             "reason": "" if _verified else _reason})
         except Exception:
-            doc.setdefault("verified", True)
+            _verified = True
+        # A policy drop (tool-noise) ALWAYS wins → excluded from the client report.
+        if _policy_drop:
+            _verified = False
+            _reason = _reason or _policy_reason
+        doc["verified"] = _verified
+        if not _verified and _reason:
+            doc["gated_reason"] = _reason
 
         _dbh = self._resolve_db()
         if _dbh is None:

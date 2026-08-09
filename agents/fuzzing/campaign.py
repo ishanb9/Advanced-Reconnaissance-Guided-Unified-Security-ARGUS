@@ -101,6 +101,8 @@ class FuzzCampaign:
         self.findings: List[Dict[str, Any]] = []
         self._fuzz_task: Optional["asyncio.Future"] = None
         self._oracle = _oracle.AnomalyOracle()
+        # [90] Human-gated PoCs awaiting approval: approval_id -> (anomaly, poc).
+        self._pending: Dict[str, tuple] = {}
 
     def stop(self) -> None:
         """Human STOP — takes effect immediately, even mid-fuzz (cancels the running
@@ -120,6 +122,31 @@ class FuzzCampaign:
     async def run(self) -> Dict[str, Any]:
         self.started = time.time()
         self.status = "running"
+        # Deep-continuous LAB mode (Slice 3, opt-in): only with explicit authorization and when
+        # NOT sharing capacity with a live scan.  Raises the wall-clock ceiling and seeds from a
+        # persistent corpus.  No-op (byte-identical) unless surface['deep'] + authorized.
+        self._corpus = None
+        if (self.ctx.surface.get("deep") and getattr(self.ctx, "authorized", False)
+                and not getattr(self.ctx, "throttle", False)):
+            try:
+                import os as _os
+                from agents.fuzzing.corpus_store import CorpusStore
+                self.max_sec = max(self.max_sec,
+                                   int(_os.environ.get("ARGUS_FUZZ_DEEP_MAX_SEC", "21600")))
+                # Corpus dirs live outside the per-scan log tree, so the folder
+                # NAME must not carry the client's host.  Session id + hash keeps
+                # it unique and stable without naming anyone.
+                import hashlib as _hh
+                _tg = _hh.sha256((self.ctx.target or '').encode('utf-8', 'ignore')).hexdigest()[:10]
+                _ckey = f"{self.ctx.session_id}_{_tg}"
+                self._corpus = CorpusStore(_ckey)
+                _seeds = self._corpus.load()
+                if _seeds:
+                    self.ctx.surface["corpus_seeds"] = list(
+                        self.ctx.surface.get("corpus_seeds") or []) + _seeds
+                await self._stage("deep", corpus_seeds=len(_seeds), max_sec=self.max_sec)
+            except Exception as exc:   # noqa: BLE001
+                logger.debug("deep-mode setup skipped: %s", exc)
         if not self.ctx.canary:
             self.ctx.canary = _proof.new_canary()
         try:
@@ -189,6 +216,14 @@ class FuzzCampaign:
             self.status = "error"
             logger.warning("campaign %s failed: %s", self.job_id, exc)
             await self._stage("error", message=f"{type(exc).__name__}: {exc}")
+        # Deep-continuous: persist this run's payloads so future deep runs accumulate a corpus.
+        if getattr(self, "_corpus", None) is not None:
+            try:
+                _vals = [p.get("value") for p in (self.ctx.surface.get("payloads") or []) if p.get("value")]
+                if _vals:
+                    self._corpus.add(_vals)
+            except Exception:
+                pass
         await self._stage("record", findings=len(self.findings))
         return self.snapshot()
 
@@ -243,11 +278,21 @@ class FuzzCampaign:
         await self._stage("develop", exploit_class=anomaly.exploit_class,
                           anomaly_type=anomaly.type)
         poc: Optional[PoC] = None
-        try:
-            async with _develop_semaphore():          # bound LLM concurrency across campaigns
-                poc = await _xdev.develop(anomaly, self.ctx)
-        except Exception as exc:   # noqa: BLE001
-            logger.debug("develop failed: %s", exc)
+        if anomaly.type == "source_hypothesis":
+            # Source-available track (Slice 2): a code-reasoning hypothesis is proven by the
+            # Slice-1 harness-build path (harness_synth → greybox → ASan oracle), NOT exploit_dev.
+            # Returns None when it can't build (CI / no toolchain) → recorded as an OBSERVED lead.
+            try:
+                from agents.reasoning import code_hypothesis_engine as _che
+                poc = await _che.prove_source_hypothesis(anomaly, self.ctx)
+            except Exception as exc:   # noqa: BLE001
+                logger.debug("source-hypothesis prove failed: %s", exc)
+        else:
+            try:
+                async with _develop_semaphore():      # bound LLM concurrency across campaigns
+                    poc = await _xdev.develop(anomaly, self.ctx)
+            except Exception as exc:   # noqa: BLE001
+                logger.debug("develop failed: %s", exc)
 
         if poc is None:
             # No proven exploit — still record the anomaly honestly (unverified).
@@ -259,15 +304,29 @@ class FuzzCampaign:
         await self._stage("gate", exploit_class=anomaly.exploit_class,
                           decision="approval" if gate else "auto")
         if gate:
+            # [90] Stash the developed PoC so a human approval can PROVE it — previously
+            # the PoC was discarded here and no approve() / endpoint / button existed, so
+            # every human-gated class (memory_corruption; intrusive/disruptive at a 'safe'
+            # ceiling; OT-unauthorized) could be developed but NEVER proven.
+            import uuid as _uuid
+            aid = _uuid.uuid4().hex[:12]
             await self.ctx.emit_event("fuzz_approval_request", {
-                "job_id": self.job_id, "exploit_class": anomaly.exploit_class,
+                "job_id": self.job_id, "approval_id": aid,
+                "exploit_class": anomaly.exploit_class,
                 "target": self.ctx.target, "poc": poc.to_dict(),
                 "reason": "weaponisation above the intrusiveness ceiling — human approval required"})
             await self._record(anomaly, poc=poc, proven=False,
                                note="custom PoC developed; PROOF pending human approval "
                                     "(above intrusiveness ceiling)")
+            self._pending[aid] = (anomaly, poc)
             return
 
+        await self._prove_and_record(anomaly, poc)
+
+    async def _prove_and_record(self, anomaly: Anomaly, poc: PoC) -> None:
+        """Prove a developed PoC and record the verdict.  Shared by the auto path and the
+        human-approved path (approve()) so approval reuses the exact proof logic — an
+        approved PoC is proven with the same oracle, never rubber-stamped."""
         await self._stage("prove", exploit_class=anomaly.exploit_class)
         verdict = await _proof.confirm(poc, self.ctx)
         await self.ctx.emit_event("proof_verdict", {
@@ -275,6 +334,20 @@ class FuzzCampaign:
         poc.proven = bool(verdict.proven)
         await self._record(anomaly, poc=poc, proven=bool(verdict.proven),
                            note=verdict.reason)
+
+    async def approve(self, approval_id: str) -> bool:
+        """[90] Human approved a gated PoC — prove it now with the real oracle."""
+        entry = self._pending.pop(approval_id, None)
+        if entry is None:
+            return False
+        anomaly, poc = entry
+        await self._prove_and_record(anomaly, poc)
+        return True
+
+    async def reject(self, approval_id: str) -> bool:
+        """[90] Human rejected a gated PoC — drop it (the 'pending' finding already
+        stands as the honest record that a PoC was developed but not proven)."""
+        return self._pending.pop(approval_id, None) is not None
 
     async def _record(self, anomaly: Anomaly, *, poc: Optional[PoC], proven: bool,
                       note: str) -> None:
@@ -410,6 +483,24 @@ def stop_campaign(job_id: str) -> bool:
         return False
     c.stop()
     return True
+
+
+async def approve_campaign(job_id: str, approval_id: str) -> bool:
+    """[90] Human approved a gated PoC on a running campaign — proves it now.
+    Returns False when the campaign or the pending approval is unknown (e.g. already
+    proven, rejected, or the campaign ended)."""
+    c = _CAMPAIGNS.get(job_id)
+    if c is None:
+        return False
+    return await c.approve(approval_id)
+
+
+async def reject_campaign(job_id: str, approval_id: str) -> bool:
+    """[90] Human rejected a gated PoC — drops it without proving."""
+    c = _CAMPAIGNS.get(job_id)
+    if c is None:
+        return False
+    return await c.reject(approval_id)
 
 
 def list_campaigns(session_id: Optional[str] = None) -> List[Dict[str, Any]]:

@@ -8,7 +8,7 @@ safety_class: safe
 severity: high
 life_safety: true
 match:
-  ports: [4000, 4003, 7878]
+  ports: [4003, 7878]
   banners: ["ARPA", "radar", "JRC JMA", "Furuno FAR", "Raytheon Anschutz", "Kongsberg radar", "SIMRAD"]
   markers: ["arpa-target", "jrc-jma", "furuno-far", "nav-radar", "radar-overlay"]
 quick_wins:

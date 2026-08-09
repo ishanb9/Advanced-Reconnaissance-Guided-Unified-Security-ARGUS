@@ -74,6 +74,13 @@ _LOGS_ROOT.mkdir(parents=True, exist_ok=True)
 _ACTIVE: Dict[str, "ScanLogger"] = {}
 _LOCK = threading.Lock()
 
+# Exercise-scoped folders: parent_session_id -> the ONE top-level folder for that
+# exercise.  Multi-target / CIDR scans register the parent here (once) so every
+# per-host CHILD session nests its logs in a SUBFOLDER of this single directory
+# instead of minting its own sibling folder.  Result: one folder per exercise,
+# per-host subfolders within.  See register_exercise_dir() / start_scan_logger().
+_EXERCISE_DIRS: Dict[str, Path] = {}
+
 
 # WS event types that arrive in such high volume they would drown the
 # ws_events.jsonl file.  Their absence is fine — narrative is preserved
@@ -92,6 +99,13 @@ _WS_NOISE_EVENTS = frozenset({
 def _safe_id(session_id: str) -> str:
     """Sanitise session id for use as a directory name."""
     return "".join(c for c in str(session_id) if c.isalnum() or c in ("-", "_")) or "unknown"
+
+
+def _safe_label(label: str) -> str:
+    """Sanitise a per-host label (e.g. an IP/hostname) for use as a SUBfolder name.
+    Keeps dots so ``192.168.40.21`` stays readable; strips path separators."""
+    out = "".join(c for c in str(label) if c.isalnum() or c in (".", "-", "_")) or "host"
+    return out[:80]
 
 
 def _shrink(value: Any, *, max_str: int = 600, max_items: int = 40) -> Any:
@@ -132,7 +146,8 @@ def _shrink(value: Any, *, max_str: int = 600, max_items: int = 40) -> Any:
 class ScanLogger:
     """Per-session multi-file logger.  All methods are no-op safe."""
 
-    def __init__(self, session_id: str, target: str = "", engagement_type: str = "") -> None:
+    def __init__(self, session_id: str, target: str = "", engagement_type: str = "",
+                 parent_dir: Optional[Path] = None, label: Optional[str] = None) -> None:
         self.session_id      = session_id
         self.target          = target
         self.engagement_type = engagement_type
@@ -160,8 +175,16 @@ class ScanLogger:
         self._phase_started_ts: float = self._t_monotonic
         self._phase_start_counters: Dict[str, int] = dict(self.counters)
 
-        ts_dir = self.started_at.strftime("%Y%m%d-%H%M%S")
-        self.dir = _LOGS_ROOT / f"{ts_dir}_{_safe_id(session_id)}"
+        # Folder layout:
+        #   • Nested (multi-target/CIDR child): <exercise_dir>/<host-label>/ — a
+        #     SUBfolder inside the one exercise folder.  No timestamp in the name so
+        #     the triage AND deep passes reuse the SAME folder (no duplicate dirs).
+        #   • Top-level (single scan or the exercise parent): logs/<ts>_<session_id>/.
+        if parent_dir is not None:
+            self.dir = Path(parent_dir) / _safe_label(label or target or session_id)
+        else:
+            ts_dir = self.started_at.strftime("%Y%m%d-%H%M%S")
+            self.dir = _LOGS_ROOT / f"{ts_dir}_{_safe_id(session_id)}"
         try:
             self.dir.mkdir(parents=True, exist_ok=True)
         except Exception:
@@ -253,6 +276,12 @@ class ScanLogger:
     def _write_footer(self) -> None:
         ended = datetime.now(timezone.utc)
         dur   = time.monotonic() - self._t_monotonic
+        # [S30/S37/S54] Reconcile tool_calls / tool_errors to the AUTHORITATIVE artifact
+        # (tool_calls.jsonl) before the footer + summary snapshot.  In a CIDR run a per-host
+        # folder's tool_calls.jsonl unions parent-recon + child rows, so the in-memory child
+        # counter under-counts what a reader tallies in the file (and mis-labels the error
+        # count).  Counting the file makes summary.counters agree with the evidence.
+        self._reconcile_tool_counters()
         tool_top = sorted(self._tool_names.items(), key=lambda kv: -kv[1])[:10]
         footer = (
             "\n" + "─" * 78 + "\n"
@@ -435,6 +464,34 @@ class ScanLogger:
             "stderr_tail": (stderr_tail or "")[-2000:],
             "error":       error or "",
         })
+
+    def _reconcile_tool_counters(self) -> None:
+        """[S30/S37/S54] Set tool_calls / tool_errors from the ACTUAL rows in
+        tool_calls.jsonl so summary.json can never under-count (or mis-classify the
+        errors of) what a reader tallies in the artifact.  A row is an error iff it
+        carries an `error` string or a non-zero exit_code (same rule as log_tool).
+        Best-effort: keeps the running counter if the file is missing/unreadable."""
+        try:
+            calls = 0
+            errors = 0
+            with open(self.tools_path, encoding="utf-8") as _fh:
+                for _ln in _fh:
+                    _ln = _ln.strip()
+                    if not _ln:
+                        continue
+                    try:
+                        _row = json.loads(_ln)
+                    except Exception:
+                        continue
+                    calls += 1
+                    _ec = _row.get("exit_code")
+                    if _row.get("error") or (_ec is not None and _ec not in (0,)):
+                        errors += 1
+            if calls:
+                self.counters["tool_calls"]  = calls
+                self.counters["tool_errors"] = errors
+        except Exception:
+            pass
 
     def log_llm(
         self,
@@ -730,13 +787,49 @@ class ScanLogger:
 #  Registry helpers (session-scoped global)
 # ──────────────────────────────────────────────────────────────────────────
 
-def start_scan_logger(session_id: str, target: str = "", engagement_type: str = "") -> ScanLogger:
+def register_exercise_dir(session_id: str, target: str = "") -> Path:
+    """Create (once) and register the ONE top-level folder for a multi-target /
+    CIDR exercise, keyed by the PARENT session id.  Every per-host child then nests
+    its logs in a subfolder of this directory (see ``start_scan_logger`` with
+    ``parent_session_id``).  Returns the exercise dir; safe to call repeatedly."""
+    with _LOCK:
+        existing = _EXERCISE_DIRS.get(session_id)
+        if existing is not None:
+            return existing
+        ts_dir = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        d = _LOGS_ROOT / f"{ts_dir}_{_safe_id(session_id)}"
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            d = _LOGS_ROOT
+        _EXERCISE_DIRS[session_id] = d
+        return d
+
+
+def start_scan_logger(session_id: str, target: str = "", engagement_type: str = "",
+                      parent_session_id: Optional[str] = None,
+                      label: Optional[str] = None) -> ScanLogger:
+    """Start (or return the existing) per-session logger.
+
+    When ``parent_session_id`` names a DIFFERENT, already-registered exercise (a
+    multi-target/CIDR run), this session's logs nest in a SUBfolder of that one
+    exercise directory (``<exercise>/<host>``) instead of a sibling top-level
+    folder — giving one folder per exercise with per-host subfolders.
+    """
     with _LOCK:
         existing = _ACTIVE.get(session_id)
         if existing is not None:
             return existing
-        slog = ScanLogger(session_id, target=target, engagement_type=engagement_type)
+        parent_dir: Optional[Path] = None
+        if parent_session_id and str(parent_session_id) != str(session_id):
+            parent_dir = _EXERCISE_DIRS.get(str(parent_session_id))
+        slog = ScanLogger(session_id, target=target, engagement_type=engagement_type,
+                          parent_dir=parent_dir, label=label or target)
         _ACTIVE[session_id] = slog
+        # A top-level (non-nested) logger IS its own exercise root — register it so
+        # any later child that names it as parent can nest correctly.
+        if parent_dir is None:
+            _EXERCISE_DIRS.setdefault(session_id, slog.dir)
         return slog
 
 

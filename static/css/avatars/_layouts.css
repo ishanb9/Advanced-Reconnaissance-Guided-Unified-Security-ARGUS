@@ -1,0 +1,148 @@
+/* ═══════════════════════════════════════════════════════════════════════
+   ARGUS — AVATAR LAYOUT ARCHETYPES
+   ───────────────────────────────────────────────────────────────────────
+   Each avatar composes the SAME panels differently. This is where "their
+   own dashboards" is delivered.
+
+   THE INVARIANT
+     Archetypes may REORDER, RESIZE, RESTACK or RELOCATE a panel. They may
+     NEVER hide one. There is not a single `display:none` in this file —
+     asserted by the slot validator (window.ArgusSlots.report()).
+     Mode gating (CLIENT/BRIEFING/PRESENT) stays the ONLY legitimate way a
+     hub is hidden, and that logic lives in app.jsx, untouched.
+
+   HOOKS THAT ACTUALLY EXIST AT RUNTIME (verified in the live DOM)
+     :root[data-avatar]  :root[data-page]  :root[data-hub]   <- set by JS
+     .argus-root  .hero-tilt  .hero-card  .hub-tabbar  .hub-tab
+     .panel-ambient  .panel-hud  .hud-telemetry  .hud-consumables
+   Page internals are ~95% inline-styled (inline beats CSS), so structural
+   re-composition is applied at these real hooks, plus generic descendant
+   grid rules where an inline grid must be overridden.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/* ── Shared shell rhythm — scales with each avatar's density ─────────── */
+.argus-root { --shell-pad: calc(18px * var(--density)); }
+
+/* Generic: the dashboard's top-level stat strip + detail grids.
+   Targets inline `display:grid` containers that are direct children of a
+   page body. Kept conservative: gap + flow only, never visibility.       */
+:root[data-avatar] .hero-tilt { gap: var(--gap-grid) !important; }
+
+/* ═══ BLACKSITE — ops-stack ═══════════════════════════════════════════
+   Layered command view. Hero stays side-by-side (gauge + chain), detail
+   grids stay 2-up. The reference composition; everything else deviates. */
+:root[data-avatar="blacksite"] .hero-tilt {
+  grid-template-columns: 380px 1fr !important;
+}
+:root[data-avatar="blacksite"] .hub-tabbar { letter-spacing: .06em; }
+
+/* ═══ PHOSPHOR — panes ════════════════════════════════════════════════
+   Terminal panes: single dense column, list-first, no decorative hero.
+   Maximum information per vertical inch.                                */
+:root[data-avatar="phosphor"] .hero-tilt {
+  grid-template-columns: 1fr !important;
+  gap: 6px !important;
+}
+:root[data-avatar="phosphor"] .hero-card { padding: 10px 12px !important; }
+:root[data-avatar="phosphor"] .hub-tabbar { text-transform: lowercase; letter-spacing: 0; }
+/* Kill decorative ambience — PHOSPHOR has no chrome */
+:root[data-avatar="phosphor"] .stellar-starfield,
+:root[data-avatar="phosphor"] .stellar-nebula,
+:root[data-avatar="phosphor"] .stellar-beam,
+:root[data-avatar="phosphor"] .halo-ring { opacity: 0 !important; }
+
+/* ═══ REDCELL — threat-first ══════════════════════════════════════════
+   Kill chain + exploitation surface lead; the risk gauge is demoted to a
+   narrower right rail. Achieved by inverting columns and re-ordering —
+   both panels remain present.                                           */
+:root[data-avatar="redcell"] .hero-tilt {
+  grid-template-columns: 1fr 340px !important;
+}
+:root[data-avatar="redcell"] .hero-tilt > *:first-child  { order: 2; }
+:root[data-avatar="redcell"] .hero-tilt > *:nth-child(2) { order: 1; }
+:root[data-avatar="redcell"] .hub-tabbar { text-transform: uppercase; letter-spacing: .1em; font-weight: 700; }
+
+/* ═══ GHOSTWIRE — centre-stage ════════════════════════════════════════
+   The visual takes the stage; supporting panels orbit it. Wider gutters,
+   taller graph canvas, generous breathing room for projector viewing.   */
+:root[data-avatar="ghostwire"] .hero-tilt {
+  grid-template-columns: 1fr !important;
+  gap: 18px !important;
+}
+:root[data-avatar="ghostwire"] .argus-root { --shell-pad: 26px; }
+:root[data-avatar="ghostwire"] .graph-container { min-height: 620px; }
+:root[data-avatar="ghostwire"] .hero-card { padding: 22px 24px !important; }
+/* Attack graph is GHOSTWIRE's centrepiece — give it the stage */
+:root[data-avatar="ghostwire"][data-page="AttackGraph"] .graph-container { min-height: 720px; }
+
+/* ═══ DOSSIER — narrative ═════════════════════════════════════════════
+   Reads as a document: one measured column, generous leading, content at
+   a comfortable reading measure. Print-safe.                            */
+:root[data-avatar="dossier"] .hero-tilt {
+  grid-template-columns: 1fr !important;
+  gap: 20px !important;
+}
+:root[data-avatar="dossier"] .argus-root { --shell-pad: 30px; }
+:root[data-avatar="dossier"] .hero-card { padding: 22px 24px !important; line-height: var(--lh-body); }
+:root[data-avatar="dossier"] .hub-tabbar { text-transform: none; letter-spacing: .02em; }
+/* Documents don't shimmer */
+:root[data-avatar="dossier"] .stellar-starfield,
+:root[data-avatar="dossier"] .stellar-nebula,
+:root[data-avatar="dossier"] .stellar-beam { opacity: 0 !important; }
+
+/* ═══ WARDEN — risk-posture ═══════════════════════════════════════════
+   Governance reading order: posture headline first (wider gauge column),
+   then register, then coverage/aging. Ledger spacing, measured column.  */
+:root[data-avatar="warden"] .hero-tilt {
+  grid-template-columns: 420px 1fr !important;
+  gap: 18px !important;
+}
+:root[data-avatar="warden"] .argus-root { --shell-pad: 26px; }
+:root[data-avatar="warden"] .hero-card { padding: 20px 22px !important; }
+:root[data-avatar="warden"] .hub-tabbar { text-transform: none; letter-spacing: .04em; }
+:root[data-avatar="warden"] .stellar-starfield,
+:root[data-avatar="warden"] .stellar-nebula,
+:root[data-avatar="warden"] .stellar-beam { opacity: 0 !important; }
+
+/* ── Responsive collapse ladder (all avatars) ────────────────────────── */
+@media (max-width: 1180px) {
+  :root[data-avatar] .hero-tilt { grid-template-columns: 1fr !important; }
+  :root[data-avatar] .hero-tilt > * { order: 0 !important; }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   CONTRAST BOOST — must outrank avatar tokens
+   ───────────────────────────────────────────────────────────────────────
+   Avatar blocks are :root[data-avatar="x"]  -> specificity (0,2,0).
+   The boost in _base.css was [data-contrast]  -> (0,1,0), so the avatar
+   won and the a11y control silently did nothing (caught in verification).
+   Qualifying with [data-avatar] gives (0,3,0), which wins in every avatar
+   regardless of sheet order.
+   ═══════════════════════════════════════════════════════════════════════ */
+:root[data-avatar][data-contrast="boost"] {
+  --text-primary:   #FFFFFF;
+  --text-secondary: #DDE3EC;
+  --text-muted:     #B4BCC9;
+  --border:         color-mix(in srgb, #FFFFFF 46%, transparent);
+  --border-dim:     color-mix(in srgb, #FFFFFF 30%, transparent);
+  --border-bright:  color-mix(in srgb, #FFFFFF 62%, transparent);
+  --tex-opacity:    0 !important;
+}
+/* Light-surface avatars invert the boost: darker ink, not white */
+:root[data-avatar="dossier"][data-contrast="boost"],
+:root[data-avatar="warden"][data-avatar-variant="light"][data-contrast="boost"] {
+  --text-primary:   #000000;
+  --text-secondary: #1F1D18;
+  --text-muted:     #3D3931;
+  --border:         color-mix(in srgb, #000000 55%, transparent);
+  --border-dim:     color-mix(in srgb, #000000 32%, transparent);
+  --border-bright:  color-mix(in srgb, #000000 70%, transparent);
+}
+:root[data-avatar][data-contrast="boost"] #argus-avatar-tex { display: none !important; }
+
+/* ── Print: every avatar produces a clean document ───────────────────── */
+@media print {
+  #argus-avatar-tex { display: none !important; }
+  .stellar-starfield, .stellar-nebula, .stellar-beam { display: none !important; }
+  .hero-card, .panel { break-inside: avoid; box-shadow: none !important; }
+}

@@ -120,19 +120,17 @@ def _rag_commands(query: str, top_k: int = 4) -> str:
 
 
 # ── LLM system prompt for chain analysis ────────────────────────────────────
-_SYSTEM_PROMPT = """You are an expert penetration tester specializing in attack chain analysis.
-Given a set of security findings from an active pentest, you:
-1. Identify all viable multi-step attack chains (how to actually compromise the target)
-2. Provide specific, runnable tool commands for each step
-3. Map each step to a MITRE ATT&CK technique
-4. Rate each chain by probability and impact
-5. Identify what additional information or access is needed to complete each chain
-6. Recommend the single most promising next action
+_SYSTEM_PROMPT = """You are a defensive security analyst supporting an AUTHORIZED, scoped penetration-testing engagement. Working only from confirmed findings produced by the engagement's own tooling, your job is analytical: you help the defending organization understand how discrete weaknesses could be chained together into attack PATHS, map those paths to MITRE ATT&CK, and decide which ones to fix first.
 
-Your analysis must be PRACTICAL: real commands a pentester can copy and run.
-Do not describe what to do in vague terms — give exact syntax adapted to the target IP/service.
-If a finding suggests SQL injection, provide the exact sqlmap command. If it shows SSH, provide hydra/nmap commands.
-Always think in terms of: initial access → privilege escalation → objectives."""
+You are an attack-path RISK PRIORITIZATION engine. Given a set of security findings from the authorized assessment, you:
+1. Correlate related findings into plausible multi-step attack PATHS (chains) — how individual weaknesses could realistically combine into a route toward a meaningful objective (initial access -> privilege escalation -> lateral movement -> impact), so defenders see end-to-end risk rather than isolated issues.
+2. For each step, describe the METHOD at a planning level: the technique, the NAME of the tool or capability class typically associated with validating it, and which finding or exposed service it applies to. Do NOT write runnable, target-specific exploit commands, flags, or payloads; describe the approach, not copy-and-paste syntax.
+3. Map each step to a MITRE ATT&CK technique (technique ID and tactic).
+4. Rate each path by probability of success and by business impact, so the team can rank them.
+5. Identify the prerequisites and the missing information or access each path still needs before it could be validated — these are the gaps defenders can widen to break the chain.
+6. Recommend the single highest-priority path to focus validation and remediation on, with a short rationale.
+
+Your analysis is PRACTICAL but stays at the level of risk assessment and methodology: think in terms of attacker objectives, prerequisites, and MITRE-mapped tactic progression — not weaponized commands. Keep the framing defensive throughout: the purpose is to prioritize validation and remediation on an authorized engagement so defenders can see where to break the chain."""
 
 
 # ── Prompt builder ────────────────────────────────────────────────────────────
@@ -163,11 +161,13 @@ FINDING COUNT: {len(findings)}
 SECURITY FINDINGS:
 {finding_block}
 
-RELEVANT EXPLOITATION TECHNIQUES (from knowledge base):
+RELEVANT DEFENSIVE / TECHNIQUE REFERENCES (from knowledge base):
 {rag_ctx or '(no KB context available)'}
 
 ---
-Analyze the above findings and produce a structured attack chain analysis.
+Analyze the above findings and produce a structured attack-path risk analysis for this authorized assessment.
+
+For each path, correlate the findings into a plausible multi-step route, map each step to MITRE ATT&CK, rate probability and impact, and list what is still missing. Describe each step by METHOD (technique + tool NAME + which finding it applies to), not by a runnable exploit string.
 
 You MUST return ONLY valid JSON matching this exact schema:
 
@@ -175,65 +175,70 @@ You MUST return ONLY valid JSON matching this exact schema:
   "chains": [
     {{
       "id": "chain_001",
-      "title": "Short title (e.g. SQLi → OS Shell → Root)",
-      "description": "Step-by-step description of what this chain achieves",
-      "probability": 0.75,
+      "title": "Short attack-path title (e.g. Web input weakness -> data-store access -> host foothold)",
+      "description": "Plain-language summary of how these findings could chain and what the path would achieve",
+      "probability": 0.6,
       "impact": "critical",
       "entry_point": "port 80 HTTP",
-      "objective": "root shell / data exfil / credential dump",
-      "missing_requirements": ["need valid credentials", "need HTTP access"],
+      "objective": "host foothold / data access / credential exposure",
+      "missing_requirements": ["valid application credentials", "confirmed HTTP reachability"],
       "finding_refs": ["F0", "F2"],
       "steps": [
         {{
           "id": "s1",
           "order": 1,
-          "technique": "SQL Injection",
-          "description": "Exploit SQLi on login form to gain DB access",
+          "technique": "SQL injection validation",
+          "description": "Assess whether the login input on the F0 web finding is injectable and could expose the backing database",
           "tool": "sqlmap",
-          "command": "sqlmap -u 'http://{target}/login.php' --data='user=admin&pass=test' --level=5 --risk=3 --dbs",
-          "expected_outcome": "Database names enumerated, potential OS shell",
+          "command": "SQL injection validation against the F0 login endpoint (tool: sqlmap)",
+          "expected_outcome": "Determination of whether the input is injectable and what data it would expose",
           "mitre_id": "T1190",
           "mitre_tactic": "initial_access",
           "requires": [],
-          "produces": "db_access",
+          "produces": "database_access",
           "finding_ref": "F0"
         }},
         {{
           "id": "s2",
           "order": 2,
-          "technique": "OS Command Execution via SQLi",
-          "description": "Use --os-shell in sqlmap to get a command shell",
-          "tool": "sqlmap",
-          "command": "sqlmap -u 'http://{target}/login.php' --data='user=admin&pass=test' --os-shell",
-          "expected_outcome": "Interactive OS shell as mysql user",
-          "mitre_id": "T1059",
-          "mitre_tactic": "execution",
-          "requires": ["db_access"],
-          "produces": "shell_limited",
+          "technique": "Credential access from exposed data store",
+          "description": "If the database is reachable, assess whether stored credentials could be recovered to reach a host account",
+          "tool": "hashcat",
+          "command": "Offline credential-recovery method applied to data exposed in step s1 (tool: hashcat)",
+          "expected_outcome": "Assessment of whether recovered credentials enable a host foothold",
+          "mitre_id": "T1003",
+          "mitre_tactic": "credential_access",
+          "requires": ["database_access"],
+          "produces": "host_credentials",
           "finding_ref": "F0"
         }}
       ]
     }}
   ],
   "immediate_actions": [
-    "Run sqlmap against discovered login endpoints to verify SQLi",
-    "Attempt default credentials on SSH port 22"
+    "Prioritize validating the F0 web input weakness — it is the entry point of the highest-rated path",
+    "Confirm reachability and scope of the SSH service on port 22 before considering it as an alternate entry point"
   ],
   "recommended_chain_id": "chain_001",
-  "target_assessment": "2-3 sentence summary of the target's security posture and most critical weaknesses",
+  "target_assessment": "2-3 sentence summary of the target's security posture and the most critical weaknesses driving risk",
   "graph_nodes": [
-    {{"id": "sqli_login", "type": "vulnerability", "label": "SQL Injection /login", "severity": "critical", "metadata": {{"port": "80", "technique": "T1190"}}}}
+    {{"id": "sqli_login", "type": "vulnerability", "label": "SQL injection candidate /login", "severity": "critical", "metadata": {{"port": "80", "technique": "T1190"}}}}
   ],
   "graph_edges": [
-    {{"source": "sqli_login", "target": "os_shell", "label": "exploitable_via_os_shell"}}
+    {{"source": "sqli_login", "target": "data_access", "label": "could_enable"}}
   ]
 }}
 
-Replace {target} in all commands with the actual target IP/hostname.
-Probability: 0.0–1.0 (how likely this chain succeeds given the findings).
-Impact: critical / high / medium / low.
-Provide at minimum 1 chain, ideally 2-4 covering different entry points.
-Only include chains that are realistically achievable from the discovered findings."""
+Field guidance:
+- "command" is a HIGH-LEVEL METHOD label for display only — describe the technique and which finding/endpoint it targets, and reference the tool by NAME (e.g. "Credential-spray assessment against the F1 SSH service (tool: hydra)"). Do NOT put runnable exploit syntax, flags, payloads, or target substitutions in this field.
+- "tool" is the NAME of the tool or capability class typically associated with validating that step (e.g. sqlmap, hydra, nmap) — a name, not an invocation.
+- "immediate_actions": prioritized analytical next-steps for the team (what to validate or investigate first, and why), not exploit instructions.
+- "probability": 0.0-1.0, how likely this path succeeds given the findings.
+- "impact": critical / high / medium / low.
+- Reference findings by their [F#] ids in "finding_refs" and each step's "finding_ref".
+- Map every step to a real MITRE ATT&CK "mitre_id" and "mitre_tactic".
+- Provide at minimum 1 path, ideally 2-4 covering different entry points.
+- Only include paths that are realistically achievable from the discovered findings. Keep the example values above generic — do not emit real exploit payloads anywhere in the output."""
 
 
 # ── Chain Analysis Agent ───────────────────────────────────────────────────────

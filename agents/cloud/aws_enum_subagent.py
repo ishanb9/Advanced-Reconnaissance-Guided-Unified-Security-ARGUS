@@ -24,6 +24,13 @@ _BUCKET_RE    = re.compile(r'"Name"\s*:\s*"([^"]+)"', re.I)
 _PUBLIC_RE    = re.compile(r'(AllUsers|AuthenticatedUsers|READ|WRITE|FULL_CONTROL)', re.I)
 _EC2_IP_RE    = re.compile(r'"PublicIpAddress"\s*:\s*"([\d.]+)"', re.I)
 _ADMIN_POL_RE = re.compile(r'(AdministratorAccess|PowerUserAccess|\*:\*)', re.I)
+
+# [64] An `aws sts get-caller-identity` ERROR is NOT proof of valid credentials — the
+# identity finding must only fire on a real, parseable identity (Account + Arn).
+_AWS_ERR_RE = re.compile(
+    r"an error occurred|invalidclienttokenid|accessdenied|signaturedoesnotmatch|"
+    r"unable to locate credentials|expiredtoken|authfailure|could not connect|"
+    r"you must specify a region|invalidaccesskeyid", re.I)
 _PRIVESC_RE   = re.compile(r'(iam:PassRole|iam:CreateAccessKey|iam:AttachUserPolicy|iam:PutUserPolicy|lambda:InvokeFunction)', re.I)
 
 
@@ -45,17 +52,22 @@ class AwsEnumSubagent(BaseSubagent):
             {"options": f"{prof} {reg} sts get-caller-identity --output json 2>&1"})
         try:
             ident = json.loads(ident_out)
-            account = ident.get("Account", "?")
-            arn     = ident.get("Arn", "?")
+            account = ident.get("Account")
+            arn     = ident.get("Arn")
         except Exception:
-            account, arn = "?", ident_out[:80]
+            account, arn = None, None
 
-        await self.store_finding(Finding(
-            title=f"AWS: Identity Confirmed — Account {account}",
-            description=f"AWS caller identity: ARN={arn}, Account={account}. Credentials are valid.",
-            severity="INFO", evidence=ident_out[:300], tool="aws", host=target,
-            mitre_technique="T1526",
-        ))
+        # [64] Only report a confirmed identity when the call returned a REAL one — an error
+        # (InvalidClientTokenId / AccessDenied / "Unable to locate credentials") is not valid
+        # creds, so it must never be shipped as "Credentials are valid".
+        _authed = bool(account and arn and not _AWS_ERR_RE.search(ident_out))
+        if _authed:
+            await self.store_finding(Finding(
+                title=f"AWS: Identity Confirmed — Account {account}",
+                description=f"AWS caller identity: ARN={arn}, Account={account}. Credentials are valid.",
+                severity="INFO", evidence=ident_out[:300], tool="aws", host=target,
+                mitre_technique="T1526",
+            ))
 
         # ── 2. IAM enumeration ────────────────────────────────────────────
         users_out  = await self.collect_tool("aws", target, {"options": f"{prof} {reg} iam list-users --output json 2>&1"})

@@ -140,11 +140,17 @@ class MissionBrief(BaseModel):
     All fields default so legacy scans (created before this object existed)
     still validate. The defaults represent a generic active-pentest goal.
     """
-    objective:        str       = "Establish foothold, capture flags, and demonstrate impact."
+    # NOT every engagement has a user/root flag.  A CTF/lab box does; an external
+    # vulnerability assessment does not — its deliverable is proven, evidence-backed
+    # vulnerabilities, and a loot-focused engagement's is retrieved data.  The default
+    # therefore states goals that ANY engagement type can actually satisfy, and the
+    # flag conditions are opt-in per engagement (ENGAGEMENT_WIN_CONDITIONS below).
+    objective:        str       = ("Identify and evidence exploitable weaknesses; "
+                                  "demonstrate impact to the extent authorized.")
     win_conditions:   List[str] = Field(default_factory=lambda: [
-        "shell_obtained",          # any interactive shell on target
-        "user_flag_captured",      # /home/<user>/user.txt or equivalent
-        "root_flag_captured",      # /root/root.txt or SYSTEM-level proof
+        "vulnerabilities_confirmed",   # >=1 validated MEDIUM+ finding with evidence
+        "exploit_verified",            # a weakness PROVEN exploitable (captured artifact)
+        "access_demonstrated",         # shell / RCE / creds / loot — any real access
     ])
     scope_in:         List[str] = []   # IPs/CIDRs/domains explicitly in-scope
     scope_out:        List[str] = []   # explicitly excluded
@@ -187,6 +193,9 @@ class SessionCreate(BaseModel):
     phases:             List[str] = []
     auto_exploit:       bool = False
     mission_brief:      Optional[MissionBrief] = None
+    # Per-host isolation: a multi-target ("MULTI"/CIDR) parent session spawns one CHILD
+    # session per host, each linked here so the report/UI can roll the children up.
+    parent_session_id:  Optional[str] = None
 
 
 class Session(SessionCreate):

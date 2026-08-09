@@ -8,7 +8,7 @@ safety_class: safe
 severity: critical
 life_safety: true
 match:
-  ports: [4000, 4001, 5050, 8500, 9001]
+  ports: [4001, 5050, 8500, 9001]
   banners: ["STARS", "ERAM", "TopSky", "EUROCAT", "ATC automation", "Raytheon STARS", "Lockheed STARS"]
   markers: ["STARS", "ERAM", "TopSky", "EUROCAT", "atc-system", "nfdc", "ARTS"]
 quick_wins:

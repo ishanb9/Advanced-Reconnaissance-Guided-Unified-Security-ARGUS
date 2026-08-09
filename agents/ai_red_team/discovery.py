@@ -14,8 +14,18 @@ AI surfaces); the engine's registry handles single-dict or list returns.
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+
+def _token_in_blob(tok, blob: str) -> bool:
+    t = str(tok).lower().strip()
+    if not t:
+        return False
+    if any(c in t for c in ":._") and len(t) >= 4:
+        return t in blob
+    return re.search(r"(?<![a-z0-9])" + re.escape(t) + r"(?![a-z0-9])", blob) is not None
 
 _SIG_FILE = (Path(__file__).resolve().parent.parent.parent
              / "knowledge" / "data" / "ai_security" / "discovery_signatures.yaml")
@@ -124,12 +134,12 @@ def detect(intel: Dict[str, Any]) -> List[Dict[str, Any]]:
                     dedicated_port_hit = True
         banner_hit = False
         for b in (s.get("banners") or []):
-            if b and str(b).lower() in blob:
+            if b and _token_in_blob(b, blob):
                 evidence.append(f"banner:{b}")
                 banner_hit = True
         marker_hit = False
         for m in (s.get("markers") or []):
-            if m and str(m).lower() in blob:
+            if m and _token_in_blob(m, blob):
                 evidence.append(f"marker:{m}")
                 marker_hit = True
         # FIRE only on a dedicated-port hit OR a banner OR an HTTP marker.  A
@@ -172,12 +182,7 @@ def finding_for(detection: Dict[str, Any]) -> Dict[str, Any]:
         "inference; and red-team it before exposure. Deep-test it in ARGUS by "
         "configuring it as an AI target (target_type='ai').")
     return {
-        # Bare shadow-AI presence = ungoverned attack surface (INFO). The YAML risk
-        # class (critical/high/medium) is inherent-risk for PRIORITISATION, not a
-        # confirmed vuln; reserve MEDIUM+ for confirmed prompt-injection / auth-bypass
-        # / data-exfil established by the AI red-team probe catalog.
-        "severity": "info",
-        "inherent_risk": str(detection.get("severity", "medium")).lower(),
+        "severity": detection.get("severity", "medium"),
         "title": f"Shadow AI: {tech} exposed (ungoverned LLM surface)",
         "description": (
             f"{tech} was detected on the network ({ev}). "

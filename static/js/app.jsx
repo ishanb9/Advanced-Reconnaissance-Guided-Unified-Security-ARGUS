@@ -1030,13 +1030,66 @@ function TargetSelectionModal() {
   const chosen = cands.filter(c => picked[c.host]).map(c => c.host);
 
   function toggle(host) { setPicked(p => ({ ...p, [host]: !p[host] })); }
-  function setAll(val, filterFn) {
-    const next = {};
-    cands.forEach(c => { next[c.host] = filterFn ? (filterFn(c) ? val : !!picked[c.host]) : val; });
-    setPicked(next);
+  // Functional updates only.  The old version read `picked` from the render
+  // closure, and "In-network only" ran setAll(false) then a setTimeout(setAll(true,
+  // filter)) — the second call still saw the PRE-clear picked map, so a
+  // third-party host the operator had ticked by hand survived a filter whose whole
+  // job was to deselect it.  `exact` does it in one atomic update instead.
+  function setAll(val, filterFn, exact) {
+    setPicked(prev => {
+      const next = {};
+      cands.forEach(c => {
+        next[c.host] = exact ? !!(filterFn ? filterFn(c) : val)
+          : (filterFn ? (filterFn(c) ? val : !!prev[c.host]) : val);
+      });
+      return next;
+    });
   }
+  // ── Per-host AUTHORIZATION review (pre-launch) ────────────────────────────
+  // ts.authorization holds the DERIVED grant per host; authzOverrides holds only what
+  // the operator changed.  Untouched hosts keep the derived (fail-closed) grant.
+  const authzMap = (ts.authorization && typeof ts.authorization === 'object') ? ts.authorization : {};
+  const overrides = (ts.authzOverrides && typeof ts.authzOverrides === 'object') ? ts.authzOverrides : {};
+  const PROFILES = (Array.isArray(ts.authzProfiles) && ts.authzProfiles.length)
+    ? ts.authzProfiles
+    : [{ id: 'passive_only', label: 'Passive only' }, { id: 'assess', label: 'Assess' },
+       { id: 'external', label: 'External (approve exploits)' }, { id: 'full', label: 'Full autonomous' }];
+
+  // Which profile a host is effectively running under.
+  function effProfile(host) {
+    if (overrides[host]) return overrides[host];
+    const a = authzMap[host] || {};
+    if (a.exploitation === 'allow') return 'full';
+    if (a.exploitation === 'require_approval') return 'external';
+    if (a.ceiling === 'light') return 'assess';
+    return 'passive_only';
+  }
+  function setProfile(host, prof) {
+    // Selecting the derived value clears the override (keeps provenance clean).
+    const a = authzMap[host] || {};
+    const derived = (a.exploitation === 'allow') ? 'full'
+      : (a.exploitation === 'require_approval') ? 'external'
+      : (a.ceiling === 'light') ? 'assess' : 'passive_only';
+    dispatch({ type: 'TARGET_SELECTION_AUTHZ',
+               payload: { host, profile: prof === derived ? '' : prof } });
+  }
+  const AUTHZ_COLOR = {
+    passive_only: 'var(--text-muted)',
+    assess:       'var(--info, #40a9ff)',
+    external:     'var(--warning, #faad14)',
+    full:         'var(--danger, #ff4d4f)',
+  };
+  const AUTHZ_SHORT = {
+    passive_only: 'passive', assess: 'assess',
+    external: 'approve-exploit', full: 'AUTONOMOUS',
+  };
+
   function submit() {
-    sendWS({ type: 'target_selection', selection_id: selId, selected: chosen });
+    // Send ONLY the hosts being engaged, with the authorization the operator
+    // reviewed.  Overrides for unselected hosts are irrelevant and dropped.
+    const authz = {};
+    chosen.forEach(h => { authz[h] = effProfile(h); });
+    sendWS({ type: 'target_selection', selection_id: selId, selected: chosen, authz });
     dispatch({ type: 'TARGET_SELECTION_RESOLVE', payload: {} });
   }
   function cancel() {  // explicit "scan nothing"
@@ -1062,72 +1115,267 @@ function TargetSelectionModal() {
     }
   }, label);
 
+  // Split the candidates: assets inside the apex network, and everything else.
+  // The second group is what ARGUS excludes by default, and it is exactly the
+  // group a human must eyeball — a forgotten subsidiary, an acquisition, a cloud
+  // tenancy or a piece of shadow IT resolves outside the apex too, and silently
+  // dropping it leaves a real hole in the assessment.
+  const inNet    = cands.filter(c => c.in_apex_network);
+  const external = cands.filter(c => !c.in_apex_network);
+  const extPicked = external.filter(c => picked[c.host]).length;
+
+  // Rich dialog shell — see static/css/avatars/_components.css (.a-dlg*).
+  // Fixed header/footer with a single scrolling body, avatar-aware accent,
+  // sticky group headers and a live selection summary. Structure was already
+  // correct (a previous fix stopped the footer being pushed out); this makes
+  // it a first-class, visually-rich surface across all six avatars.
   return React.createElement('div', {
-    style: {
-      position: 'fixed', inset: 0, zIndex: 9999,
-      background: 'rgba(0,0,0,0.68)', backdropFilter: 'blur(5px)',
-      display: 'flex', alignItems: 'center', justifyContent: 'center',
-    }
+    className: 'a-dlg-backdrop',
+    role: 'presentation',
+    'data-slot': 'dialog.targetSelection'
   },
     React.createElement('div', {
-      style: {
-        background: 'var(--bg-surface)', border: '1px solid #7B6CF6', borderRadius: 14,
-        padding: '22px 26px', minWidth: 560, maxWidth: 760, maxHeight: '82vh',
-        display: 'flex', flexDirection: 'column',
-        boxShadow: '0 0 60px rgba(123,108,246,0.20), 0 12px 40px rgba(0,0,0,0.65)',
-        fontFamily: 'var(--font-ui)',
-      }
+      className: 'a-dlg',
+      role: 'dialog',
+      'aria-modal': 'true',
+      'aria-label': `Select targets for ${ts.domain || 'engagement'}`
     },
-      React.createElement('div', { style: { fontSize: 15, fontWeight: 700, color: '#7B6CF6', marginBottom: 4 } },
-        `◆ Select Targets — ${ts.domain || ''}`),
-      React.createElement('div', { style: { fontSize: 11, color: 'var(--text-secondary)', marginBottom: 12, lineHeight: 1.5 } },
-        `${cands.length} candidate(s) discovered. Pick which to engage — nothing is attacked until you confirm. ` +
-        'Hosts resolving outside the apex network are flagged as likely third-party/CDN — only select what you are authorized to test.'),
+      // ── HEADER (pinned) ──────────────────────────────────────────────────
+      React.createElement('div', { className: 'a-dlg-head' },
+        React.createElement('div', { className: 'a-dlg-title' },
+          React.createElement('span', { 'aria-hidden': 'true' }, '◆'),
+          React.createElement('span', null, 'Select Targets'),
+          ts.domain ? React.createElement('span', {
+            className: 'a-num',
+            style: { fontSize: 12, color: 'var(--text-secondary)', fontWeight: 500 }
+          }, ts.domain) : null
+        ),
+        React.createElement('div', { className: 'a-dlg-sub' },
+          React.createElement('b', { style: { color: 'var(--text-primary)' } }, String(cands.length)),
+          ` candidate${cands.length === 1 ? '' : 's'} discovered · `,
+          React.createElement('span', { style: { color: 'var(--low)' } }, `${inNet.length} in apex network`),
+          ' · ',
+          React.createElement('span', { style: { color: external.length ? 'var(--high)' : 'var(--text-muted)' } },
+            `${external.length} outside it`),
+          React.createElement('span', { style: { display: 'block', marginTop: 3, color: 'var(--text-muted)' } },
+            'Nothing is touched until you confirm. Review the authorization column before launching.')
+        )
+      ),
 
-      // Candidate list
-      React.createElement('div', {
-        style: { overflowY: 'auto', flex: 1, border: '1px solid var(--border-light)', borderRadius: 8, marginBottom: 12 }
-      },
-        cands.map((c, i) => {
+      // ── BODY (the ONLY scrolling region) ─────────────────────────────────
+      React.createElement('div', { className: 'a-dlg-body' },
+
+      // DNS record sweep (DNSDumpster-equivalent) — context for the pick.
+      // An OPEN ZONE TRANSFER is called out in red because it is the single
+      // highest-value misconfiguration this pass can surface.
+      (function renderDns() {
+        const rec = ts.dnsRecords;
+        if (!rec) return null;
+        const s = rec.summary || ts.dnsSummary || {};
+        const openAxfr = s.zone_transfer_open || [];
+        const row = (label, val) => (val && (!Array.isArray(val) || val.length))
+          ? React.createElement('div', { key: label, style: { display: 'flex', gap: 8, padding: '2px 0' } },
+              React.createElement('span', { style: { fontSize: 9.5, fontWeight: 700, color: 'var(--text-muted)', minWidth: 52, fontFamily: 'var(--font-mono)' } }, label),
+              React.createElement('span', { style: { fontSize: 10, color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)', wordBreak: 'break-all' } },
+                Array.isArray(val) ? val.join(', ') : String(val)))
+          : null;
+        const pol = rec.txt_policies || {};
+        return React.createElement('details', {
+          open: openAxfr.length > 0,
+          style: { border: `1px solid ${openAxfr.length ? 'var(--danger, #ff4d4f)' : 'var(--border-light)'}`,
+                   borderRadius: 8, marginBottom: 10, padding: '8px 12px' }
+        },
+          React.createElement('summary', {
+            style: { fontSize: 11, fontWeight: 700, cursor: 'pointer',
+                     color: openAxfr.length ? 'var(--danger, #ff4d4f)' : '#7B6CF6' }
+          }, openAxfr.length
+              ? `⚠ DNS records — ZONE TRANSFER OPEN on ${openAxfr.join(', ')}`
+              : `▤ DNS records (${s.addresses || 0} addr · ${s.nameservers || 0} NS · ${s.mail_exchangers || 0} MX · ${s.txt_records || 0} TXT)`),
+          React.createElement('div', { style: { marginTop: 8, maxHeight: 180, overflowY: 'auto' } },
+            row('A', rec.a), row('AAAA', rec.aaaa), row('NS', rec.ns),
+            row('MX', (rec.mx || []).map(m => `${m.priority} ${m.host}`)),
+            row('CNAME', rec.cname), row('CAA', rec.caa),
+            row('SOA', rec.soa && rec.soa.mname ? `${rec.soa.mname} (serial ${rec.soa.serial})` : ''),
+            row('SRV', (rec.srv || []).map(r => `${r.service || ''}:${r.port} → ${r.target}`)),
+            row('TXT', rec.txt),
+            row('SPF', pol.has_spf ? `present ${pol.spf_all_qualifier || ''}all` : 'MISSING'),
+            row('DMARC', pol.has_dmarc ? `p=${pol.dmarc_policy || '?'}` : 'MISSING'),
+            row('PTR', Object.keys(rec.ptr || {}).map(ip => `${ip} → ${(rec.ptr[ip] || []).join('/')}`)),
+            rec.wildcard ? row('WILDCARD', 'yes — brute-force results are unreliable') : null,
+            (rec.errors && rec.errors.length) ? row('NOTES', rec.errors) : null
+          )
+        );
+      })(),
+
+      // One row renderer, used by both groups.
+      (function renderGroups() {
+        const row = (c, i, last) => {
           const f = flag(c);
           return React.createElement('div', {
-            key: c.host, onClick: () => toggle(c.host),
-            style: {
-              display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px', cursor: 'pointer',
-              borderBottom: i < cands.length - 1 ? '1px solid var(--border-light)' : 'none',
-              background: picked[c.host] ? 'rgba(123,108,246,0.08)' : 'transparent',
-            }
+            key: c.host,
+            className: 'a-dlg-row',
+            'data-picked': picked[c.host] ? 'true' : 'false',
+            role: 'checkbox',
+            'aria-checked': picked[c.host] ? 'true' : 'false',
+            tabIndex: 0,
+            onKeyDown: (ev) => {
+              if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); toggle(c.host); }
+            },
+            onClick: () => toggle(c.host)
           },
             React.createElement('input', {
-              type: 'checkbox', checked: !!picked[c.host], readOnly: true,
-              style: { width: 15, height: 15, accentColor: '#7B6CF6', pointerEvents: 'none' }
+              type: 'checkbox', checked: !!picked[c.host], readOnly: true, tabIndex: -1,
+              style: { width: 15, height: 15, accentColor: 'var(--accent)', pointerEvents: 'none', flexShrink: 0 }
             }),
             React.createElement('div', { style: { flex: 1, minWidth: 0 } },
-              React.createElement('div', { style: { fontSize: 12, fontWeight: 600, color: 'var(--text-primary)', fontFamily: 'var(--font-mono)' } }, c.host),
-              React.createElement('div', { style: { fontSize: 9.5, color: 'var(--text-muted)' } },
+              React.createElement('div', { className: 'primary a-wrap-any' }, c.host),
+              React.createElement('div', { className: 'secondary a-wrap-any' },
                 `${(c.ips || []).join(', ') || 'unresolved'}${c.sources && c.sources.length ? '  ·  ' + c.sources.join('/') : ''}`)
             ),
             React.createElement('span', {
-              style: { fontSize: 9, fontWeight: 700, color: f.col, border: `1px solid ${f.col}`,
-                       borderRadius: 5, padding: '2px 7px', whiteSpace: 'nowrap' }
-            }, f.t)
+              className: 'a-dlg-tag', style: { color: f.col }
+            }, f.t),
+            // ── AUTHORIZATION control: what ARGUS may do to THIS host ──
+            (function authzCell() {
+              const prof = effProfile(c.host);
+              const col = AUTHZ_COLOR[prof] || 'var(--text-muted)';
+              const a = authzMap[c.host] || {};
+              const isOverride = !!overrides[c.host];
+              return React.createElement('select', {
+                value: prof,
+                title: (a.note || '') + (isOverride ? '  [OPERATOR-SET]' : '  [derived]'),
+                onClick: (e) => e.stopPropagation(),   // don't toggle the row
+                onChange: (e) => { e.stopPropagation(); setProfile(c.host, e.target.value); },
+                style: {
+                  fontSize: 9, fontWeight: 700, fontFamily: 'var(--font-mono)',
+                  color: col, background: 'transparent',
+                  border: `1px solid ${col}`, borderRadius: 5,
+                  padding: '2px 4px', cursor: 'pointer', maxWidth: 152,
+                  outline: isOverride ? `1px dashed ${col}` : 'none',
+                }
+              }, PROFILES.map(p => React.createElement('option', {
+                key: p.id, value: p.id,
+                style: { color: 'var(--text-primary)', background: 'var(--bg-surface)' }
+              }, (AUTHZ_SHORT[p.id] || p.id) + (p.id === prof && isOverride ? ' *' : ''))));
+            })()
           );
-        })
-      ),
+        };
 
-      // Quick-select row
-      React.createElement('div', { style: { display: 'flex', gap: 8, marginBottom: 12, flexWrap: 'wrap' } },
-        btn('All', () => setAll(true)),
-        btn('None', () => setAll(false)),
-        btn('In-network only', () => { setAll(false); setTimeout(() => setAll(true, c => c.in_apex_network), 0); }),
-      ),
+        // Sticky group header + a note, then the rows. The header stays visible
+        // while its group scrolls, so a long candidate list never loses context.
+        const section = (title, note, list, accent) => list.length ? React.createElement('div', {
+          key: title, style: { marginBottom: 14 }
+        },
+          React.createElement('div', {
+            className: 'a-dlg-group', style: { color: accent }
+          },
+            React.createElement('span', null, title),
+            React.createElement('span', { className: 'count' }, String(list.length)),
+            React.createElement('span', {
+              style: { flexBasis: '100%', fontSize: 9.5, fontWeight: 400, letterSpacing: 0,
+                       textTransform: 'none', color: 'var(--text-muted)', lineHeight: 1.45 }
+            }, note)
+          ),
+          list.map((c, i) => row(c, i, i === list.length - 1))
+        ) : null;
 
-      // Action row
-      React.createElement('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10 } },
-        React.createElement('div', { style: { fontSize: 11, color: 'var(--text-muted)' } }, `${chosen.length} selected`),
-        React.createElement('div', { style: { display: 'flex', gap: 8 } },
-          btn('Scan nothing', cancel, false),
-          btn(`▶ Engage ${chosen.length} target(s)`, submit, true, chosen.length === 0),
+        return React.createElement(React.Fragment, null,
+          section('▣ IN APEX NETWORK', 'resolve inside the target’s own address space — selected by default',
+                  inNet, 'var(--success, #73d13d)'),
+          // The validation list.  Excluded by DEFAULT, never SILENTLY: a name that
+          // resolves outside the apex is usually a CDN or a mail provider, but it
+          // is also how a forgotten subsidiary, an acquisition, a cloud tenancy or
+          // shadow IT looks.  Skipping one of those quietly is its own security
+          // problem, so the operator is shown every one and confirms the call.
+          section('⚠ OUTSIDE APEX — VALIDATE OWNERSHIP',
+                  'excluded by default. Check each: a CDN/mail provider is correctly '
+                  + 'left out, but an acquisition, cloud tenancy or shadow-IT asset '
+                  + 'belongs IN scope — include it only if the engagement covers it',
+                  external, 'var(--warning, #faad14)')
+        );
+      })(),
+
+      // ── Pre-launch AUTHORIZATION summary ──────────────────────────────────
+      // States plainly what will happen to the selected hosts, and calls out any
+      // host escalated to autonomous exploitation — the one choice that removes the
+      // human from the loop, so it must never be quiet.
+      (function authzSummary() {
+        if (!chosen.length) return null;
+        const byProf = {};
+        chosen.forEach(h => { const p = effProfile(h); (byProf[p] = byProf[p] || []).push(h); });
+        const overridden = chosen.filter(h => overrides[h]);
+        const autonomous = byProf['full'] || [];
+        return React.createElement('div', {
+          style: {
+            border: `1px solid ${autonomous.length ? 'var(--danger, #ff4d4f)' : 'var(--border-light)'}`,
+            // Capped + scrollable.  Uncapped, this block listed every selected host
+            // by name and grew without limit — that is what pushed the buttons out
+            // of the dialog once more than a handful of hosts were picked.
+            borderRadius: 8, padding: '8px 12px', marginBottom: 4,
+            maxHeight: 150, overflowY: 'auto',
+          }
+        },
+          React.createElement('div', {
+            style: { fontSize: 10, fontWeight: 700, color: '#7B6CF6', marginBottom: 5 }
+          }, '⚖ AUTHORIZATION — reviewed before launch'),
+          ...PROFILES.filter(p => (byProf[p.id] || []).length).map(p =>
+            React.createElement('div', {
+              key: p.id, style: { display: 'flex', gap: 8, padding: '1px 0' }
+            },
+              React.createElement('span', {
+                style: { fontSize: 9, fontWeight: 700, minWidth: 116,
+                         color: AUTHZ_COLOR[p.id], fontFamily: 'var(--font-mono)' }
+              }, `${AUTHZ_SHORT[p.id] || p.id} (${(byProf[p.id] || []).length})`),
+              React.createElement('span', {
+                style: { fontSize: 9.5, color: 'var(--text-secondary)', wordBreak: 'break-all' }
+              }, (byProf[p.id] || []).join(', '))
+            )
+          ),
+          autonomous.length ? React.createElement('div', {
+            style: { fontSize: 9.5, color: 'var(--danger, #ff4d4f)', marginTop: 5, fontWeight: 700 }
+          }, `⚠ ${autonomous.length} host(s) set to AUTONOMOUS exploitation — no per-exploit `
+             + `approval will be requested. Use only where the engagement authorizes it.`) : null,
+          overridden.length ? React.createElement('div', {
+            style: { fontSize: 9, color: 'var(--warning, #faad14)', marginTop: 4 }
+          }, `${overridden.length} host(s) changed from the derived authorization `
+             + `(recorded in the audit trail): ${overridden.join(', ')}`) : null
+        );
+      })(),
+
+      ),   // ── end BODY ──────────────────────────────────────────────────
+
+      // ── FOOTER (pinned — the buttons are ALWAYS reachable) ───────────────
+      React.createElement('div', { className: 'a-dlg-foot', style: { flexDirection: 'column', alignItems: 'stretch' } },
+        // Bulk-selection toolbar
+        React.createElement('div', { className: 'a-chiprow' },
+          React.createElement('span', { className: 'a-eyebrow', style: { marginRight: 2 } }, 'Select'),
+          React.createElement('button', { className: 'a-dlg-btn', style: { padding: '5px 10px', fontSize: 10 },
+            onClick: () => setAll(true) }, 'All'),
+          React.createElement('button', { className: 'a-dlg-btn', style: { padding: '5px 10px', fontSize: 10 },
+            onClick: () => setAll(false) }, 'None'),
+          React.createElement('button', { className: 'a-dlg-btn', style: { padding: '5px 10px', fontSize: 10 },
+            onClick: () => setAll(true, c => c.in_apex_network, true) }, 'In-network only')
+        ),
+        // Live summary + primary actions
+        React.createElement('div', {
+          style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                   gap: 12, flexWrap: 'wrap', marginTop: 4 }
+        },
+          React.createElement('div', { className: 'a-dlg-summary' },
+            React.createElement('b', null, String(chosen.length)),
+            ` of ${cands.length} selected`,
+            external.length ? React.createElement('span', {
+              className: extPicked ? 'a-dlg-warn' : undefined
+            }, `  ·  ${extPicked}/${external.length} outside-apex included`) : null
+          ),
+          React.createElement('div', { style: { display: 'flex', gap: 8 } },
+            React.createElement('button', { className: 'a-dlg-btn', onClick: cancel }, 'Scan nothing'),
+            React.createElement('button', {
+              className: 'a-dlg-btn', 'data-primary': 'true',
+              disabled: chosen.length === 0,
+              onClick: chosen.length === 0 ? undefined : submit
+            }, `▶ Engage ${chosen.length} target${chosen.length === 1 ? '' : 's'}`)
+          )
         )
       )
     )
@@ -1565,15 +1813,31 @@ function App() {
     return () => clearTimeout(id);
   }, [state.recentFindings]);
 
-  // Apply persisted theme on mount + whenever it changes
-  useEffect(() => { applyTheme(theme); }, [theme]);
+  // Apply persisted theme on mount + whenever it changes.
+  // When the avatar engine is present it owns the visual identity, so the
+  // legacy data-theme attribute is cleared to avoid two competing token
+  // sources. (Avatar CSS already wins on specificity + document order; this
+  // just keeps the DOM honest about which system is in charge.)
+  useEffect(() => {
+    if (window.ArgusAvatar) {
+      try { document.documentElement.removeAttribute('data-theme'); } catch (_) {}
+      return;
+    }
+    applyTheme(theme);
+  }, [theme]);
 
-  // Apply persisted visual skin on cold boot (idempotent — the
-  // SkinChooser component handles subsequent in-session changes).
-  // Use a single-shot effect so cold-boot loads the correct skin
-  // stylesheet before any panel renders.
+  // Legacy visual-skin cold boot. Superseded by the avatar engine: when
+  // ArgusAvatar is present we clear the skin <link> so a stale skin
+  // stylesheet cannot override avatar tokens. ArgusAvatar.boot() has
+  // already migrated the saved skin id to its avatar equivalent.
   useEffect(() => {
     try {
+      if (window.ArgusAvatar) {
+        const legacy = document.getElementById('argus-skin');
+        if (legacy) { legacy.removeAttribute('href'); }
+        document.documentElement.removeAttribute('data-skin');
+        return;
+      }
       if (window.ArgusSkin) {
         window.ArgusSkin.apply(window.ArgusSkin.load());
       }
@@ -1744,6 +2008,18 @@ function App() {
     }
     const tab = hub.tabs.find(t => t.key === currentTab) || hub.tabs[0];
     const Comp = COMP_FOR[tab.comp]?.();
+
+    // ── Avatar layout hooks ────────────────────────────────────────────
+    // Publish the active page/hub as root attributes so avatar stylesheets
+    // can compose per-page layouts (:root[data-avatar=x][data-page=y]).
+    // Deliberately an ATTRIBUTE, not a wrapper element: it adds zero DOM
+    // depth, so no existing flex/grid parent-child relationship changes.
+    // Idempotent and side-effect free beyond the attribute itself.
+    try {
+      document.documentElement.setAttribute('data-page', tab.comp);
+      document.documentElement.setAttribute('data-hub', hub.key);
+      if (window.ArgusSlots) window.ArgusSlots.seen('page:' + tab.comp);
+    } catch (_) {}
 
     const tabbar = React.createElement('div', {
       className: 'hub-tabbar',
@@ -1970,14 +2246,23 @@ function App() {
         }
       }, `⚠ ${findingsSummary.critical} CRIT`),
 
-      // Audience-mode picker (T5) — sits left of theme switcher
+      // Audience-mode picker (T5) — sits left of the avatar switcher.
+      // Mode (WHO is looking) and avatar (WHICH ARGUS) are orthogonal:
+      // 6 avatars × 4 modes = 24 combinations, all supported.
       React.createElement(ModePicker),
 
-      // Visual-skin chooser (18 skins across 3 families).
-      window.SkinChooser ? React.createElement(window.SkinChooser) : null,
-
-      // Theme switcher (color theme within the active skin)
-      React.createElement(ThemeSwitcher, { current: theme, onPick: setTheme }),
+      // ── AVATAR SWITCHER ────────────────────────────────────────────
+      // Supersedes the legacy ThemeSwitcher (5 colour themes) and
+      // SkinChooser (17 colour skins) with 6 full avatars — tokens,
+      // typography, density, motion, texture, layout and copy register.
+      // Legacy prefs are migrated automatically by ArgusAvatar.boot()
+      // (see static/js/theme/avatars.js SKIN_TO_AVATAR / THEME_TO_AVATAR),
+      // so no saved preference is orphaned.
+      // ThemeSwitcher + SkinChooser remain defined and callable for
+      // backward compatibility; they are simply no longer mounted here.
+      window.AvatarSwitcher
+        ? React.createElement(window.AvatarSwitcher)
+        : React.createElement(ThemeSwitcher, { current: theme, onPick: setTheme }),
 
       // Auth user chip — only renders when window.ArgusAuth.me is set
       // (i.e. the auth module is installed AND user is authenticated).

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>ARGUS Security Assessment &mdash; {{ target_display }}</title>
+<title>ARGUS Security Assessment &mdash; 10.129.21.254</title>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;700&family=IBM+Plex+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
 <style>
 /* ===================================================================
@@ -339,7 +339,7 @@ body{font-family:var(--font-main);background:var(--muted-bg);color:var(--text-pr
 
 <!-- CONFIDENTIAL BANNER -->
 <div class="confid-banner">
-  <span class="side">ARGUS Assessment &middot; {{ target_display }}</span>
+  <span class="side">ARGUS Assessment &middot; 10.129.21.254</span>
   <span>CONFIDENTIAL &mdash; CLIENT PRIVILEGED &mdash; NOT FOR DISTRIBUTION</span>
   <span class="side">Classification: RESTRICTED &middot; Handle per NDA</span>
 </div>
@@ -358,44 +358,42 @@ body{font-family:var(--font-main);background:var(--muted-bg);color:var(--text-pr
 
   <div class="cover-rule"></div>
 
-  <div class="cover-report-type">Penetration Test Report &middot; {{ engagement_type }}</div>
-  <h1 class="cover-title">Security Assessment<br>Report &mdash; {{ target_display }}</h1>
+  <div class="cover-report-type">Penetration Test Report &middot; pentest</div>
+  <h1 class="cover-title">Security Assessment<br>Report &mdash; 10.129.21.254</h1>
   <div class="cover-subtitle">
-    Target: {{ session.target_ip }}{% if session.target_hostname %} &middot; {{ session.target_hostname }}{% endif %}
-    {% if session.scope %} &middot; {{ session.scope }}{% endif %}
+    Target: 10.129.21.254 &middot; FORGE
+     &middot; single host
   </div>
 
   <div class="cover-meta-grid">
-    <div class="cover-meta-item"><label>Target Host</label><div class="val">{{ session.target_ip }}{% if session.target_hostname %} ({{ session.target_hostname }}){% endif %}</div></div>
-    <div class="cover-meta-item"><label>Engagement Type</label><div class="val">{{ engagement_type }}</div></div>
+    <div class="cover-meta-item"><label>Target Host</label><div class="val">10.129.21.254 (FORGE)</div></div>
+    <div class="cover-meta-item"><label>Engagement Type</label><div class="val">pentest</div></div>
     <div class="cover-meta-item"><label>Classification</label><div class="val">CONFIDENTIAL</div></div>
-    <div class="cover-meta-item"><label>Engagement Window</label><div class="val">{{ session.started_at }}{% if session.completed_at %} &ndash; {{ session.completed_at }}{% endif %}</div></div>
+    <div class="cover-meta-item"><label>Engagement Window</label><div class="val">2026-06-18 &ndash; 2026-06-19</div></div>
     <div class="cover-meta-item"><label>Analyst</label><div class="val">ARGUS Autonomous Engine</div></div>
-    <div class="cover-meta-item"><label>Report Date</label><div class="val">{{ generated_at }}</div></div>
-    {% if session.scope %}
-    <div class="cover-meta-item"><label>Scope</label><div class="val">{{ session.scope }}</div></div>
-    {% endif %}
+    <div class="cover-meta-item"><label>Report Date</label><div class="val">2026-06-19 09:30 UTC</div></div>
+    
+    <div class="cover-meta-item"><label>Scope</label><div class="val">single host</div></div>
+    
     <div class="cover-meta-item"><label>Review Status</label><div class="val">Operator-Reviewed</div></div>
-    {% if duration %}
-    <div class="cover-meta-item"><label>Duration</label><div class="val">{{ duration }}</div></div>
-    {% endif %}
+    
+    <div class="cover-meta-item"><label>Duration</label><div class="val">1h 42m</div></div>
+    
   </div>
 
   <div class="cover-badges">
-    {% if final_rating is defined and final_rating and final_rating != 'none' %}
-    <div class="cover-risk-badge">&#9679; Overall Risk: {{ final_rating | upper }}</div>
-    <div class="cover-outcome-badge">&#10004; {{ outcome.label }}</div>
-    {% else %}
-    <div class="cover-risk-badge">&#9679; Assessment Complete</div>
-    {% endif %}
+    
+    <div class="cover-risk-badge">&#9679; Overall Risk: CRITICAL</div>
+    <div class="cover-outcome-badge">&#10004; FULL COMPROMISE — ROOT</div>
+    
     <div class="cover-outcome-badge">&#10004; Autonomously Executed</div>
     <div class="cover-outcome-badge">&#10004; Operator-Reviewed</div>
   </div>
 
   <div class="cover-id-row">
     <span>ARGUS Assessment</span><span>&middot;</span>
-    <span>{{ target_display }}</span><span>&middot;</span>
-    <span>Generated: {{ generated_at }}</span><span>&middot;</span>
+    <span>10.129.21.254</span><span>&middot;</span>
+    <span>Generated: 2026-06-19 09:30 UTC</span><span>&middot;</span>
     <span>ARGUS Stellar Ops</span>
   </div>
 </div>
@@ -418,19 +416,15 @@ body{font-family:var(--font-main);background:var(--muted-bg);color:var(--text-pr
     <thead><tr><th>Field</th><th>Value</th><th>Field</th><th>Value</th></tr></thead>
     <tbody>
       <tr><td>Classification</td><td>CONFIDENTIAL &mdash; Client Privileged</td><td>Handling</td><td>Not for distribution; attorney-client where applicable</td></tr>
-      <tr><td>Target</td><td class="text-mono">{{ session.target_ip }}{% if session.target_hostname %} &middot; {{ session.target_hostname }}{% endif %}</td><td>Engagement Type</td><td>{{ engagement_type }}</td></tr>
-      {% if session.scope %}
-      <tr><td>Scope</td><td>{{ session.scope }}</td><td>Test Approach</td><td>Grey-box &middot; Time-boxed</td></tr>
-      {% endif %}
-      <tr><td>Engagement Window</td><td class="text-mono">{{ session.started_at }}{% if session.completed_at %} &ndash; {{ session.completed_at }}{% endif %}</td><td>Report Generated</td><td class="text-mono">{{ generated_at }}</td></tr>
+      <tr><td>Target</td><td class="text-mono">10.129.21.254 &middot; FORGE</td><td>Engagement Type</td><td>pentest</td></tr>
+      
+      <tr><td>Scope</td><td>single host</td><td>Test Approach</td><td>Grey-box &middot; Time-boxed</td></tr>
+      
+      <tr><td>Engagement Window</td><td class="text-mono">2026-06-18 &ndash; 2026-06-19</td><td>Report Generated</td><td class="text-mono">2026-06-19 09:30 UTC</td></tr>
       <tr><td>Analysts</td><td>ARGUS Autonomous Engine (operator-reviewed)</td><td>Authorized By</td><td>[Client Authorized Signatory &mdash; REDACTED]</td></tr>
-      {% if summary.critical is defined and summary.critical > 0 %}
-      <tr><td>Overall Risk</td><td><span class="badge badge-critical badge-dot">Critical</span></td><td>Outcome</td><td><strong>{{ outcome.label }}</strong></td></tr>
-      {% elif summary.high is defined and summary.high > 0 %}
-      <tr><td>Overall Risk</td><td><span class="badge badge-high badge-dot">High</span></td><td>Outcome</td><td><strong>{{ outcome.label }}</strong></td></tr>
-      {% else %}
-      <tr><td>Overall Risk</td><td><span class="badge badge-medium badge-dot">Medium</span></td><td>Outcome</td><td><strong>{{ outcome.label }}</strong></td></tr>
-      {% endif %}
+      
+      <tr><td>Overall Risk</td><td><span class="badge badge-critical badge-dot">Critical</span></td><td>Outcome</td><td><strong>FULL COMPROMISE — ROOT</strong></td></tr>
+      
     </tbody>
   </table>
 
@@ -481,49 +475,61 @@ body{font-family:var(--font-main);background:var(--muted-bg);color:var(--text-pr
   </div>
 
   <!-- Stat Tiles -->
-  {% if summary %}
+  
   <div class="stat-tiles">
-    <div class="stat-tile t-critical"><div class="tile-num">{{ summary.critical }}</div><div class="tile-label">Critical</div></div>
-    <div class="stat-tile t-high"><div class="tile-num">{{ summary.high }}</div><div class="tile-label">High</div></div>
-    <div class="stat-tile t-medium"><div class="tile-num">{{ summary.medium }}</div><div class="tile-label">Medium</div></div>
-    <div class="stat-tile t-low"><div class="tile-num">{{ summary.low }}</div><div class="tile-label">Low</div></div>
-    <div class="stat-tile t-info"><div class="tile-num">{{ summary.info }}</div><div class="tile-label">Info</div></div>
-    <div class="stat-tile t-total"><div class="tile-num">{{ summary.total }}</div><div class="tile-label">Total</div></div>
+    <div class="stat-tile t-critical"><div class="tile-num">1</div><div class="tile-label">Critical</div></div>
+    <div class="stat-tile t-high"><div class="tile-num">1</div><div class="tile-label">High</div></div>
+    <div class="stat-tile t-medium"><div class="tile-num">0</div><div class="tile-label">Medium</div></div>
+    <div class="stat-tile t-low"><div class="tile-num">0</div><div class="tile-label">Low</div></div>
+    <div class="stat-tile t-info"><div class="tile-num">0</div><div class="tile-label">Info</div></div>
+    <div class="stat-tile t-total"><div class="tile-num">2</div><div class="tile-label">Total</div></div>
     <div class="stat-tile t-access">
-      <div class="tile-num">{% if outcome.root %}ROOT{% elif outcome.compromised %}USER{% else %}NONE{% endif %}</div>
+      <div class="tile-num">ROOT</div>
       <div class="tile-label">Access Level</div>
     </div>
   </div>
-  {% endif %}
+  
 
   <!-- Headline / Executive Summary -->
-  {% if executive_summary %}
+  
   <div class="exec-headline">
     <div class="eh-label">Attack Chain Summary &mdash; Autonomous Assessment</div>
-    <p>{{ executive_summary }}</p>
+    <p>ARGUS chained upload-RCE then sudo-git to root.</p>
   </div>
-  {% endif %}
+  
 
   <!-- Priority Actions — derived from critical/high findings -->
-  {% if findings %}
+  
   <div class="sub-heading">Priority Actions</div>
   <div class="priority-actions">
-    {% set ns = namespace(action_num=0) %}
-    {% for f in findings if f.severity|lower in ['critical','high','medium','low'] %}
-    {% set ns.action_num = ns.action_num + 1 %}
-    {% if ns.action_num <= 5 %}
+    
+    
+    
+    
     <div class="priority-action">
-      <div class="pa-num">{{ ns.action_num }}</div>
+      <div class="pa-num">1</div>
       <div class="pa-body">
-        <strong>{{ f.title }}</strong>
-        <span>{{ f.remediation }}</span>
+        <strong>Unauthenticated file-upload to RCE</strong>
+        <span>validate uploads</span>
       </div>
-      <div class="pa-sev"><span class="badge badge-{{ f.severity|lower }} badge-dot">{{ f.severity }}</span></div>
+      <div class="pa-sev"><span class="badge badge-critical badge-dot">critical</span></div>
     </div>
-    {% endif %}
-    {% endfor %}
+    
+    
+    
+    
+    <div class="priority-action">
+      <div class="pa-num">2</div>
+      <div class="pa-body">
+        <strong>Outdated Apache 2.4.41</strong>
+        <span>patch</span>
+      </div>
+      <div class="pa-sev"><span class="badge badge-high badge-dot">high</span></div>
+    </div>
+    
+    
   </div>
-  {% endif %}
+  
 </div>
 
 <!-- ================================================================
@@ -545,20 +551,20 @@ body{font-family:var(--font-main);background:var(--muted-bg);color:var(--text-pr
       <div class="card-header">&#x1F5A5; Target System</div>
       <div class="card-body">
         <table style="width:100%;border-collapse:collapse;font-size:12px">
-          {% if session.target_hostname %}
-          <tr><td style="padding:5px 0;color:var(--text-muted);font-size:10.5px;text-transform:uppercase;letter-spacing:.06em;font-weight:600;width:110px">Hostname</td><td style="font-family:var(--font-mono);font-weight:700;color:var(--navy)">{{ session.target_hostname }}</td></tr>
-          {% endif %}
-          <tr><td style="padding:5px 0;color:var(--text-muted);font-size:10.5px;text-transform:uppercase;letter-spacing:.06em;font-weight:600">IP Address</td><td style="font-family:var(--font-mono);color:var(--navy)">{{ session.target_ip }}</td></tr>
-          {% if intel.os_guess %}
-          <tr><td style="padding:5px 0;color:var(--text-muted);font-size:10.5px;text-transform:uppercase;letter-spacing:.06em;font-weight:600">OS</td><td>{{ intel.os_guess }}</td></tr>
-          {% endif %}
-          <tr><td style="padding:5px 0;color:var(--text-muted);font-size:10.5px;text-transform:uppercase;letter-spacing:.06em;font-weight:600">Test Type</td><td>{{ engagement_type }}</td></tr>
-          {% if session.scope %}
-          <tr><td style="padding:5px 0;color:var(--text-muted);font-size:10.5px;text-transform:uppercase;letter-spacing:.06em;font-weight:600">Scope</td><td>{{ session.scope }}</td></tr>
-          {% endif %}
-          {% if intel.shell_access %}
-          <tr><td style="padding:5px 0;color:var(--text-muted);font-size:10.5px;text-transform:uppercase;letter-spacing:.06em;font-weight:600">Shell Access</td><td>{{ intel.shell_access }}</td></tr>
-          {% endif %}
+          
+          <tr><td style="padding:5px 0;color:var(--text-muted);font-size:10.5px;text-transform:uppercase;letter-spacing:.06em;font-weight:600;width:110px">Hostname</td><td style="font-family:var(--font-mono);font-weight:700;color:var(--navy)">FORGE</td></tr>
+          
+          <tr><td style="padding:5px 0;color:var(--text-muted);font-size:10.5px;text-transform:uppercase;letter-spacing:.06em;font-weight:600">IP Address</td><td style="font-family:var(--font-mono);color:var(--navy)">10.129.21.254</td></tr>
+          
+          <tr><td style="padding:5px 0;color:var(--text-muted);font-size:10.5px;text-transform:uppercase;letter-spacing:.06em;font-weight:600">OS</td><td>Ubuntu 20.04</td></tr>
+          
+          <tr><td style="padding:5px 0;color:var(--text-muted);font-size:10.5px;text-transform:uppercase;letter-spacing:.06em;font-weight:600">Test Type</td><td>pentest</td></tr>
+          
+          <tr><td style="padding:5px 0;color:var(--text-muted);font-size:10.5px;text-transform:uppercase;letter-spacing:.06em;font-weight:600">Scope</td><td>single host</td></tr>
+          
+          
+          <tr><td style="padding:5px 0;color:var(--text-muted);font-size:10.5px;text-transform:uppercase;letter-spacing:.06em;font-weight:600">Shell Access</td><td>True</td></tr>
+          
         </table>
       </div>
     </div>
@@ -568,10 +574,10 @@ body{font-family:var(--font-main);background:var(--muted-bg);color:var(--text-pr
       <div class="card-header">&#x1F4CB; Engagement Parameters</div>
       <div class="card-body">
         <table style="width:100%;border-collapse:collapse;font-size:12px">
-          <tr><td style="padding:5px 0;color:var(--text-muted);font-size:10.5px;text-transform:uppercase;letter-spacing:.06em;font-weight:600;width:110px">Window</td><td style="font-family:var(--font-mono)">{{ session.started_at }}{% if session.completed_at %} &ndash; {{ session.completed_at }}{% endif %}</td></tr>
-          {% if session.scope %}
-          <tr><td style="padding:5px 0;color:var(--text-muted);font-size:10.5px;text-transform:uppercase;letter-spacing:.06em;font-weight:600">Scope</td><td>{{ session.scope }}</td></tr>
-          {% endif %}
+          <tr><td style="padding:5px 0;color:var(--text-muted);font-size:10.5px;text-transform:uppercase;letter-spacing:.06em;font-weight:600;width:110px">Window</td><td style="font-family:var(--font-mono)">2026-06-18 &ndash; 2026-06-19</td></tr>
+          
+          <tr><td style="padding:5px 0;color:var(--text-muted);font-size:10.5px;text-transform:uppercase;letter-spacing:.06em;font-weight:600">Scope</td><td>single host</td></tr>
+          
           <tr><td style="padding:5px 0;color:var(--text-muted);font-size:10.5px;text-transform:uppercase;letter-spacing:.06em;font-weight:600">Findings Gate</td><td>ARGUS Issue-Validator (evidence-chained)</td></tr>
           <tr><td style="padding:5px 0;color:var(--text-muted);font-size:10.5px;text-transform:uppercase;letter-spacing:.06em;font-weight:600">MITRE Annot.</td><td>All actions MITRE ATT&amp;CK tagged</td></tr>
         </table>
@@ -579,7 +585,7 @@ body{font-family:var(--font-main);background:var(--muted-bg);color:var(--text-pr
     </div>
   </div>
 
-  {% if intel.services %}
+  
   <div class="sub-heading mt-16">Service Inventory</div>
   <table class="data-table avoid-break">
     <thead>
@@ -588,24 +594,24 @@ body{font-family:var(--font-main);background:var(--muted-bg);color:var(--text-pr
       </tr>
     </thead>
     <tbody>
-      {% for port, s in intel.services.items() %}
+      
       <tr>
-        <td class="mono fw">{{ port }}</td>
-        <td>{{ s.service }}</td>
-        <td class="mono">{{ s.version }}</td>
-        <td>{% if s.notes %}{{ s.notes }}{% endif %}</td>
+        <td class="mono fw">22</td>
+        <td>ssh</td>
+        <td class="mono">8.2p1</td>
+        <td></td>
       </tr>
-      {% endfor %}
+      
+      <tr>
+        <td class="mono fw">80</td>
+        <td>http</td>
+        <td class="mono">2.4.41</td>
+        <td></td>
+      </tr>
+      
     </tbody>
   </table>
-  {% elif intel.open_ports %}
-  <div class="sub-heading mt-16">Open Ports</div>
-  <div class="flex-gap">
-    {% for p in intel.open_ports %}
-    <span class="chip chip-open">{{ p }}</span>
-    {% endfor %}
-  </div>
-  {% endif %}
+  
 </div>
 
 <!-- ================================================================
@@ -626,7 +632,7 @@ body{font-family:var(--font-main);background:var(--muted-bg);color:var(--text-pr
       <div class="sub-heading" style="margin-top:0">Assessment Approach</div>
       <p style="font-size:12.5px;color:var(--text-mid);line-height:1.7;margin-bottom:12px">ARGUS executes a structured <strong>Plan &rarr; Execute &rarr; Validate</strong> hypothesis tree. Each node in the tree represents a testable attack hypothesis; nodes are activated based on evidence gathered from prior steps. The engine only promotes a finding when it is grounded in concrete tool output (the <strong>Issue-Validator gate</strong>).</p>
       <p style="font-size:12.5px;color:var(--text-mid);line-height:1.7;margin-bottom:12px">Every offensive action is annotated with MITRE ATT&amp;CK technique IDs at time of execution, creating a tamper-evident evidence chain from reconnaissance through loot capture. Failed attempts are recorded as coverage evidence (not omitted).</p>
-      <p style="font-size:12.5px;color:var(--text-mid);line-height:1.7">The engagement followed the scope agreement: {{ engagement_type }}; time-boxed {{ session.started_at }}{% if session.completed_at %} &ndash; {{ session.completed_at }}{% endif %}. All activity remained within the authorized target range.</p>
+      <p style="font-size:12.5px;color:var(--text-mid);line-height:1.7">The engagement followed the scope agreement: pentest; time-boxed 2026-06-18 &ndash; 2026-06-19. All activity remained within the authorized target range.</p>
     </div>
     <div>
       <div class="sub-heading" style="margin-top:0">Hypothesis Tree Phases</div>
@@ -662,17 +668,17 @@ body{font-family:var(--font-main);background:var(--muted-bg);color:var(--text-pr
       <tr>
         <td><span class="mitre-badge">MITRE ATT&amp;CK v15</span></td>
         <td>Every offensive action tagged with Tactic + Technique ID at execution time. Kill chain mapped to ATT&amp;CK matrix in &sect;11.</td>
-        <td>{% if mitre_mappings %}{{ mitre_mappings|length }} technique(s) across multiple tactics{% else %}Tagged at execution time{% endif %}</td>
+        <td>1 technique(s) across multiple tactics</td>
       </tr>
       <tr>
         <td><span class="owasp-badge">OWASP Top 10 2021</span></td>
         <td>Web findings cross-referenced to OWASP Top 10 categories (A01&ndash;A10).</td>
-        <td>{% if findings %}{{ findings|selectattr('severity','in',['Critical','High','Medium'])|list|length }} relevant findings{% else %}N/A{% endif %}</td>
+        <td>0 relevant findings</td>
       </tr>
       <tr>
         <td><span style="background:#c0392b;color:#fff;padding:1px 7px;border-radius:3px;font-size:9.5px;font-weight:700;font-family:var(--font-mono)">CVSS v3.1</span></td>
         <td>All findings scored with Base Score vectors. Scores drive severity classification and remediation priority bands (P1/P2/P3).</td>
-        <td>{% if summary.total %}{{ summary.total }} findings scored{% else %}All findings scored{% endif %}</td>
+        <td>2 findings scored</td>
       </tr>
       <tr>
         <td><span style="background:#1e7a40;color:#fff;padding:1px 7px;border-radius:3px;font-size:9.5px;font-weight:700;font-family:var(--font-mono)">PTES</span></td>
@@ -696,12 +702,8 @@ body{font-family:var(--font-main);background:var(--muted-bg);color:var(--text-pr
     <div class="section-badge">Kill Chain</div>
   </div>
 
-  {% if attack_path %}
-  <div class="attack-path-wrap">
-    {%- set ns = namespace(node_count=attack_path|length) -%}
-    {%- set spacing = 130 -%}
-    {%- set svg_width = [860, ns.node_count * spacing + 60] | max -%}
-    <svg viewBox="0 0 {{ svg_width }} 300" xmlns="http://www.w3.org/2000/svg" style="width:100%;min-width:600px;display:block">
+  
+  <div class="attack-path-wrap"><svg viewBox="0 0 860 300" xmlns="http://www.w3.org/2000/svg" style="width:100%;min-width:600px;display:block">
       <defs>
         <marker id="arr-red" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
           <path d="M0,0 L0,6 L8,3 z" fill="#c0392b"/>
@@ -716,47 +718,54 @@ body{font-family:var(--font-main);background:var(--muted-bg);color:var(--text-pr
       </defs>
 
       <!-- Phase labels (top row) -->
-      {% for s in attack_path %}
-      {%- set cx = 40 + loop.index0 * spacing -%}
-      <text x="{{ cx }}" y="16" fill="rgba(255,255,255,0.25)" font-size="7" font-family="IBM Plex Sans,sans-serif" font-weight="700" letter-spacing="0.10em" text-anchor="middle" text-transform="uppercase">{{ s.phase|upper }}</text>
-      {% endfor %}
+      <text x="40" y="16" fill="rgba(255,255,255,0.25)" font-size="7" font-family="IBM Plex Sans,sans-serif" font-weight="700" letter-spacing="0.10em" text-anchor="middle" text-transform="uppercase">RECON</text>
+      <text x="170" y="16" fill="rgba(255,255,255,0.25)" font-size="7" font-family="IBM Plex Sans,sans-serif" font-weight="700" letter-spacing="0.10em" text-anchor="middle" text-transform="uppercase">EXPLOIT</text>
+      <text x="300" y="16" fill="rgba(255,255,255,0.25)" font-size="7" font-family="IBM Plex Sans,sans-serif" font-weight="700" letter-spacing="0.10em" text-anchor="middle" text-transform="uppercase">PRIVESC</text>
+      
 
       <!-- Connecting arrows between nodes -->
-      {% for s in attack_path %}
-      {% if not loop.last %}
-      {%- set x1 = 40 + loop.index0 * spacing + 50 -%}
-      {%- set x2 = 40 + loop.index * spacing - 50 -%}
-      <line x1="{{ x1 }}" y1="110" x2="{{ x2 }}" y2="110" stroke="#c0392b" stroke-width="2" marker-end="url(#arr-red)"/>
-      {% endif %}
-      {% endfor %}
+      
+      <line x1="90" y1="110" x2="120" y2="110" stroke="#c0392b" stroke-width="2" marker-end="url(#arr-red)"/>
+      
+      
+      <line x1="220" y1="110" x2="250" y2="110" stroke="#c0392b" stroke-width="2" marker-end="url(#arr-red)"/>
+      
+      
+      
+      
 
       <!-- Nodes -->
-      {% for s in attack_path %}
-      {%- set cx = 40 + loop.index0 * spacing -%}
-      {%- set phase_lower = s.phase|lower -%}
-      {%- if 'initial' in phase_lower or 'access' in phase_lower %}
-        {%- set node_fill = '#c0392b' -%}{%- set node_stroke = '#e05040' -%}
-      {%- elif 'exec' in phase_lower or 'rce' in phase_lower %}
-        {%- set node_fill = '#c0392b' -%}{%- set node_stroke = '#e05040' -%}
-      {%- elif 'priv' in phase_lower or 'escal' in phase_lower %}
-        {%- set node_fill = '#d35400' -%}{%- set node_stroke = '#e86010' -%}
-      {%- elif 'cred' in phase_lower or 'loot' in phase_lower %}
-        {%- set node_fill = '#d35400' -%}{%- set node_stroke = '#e86010' -%}
-      {%- elif 'recon' in phase_lower or 'discov' in phase_lower %}
-        {%- set node_fill = '#1e3a5f' -%}{%- set node_stroke = '#3d74b8' -%}
-      {%- else %}
-        {%- set node_fill = '#b7770d' -%}{%- set node_stroke = '#d4920f' -%}
-      {%- endif %}
-      <rect x="{{ cx - 50 }}" y="82" width="100" height="56" rx="6" fill="{{ node_fill }}" stroke="{{ node_stroke }}" stroke-width="1.5"/>
-      <text x="{{ cx }}" y="102" fill="#fff" font-size="8.5" font-family="IBM Plex Sans,sans-serif" font-weight="700" text-anchor="middle">{{ s.phase }}</text>
-      {% if s.result %}
-      <text x="{{ cx }}" y="115" fill="rgba(255,255,255,0.80)" font-size="7.5" font-family="IBM Plex Sans,sans-serif" text-anchor="middle">{{ s.result[:20] }}{% if s.result|length > 20 %}&hellip;{% endif %}</text>
-      {% endif %}
-      {% if s.source %}
-      <rect x="{{ cx - 38 }}" y="127" width="76" height="13" rx="3" fill="rgba(255,255,255,0.12)"/>
-      <text x="{{ cx }}" y="137" fill="rgba(255,255,255,0.65)" font-size="7" font-family="JetBrains Mono,monospace" text-anchor="middle">{{ s.source[:14] }}{% if s.source|length > 14 %}&hellip;{% endif %}</text>
-      {% endif %}
-      {% endfor %}
+      
+      <rect x="-10" y="82" width="100" height="56" rx="6" fill="#1e3a5f" stroke="#3d74b8" stroke-width="1.5"/>
+      <text x="40" y="102" fill="#fff" font-size="8.5" font-family="IBM Plex Sans,sans-serif" font-weight="700" text-anchor="middle">recon</text>
+      
+      <text x="40" y="115" fill="rgba(255,255,255,0.80)" font-size="7.5" font-family="IBM Plex Sans,sans-serif" text-anchor="middle">ports found</text>
+      
+      
+      <rect x="2" y="127" width="76" height="13" rx="3" fill="rgba(255,255,255,0.12)"/>
+      <text x="40" y="137" fill="rgba(255,255,255,0.65)" font-size="7" font-family="JetBrains Mono,monospace" text-anchor="middle">nmap</text>
+      
+      
+      <rect x="120" y="82" width="100" height="56" rx="6" fill="#b7770d" stroke="#d4920f" stroke-width="1.5"/>
+      <text x="170" y="102" fill="#fff" font-size="8.5" font-family="IBM Plex Sans,sans-serif" font-weight="700" text-anchor="middle">exploit</text>
+      
+      <text x="170" y="115" fill="rgba(255,255,255,0.80)" font-size="7.5" font-family="IBM Plex Sans,sans-serif" text-anchor="middle">RCE</text>
+      
+      
+      <rect x="132" y="127" width="76" height="13" rx="3" fill="rgba(255,255,255,0.12)"/>
+      <text x="170" y="137" fill="rgba(255,255,255,0.65)" font-size="7" font-family="JetBrains Mono,monospace" text-anchor="middle">upload</text>
+      
+      
+      <rect x="250" y="82" width="100" height="56" rx="6" fill="#d35400" stroke="#e86010" stroke-width="1.5"/>
+      <text x="300" y="102" fill="#fff" font-size="8.5" font-family="IBM Plex Sans,sans-serif" font-weight="700" text-anchor="middle">privesc</text>
+      
+      <text x="300" y="115" fill="rgba(255,255,255,0.80)" font-size="7.5" font-family="IBM Plex Sans,sans-serif" text-anchor="middle">root</text>
+      
+      
+      <rect x="262" y="127" width="76" height="13" rx="3" fill="rgba(255,255,255,0.12)"/>
+      <text x="300" y="137" fill="rgba(255,255,255,0.65)" font-size="7" font-family="JetBrains Mono,monospace" text-anchor="middle">sudo git</text>
+      
+      
 
       <!-- Legend -->
       <rect x="10" y="270" width="10" height="10" rx="2" fill="#c0392b"/>
@@ -774,19 +783,31 @@ body{font-family:var(--font-main);background:var(--muted-bg);color:var(--text-pr
   <table class="data-table avoid-break">
     <thead><tr><th>Step</th><th>Phase</th><th>Action / Result</th><th>Source</th></tr></thead>
     <tbody>
-      {% for s in attack_path %}
+      
       <tr>
-        <td class="mono fw">{{ '%02d'|format(loop.index) }}</td>
-        <td>{{ s.phase }}</td>
-        <td>{{ s.result }}</td>
-        <td class="mono" style="font-size:10.5px;color:var(--text-muted)">{{ s.source }}</td>
+        <td class="mono fw">01</td>
+        <td>recon</td>
+        <td>ports found</td>
+        <td class="mono" style="font-size:10.5px;color:var(--text-muted)">nmap</td>
       </tr>
-      {% endfor %}
+      
+      <tr>
+        <td class="mono fw">02</td>
+        <td>exploit</td>
+        <td>RCE</td>
+        <td class="mono" style="font-size:10.5px;color:var(--text-muted)">upload</td>
+      </tr>
+      
+      <tr>
+        <td class="mono fw">03</td>
+        <td>privesc</td>
+        <td>root</td>
+        <td class="mono" style="font-size:10.5px;color:var(--text-muted)">sudo git</td>
+      </tr>
+      
     </tbody>
   </table>
-  {% else %}
-  <div class="infobox">&#9432; No attack path data available for this engagement.</div>
-  {% endif %}
+  
 </div>
 
 <!-- ================================================================
@@ -802,7 +823,7 @@ body{font-family:var(--font-main);background:var(--muted-bg);color:var(--text-pr
     <div class="section-badge">Coverage Evidence</div>
   </div>
 
-  {% if coverage_tests %}
+  
   <div class="severity-legend" style="margin-bottom:20px">
     <span class="leg-label">Outcome Key:</span>
     <span style="display:inline-flex;align-items:center;gap:4px;font-size:11px;color:var(--critical);font-weight:600"><span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:var(--critical)"></span> Exploitable / Success</span>
@@ -821,39 +842,53 @@ body{font-family:var(--font-main);background:var(--muted-bg);color:var(--text-pr
       </tr>
     </thead>
     <tbody>
-      {% for c in coverage_tests %}
-      <tr class="out-{{ c.outcome }}">
-        <td class="mono fw">{{ '%02d'|format(loop.index) }}</td>
-        <td>{{ c.tool }}</td>
-        <td class="mono" style="font-size:10px;word-break:break-all">{{ c.command }}</td>
+      
+      <tr class="out-success">
+        <td class="mono fw">01</td>
+        <td>nmap</td>
+        <td class="mono" style="font-size:10px;word-break:break-all">nmap -sCV</td>
         <td>
-          {% if c.outcome == 'success' %}
+          
           <span class="chip chip-verified">Success</span>
-          {% elif c.outcome == 'blocked' %}
-          <span class="chip chip-gated">Blocked</span>
-          {% elif c.outcome == 'error' %}
-          <span class="chip chip-gated">Error</span>
-          {% elif c.outcome == 'negative' %}
-          <span class="chip chip-neg">Negative</span>
-          {% else %}
-          <span class="chip chip-open">{{ c.outcome }}</span>
-          {% endif %}
+          
         </td>
-        <td>{{ c.note }}</td>
+        <td>3 ports</td>
       </tr>
-      {% endfor %}
+      
+      <tr class="out-negative">
+        <td class="mono fw">02</td>
+        <td>sqlmap</td>
+        <td class="mono" style="font-size:10px;word-break:break-all">sqlmap /api?id=</td>
+        <td>
+          
+          <span class="chip chip-neg">Negative</span>
+          
+        </td>
+        <td>not injectable</td>
+      </tr>
+      
+      <tr class="out-blocked">
+        <td class="mono fw">03</td>
+        <td>hydra</td>
+        <td class="mono" style="font-size:10px;word-break:break-all">hydra ssh</td>
+        <td>
+          
+          <span class="chip chip-gated">Blocked</span>
+          
+        </td>
+        <td>rate-limited</td>
+      </tr>
+      
     </tbody>
   </table>
 
-  {% if coverage_counts %}
+  
   <p class="small" style="margin-top:10px">
-    {% for outcome, count in coverage_counts.items() %}{{ count }} {{ outcome }}{% if not loop.last %} &middot; {% endif %}{% endfor %}
-    &middot; Total: {{ coverage_tests|length }} attempts &middot; All attempts logged with tool evidence; negative results serve as coverage attestation.
+    8 success &middot; 3 negative &middot; 1 blocked &middot; 0 error
+    &middot; Total: 3 attempts &middot; All attempts logged with tool evidence; negative results serve as coverage attestation.
   </p>
-  {% endif %}
-  {% else %}
-  <div class="infobox">&#9432; No coverage test log available for this engagement.</div>
-  {% endif %}
+  
+  
 </div>
 
 <!-- ================================================================
@@ -882,7 +917,7 @@ body{font-family:var(--font-main);background:var(--muted-bg);color:var(--text-pr
     <span class="chip chip-gated">Gated</span>
   </div>
 
-  {% if findings %}
+  
   <div style="overflow-x:auto">
   <table class="data-table" style="font-size:11.5px;min-width:820px">
     <thead>
@@ -897,49 +932,58 @@ body{font-family:var(--font-main);background:var(--muted-bg);color:var(--text-pr
       </tr>
     </thead>
     <tbody>
-      {% for f in findings %}
-      {%- set sev = f.severity|lower -%}
-      {%- set cvss = f.extra.cvss_base if f.extra and f.extra.cvss_base else '—' -%}
       <tr>
-        <td class="mono fw" style="color:var(--{{ sev }})">{{ f.fid | default('F-%02d'|format(loop.index)) }}</td>
-        <td class="fw">{{ f.title }}</td>
-        <td><span class="badge badge-{{ sev }} badge-dot">{{ f.severity }}</span></td>
+        <td class="mono fw" style="color:var(--critical)">F-01</td>
+        <td class="fw">Unauthenticated file-upload to RCE</td>
+        <td><span class="badge badge-critical badge-dot">critical</span></td>
         <td>
-          {% if cvss != '—' %}
-          <span style="background:var(--{{ sev }}-bg);color:var(--{{ sev }});border:1px solid var(--{{ sev }}-bd);padding:1px 7px;border-radius:3px;font-family:var(--font-mono);font-size:10px;font-weight:700">{{ cvss }}</span>
-          {% else %}
-          <span class="text-muted">—</span>
-          {% endif %}
+          
+          <span style="background:var(--critical-bg);color:var(--critical);border:1px solid var(--critical-bd);padding:1px 7px;border-radius:3px;font-family:var(--font-mono);font-size:10px;font-weight:700">9.8</span>
+          
         </td>
-        <td class="mono">{{ f.host }}{% if f.port %}:{{ f.port }}{% endif %}</td>
+        <td class="mono">10.129.21.254:80</td>
         <td>
-          {% if f.mitre %}
-          <span class="mitre-badge">{{ f.mitre }}</span>
-          {% else %}
-          <span class="mitre-badge" style="background:#4a4a6a">—</span>
-          {% endif %}
+          
+          <span class="mitre-badge">T1059</span>
+          
         </td>
         <td>
-          {% set rs = f.retest_status|lower if f.retest_status else '' %}
-          {% if 'verified' in rs or 'confirmed' in rs %}
+          
+          
           <span class="chip chip-verified">Verified</span>
-          {% elif 'gated' in rs or 'info' in rs %}
-          <span class="chip chip-gated">Gated</span>
-          {% else %}
-          <span class="chip chip-open">Open</span>
-          {% endif %}
+          
         </td>
       </tr>
-      {% endfor %}
+      <tr>
+        <td class="mono fw" style="color:var(--high)">F-02</td>
+        <td class="fw">Outdated Apache 2.4.41</td>
+        <td><span class="badge badge-high badge-dot">high</span></td>
+        <td>
+          
+          <span style="background:var(--high-bg);color:var(--high);border:1px solid var(--high-bd);padding:1px 7px;border-radius:3px;font-family:var(--font-mono);font-size:10px;font-weight:700">7.5</span>
+          
+        </td>
+        <td class="mono">10.129.21.254:80</td>
+        <td>
+          
+          <span class="mitre-badge" style="background:#4a4a6a">—</span>
+          
+        </td>
+        <td>
+          
+          
+          <span class="chip chip-open">Open</span>
+          
+        </td>
+      </tr>
+      
     </tbody>
   </table>
   </div>
-  {% if summary %}
-  <p class="small" style="margin-top:10px">Total: {{ summary.total }} findings &middot; {{ summary.critical }} Critical &middot; {{ summary.high }} High &middot; {{ summary.medium }} Medium &middot; {{ summary.low }} Low &middot; {{ summary.info }} Info &middot; CVSS v3.1 Base Scores</p>
-  {% endif %}
-  {% else %}
-  <div class="infobox">&#9432; No findings recorded for this engagement.</div>
-  {% endif %}
+  
+  <p class="small" style="margin-top:10px">Total: 2 findings &middot; 1 Critical &middot; 1 High &middot; 0 Medium &middot; 0 Low &middot; 0 Info &middot; CVSS v3.1 Base Scores</p>
+  
+  
 </div>
 
 <!-- ================================================================
@@ -959,67 +1003,86 @@ body{font-family:var(--font-main);background:var(--muted-bg);color:var(--text-pr
     <strong>Redaction Notice:</strong> All credential values, key material, and flag contents in this section are REDACTED for the published report. SHA-256 hashes are provided for integrity verification. Raw artifacts are available under separate cover to authorized personnel only.
   </div>
 
-  {% if findings %}
-  {% for f in findings %}
-  {%- set sev = f.severity|lower -%}
-  {%- set cvss = f.extra.cvss_base if f.extra and f.extra.cvss_base else '' -%}
-  {%- set cvss_vec = f.extra.cvss_vector if f.extra and f.extra.cvss_vector else '' -%}
+  
   <div class="finding-card avoid-break">
-    <div class="finding-card-header fc-{{ sev }}">
-      <span class="fc-id">{{ f.fid | default('F-%02d'|format(loop.index)) }}</span>
-      <span class="fc-title">{{ f.title }}</span>
-      {%- set _basis = f.severity_rationale if f.severity_rationale else (f.extra.severity_rationale if f.extra and f.extra.severity_rationale else '') -%}
-      {% if _basis %}<div style="font-size:7pt;opacity:.68;margin-top:2px;">Severity basis: {{ _basis }}</div>{% endif %}
-      <span class="badge badge-{{ sev }} badge-dot">{{ f.severity }}</span>
-      {%- set _etag = f.evidence_tag if f.evidence_tag else (f.extra.evidence_tag if f.extra and f.extra.evidence_tag else '') -%}
-      {% if _etag %}<span style="padding:1px 6px;border-radius:4px;font-size:7pt;font-weight:700;background:rgba(128,128,150,0.16);border:1px solid rgba(128,128,150,0.42);">{{ _etag }}</span>{% endif %}
-      {% if cvss %}
-      <span style="background:var(--{{ sev }}-bg);color:var(--{{ sev }});border:1px solid var(--{{ sev }}-bd);padding:1px 8px;border-radius:3px;font-family:var(--font-mono);font-size:10px;font-weight:700;margin-left:4px">CVSS {{ cvss }}</span>
-      {% endif %}
+    <div class="finding-card-header fc-critical">
+      <span class="fc-id">F-01</span>
+      <span class="fc-title">Unauthenticated file-upload to RCE</span>
+      <span class="badge badge-critical badge-dot">critical</span>
+      
+      <span style="background:var(--critical-bg);color:var(--critical);border:1px solid var(--critical-bd);padding:1px 8px;border-radius:3px;font-family:var(--font-mono);font-size:10px;font-weight:700;margin-left:4px">CVSS 9.8</span>
+      
     </div>
     <div class="finding-card-body">
-      {% if f.description %}
+      
       <h5>Description</h5>
-      <p>{{ f.description }}</p>
-      {% endif %}
+      <p>Webshell via upload bypass.</p>
+      
 
-      {% if f.evidence %}
+      
       <h5>Evidence</h5>
-      <div class="code-block"><span class="out">{{ f.evidence }}</span></div>
-      {% endif %}
+      <div class="code-block"><span class="out">uid=33(www-data)</span></div>
+      
 
-      {% if f.remediation %}
+      
       <h5>Remediation</h5>
-      <p>{{ f.remediation }}</p>
-      {% endif %}
+      <p>validate uploads</p>
+      
 
-      {% if f.cves %}
-      <h5>CVEs</h5>
-      <p class="text-mono" style="font-size:11px">{{ f.cves|join(', ') }}</p>
-      {% endif %}
+      
     </div>
     <div class="finding-card-meta">
-      {% if f.mitre %}
-      <span class="mitre-badge">{{ f.mitre }}</span>
-      {% endif %}
-      {% if cvss_vec %}
-      <span style="font-family:var(--font-mono);font-size:9px;color:var(--text-muted)">{{ cvss_vec }}</span>
-      {% endif %}
-      {%- set rs = f.retest_status|lower if f.retest_status else '' -%}
-      {% if 'verified' in rs or 'confirmed' in rs %}
+      
+      <span class="mitre-badge">T1059</span>
+      
+      
+      <span style="font-family:var(--font-mono);font-size:9px;color:var(--text-muted)">CVSS:3.1/AV:N/AC:L</span>
+      
       <span class="chip chip-verified">Retest: Verified</span>
-      {% elif 'gated' in rs %}
-      <span class="chip chip-gated">Retest: Gated</span>
-      {% else %}
-      <span class="chip chip-open">Retest: Open</span>
-      {% endif %}
-      <span style="font-size:10.5px;color:var(--text-muted);margin-left:auto">Host: {{ f.host }}{% if f.port %}:{{ f.port }}{% endif %}</span>
+      
+      <span style="font-size:10.5px;color:var(--text-muted);margin-left:auto">Host: 10.129.21.254:80</span>
     </div>
   </div>
-  {% endfor %}
-  {% else %}
-  <div class="infobox">&#9432; No finding details available.</div>
-  {% endif %}
+  <div class="finding-card avoid-break">
+    <div class="finding-card-header fc-high">
+      <span class="fc-id">F-02</span>
+      <span class="fc-title">Outdated Apache 2.4.41</span>
+      <span class="badge badge-high badge-dot">high</span>
+      
+      <span style="background:var(--high-bg);color:var(--high);border:1px solid var(--high-bd);padding:1px 8px;border-radius:3px;font-family:var(--font-mono);font-size:10px;font-weight:700;margin-left:4px">CVSS 7.5</span>
+      
+    </div>
+    <div class="finding-card-body">
+      
+      <h5>Description</h5>
+      <p>Version banner.</p>
+      
+
+      
+      <h5>Evidence</h5>
+      <div class="code-block"><span class="out">Server: Apache/2.4.41</span></div>
+      
+
+      
+      <h5>Remediation</h5>
+      <p>patch</p>
+      
+
+      
+      <h5>CVEs</h5>
+      <p class="text-mono" style="font-size:11px">CVE-2021-41773</p>
+      
+    </div>
+    <div class="finding-card-meta">
+      
+      
+      <span class="chip chip-open">Retest: Open</span>
+      
+      <span style="font-size:10.5px;color:var(--text-muted);margin-left:auto">Host: 10.129.21.254:80</span>
+    </div>
+  </div>
+  
+  
 </div>
 
 <!-- ================================================================
@@ -1037,8 +1100,8 @@ body{font-family:var(--font-main);background:var(--muted-bg);color:var(--text-pr
 
   <div class="infobox">&#9432; The following attack vectors were tested to completion and confirmed not exploitable. Their inclusion demonstrates assessment coverage breadth and serves as a negative attestation for GRC and audit purposes. Absence of exploitation is not absence of testing.</div>
 
-  {% set neg_tests = coverage_tests | selectattr('outcome', 'in', ['negative', 'blocked', 'error']) | list %}
-  {% if neg_tests %}
+  
+  
   <table class="data-table avoid-break">
     <thead>
       <tr>
@@ -1049,30 +1112,37 @@ body{font-family:var(--font-main);background:var(--muted-bg);color:var(--text-pr
       </tr>
     </thead>
     <tbody>
-      {% for c in neg_tests %}
+      
       <tr>
-        <td class="fw">{{ c.tool }}</td>
+        <td class="fw">sqlmap</td>
         <td>
-          <code style="font-family:var(--font-mono);font-size:10.5px">{{ c.command }}</code>
+          <code style="font-family:var(--font-mono);font-size:10.5px">sqlmap /api?id=</code>
         </td>
         <td>
-          {% if c.outcome == 'blocked' %}
-          <span class="chip chip-gated">Blocked</span>
-          {% elif c.outcome == 'error' %}
-          <span class="chip chip-gated">Error</span>
-          {% else %}
+          
           <span class="chip chip-neg">Negative</span>
-          {% endif %}
+          
         </td>
-        <td>{{ c.note }}</td>
+        <td>not injectable</td>
       </tr>
-      {% endfor %}
+      
+      <tr>
+        <td class="fw">hydra</td>
+        <td>
+          <code style="font-family:var(--font-mono);font-size:10.5px">hydra ssh</code>
+        </td>
+        <td>
+          
+          <span class="chip chip-gated">Blocked</span>
+          
+        </td>
+        <td>rate-limited</td>
+      </tr>
+      
     </tbody>
   </table>
-  <p class="small" style="margin-top:12px">{{ neg_tests|length }} attack vector(s) tested and confirmed not exploitable. These results are included as positive security evidence and do not require remediation action. They may be cited in GRC audits as evidence of compensating controls.</p>
-  {% else %}
-  <div class="infobox">&#9432; All recorded attack attempts resulted in exploitation or findings. No non-exploitable negative results to report.</div>
-  {% endif %}
+  <p class="small" style="margin-top:12px">2 attack vector(s) tested and confirmed not exploitable. These results are included as positive security evidence and do not require remediation action. They may be cited in GRC audits as evidence of compensating controls.</p>
+  
 </div>
 
 <!-- ================================================================
@@ -1088,7 +1158,7 @@ body{font-family:var(--font-main);background:var(--muted-bg);color:var(--text-pr
     <div class="section-badge">Purple Team / SOC</div>
   </div>
 
-  {% if detection_map %}
+  
   <p style="font-size:12.5px;color:var(--text-mid);margin-bottom:20px;line-height:1.65">The following table maps each attack stage to its detection opportunity, recommended telemetry source, and the current detection status. Items marked <span class="chip chip-open">Not Caught</span> represent gaps the SOC and detection engineering teams should prioritise.</p>
 
   <table class="data-table avoid-break" style="font-size:11.5px">
@@ -1102,36 +1172,22 @@ body{font-family:var(--font-main);background:var(--muted-bg);color:var(--text-pr
       </tr>
     </thead>
     <tbody>
-      {% for d in detection_map %}
+      
       <tr>
-        <td class="fw">{{ d.finding }}</td>
-        <td>{{ d.technique }}</td>
-        <td>{{ d.opportunity }}</td>
-        <td><code style="font-family:var(--font-mono);font-size:10px">{{ d.telemetry }}</code></td>
+        <td class="fw">RCE</td>
+        <td>T1059</td>
+        <td>child proc from apache</td>
+        <td><code style="font-family:var(--font-mono);font-size:10px">EDR</code></td>
         <td>
-          {% if d.caught and d.caught|lower in ['yes','caught','true','detected'] %}
-          <span class="chip chip-verified">Caught</span>
-          {% else %}
+          
           <span class="chip chip-open">Not Caught</span>
-          {% endif %}
+          
         </td>
       </tr>
-      {% endfor %}
+      
     </tbody>
   </table>
-  {% else %}
-  <div class="infobox">&#9432; No purple-team / detection mapping data available for this engagement.</div>
-  <div style="font-size:12.5px;color:var(--text-mid);line-height:1.65;margin-top:12px">
-    <p>General detection recommendations for common attack patterns:</p>
-    <ul style="margin:12px 0 0 20px;font-size:12px;color:var(--text-muted);line-height:1.8">
-      <li>Deploy WAF with egress allow-list rules for SSRF prevention and detection</li>
-      <li>Enable FIM (File Integrity Monitoring) on web root directories for webshell detection</li>
-      <li>Configure auditd rules for privilege escalation detection (sudo by service accounts)</li>
-      <li>Implement SIEM alerting on anomalous process trees (web server spawning shells)</li>
-      <li>Rate-limit and alert on scanning patterns (&gt;100 req/min from single IP)</li>
-    </ul>
-  </div>
-  {% endif %}
+  
 </div>
 
 <!-- ================================================================
@@ -1149,7 +1205,7 @@ body{font-family:var(--font-main);background:var(--muted-bg);color:var(--text-pr
 
   <div class="infobox" style="margin-bottom:20px">&#9432; All artifacts were captured autonomously by the ARGUS engine during the engagement window and immediately hashed. Raw artifact files are stored in the ARGUS secure evidence vault and are available to authorized personnel under separate cover. Credential values, key material, and flag contents are fully redacted in this published report. SHA-256 hashes serve as integrity anchors for chain-of-custody purposes.</div>
 
-  {% if loot_entries %}
+  
   <table class="data-table avoid-break">
     <thead>
       <tr>
@@ -1163,38 +1219,32 @@ body{font-family:var(--font-main);background:var(--muted-bg);color:var(--text-pr
       </tr>
     </thead>
     <tbody>
-      {% for l in loot_entries %}
+      
       <tr>
-        <td class="mono fw">{{ l.doi_label }}</td>
-        <td>{{ l.source }}</td>
+        <td class="mono fw">root.txt</td>
+        <td>/root/root.txt</td>
         <td>
-          {% if l.severity %}
-          {%- set ls = l.severity|lower -%}
-          <span class="badge badge-{{ ls }} badge-dot">{{ l.severity }}</span>
-          {% endif %}
+          <span class="badge badge-critical badge-dot">critical</span>
+          
         </td>
-        <td class="mono" style="font-size:10.5px">{{ l.source }} &rarr; {{ l.target }}</td>
+        <td class="mono" style="font-size:10.5px">/root/root.txt &rarr; 10.129.21.254</td>
         <td>
-          {% if l.sha256 %}
-          <span class="evidence-hash">{{ l.sha256[:16] }}&hellip;</span>
-          {% else %}
-          <span class="text-muted">—</span>
-          {% endif %}
+          
+          <span class="evidence-hash">3b71dea0&hellip;</span>
+          
         </td>
         <td class="mono" style="font-size:10.5px">
-          {% if l.size_bytes %}{{ l.size_bytes }}B{% else %}—{% endif %}
+          33B
         </td>
         <td><span class="chip chip-verified">Hashed</span></td>
       </tr>
-      {% endfor %}
+      
     </tbody>
   </table>
-  <p class="small" style="margin-top:10px">{{ loot_entries|length }} evidence artifact(s) &middot; all SHA-256 integrity-hashed at capture time &middot; credential/key material redacted &middot; raw vault access: authorized personnel only</p>
-  {% else %}
-  <div class="infobox">&#9432; No loot/evidence entries recorded for this engagement.</div>
-  {% endif %}
+  <p class="small" style="margin-top:10px">1 evidence artifact(s) &middot; all SHA-256 integrity-hashed at capture time &middot; credential/key material redacted &middot; raw vault access: authorized personnel only</p>
+  
 
-  {% if creds_summary %}
+  
   <div class="sub-heading mt-16">Captured Credentials (Redacted)</div>
   <table class="data-table avoid-break" style="font-size:11.5px">
     <thead>
@@ -1206,19 +1256,19 @@ body{font-family:var(--font-main);background:var(--muted-bg);color:var(--text-pr
       </tr>
     </thead>
     <tbody>
-      {% for cr in creds_summary %}
+      
       <tr>
-        <td class="mono fw">{{ cr.user }}</td>
+        <td class="mono fw">forge_app</td>
         <td class="loot-redacted" style="font-family:var(--font-mono);font-size:11px;color:#c0392b;font-style:italic">
-          {% if cr.password %}&#9679;&#9679;&#9679;&#9679;&#9679;&#9679; (redacted){% else %}—{% endif %}
+          &#9679;&#9679;&#9679;&#9679;&#9679;&#9679; (redacted)
         </td>
-        <td class="mono">{{ cr.domain }}</td>
-        <td>{{ cr.source }}</td>
+        <td class="mono"></td>
+        <td>config.php</td>
       </tr>
-      {% endfor %}
+      
     </tbody>
   </table>
-  {% endif %}
+  
 </div>
 
 <!-- ================================================================
@@ -1234,16 +1284,16 @@ body{font-family:var(--font-main);background:var(--muted-bg);color:var(--text-pr
     <div class="section-badge">ATT&amp;CK v15</div>
   </div>
 
-  {% if mitre_mappings %}
+  
   <!-- Dynamic MITRE matrix cells — one per unique tactic -->
   <div class="mitre-matrix" style="margin-bottom:24px">
-    {% for m in mitre_mappings %}
+    
     <div class="mitre-cell active">
-      <div class="mc-tactic">{{ m.tactic }}</div>
-      <div class="mc-tech">{{ m.technique_id }}</div>
-      <div class="mc-desc">{{ m.technique_name }}</div>
+      <div class="mc-tactic">Initial Access</div>
+      <div class="mc-tech">T1190</div>
+      <div class="mc-desc">Exploit Public-Facing App</div>
     </div>
-    {% endfor %}
+    
   </div>
 
   <div class="sub-heading">Technique Detail Register</div>
@@ -1258,28 +1308,22 @@ body{font-family:var(--font-main);background:var(--muted-bg);color:var(--text-pr
       </tr>
     </thead>
     <tbody>
-      {% for m in mitre_mappings %}
-      {%- set linked_finding = findings | selectattr('mitre', 'equalto', m.technique_id) | first | default(none) -%}
       <tr>
-        <td><span class="mitre-badge">{{ m.technique_id }}</span></td>
-        <td class="fw">{{ m.technique_name }}</td>
-        <td>{{ m.tactic }}</td>
-        <td class="mono" style="font-size:10.5px">{{ m.tool_used }}</td>
+        <td><span class="mitre-badge">T1190</span></td>
+        <td class="fw">Exploit Public-Facing App</td>
+        <td>Initial Access</td>
+        <td class="mono" style="font-size:10.5px">operator</td>
         <td>
-          {% if linked_finding %}
-          <span class="badge badge-{{ linked_finding.severity|lower }} badge-dot">{{ linked_finding.severity }}</span>
-          {% else %}
+          
           <span class="text-muted">—</span>
-          {% endif %}
+          
         </td>
       </tr>
-      {% endfor %}
+      
     </tbody>
   </table>
-  <p class="small" style="margin-top:10px">{{ mitre_mappings|length }} technique(s) &middot; MITRE ATT&amp;CK Enterprise v15 &middot; Annotated at execution time by ARGUS engine &middot; All technique observations evidence-grounded</p>
-  {% else %}
-  <div class="infobox">&#9432; No MITRE ATT&amp;CK mapping data available for this engagement.</div>
-  {% endif %}
+  <p class="small" style="margin-top:10px">1 technique(s) &middot; MITRE ATT&amp;CK Enterprise v15 &middot; Annotated at execution time by ARGUS engine &middot; All technique observations evidence-grounded</p>
+  
 </div>
 
 <!-- ================================================================
@@ -1295,78 +1339,19 @@ body{font-family:var(--font-main);background:var(--muted-bg);color:var(--text-pr
     <div class="section-badge">Remediation Plan</div>
   </div>
 
-  {% if findings %}
+  
   <!-- P1: Critical findings -->
-  {% set p1_findings = findings | selectattr('severity', 'equalto', 'Critical') | list %}
-  {% if p1_findings %}
-  <div class="roadmap-tier avoid-break">
-    <div class="roadmap-tier-header p1">
-      <span style="font-size:13px">&#9888;</span>
-      P1 &mdash; Immediate (before system reconnection / within 24&ndash;48 hours)
-      <span style="margin-left:auto;font-size:10px;font-weight:400;opacity:.75">{{ p1_findings|length }} action(s) &middot; Critical findings</span>
-    </div>
-    <div class="roadmap-items">
-      {% for f in p1_findings %}
-      <div class="roadmap-item">
-        <div class="ri-check p1">{{ loop.index }}</div>
-        <div class="ri-body">
-          <strong>{{ f.title }}</strong>
-          <span>{{ f.remediation }}</span>
-        </div>
-      </div>
-      {% endfor %}
-    </div>
-  </div>
-  {% endif %}
+  
+  
 
   <!-- P2: High findings -->
-  {% set p2_findings = findings | selectattr('severity', 'equalto', 'High') | list %}
-  {% if p2_findings %}
-  <div class="roadmap-tier avoid-break">
-    <div class="roadmap-tier-header p2">
-      <span style="font-size:13px">&#9432;</span>
-      P2 &mdash; Near-Term (within next sprint / 2&ndash;4 weeks)
-      <span style="margin-left:auto;font-size:10px;font-weight:400;opacity:.75">{{ p2_findings|length }} action(s) &middot; High findings</span>
-    </div>
-    <div class="roadmap-items">
-      {% for f in p2_findings %}
-      <div class="roadmap-item">
-        <div class="ri-check p2">{{ loop.index }}</div>
-        <div class="ri-body">
-          <strong>{{ f.title }}</strong>
-          <span>{{ f.remediation }}</span>
-        </div>
-      </div>
-      {% endfor %}
-    </div>
-  </div>
-  {% endif %}
+  
+  
 
   <!-- P3: Medium + Low findings -->
-  {% set p3_findings = (findings | selectattr('severity', 'equalto', 'Medium') | list) + (findings | selectattr('severity', 'equalto', 'Low') | list) %}
-  {% if p3_findings %}
-  <div class="roadmap-tier avoid-break">
-    <div class="roadmap-tier-header p3">
-      <span style="font-size:13px">&#10003;</span>
-      P3 &mdash; Scheduled (within 90 days)
-      <span style="margin-left:auto;font-size:10px;font-weight:400;opacity:.75">{{ p3_findings|length }} action(s) &middot; Medium &amp; Low findings</span>
-    </div>
-    <div class="roadmap-items">
-      {% for f in p3_findings %}
-      <div class="roadmap-item">
-        <div class="ri-check p3">{{ loop.index }}</div>
-        <div class="ri-body">
-          <strong>{{ f.title }}</strong>
-          <span>{{ f.remediation }}</span>
-        </div>
-      </div>
-      {% endfor %}
-    </div>
-  </div>
-  {% endif %}
-  {% else %}
-  <div class="infobox">&#9432; No findings to generate remediation roadmap from.</div>
-  {% endif %}
+  
+  
+  
 </div>
 
 <!-- ================================================================
@@ -1382,27 +1367,25 @@ body{font-family:var(--font-main);background:var(--muted-bg);color:var(--text-pr
     <div class="section-badge">Audit Trail</div>
   </div>
 
-  {% if engagement_timeline %}
+  
   <div class="timeline">
-    {% for t in engagement_timeline %}
-    {%- set label_lower = t.label|lower -%}
-    {%- set is_exploit = ('exploit' in label_lower or 'rce' in label_lower or 'root' in label_lower or 'shell' in label_lower or 'comprom' in label_lower or 'escalat' in label_lower) -%}
-    <div class="timeline-item {% if is_exploit %}exploitable{% endif %}">
-      <div class="tl-time">{{ t.ts }}</div>
-      <div class="tl-event" {% if is_exploit %}style="color:var(--critical);font-weight:700"{% endif %}>{{ t.label }}</div>
-      {% if t.detail %}
-      <div class="tl-detail">{{ t.detail }}</div>
-      {% endif %}
+    <div class="timeline-item ">
+      <div class="tl-time">14:02</div>
+      <div class="tl-event" >recon</div>
+      
+      <div class="tl-detail">start</div>
+      
     </div>
-    {% endfor %}
+    <div class="timeline-item exploitable">
+      <div class="tl-time">16:05</div>
+      <div class="tl-event" style="color:var(--critical);font-weight:700">root</div>
+      
+      <div class="tl-detail">sudo git</div>
+      
+    </div>
+    
   </div>
-  {% else %}
-  <div class="infobox">&#9432; No detailed timeline data available for this engagement.</div>
-  <p style="font-size:12.5px;color:var(--text-mid);margin-top:12px">
-    Engagement window: {{ session.started_at }}{% if session.completed_at %} &ndash; {{ session.completed_at }}{% endif %}
-    {% if duration %} &middot; Duration: {{ duration }}{% endif %}
-  </p>
-  {% endif %}
+  
 </div>
 
 <!-- ================================================================
@@ -1421,47 +1404,24 @@ body{font-family:var(--font-main);background:var(--muted-bg);color:var(--text-pr
   <div class="viz-row">
 
     <!-- Chart 1: Severity Distribution — donut -->
-    {% if summary and summary.total %}
+    
     <div class="viz-panel">
       <div class="viz-panel-header">Findings by Severity</div>
-      <div class="viz-panel-body" style="display:flex;align-items:center;gap:20px">
-        {%- set total = summary.total | int -%}
-        {%- set circ = 364.4 -%}
-        {%- if total > 0 -%}
-          {%- set crit_arc  = (summary.critical | int / total * circ) | round(1) -%}
-          {%- set high_arc  = (summary.high     | int / total * circ) | round(1) -%}
-          {%- set med_arc   = (summary.medium   | int / total * circ) | round(1) -%}
-          {%- set low_arc   = (summary.low      | int / total * circ) | round(1) -%}
-          {%- set info_arc  = (summary.info     | int / total * circ) | round(1) -%}
-          {%- set crit_gap  = (circ - crit_arc) | round(1) -%}
-          {%- set high_gap  = (circ - high_arc) | round(1) -%}
-          {%- set med_gap   = (circ - med_arc) | round(1) -%}
-          {%- set low_gap   = (circ - low_arc) | round(1) -%}
-          {%- set info_gap  = (circ - info_arc) | round(1) -%}
-          {# Offsets: start at 91 (top), subtract running arc lengths #}
-          {%- set off0 = 91 -%}
-          {%- set off1 = (off0 - crit_arc) | round(1) -%}
-          {%- set off2 = (off1 - high_arc) | round(1) -%}
-          {%- set off3 = (off2 - med_arc) | round(1) -%}
-          {%- set off4 = (off3 - low_arc) | round(1) -%}
-        {%- endif -%}
-        <svg viewBox="0 0 160 160" xmlns="http://www.w3.org/2000/svg" style="width:160px;height:160px;flex-shrink:0">
-          {% if total > 0 %}
+      <div class="viz-panel-body" style="display:flex;align-items:center;gap:20px"><svg viewBox="0 0 160 160" xmlns="http://www.w3.org/2000/svg" style="width:160px;height:160px;flex-shrink:0">
+          
           <circle cx="80" cy="80" r="58" fill="none" stroke="#c0392b" stroke-width="22"
-            stroke-dasharray="{{ crit_arc }} {{ crit_gap }}" stroke-dashoffset="{{ off0 }}"/>
+            stroke-dasharray="182.2 182.2" stroke-dashoffset="91"/>
           <circle cx="80" cy="80" r="58" fill="none" stroke="#d35400" stroke-width="22"
-            stroke-dasharray="{{ high_arc }} {{ high_gap }}" stroke-dashoffset="{{ off1 }}"/>
+            stroke-dasharray="182.2 182.2" stroke-dashoffset="-91.2"/>
           <circle cx="80" cy="80" r="58" fill="none" stroke="#b7770d" stroke-width="22"
-            stroke-dasharray="{{ med_arc }} {{ med_gap }}" stroke-dashoffset="{{ off2 }}"/>
+            stroke-dasharray="0.0 364.4" stroke-dashoffset="-273.4"/>
           <circle cx="80" cy="80" r="58" fill="none" stroke="#1a7a40" stroke-width="22"
-            stroke-dasharray="{{ low_arc }} {{ low_gap }}" stroke-dashoffset="{{ off3 }}"/>
+            stroke-dasharray="0.0 364.4" stroke-dashoffset="-273.4"/>
           <circle cx="80" cy="80" r="58" fill="none" stroke="#1565a8" stroke-width="22"
-            stroke-dasharray="{{ info_arc }} {{ info_gap }}" stroke-dashoffset="{{ off4 }}"/>
-          {% else %}
-          <circle cx="80" cy="80" r="58" fill="none" stroke="#c8d4e6" stroke-width="22"/>
-          {% endif %}
+            stroke-dasharray="0.0 364.4" stroke-dashoffset="-273.4"/>
+          
           <circle cx="80" cy="80" r="42" fill="white"/>
-          <text x="80" y="75" text-anchor="middle" font-size="22" font-weight="800" fill="#0d1b2a" font-family="IBM Plex Sans,sans-serif">{{ total }}</text>
+          <text x="80" y="75" text-anchor="middle" font-size="22" font-weight="800" fill="#0d1b2a" font-family="IBM Plex Sans,sans-serif">2</text>
           <text x="80" y="90" text-anchor="middle" font-size="9" fill="#8fa3bc" font-family="IBM Plex Sans,sans-serif" font-weight="600" letter-spacing="0.06em">FINDINGS</text>
         </svg>
         <!-- Legend -->
@@ -1469,78 +1429,97 @@ body{font-family:var(--font-main);background:var(--muted-bg);color:var(--text-pr
           <div style="display:flex;align-items:center;gap:8px;font-size:12px">
             <span style="width:12px;height:12px;border-radius:3px;background:#c0392b;flex-shrink:0;display:inline-block"></span>
             <span style="flex:1;color:var(--text-mid)">Critical</span>
-            <span style="font-family:var(--font-mono);font-weight:700;color:#c0392b">{{ summary.critical }}</span>
-            {% if total > 0 %}<span style="color:var(--text-light);font-size:10.5px">{{ (summary.critical | int / total * 100) | round(1) }}%</span>{% endif %}
+            <span style="font-family:var(--font-mono);font-weight:700;color:#c0392b">1</span>
+            <span style="color:var(--text-light);font-size:10.5px">50.0%</span>
           </div>
           <div style="display:flex;align-items:center;gap:8px;font-size:12px">
             <span style="width:12px;height:12px;border-radius:3px;background:#d35400;flex-shrink:0;display:inline-block"></span>
             <span style="flex:1;color:var(--text-mid)">High</span>
-            <span style="font-family:var(--font-mono);font-weight:700;color:#d35400">{{ summary.high }}</span>
-            {% if total > 0 %}<span style="color:var(--text-light);font-size:10.5px">{{ (summary.high | int / total * 100) | round(1) }}%</span>{% endif %}
+            <span style="font-family:var(--font-mono);font-weight:700;color:#d35400">1</span>
+            <span style="color:var(--text-light);font-size:10.5px">50.0%</span>
           </div>
           <div style="display:flex;align-items:center;gap:8px;font-size:12px">
             <span style="width:12px;height:12px;border-radius:3px;background:#b7770d;flex-shrink:0;display:inline-block"></span>
             <span style="flex:1;color:var(--text-mid)">Medium</span>
-            <span style="font-family:var(--font-mono);font-weight:700;color:#b7770d">{{ summary.medium }}</span>
-            {% if total > 0 %}<span style="color:var(--text-light);font-size:10.5px">{{ (summary.medium | int / total * 100) | round(1) }}%</span>{% endif %}
+            <span style="font-family:var(--font-mono);font-weight:700;color:#b7770d">0</span>
+            <span style="color:var(--text-light);font-size:10.5px">0.0%</span>
           </div>
           <div style="display:flex;align-items:center;gap:8px;font-size:12px">
             <span style="width:12px;height:12px;border-radius:3px;background:#1a7a40;flex-shrink:0;display:inline-block"></span>
             <span style="flex:1;color:var(--text-mid)">Low</span>
-            <span style="font-family:var(--font-mono);font-weight:700;color:#1a7a40">{{ summary.low }}</span>
-            {% if total > 0 %}<span style="color:var(--text-light);font-size:10.5px">{{ (summary.low | int / total * 100) | round(1) }}%</span>{% endif %}
+            <span style="font-family:var(--font-mono);font-weight:700;color:#1a7a40">0</span>
+            <span style="color:var(--text-light);font-size:10.5px">0.0%</span>
           </div>
           <div style="display:flex;align-items:center;gap:8px;font-size:12px">
             <span style="width:12px;height:12px;border-radius:3px;background:#1565a8;flex-shrink:0;display:inline-block"></span>
             <span style="flex:1;color:var(--text-mid)">Info</span>
-            <span style="font-family:var(--font-mono);font-weight:700;color:#1565a8">{{ summary.info }}</span>
-            {% if total > 0 %}<span style="color:var(--text-light);font-size:10.5px">{{ (summary.info | int / total * 100) | round(1) }}%</span>{% endif %}
+            <span style="font-family:var(--font-mono);font-weight:700;color:#1565a8">0</span>
+            <span style="color:var(--text-light);font-size:10.5px">0.0%</span>
           </div>
         </div>
       </div>
     </div>
-    {% endif %}
+    
 
     <!-- Chart 2: Attack Attempt Outcomes — horizontal bar -->
-    {% if coverage_counts %}
+    
     <div class="viz-panel">
-      <div class="viz-panel-header">Attack Attempt Outcomes ({{ coverage_tests|length }} total)</div>
-      <div class="viz-panel-body">
-        {%- set outcomes = coverage_counts.keys() | list -%}
-        {%- set max_count = coverage_counts.values() | max | default(1) -%}
-        <svg viewBox="0 0 320 {{ outcomes|length * 44 + 20 }}" xmlns="http://www.w3.org/2000/svg" style="width:100%;display:block">
+      <div class="viz-panel-header">Attack Attempt Outcomes (3 total)</div>
+      <div class="viz-panel-body"><svg viewBox="0 0 320 196" xmlns="http://www.w3.org/2000/svg" style="width:100%;display:block">
           <!-- Y axis -->
-          <line x1="110" y1="10" x2="110" y2="{{ outcomes|length * 44 + 10 }}" stroke="#c8d4e6" stroke-width="1"/>
-          {% for outcome, count in coverage_counts.items() %}
-          {%- set y = 10 + loop.index0 * 44 -%}
-          {%- set bar_w = (count / max_count * 190) | round | int -%}
-          {%- set pct = (count / (coverage_tests|length) * 100) | round(1) if coverage_tests else 0 -%}
-          {%- if outcome == 'success' -%}{%- set bar_color = '#1a7a40' -%}
-          {%- elif outcome == 'negative' -%}{%- set bar_color = '#8fa3bc' -%}
-          {%- elif outcome in ['blocked','error'] -%}{%- set bar_color = '#1565a8' -%}
-          {%- else -%}{%- set bar_color = '#c0392b' -%}
-          {%- endif %}
+          <line x1="110" y1="10" x2="110" y2="186" stroke="#c8d4e6" stroke-width="1"/>
+          
           <!-- Grid line -->
-          <line x1="110" y1="{{ y + 10 }}" x2="310" y2="{{ y + 10 }}" stroke="#e8edf4" stroke-width="1"/>
+          <line x1="110" y1="20" x2="310" y2="20" stroke="#e8edf4" stroke-width="1"/>
           <!-- Row label -->
-          <text x="105" y="{{ y + 25 }}" text-anchor="end" font-size="10" fill="#5a6f8a" font-family="IBM Plex Sans,sans-serif">{{ outcome }}</text>
+          <text x="105" y="35" text-anchor="end" font-size="10" fill="#5a6f8a" font-family="IBM Plex Sans,sans-serif">success</text>
           <!-- Bar -->
-          <rect x="112" y="{{ y + 12 }}" width="{{ bar_w }}" height="20" rx="3" fill="{{ bar_color }}"/>
+          <rect x="112" y="22" width="190" height="20" rx="3" fill="#1a7a40"/>
           <!-- Count label -->
-          <text x="{{ 115 + bar_w }}" y="{{ y + 26 }}" font-size="11" font-weight="700" fill="{{ bar_color }}" font-family="IBM Plex Sans,sans-serif">{{ count }}</text>
-          <text x="{{ 132 + bar_w }}" y="{{ y + 26 }}" font-size="10" fill="#8fa3bc" font-family="IBM Plex Sans,sans-serif">{{ pct }}%</text>
-          {% endfor %}
+          <text x="305" y="36" font-size="11" font-weight="700" fill="#1a7a40" font-family="IBM Plex Sans,sans-serif">8</text>
+          <text x="322" y="36" font-size="10" fill="#8fa3bc" font-family="IBM Plex Sans,sans-serif">266.7%</text>
+          
+          <!-- Grid line -->
+          <line x1="110" y1="64" x2="310" y2="64" stroke="#e8edf4" stroke-width="1"/>
+          <!-- Row label -->
+          <text x="105" y="79" text-anchor="end" font-size="10" fill="#5a6f8a" font-family="IBM Plex Sans,sans-serif">negative</text>
+          <!-- Bar -->
+          <rect x="112" y="66" width="71" height="20" rx="3" fill="#8fa3bc"/>
+          <!-- Count label -->
+          <text x="186" y="80" font-size="11" font-weight="700" fill="#8fa3bc" font-family="IBM Plex Sans,sans-serif">3</text>
+          <text x="203" y="80" font-size="10" fill="#8fa3bc" font-family="IBM Plex Sans,sans-serif">100.0%</text>
+          
+          <!-- Grid line -->
+          <line x1="110" y1="108" x2="310" y2="108" stroke="#e8edf4" stroke-width="1"/>
+          <!-- Row label -->
+          <text x="105" y="123" text-anchor="end" font-size="10" fill="#5a6f8a" font-family="IBM Plex Sans,sans-serif">blocked</text>
+          <!-- Bar -->
+          <rect x="112" y="110" width="24" height="20" rx="3" fill="#1565a8"/>
+          <!-- Count label -->
+          <text x="139" y="124" font-size="11" font-weight="700" fill="#1565a8" font-family="IBM Plex Sans,sans-serif">1</text>
+          <text x="156" y="124" font-size="10" fill="#8fa3bc" font-family="IBM Plex Sans,sans-serif">33.3%</text>
+          
+          <!-- Grid line -->
+          <line x1="110" y1="152" x2="310" y2="152" stroke="#e8edf4" stroke-width="1"/>
+          <!-- Row label -->
+          <text x="105" y="167" text-anchor="end" font-size="10" fill="#5a6f8a" font-family="IBM Plex Sans,sans-serif">error</text>
+          <!-- Bar -->
+          <rect x="112" y="154" width="0" height="20" rx="3" fill="#1565a8"/>
+          <!-- Count label -->
+          <text x="115" y="168" font-size="11" font-weight="700" fill="#1565a8" font-family="IBM Plex Sans,sans-serif">0</text>
+          <text x="132" y="168" font-size="10" fill="#8fa3bc" font-family="IBM Plex Sans,sans-serif">0.0%</text>
+          
         </svg>
       </div>
     </div>
-    {% endif %}
+    
 
   </div>
 
   <!-- Chart 3: CVSS Score Profile — scatter plot -->
-  {% if findings %}
-  {% set scored = findings | selectattr('extra') | selectattr('extra.cvss_base') | list %}
-  {% if scored %}
+  
+  
+  
   <div class="viz-panel" style="margin-bottom:24px">
     <div class="viz-panel-header">CVSS v3.1 Score Profile &mdash; Scored Findings</div>
     <div class="viz-panel-body">
@@ -1548,9 +1527,29 @@ body{font-family:var(--font-main);background:var(--muted-bg);color:var(--text-pr
         <!-- Axis -->
         <line x1="60" y1="80" x2="780" y2="80" stroke="#c8d4e6" stroke-width="1.5"/>
         <!-- Score labels 0–10 -->
-        {% for i in range(0, 11) %}
-        <text x="{{ 60 + i * 72 }}" y="96" text-anchor="middle" font-size="9" fill="#8fa3bc" font-family="JetBrains Mono,monospace">{{ i }}.0</text>
-        {% endfor %}
+        
+        <text x="60" y="96" text-anchor="middle" font-size="9" fill="#8fa3bc" font-family="JetBrains Mono,monospace">0.0</text>
+        
+        <text x="132" y="96" text-anchor="middle" font-size="9" fill="#8fa3bc" font-family="JetBrains Mono,monospace">1.0</text>
+        
+        <text x="204" y="96" text-anchor="middle" font-size="9" fill="#8fa3bc" font-family="JetBrains Mono,monospace">2.0</text>
+        
+        <text x="276" y="96" text-anchor="middle" font-size="9" fill="#8fa3bc" font-family="JetBrains Mono,monospace">3.0</text>
+        
+        <text x="348" y="96" text-anchor="middle" font-size="9" fill="#8fa3bc" font-family="JetBrains Mono,monospace">4.0</text>
+        
+        <text x="420" y="96" text-anchor="middle" font-size="9" fill="#8fa3bc" font-family="JetBrains Mono,monospace">5.0</text>
+        
+        <text x="492" y="96" text-anchor="middle" font-size="9" fill="#8fa3bc" font-family="JetBrains Mono,monospace">6.0</text>
+        
+        <text x="564" y="96" text-anchor="middle" font-size="9" fill="#8fa3bc" font-family="JetBrains Mono,monospace">7.0</text>
+        
+        <text x="636" y="96" text-anchor="middle" font-size="9" fill="#8fa3bc" font-family="JetBrains Mono,monospace">8.0</text>
+        
+        <text x="708" y="96" text-anchor="middle" font-size="9" fill="#8fa3bc" font-family="JetBrains Mono,monospace">9.0</text>
+        
+        <text x="780" y="96" text-anchor="middle" font-size="9" fill="#8fa3bc" font-family="JetBrains Mono,monospace">10.0</text>
+        
         <!-- Band regions -->
         <rect x="60"  y="68" width="216" height="12" rx="2" fill="#b8e0c8" opacity="0.4"/>
         <rect x="276" y="68" width="216" height="12" rx="2" fill="#f5e6c0" opacity="0.5"/>
@@ -1561,228 +1560,22 @@ body{font-family:var(--font-main);background:var(--muted-bg);color:var(--text-pr
         <text x="564" y="77" text-anchor="middle" font-size="7.5" fill="#d35400" font-family="IBM Plex Sans,sans-serif" font-weight="600">HIGH</text>
         <text x="708" y="77" text-anchor="middle" font-size="7.5" fill="#c0392b" font-family="IBM Plex Sans,sans-serif" font-weight="600">CRITICAL</text>
         <!-- Finding markers: x = 60 + (score/10)*720 -->
-        {% for f in scored %}
-        {%- set score = f.extra.cvss_base | float -%}
-        {%- set cx = (60 + score / 10 * 720) | round | int -%}
-        {%- set cy = (50 - loop.index0 % 2 * 16) -%}
-        {%- set sev = f.severity|lower -%}
-        {%- if sev == 'critical' -%}{%- set fc = '#c0392b' -%}
-        {%- elif sev == 'high' -%}{%- set fc = '#d35400' -%}
-        {%- elif sev == 'medium' -%}{%- set fc = '#b7770d' -%}
-        {%- elif sev == 'low' -%}{%- set fc = '#1a7a40' -%}
-        {%- else -%}{%- set fc = '#1565a8' -%}
-        {%- endif %}
-        <circle cx="{{ cx }}" cy="{{ cy }}" r="10" fill="{{ fc }}"/>
-        <text x="{{ cx }}" y="{{ cy + 4 }}" text-anchor="middle" font-size="7.5" fill="white" font-family="JetBrains Mono,monospace" font-weight="700">{{ f.fid | default('F-%02d'|format(loop.index)) }}</text>
-        <text x="{{ cx }}" y="{{ cy + 16 }}" text-anchor="middle" font-size="7" fill="{{ fc }}" font-family="JetBrains Mono,monospace">{{ score }}</text>
-        {% endfor %}
+        
+        <circle cx="766" cy="50" r="10" fill="#c0392b"/>
+        <text x="766" y="54" text-anchor="middle" font-size="7.5" fill="white" font-family="JetBrains Mono,monospace" font-weight="700">F-01</text>
+        <text x="766" y="66" text-anchor="middle" font-size="7" fill="#c0392b" font-family="JetBrains Mono,monospace">9.8</text>
+        
+        <circle cx="600" cy="34" r="10" fill="#d35400"/>
+        <text x="600" y="38" text-anchor="middle" font-size="7.5" fill="white" font-family="JetBrains Mono,monospace" font-weight="700">F-02</text>
+        <text x="600" y="50" text-anchor="middle" font-size="7" fill="#d35400" font-family="JetBrains Mono,monospace">7.5</text>
+        
       </svg>
     </div>
   </div>
-  {% endif %}
-  {% endif %}
+  
+  
 
 </div>
-
-{% if ai_security and ai_security.findings %}
-<!-- ================================================================
-     SECTION 15: AI / LLM SECURITY (RED-TEAM)
-================================================================ -->
-<div class="section section-alt page-break">
-  <div class="section-header">
-    <div class="section-num">&sect;&nbsp;15</div>
-    <div>
-      <div class="section-title">AI / LLM Security (Red-Team)</div>
-      <div class="section-desc">Results of adversarial red-teaming against AI/LLM targets. Scored with AIVSS and Attack Success Rate (ASR). OWASP LLM Top 10 and MITRE ATLAS cross-referenced.</div>
-    </div>
-    <div class="section-badge">AI Red-Team</div>
-  </div>
-
-  <!-- Summary stat tiles -->
-  <div class="stat-tiles" style="grid-template-columns:repeat(4,1fr)">
-    <div class="stat-tile t-total">
-      <div class="tile-num">{{ ai_security.count }}</div>
-      <div class="tile-label">AI Findings</div>
-    </div>
-    <div class="stat-tile t-critical">
-      <div class="tile-num">{{ ai_security.max_aivss }}</div>
-      <div class="tile-label">Max AIVSS</div>
-    </div>
-    <div class="stat-tile t-high">
-      <div class="tile-num">{{ ai_security.avg_asr }}%</div>
-      <div class="tile-label">Avg ASR</div>
-    </div>
-    <div class="stat-tile t-info">
-      <div class="tile-num" style="font-size:13px;font-weight:800;margin-top:4px">{{ ai_security.owasp_classes | join(', ') }}</div>
-      <div class="tile-label">OWASP-LLM Classes</div>
-    </div>
-  </div>
-
-  <!-- Attack-vector distribution bar chart -->
-  {% if ai_security.by_class %}
-  <div class="sub-heading">Attack-Vector Distribution</div>
-  {%- set av_max = ai_security.by_class.values() | max | default(1) -%}
-  <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:24px">
-    {% for vector, count in ai_security.by_class.items() %}
-    {%- set bar_pct = (count / av_max * 100) | round | int -%}
-    <div style="display:flex;align-items:center;gap:10px;font-size:12px">
-      <span style="width:180px;flex-shrink:0;color:var(--text-mid);font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ vector }}</span>
-      <div style="flex:1;background:var(--muted-bg);border-radius:3px;height:14px;overflow:hidden;border:1px solid var(--border)">
-        <div style="width:{{ bar_pct }}%;background:var(--steel);height:100%;border-radius:3px 0 0 3px"></div>
-      </div>
-      <span style="font-family:var(--font-mono);font-weight:700;color:var(--navy);min-width:24px;text-align:right">{{ count }}</span>
-    </div>
-    {% endfor %}
-  </div>
-  {% endif %}
-
-  <!-- Findings register table -->
-  <div class="sub-heading">AI Findings Register</div>
-  <div style="overflow-x:auto">
-  <table class="data-table" style="font-size:11.5px;min-width:900px">
-    <thead>
-      <tr>
-        <th style="width:44px">ID</th>
-        <th>Finding</th>
-        <th style="width:80px">Severity</th>
-        <th style="width:52px">AIVSS</th>
-        <th style="width:72px">ASR %</th>
-        <th style="width:74px">OWASP-LLM</th>
-        <th style="width:80px">ATLAS</th>
-        <th style="width:120px">Attack Vector</th>
-        <th style="width:130px">Model</th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for f in ai_security.findings %}
-      {%- set sev = f.severity | lower -%}
-      <tr>
-        <td class="mono fw" style="color:var(--{{ sev }})">AI-{{ '%02d' | format(loop.index) }}</td>
-        <td class="fw">{{ f.title | default('') }}</td>
-        <td><span class="badge badge-{{ sev }} badge-dot">{{ f.severity | default('') }}</span></td>
-        <td>
-          <span style="background:var(--{{ sev }}-bg);color:var(--{{ sev }});border:1px solid var(--{{ sev }}-bd);padding:1px 7px;border-radius:3px;font-family:var(--font-mono);font-size:10px;font-weight:700">{{ f.aivss | default('—') }}</span>
-        </td>
-        <td>
-          {%- set asr_int = f.asr | default(0) | int -%}
-          <div style="display:flex;align-items:center;gap:6px">
-            <div style="flex:1;background:var(--muted-bg);border-radius:3px;height:10px;overflow:hidden;border:1px solid var(--border);min-width:40px">
-              <div style="width:{{ asr_int }}%;background:var(--{{ sev }});height:100%;border-radius:3px 0 0 3px"></div>
-            </div>
-            <span style="font-family:var(--font-mono);font-size:10px;font-weight:700;color:var(--{{ sev }});min-width:28px">{{ asr_int }}%</span>
-          </div>
-        </td>
-        <td>
-          {% if f.owasp_llm | default('') %}
-          <span class="owasp-badge">{{ f.owasp_llm }}</span>
-          {% else %}
-          <span class="text-muted">—</span>
-          {% endif %}
-        </td>
-        <td>
-          {% if f.atlas | default('') %}
-          <span class="mitre-badge">{{ f.atlas }}</span>
-          {% else %}
-          <span class="text-muted">—</span>
-          {% endif %}
-        </td>
-        <td style="font-size:11px;color:var(--text-muted)">{{ f.attack_vector | default('') }}</td>
-        <td class="mono" style="font-size:10.5px;color:var(--text-muted)">{{ f.target_model | default('') }}</td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-  </div>
-  <p class="small" style="margin-top:10px">{{ ai_security.count }} AI/LLM finding(s) &middot; AIVSS scored &middot; ASR = Attack Success Rate across trial runs &middot; OWASP LLM Top 10 &middot; MITRE ATLAS cross-referenced</p>
-
-  <!-- Per-finding detail cards -->
-  <div class="sub-heading mt-16">AI Finding Detail Cards</div>
-  {% for f in ai_security.findings %}
-  {%- set sev = f.severity | lower -%}
-  <div class="finding-card avoid-break">
-    <div class="finding-card-header fc-{{ sev }}">
-      <span class="fc-id">AI-{{ '%02d' | format(loop.index) }}</span>
-      <span class="fc-title">{{ f.title | default('') }}</span>
-      <span class="badge badge-{{ sev }} badge-dot">{{ f.severity | default('') }}</span>
-      {% if f.aivss | default('') %}
-      <span style="background:var(--{{ sev }}-bg);color:var(--{{ sev }});border:1px solid var(--{{ sev }}-bd);padding:1px 8px;border-radius:3px;font-family:var(--font-mono);font-size:10px;font-weight:700;margin-left:4px">AIVSS&nbsp;{{ f.aivss }}</span>
-      {% endif %}
-    </div>
-    <div class="finding-card-body">
-
-      <!-- Meta grid row -->
-      <div class="two-col" style="margin-bottom:14px;gap:14px">
-        <table style="width:100%;border-collapse:collapse;font-size:12px">
-          <tr>
-            <td style="padding:4px 0;color:var(--text-muted);font-size:10.5px;text-transform:uppercase;letter-spacing:.06em;font-weight:600;width:100px">OWASP-LLM</td>
-            <td>
-              {% if f.owasp_llm | default('') %}<span class="owasp-badge">{{ f.owasp_llm }}</span>{% else %}<span class="text-muted">—</span>{% endif %}
-            </td>
-          </tr>
-          <tr>
-            <td style="padding:4px 0;color:var(--text-muted);font-size:10.5px;text-transform:uppercase;letter-spacing:.06em;font-weight:600">ATLAS</td>
-            <td>
-              {% if f.atlas | default('') %}<span class="mitre-badge">{{ f.atlas }}</span>{% else %}<span class="text-muted">—</span>{% endif %}
-            </td>
-          </tr>
-          <tr>
-            <td style="padding:4px 0;color:var(--text-muted);font-size:10.5px;text-transform:uppercase;letter-spacing:.06em;font-weight:600">Attack Vector</td>
-            <td style="font-size:12px;color:var(--text-mid)">{{ f.attack_vector | default('—') }}</td>
-          </tr>
-          <tr>
-            <td style="padding:4px 0;color:var(--text-muted);font-size:10.5px;text-transform:uppercase;letter-spacing:.06em;font-weight:600">Target Model</td>
-            <td style="font-family:var(--font-mono);font-size:11px;color:var(--navy)">{{ f.target_model | default('—') }}</td>
-          </tr>
-        </table>
-        <table style="width:100%;border-collapse:collapse;font-size:12px">
-          <tr>
-            <td style="padding:4px 0;color:var(--text-muted);font-size:10.5px;text-transform:uppercase;letter-spacing:.06em;font-weight:600;width:80px">AIVSS</td>
-            <td style="font-family:var(--font-mono);font-weight:700;color:var(--{{ sev }})">{{ f.aivss | default('—') }}</td>
-          </tr>
-          <tr>
-            <td style="padding:4px 0;color:var(--text-muted);font-size:10.5px;text-transform:uppercase;letter-spacing:.06em;font-weight:600">CVSS</td>
-            <td style="font-family:var(--font-mono);font-size:11px;color:var(--text-mid)">{{ f.cvss | default('—') }}</td>
-          </tr>
-          <tr>
-            <td style="padding:4px 0;color:var(--text-muted);font-size:10.5px;text-transform:uppercase;letter-spacing:.06em;font-weight:600">ASR</td>
-            <td>
-              {%- set asr_int = f.asr | default(0) | int -%}
-              <div style="display:flex;align-items:center;gap:6px">
-                <div style="width:80px;background:var(--muted-bg);border-radius:3px;height:10px;overflow:hidden;border:1px solid var(--border)">
-                  <div style="width:{{ asr_int }}%;background:var(--{{ sev }});height:100%;border-radius:3px 0 0 3px"></div>
-                </div>
-                <span style="font-family:var(--font-mono);font-size:10px;font-weight:700;color:var(--{{ sev }})">{{ asr_int }}%</span>
-                <span style="font-size:10px;color:var(--text-light)">({{ f.successes | default(0) }}/{{ f.trials | default(0) }} trials)</span>
-              </div>
-            </td>
-          </tr>
-        </table>
-      </div>
-
-      {% if f.evidence | default('') %}
-      <h5>Evidence / Prompt Output</h5>
-      <div class="code-block"><span class="out">{{ f.evidence }}</span></div>
-      {% endif %}
-
-      {% if f.remediation | default('') %}
-      <h5>Remediation</h5>
-      <p>{{ f.remediation }}</p>
-      {% endif %}
-
-    </div>
-    <div class="finding-card-meta">
-      {% if f.owasp_llm | default('') %}<span class="owasp-badge">{{ f.owasp_llm }}</span>{% endif %}
-      {% if f.atlas | default('') %}<span class="mitre-badge">{{ f.atlas }}</span>{% endif %}
-      {% if f.vector | default('') %}
-      <span style="font-family:var(--font-mono);font-size:9px;color:var(--text-muted)">{{ f.vector }}</span>
-      {% endif %}
-      <span style="font-size:10.5px;color:var(--text-muted);margin-left:auto">Model: {{ f.target_model | default('—') }}</span>
-    </div>
-  </div>
-  {% endfor %}
-
-</div>
-{% endif %}
 
 <!-- ================================================================
      REPORT FOOTER
@@ -1791,12 +1584,12 @@ body{font-family:var(--font-main);background:var(--muted-bg);color:var(--text-pr
   <div class="footer-left">
     <div style="color:rgba(255,255,255,.65);font-weight:600;margin-bottom:3px">ARGUS Autonomous Security Assessment Platform</div>
     <div>CONFIDENTIAL &mdash; Client Privileged &mdash; Not for Distribution</div>
-    <div style="margin-top:2px">Target: {{ target_display }} &middot; Generated: {{ generated_at }}</div>
+    <div style="margin-top:2px">Target: 10.129.21.254 &middot; Generated: 2026-06-19 09:30 UTC</div>
   </div>
   <div class="footer-right">
     <div style="color:rgba(255,255,255,.55)">ARGUS Assessment Report</div>
-    {% if duration %}<div style="color:rgba(255,255,255,.55)">Duration: {{ duration }}</div>{% endif %}
-    <div style="color:rgba(255,255,255,.35)">Generated: {{ generated_at }}</div>
+    <div style="color:rgba(255,255,255,.55)">Duration: 1h 42m</div>
+    <div style="color:rgba(255,255,255,.35)">Generated: 2026-06-19 09:30 UTC</div>
     <div style="color:rgba(255,255,255,.35);margin-top:4px">ARGUS Stellar Ops &copy; 2026</div>
   </div>
 </div>
@@ -1804,4 +1597,3 @@ body{font-family:var(--font-main);background:var(--muted-bg);color:var(--text-pr
 </div><!-- /.report-wrap -->
 </body>
 </html>
-

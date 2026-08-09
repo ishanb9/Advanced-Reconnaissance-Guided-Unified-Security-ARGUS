@@ -382,6 +382,75 @@ class RedTeamExpertAgent(BaseMetaAgent):
             lines.append(">>> ALL WIN CONDITIONS ACHIEVED — recommend HALT/exfil/report. <<<")
         return "\n".join(lines)
 
+    # ── Mission kickoff (initial objective snapshot) ───────────────────────
+    @staticmethod
+    def _kickoff_objectives(engagement_type: str = "") -> List[Dict[str, Any]]:
+        """The objectives THIS engagement can actually achieve.
+
+        The first version of this seeded ``flag_capture`` unconditionally — the same
+        flag-centric assumption that made a vulnerability assessment look permanently
+        incomplete.  Flags are now opt-in: only an engagement whose win conditions
+        genuinely include one gets a flag objective."""
+        names: List[str] = ["initial_access", "credential_capture",
+                            "privilege_escalation", "lateral_movement",
+                            "data_exfiltration"]
+        try:
+            from agents.mission.win_conditions import expects_flags, win_conditions_for
+            wc = win_conditions_for(engagement_type)
+            if expects_flags(engagement_type, wc):
+                names.insert(3, "flag_capture")
+            # Assessment-style engagements: findings ARE the deliverable.
+            if not any(any(k in str(c).lower() for k in
+                           ("shell", "flag", "access", "privilege", "lateral",
+                            "exfil", "loot"))
+                       for c in wc):
+                names = ["vulnerability_identification", "evidence_capture",
+                         "impact_demonstration", "remediation_guidance"]
+        except Exception:                                        # noqa: BLE001
+            pass
+        return [{"name": n, "status": "in_progress" if i == 0 else "pending",
+                 "evidence": ""} for i, n in enumerate(names)]
+
+    async def emit_kickoff(self, target: str = "", target_type: str = "",
+                           engagement_type: str = "") -> None:
+        """Emit an INITIAL objective snapshot the instant the engagement starts so the
+        Expert panel reflects a LIVE mission immediately — instead of sitting at
+        "Awaiting mission kickoff" until the first cadence-gated LLM consultation, which
+        is ``ARGUS_OPERATOR_ADVISOR_EVERY`` (default 6) operator turns away and is skipped
+        entirely once a foothold lands (post-foothold the Expert is intentionally silent).
+
+        Seeds the six standard objectives as pending; later consultations refine the phase
+        and progress via ``expert_objective_update``.  Best-effort; never raises."""
+        if not self._enabled:
+            return
+        try:
+            if not self._objectives.get("objectives"):
+                # Prefer a phase from the mission brief when one is available.
+                _phase = self._objectives.get("mission_phase") or ""
+                if not _phase:
+                    mb = getattr(self, "_mission_brief", None)
+                    _goal = getattr(mb, "goal", "") if mb is not None else ""
+                    _phase = (f"Reconnaissance — {_goal}".strip(" —")
+                              if _goal else "Reconnaissance — Initial Access")
+                self._objectives = {
+                    "mission_phase": _phase,
+                    "progress_pct":  0,
+                    # Objectives this engagement can actually achieve — a flag objective
+                    # appears ONLY when the engagement genuinely has a flag.
+                    "objectives": self._kickoff_objectives(engagement_type),
+                }
+            await self._emit("expert_objective_update", {
+                "agent": "expert", "phase": "kickoff",
+                "target": str(target or ""), **self._objectives,
+            })
+            await self._emit("expert_status", {
+                "agent": "expert", "status": "idle", "phase": "kickoff",
+                "message": ("Red-team Expert online — overseeing the engagement"
+                            + (f" against {target}" if target else "") + "."),
+            })
+        except Exception as exc:                       # noqa: BLE001
+            logger.warning("[expert] kickoff emit failed: %s", exc)
+
     def _build_system_prompt(self) -> str:
         # Prepend the mission brief and current win-condition state so they
         # travel in *every* turn of the persistent conversation thread.

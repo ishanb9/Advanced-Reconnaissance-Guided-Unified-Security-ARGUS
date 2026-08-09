@@ -1,0 +1,1164 @@
+{
+  "total": 165,
+  "static_ok": 165,
+  "with_warnings": 0,
+  "lab_confirmed": 0,
+  "lab_failed": 0,
+  "skills": {
+    "acars": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "aviation",
+      "domain": "OT",
+      "transport": "rf"
+    },
+    "adsb_1090es": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "aviation",
+      "domain": "OT",
+      "transport": "rf"
+    },
+    "aero_satcom": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "aviation",
+      "domain": "OT",
+      "transport": "rf"
+    },
+    "afdx_arinc664": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "aviation",
+      "domain": "OT",
+      "transport": "arinc"
+    },
+    "airport_dcs": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "aviation",
+      "domain": "OT",
+      "transport": "ip"
+    },
+    "arinc429": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "aviation",
+      "domain": "OT",
+      "transport": "arinc"
+    },
+    "atc_automation": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "aviation",
+      "domain": "OT",
+      "transport": "ip"
+    },
+    "cpdlc": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "aviation",
+      "domain": "OT",
+      "transport": "rf"
+    },
+    "efb": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "aviation",
+      "domain": "OT",
+      "transport": "ip"
+    },
+    "fadec": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "aviation",
+      "domain": "OT",
+      "transport": "arinc"
+    },
+    "ife": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "aviation",
+      "domain": "OT",
+      "transport": "ip"
+    },
+    "modes_transponder": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "aviation",
+      "domain": "OT",
+      "transport": "rf"
+    },
+    "tcas": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "aviation",
+      "domain": "OT",
+      "transport": "rf"
+    },
+    "vdl2": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "aviation",
+      "domain": "OT",
+      "transport": "rf"
+    },
+    "amazon_alexa_echo": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "home",
+      "domain": "IOT",
+      "transport": "ip"
+    },
+    "apple_homekit_hap": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "home",
+      "domain": "IOT",
+      "transport": "ip"
+    },
+    "control4": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "home",
+      "domain": "IOT",
+      "transport": "ip"
+    },
+    "google_home_nest": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "home",
+      "domain": "IOT",
+      "transport": "ip"
+    },
+    "home_assistant": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "home",
+      "domain": "IOT",
+      "transport": "ip"
+    },
+    "hubitat_elevation": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "home",
+      "domain": "IOT",
+      "transport": "ip"
+    },
+    "insteon": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "home",
+      "domain": "IOT",
+      "transport": "ip"
+    },
+    "openhab": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "home",
+      "domain": "IOT",
+      "transport": "ip"
+    },
+    "philips_hue": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "home",
+      "domain": "IOT",
+      "transport": "ip"
+    },
+    "ring_arlo_cameras": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "home",
+      "domain": "IOT",
+      "transport": "ip"
+    },
+    "samsung_smartthings": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "home",
+      "domain": "IOT",
+      "transport": "ip"
+    },
+    "tuya_cloud": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "home",
+      "domain": "IOT",
+      "transport": "ip"
+    },
+    "vera_micasaverde": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "home",
+      "domain": "IOT",
+      "transport": "ip"
+    },
+    "amx_netlinx": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "",
+      "domain": "IOT",
+      "transport": "ip"
+    },
+    "ble": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "",
+      "domain": "IOT",
+      "transport": "rf"
+    },
+    "coap": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "",
+      "domain": "IOT",
+      "transport": "ip"
+    },
+    "dicom": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "",
+      "domain": "IOT",
+      "transport": "ip"
+    },
+    "hl7_mllp": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "",
+      "domain": "IOT",
+      "transport": "ip"
+    },
+    "ipp_pjl": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "",
+      "domain": "IOT",
+      "transport": "ip"
+    },
+    "lorawan": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "",
+      "domain": "IOT",
+      "transport": "rf"
+    },
+    "lutron_lip": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "",
+      "domain": "IOT",
+      "transport": "ip"
+    },
+    "matter_mdns": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "",
+      "domain": "IOT",
+      "transport": "ip"
+    },
+    "mdns": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "",
+      "domain": "IOT",
+      "transport": "ip"
+    },
+    "medical_devices": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "",
+      "domain": "IOT",
+      "transport": "ip"
+    },
+    "mqtt": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "",
+      "domain": "IOT",
+      "transport": "ip"
+    },
+    "nas_appliances": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "",
+      "domain": "IOT",
+      "transport": "ip"
+    },
+    "onvif_rtsp": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "",
+      "domain": "IOT",
+      "transport": "ip"
+    },
+    "smarthome_hubs": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "",
+      "domain": "IOT",
+      "transport": "ip"
+    },
+    "tr069_cpe": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "",
+      "domain": "IOT",
+      "transport": "ip"
+    },
+    "upnp_ssdp": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "",
+      "domain": "IOT",
+      "transport": "ip"
+    },
+    "wifi": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "",
+      "domain": "IOT",
+      "transport": "rf"
+    },
+    "zigbee": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "",
+      "domain": "IOT",
+      "transport": "rf"
+    },
+    "zwave": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "",
+      "domain": "IOT",
+      "transport": "rf"
+    },
+    "cloud_imds": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "",
+      "domain": "IT",
+      "transport": "ip"
+    },
+    "databases": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "",
+      "domain": "IT",
+      "transport": "ip"
+    },
+    "docker": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "",
+      "domain": "IT",
+      "transport": "ip"
+    },
+    "fhir": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "",
+      "domain": "IT",
+      "transport": "ip"
+    },
+    "graphql": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "",
+      "domain": "IT",
+      "transport": "ip"
+    },
+    "grpc": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "",
+      "domain": "IT",
+      "transport": "ip"
+    },
+    "kerberos": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "",
+      "domain": "IT",
+      "transport": "ip"
+    },
+    "kubernetes": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "",
+      "domain": "IT",
+      "transport": "ip"
+    },
+    "ldap": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "",
+      "domain": "IT",
+      "transport": "ip"
+    },
+    "message_queues": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "",
+      "domain": "IT",
+      "transport": "ip"
+    },
+    "smb_ad": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "",
+      "domain": "IT",
+      "transport": "ip"
+    },
+    "vpn_edge": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "",
+      "domain": "IT",
+      "transport": "ip"
+    },
+    "ais_transponder": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "marine",
+      "domain": "OT",
+      "transport": "rf"
+    },
+    "ballast_water_mgmt": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "marine",
+      "domain": "OT",
+      "transport": "ip"
+    },
+    "cargo_management": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "marine",
+      "domain": "OT",
+      "transport": "ip"
+    },
+    "dynamic_positioning": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "marine",
+      "domain": "OT",
+      "transport": "ip"
+    },
+    "ecdis": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "marine",
+      "domain": "OT",
+      "transport": "ip"
+    },
+    "engine_monitoring": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "marine",
+      "domain": "OT",
+      "transport": "can"
+    },
+    "gmdss": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "marine",
+      "domain": "OT",
+      "transport": "rf"
+    },
+    "integrated_bridge": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "marine",
+      "domain": "OT",
+      "transport": "ip"
+    },
+    "marine_satcom": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "marine",
+      "domain": "OT",
+      "transport": "ip"
+    },
+    "nmea2000": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "marine",
+      "domain": "OT",
+      "transport": "can"
+    },
+    "port_terminal_tos": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "marine",
+      "domain": "OT",
+      "transport": "ip"
+    },
+    "radar_arpa": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "marine",
+      "domain": "OT",
+      "transport": "ip"
+    },
+    "ship_alarm_monitoring": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "marine",
+      "domain": "OT",
+      "transport": "ip"
+    },
+    "vdr": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "marine",
+      "domain": "OT",
+      "transport": "ip"
+    },
+    "vessel_network_infra": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "marine",
+      "domain": "OT",
+      "transport": "ip"
+    },
+    "arista_eos": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "network",
+      "domain": "IT",
+      "transport": "ip"
+    },
+    "cisco_ios": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "network",
+      "domain": "IT",
+      "transport": "ip"
+    },
+    "cisco_nxos": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "network",
+      "domain": "IT",
+      "transport": "ip"
+    },
+    "citrix_adc": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "network",
+      "domain": "IT",
+      "transport": "ip"
+    },
+    "f5_bigip": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "network",
+      "domain": "IT",
+      "transport": "ip"
+    },
+    "hpe_aruba": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "network",
+      "domain": "IT",
+      "transport": "ip"
+    },
+    "juniper_junos": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "network",
+      "domain": "IT",
+      "transport": "ip"
+    },
+    "mikrotik_routeros": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "network",
+      "domain": "IT",
+      "transport": "ip"
+    },
+    "sdwan_edge": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "network",
+      "domain": "IT",
+      "transport": "ip"
+    },
+    "snmp_managed_switch": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "network",
+      "domain": "IT",
+      "transport": "ip"
+    },
+    "ubiquiti_unifi": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "network",
+      "domain": "IT",
+      "transport": "ip"
+    },
+    "wireless_lan_controller": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "network",
+      "domain": "IT",
+      "transport": "ip"
+    },
+    "os-android-adb": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "os",
+      "domain": "IT",
+      "transport": "ip"
+    },
+    "os-esxi-vsphere": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "os",
+      "domain": "IT",
+      "transport": "ip"
+    },
+    "os-freebsd": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "os",
+      "domain": "IT",
+      "transport": "ip"
+    },
+    "os-ibm-aix": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "os",
+      "domain": "IT",
+      "transport": "ip"
+    },
+    "os-ios-mdm": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "os",
+      "domain": "IT",
+      "transport": "ip"
+    },
+    "os-linux-privesc": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "os",
+      "domain": "IT",
+      "transport": "ip"
+    },
+    "os-linux-ssh": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "os",
+      "domain": "IT",
+      "transport": "ip"
+    },
+    "os-macos-ard": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "os",
+      "domain": "IT",
+      "transport": "ip"
+    },
+    "os-solaris": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "os",
+      "domain": "IT",
+      "transport": "ip"
+    },
+    "os-windows-adcs": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "os",
+      "domain": "IT",
+      "transport": "ip"
+    },
+    "os-windows-iis": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "os",
+      "domain": "IT",
+      "transport": "ip"
+    },
+    "os-windows-rdp": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "os",
+      "domain": "IT",
+      "transport": "ip"
+    },
+    "os-windows-server-roles": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "os",
+      "domain": "IT",
+      "transport": "ip"
+    },
+    "os-windows-winrm": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "os",
+      "domain": "IT",
+      "transport": "ip"
+    },
+    "bacnet": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "",
+      "domain": "OT",
+      "transport": "ip"
+    },
+    "can_uds": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "",
+      "domain": "OT",
+      "transport": "can"
+    },
+    "codesys": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "",
+      "domain": "OT",
+      "transport": "ip"
+    },
+    "dlms_cosem": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "",
+      "domain": "OT",
+      "transport": "ip"
+    },
+    "dnp3": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "",
+      "domain": "OT",
+      "transport": "ip"
+    },
+    "doip": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "",
+      "domain": "OT",
+      "transport": "ip"
+    },
+    "ethernetip": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "",
+      "domain": "OT",
+      "transport": "ip"
+    },
+    "goose_sv": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "",
+      "domain": "OT",
+      "transport": "l2"
+    },
+    "hart_ip": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "",
+      "domain": "OT",
+      "transport": "ip"
+    },
+    "iec104": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "",
+      "domain": "OT",
+      "transport": "ip"
+    },
+    "j1939": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "",
+      "domain": "OT",
+      "transport": "can"
+    },
+    "knxnet_ip": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "",
+      "domain": "OT",
+      "transport": "ip"
+    },
+    "lonworks": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "",
+      "domain": "OT",
+      "transport": "ip"
+    },
+    "modbus": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "",
+      "domain": "OT",
+      "transport": "ip"
+    },
+    "niagara_fox": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "",
+      "domain": "OT",
+      "transport": "ip"
+    },
+    "nmea_maritime": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "",
+      "domain": "OT",
+      "transport": "ip"
+    },
+    "omron_fins": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "",
+      "domain": "OT",
+      "transport": "ip"
+    },
+    "opcua": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "",
+      "domain": "OT",
+      "transport": "ip"
+    },
+    "osdp": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "",
+      "domain": "OT",
+      "transport": "serial"
+    },
+    "profinet_dcp": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "",
+      "domain": "OT",
+      "transport": "l2"
+    },
+    "s7comm": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "",
+      "domain": "OT",
+      "transport": "ip"
+    },
+    "wiegand": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "",
+      "domain": "OT",
+      "transport": "serial"
+    },
+    "aveva-system-platform": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "scada",
+      "domain": "OT",
+      "transport": "ip"
+    },
+    "factorytalk-view": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "scada",
+      "domain": "OT",
+      "transport": "ip"
+    },
+    "ge-cimplicity": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "scada",
+      "domain": "OT",
+      "transport": "ip"
+    },
+    "ge-ifix": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "scada",
+      "domain": "OT",
+      "transport": "ip"
+    },
+    "iconics-genesis64": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "scada",
+      "domain": "OT",
+      "transport": "ip"
+    },
+    "ignition-scada": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "scada",
+      "domain": "OT",
+      "transport": "ip"
+    },
+    "kepware-kepserverex": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "scada",
+      "domain": "OT",
+      "transport": "ip"
+    },
+    "opc-da-classic": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "scada",
+      "domain": "OT",
+      "transport": "ip"
+    },
+    "osisoft-pi-system": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "scada",
+      "domain": "OT",
+      "transport": "ip"
+    },
+    "schneider-clearscada": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "scada",
+      "domain": "OT",
+      "transport": "ip"
+    },
+    "siemens-wincc": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "scada",
+      "domain": "OT",
+      "transport": "ip"
+    },
+    "vtscada": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "scada",
+      "domain": "OT",
+      "transport": "ip"
+    },
+    "wonderware-historian": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "scada",
+      "domain": "OT",
+      "transport": "ip"
+    },
+    "wonderware-intouch": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "scada",
+      "domain": "OT",
+      "transport": "ip"
+    },
+    "aruba_clearpass_nac": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "security",
+      "domain": "IT",
+      "transport": "ip"
+    },
+    "checkpoint_gaia": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "security",
+      "domain": "IT",
+      "transport": "ip"
+    },
+    "cisco_asa_ftd": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "security",
+      "domain": "IT",
+      "transport": "ip"
+    },
+    "cisco_ise_nac": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "security",
+      "domain": "IT",
+      "transport": "ip"
+    },
+    "f5_asm_waf": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "security",
+      "domain": "IT",
+      "transport": "ip"
+    },
+    "fortigate": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "security",
+      "domain": "IT",
+      "transport": "ip"
+    },
+    "hsm_kms": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "security",
+      "domain": "IT",
+      "transport": "ip"
+    },
+    "imperva_waf": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "security",
+      "domain": "IT",
+      "transport": "ip"
+    },
+    "panos_ngfw": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "security",
+      "domain": "IT",
+      "transport": "ip"
+    },
+    "pfsense_opnsense": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "security",
+      "domain": "IT",
+      "transport": "ip"
+    },
+    "proofpoint_seg": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "security",
+      "domain": "IT",
+      "transport": "ip"
+    },
+    "snort_suricata_ids": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "security",
+      "domain": "IT",
+      "transport": "ip"
+    },
+    "splunk_siem": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "security",
+      "domain": "IT",
+      "transport": "ip"
+    },
+    "zscaler_proxy": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "security",
+      "domain": "IT",
+      "transport": "ip"
+    },
+    "apache_tomcat": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "webapp",
+      "domain": "IT",
+      "transport": "ip"
+    },
+    "citrix_storefront": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "webapp",
+      "domain": "IT",
+      "transport": "ip"
+    },
+    "confluence": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "webapp",
+      "domain": "IT",
+      "transport": "ip"
+    },
+    "drupal": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "webapp",
+      "domain": "IT",
+      "transport": "ip"
+    },
+    "gitlab": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "webapp",
+      "domain": "IT",
+      "transport": "ip"
+    },
+    "grafana": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "webapp",
+      "domain": "IT",
+      "transport": "ip"
+    },
+    "jboss_wildfly": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "webapp",
+      "domain": "IT",
+      "transport": "ip"
+    },
+    "jenkins": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "webapp",
+      "domain": "IT",
+      "transport": "ip"
+    },
+    "jira": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "webapp",
+      "domain": "IT",
+      "transport": "ip"
+    },
+    "kibana": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "webapp",
+      "domain": "IT",
+      "transport": "ip"
+    },
+    "phpmyadmin": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "webapp",
+      "domain": "IT",
+      "transport": "ip"
+    },
+    "sharepoint": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "webapp",
+      "domain": "IT",
+      "transport": "ip"
+    },
+    "spring_boot_actuator": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "webapp",
+      "domain": "IT",
+      "transport": "ip"
+    },
+    "weblogic": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "webapp",
+      "domain": "IT",
+      "transport": "ip"
+    },
+    "wordpress": {
+      "status": "static-ok",
+      "warnings": [],
+      "category": "webapp",
+      "domain": "IT",
+      "transport": "ip"
+    }
+  }
+}

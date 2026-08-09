@@ -222,7 +222,45 @@ class WebAgent(BaseAgent):
     # ═══════════════════════════════════════════════════════════════
 
     async def execute_tasks(self, target, tasks, phase_name, intel):
-        """Compatibility interface for master_agent._dispatch_to_agent."""
+        """Execute a caller-supplied list of (tool, args) probes; with no task
+        list, fall back to the full legacy battery.
+
+        [57] The WSTG orchestrator builds a bespoke probe list per phase and
+        dispatches it here (dev-artifact discovery, deep TLS audit, method/CORS/
+        cache-poisoning/IDOR/GraphQL probing, JS-secret mining, ...).  This method
+        used to IGNORE `tasks` entirely and run the port-wide legacy battery
+        instead — which the class-level _BATTERY_DONE dedup then suppressed after
+        the first phase — so ~11 phases of WSTG-specific probes never ran while the
+        UI matrix showed them 'done'.  When a task list is supplied, run exactly
+        those probes through the governed run_tool pipeline (which extracts and
+        persists findings); the empty-list path keeps the legacy battery for the
+        master_agent._dispatch_to_agent compatibility callers.
+        """
+        norm = []
+        for t in (tasks or []):
+            if isinstance(t, dict):
+                _tool, _args, _to = t.get("tool"), t.get("args", ""), int(t.get("timeout") or 60)
+            elif isinstance(t, (list, tuple)) and len(t) >= 2:
+                _tool, _args, _to = t[0], t[1], 60
+            else:
+                continue
+            if _tool:
+                norm.append((str(_tool), str(_args), _to))
+
+        if norm:
+            ran = 0
+            for _tool, _args, _to in norm:
+                if getattr(self, "_stop_requested", False):
+                    break
+                try:
+                    await self.run_tool(_tool, _args, target=target,
+                                        phase=getattr(self, "phase", None), timeout=_to)
+                    ran += 1
+                except Exception:
+                    continue
+            return {"status": "complete", "agent": str(self.name),
+                    "target": target, "tasks_run": ran, "raw_output": ""}
+
         web_ports = intel.get("web_ports") or [80]
         technologies = intel.get("technologies") or []
         known_paths  = intel.get("web_paths") or []

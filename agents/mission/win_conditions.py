@@ -113,9 +113,77 @@ def _initial_access(intel: Dict[str, Any]) -> bool:
     )
 
 
+def _validated_findings(intel: Dict[str, Any]) -> list:
+    """Findings that passed the evidence gate.  A finding only counts when it is
+    NOT explicitly rejected/unvalidated — the severity policy and issue validator own
+    that verdict; we never re-grade here."""
+    out = []
+    for f in (intel.get("findings") or []):
+        if not isinstance(f, dict):
+            continue
+        if f.get("rejected") or f.get("validated") is False:
+            continue
+        out.append(f)
+    return out
+
+
+_SEV_RANK = {"info": 0, "informational": 0, "low": 1, "medium": 2, "high": 3,
+             "critical": 4}
+
+
+def _vulnerabilities_confirmed(intel: Dict[str, Any]) -> bool:
+    """At least one MEDIUM-or-above validated finding exists.
+
+    This is the win condition a VULNERABILITY ASSESSMENT actually has.  Many
+    engagements have no user/root flag at all — the deliverable is proven, evidence-
+    backed vulnerabilities — and without this token that goal was inexpressible, so
+    such an engagement could only ever be graded 'recon_only'."""
+    for f in _validated_findings(intel):
+        if _SEV_RANK.get(str(f.get("severity") or "").lower(), 0) >= 2:
+            return True
+    return bool(intel.get("vulnerabilities"))
+
+
+def _exploit_verified(intel: Dict[str, Any]) -> bool:
+    """A vulnerability was PROVEN exploitable with a captured artifact — short of (or
+    without) taking a shell.  Covers assessments authorized to demonstrate impact."""
+    if intel.get("rce_confirmed") or intel.get("exploited"):
+        return True
+    for f in _validated_findings(intel):
+        blob = f"{f.get('title', '')} {f.get('description', '')}".lower()
+        if f.get("exploit_verified") or f.get("reproduced"):
+            return True
+        if any(k in blob for k in ("verified exploit", "exploitation confirmed",
+                                  "proof of concept confirmed")):
+            return True
+    return False
+
+
+def _loot_collected(intel: Dict[str, Any]) -> bool:
+    """Sensitive data was retrieved.  Reads intel['loot'] directly — the existing
+    ``data_exfiltrated`` token only inspected intel['evidence'], so loot recorded in
+    intel['loot'] (which is where the loot hunter writes it) satisfied nothing."""
+    if intel.get("loot"):
+        return True
+    return _data_exfiltrated(intel)
+
+
+def _access_demonstrated(intel: Dict[str, Any]) -> bool:
+    """Any concrete access proof: a shell, RCE, harvested credentials, or loot.  The
+    'we got in' condition for engagements that do not use flags."""
+    return bool(_shell_obtained(intel) or _rce_confirmed(intel)
+                or _creds_captured(intel) or _loot_collected(intel))
+
+
 BUILTIN_EVALUATORS: Dict[str, Callable[[Dict[str, Any]], bool]] = {
     "shell_obtained":          _shell_obtained,
     "initial_access":          _initial_access,
+    # ── Non-flag outcomes: not every engagement has a user/root flag ──────────
+    "vulnerabilities_confirmed": _vulnerabilities_confirmed,
+    "vulns_confirmed":         _vulnerabilities_confirmed,
+    "exploit_verified":        _exploit_verified,
+    "loot_collected":          _loot_collected,
+    "access_demonstrated":     _access_demonstrated,
     "user_flag_captured":      _user_flag_captured,
     "root_flag_captured":      _root_flag_captured,
     "any_flag_captured":       _any_flag_captured,
@@ -147,6 +215,67 @@ BUILTIN_EVALUATORS: Dict[str, Callable[[Dict[str, Any]], bool]] = {
 
 _TOKEN_RE = re.compile(r"\(|\)|[A-Za-z_][A-Za-z0-9_]*")
 _OPS = {"AND", "OR", "NOT"}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Per-engagement-type win conditions
+#
+# The old single default ("shell_obtained", "user_flag_captured",
+# "root_flag_captured") assumed every engagement is a flag hunt.  On an external
+# vulnerability assessment root_flag_captured can never become true, so the mission
+# was permanently incomplete and the compromise gate kept forcing exploitation the
+# engagement may not even authorize.  Flags are now opt-in per engagement type.
+# ─────────────────────────────────────────────────────────────────────────────
+ENGAGEMENT_WIN_CONDITIONS: Dict[str, List[str]] = {
+    # Flag-bearing: a lab/CTF box genuinely has user.txt / root.txt.
+    "ctf":               ["user_flag_captured", "root_flag_captured", "shell_obtained"],
+    "lab":               ["user_flag_captured", "root_flag_captured", "shell_obtained"],
+    # Full-depth offensive engagements: access + impact, flags only if present.
+    "red_team":          ["access_demonstrated", "privilege_escalated",
+                          "lateral_movement", "loot_collected"],
+    "pentest":           ["vulnerabilities_confirmed", "exploit_verified",
+                          "access_demonstrated"],
+    "bug_bounty":        ["vulnerabilities_confirmed", "exploit_verified"],
+    # Assessment-only: NO exploitation authorized, so success is proven findings.
+    "vuln_assessment":   ["vulnerabilities_confirmed"],
+    "assessment":        ["vulnerabilities_confirmed"],
+    "external":          ["vulnerabilities_confirmed", "exploit_verified"],
+    # Data-focused engagements.
+    "loot":              ["loot_collected", "access_demonstrated"],
+    "exfil":             ["loot_collected", "data_exfiltrated"],
+    # Non-offensive engagement types have no compromise goal at all.
+    "forensics":         ["vulnerabilities_confirmed"],
+    "network_analysis":  ["vulnerabilities_confirmed"],
+    "compliance":        ["vulnerabilities_confirmed"],
+}
+
+DEFAULT_WIN_CONDITIONS: List[str] = ["vulnerabilities_confirmed", "exploit_verified",
+                                     "access_demonstrated"]
+
+
+def win_conditions_for(engagement_type: str = "",
+                       objectives: Optional[List[str]] = None) -> List[str]:
+    """The win conditions an engagement of this TYPE can actually satisfy.
+
+    Explicit operator ``objectives`` always win.  Otherwise the engagement type
+    selects a set; an unknown type falls back to the flag-free default rather than
+    demanding a root flag that will never exist."""
+    if objectives:
+        clean = [str(o).strip() for o in objectives if str(o).strip()]
+        if clean:
+            return clean
+    return list(ENGAGEMENT_WIN_CONDITIONS.get(
+        (engagement_type or "").strip().lower(), DEFAULT_WIN_CONDITIONS))
+
+
+def expects_flags(engagement_type: str = "",
+                  win_conditions: Optional[List[str]] = None) -> bool:
+    """True only when this engagement genuinely has flags to capture.  Callers use it
+    to avoid reporting 'no flag captured' as a shortfall on an engagement that never
+    had one."""
+    conds = [str(c).lower() for c in (win_conditions
+             or ENGAGEMENT_WIN_CONDITIONS.get((engagement_type or "").lower(), []))]
+    return any("flag" in c for c in conds)
 
 
 def _tokenise(expr: str) -> List[str]:

@@ -40,7 +40,7 @@ function estTokens(text) { return Math.ceil((text || '').length / 4); }
 function AgentBadge({ name, size }) {
   const p = OBS_PALETTE[name] || { color: 'var(--text-secondary)', icon: '◆', label: name || '?' };
   const small = size === 'xs';
-  return React.createElement('span', {
+  return React.createElement('span', { 'data-slot': 'AIObservability.AgentBadge',
     style: {
       fontSize: small ? 8 : 9, padding: small ? '0 4px' : '1px 6px', borderRadius: 3, flexShrink: 0,
       background: `${p.color}14`, border: `1px solid ${p.color}40`, color: p.color,
@@ -52,7 +52,7 @@ function AgentBadge({ name, size }) {
 
 function PhasePill({ phase }) {
   if (!phase) return null;
-  return React.createElement('span', {
+  return React.createElement('span', { 'data-slot': 'AIObservability.PhasePill',
     style: {
       fontSize: 8, padding: '0 5px', borderRadius: 3, flexShrink: 0,
       background: 'rgba(255,255,255,0.02)', border: '1px solid var(--border)',
@@ -67,7 +67,7 @@ function TypePill({ type, found }) {
     rag:       { color: found ? 'var(--violet)' : '#3d2060', icon: '📚', label: found ? 'RAG ✓' : 'RAG ✗' },
     reasoning: { color: 'var(--medium)', icon: '💭', label: 'REASON'    },
   }[type] || { color: 'var(--text-muted)', icon: '◆', label: (type || '').toUpperCase() };
-  return React.createElement('span', {
+  return React.createElement('span', { 'data-slot': 'AIObservability.TypePill',
     style: {
       fontSize: 8, padding: '1px 6px', borderRadius: 3, flexShrink: 0, minWidth: 58,
       textAlign: 'center', fontFamily: 'var(--font-mono)', fontWeight: 700,
@@ -81,7 +81,7 @@ function TypePill({ type, found }) {
 function CodeBlock({ text, color, label, maxH }) {
   if (!text) return null;
   const tokens = estTokens(text);
-  return React.createElement('div', {
+  return React.createElement('div', { 'data-slot': 'AIObservability.CodeBlock',
     style: { borderRadius: 5, background: 'var(--bg-surface)', border: `1px solid ${color}1a`, overflow: 'hidden' }
   },
     React.createElement('div', {
@@ -122,7 +122,7 @@ function InteractionEntry({ item }) {
   const hasContent = !!(queryText || replyText);
   const previewText = (queryText || replyText || '—');
 
-  return React.createElement('div', {
+  return React.createElement('div', { 'data-slot': 'AIObservability.InteractionEntry',
     onClick: hasContent ? () => setExp(e => !e) : undefined,
     style: {
       padding: '7px 10px', borderRadius: 6, marginBottom: 3,
@@ -223,7 +223,7 @@ function IntelligenceFeed({ items }) {
     }
   }, label);
 
-  return React.createElement('div', { style: { display: 'flex', flexDirection: 'column', height: '100%' } },
+  return React.createElement('div', { 'data-slot': 'AIObservability.IntelligenceFeed', style: { display: 'flex', flexDirection: 'column', height: '100%' } },
     // Toolbar
     React.createElement('div', {
       style: { display: 'flex', gap: 6, alignItems: 'center', paddingBottom: 10, flexShrink: 0, flexWrap: 'wrap' }
@@ -275,8 +275,17 @@ function IntelligenceFeed({ items }) {
     },
       filtered.length === 0
         ? React.createElement('div', {
-            style: { color: 'var(--text-muted)', fontSize: 11, textAlign: 'center', padding: '60px 0', fontFamily: 'var(--font-mono)' }
-          }, search ? '— no matching interactions —' : '— waiting for AI activity —')
+            style: { textAlign: 'center', padding: '56px 24px', fontFamily: 'var(--font-mono)' }
+          },
+            React.createElement('div', {
+              style: { color: 'var(--text-muted)', fontSize: 12, marginBottom: 10 }
+            }, search ? '— no matching interactions —' : '⚡ Live feed — waiting for AI activity'),
+            !search && React.createElement('div', {
+              style: { color: 'var(--text-muted)', fontSize: 10, opacity: 0.75,
+                       maxWidth: 440, margin: '0 auto', lineHeight: 1.6 }
+            }, 'This feed streams every LLM call, RAG query and agent-reasoning step in real time '
+             + 'as a scan runs. It is empty right now because no scan is active — start a scan and it '
+             + 'will populate live.'))
         : filtered.map((item, i) => React.createElement(InteractionEntry, { key: i, item }))
     )
   );
@@ -288,7 +297,7 @@ function LLMDeepDive({ agentComms, agents }) {
   const comms = (agentComms[selected] || []).filter(c => c.type === 'llm');
   const totalLLM = OBS_AGENTS.reduce((s, a) => s + (agentComms[a] || []).filter(c => c.type === 'llm').length, 0);
 
-  return React.createElement('div', { style: { display: 'flex', height: '100%', gap: 10 } },
+  return React.createElement('div', { 'data-slot': 'AIObservability.LLMDeepDive', style: { display: 'flex', height: '100%', gap: 10 } },
     // Sidebar: agent list
     React.createElement('div', {
       style: {
@@ -406,7 +415,7 @@ function RAGInspector({ agentComms }) {
     React.createElement('div', { style: { fontSize: 8, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: 1, marginTop: 2 } }, label)
   );
 
-  return React.createElement('div', { style: { display: 'flex', flexDirection: 'column', height: '100%' } },
+  return React.createElement('div', { 'data-slot': 'AIObservability.RAGInspector', style: { display: 'flex', flexDirection: 'column', height: '100%' } },
     // Stats strip
     React.createElement('div', {
       style: { display: 'flex', gap: 8, marginBottom: 10, flexShrink: 0, alignItems: 'center', flexWrap: 'wrap' }
@@ -505,7 +514,7 @@ function StatsPanel({ agentComms, reasoningLog, llmStatus }) {
 
   const fmtToks = t => t >= 1000 ? `${Math.round(t / 1000)}k` : t;
 
-  return React.createElement('div', { style: { display: 'flex', flexDirection: 'column', gap: 14 } },
+  return React.createElement('div', { 'data-slot': 'AIObservability.StatsPanel', style: { display: 'flex', flexDirection: 'column', gap: 14 } },
     // Global tiles
     React.createElement('div', { style: { display: 'flex', gap: 8, flexWrap: 'wrap' } },
       bigStat('🧠', tot.llm, 'LLM Calls',  'var(--cyan)'),
@@ -687,7 +696,7 @@ function ToolExecutions({ subagentStates, subagentLines }) {
     }
   }, label);
 
-  return React.createElement('div', { style: { display: 'flex', flexDirection: 'column', height: '100%' } },
+  return React.createElement('div', { 'data-slot': 'AIObservability.ToolExecutions', style: { display: 'flex', flexDirection: 'column', height: '100%' } },
 
     // Stats strip
     React.createElement('div', {
@@ -825,7 +834,7 @@ function ToolWaterfall({ interactions }) {
   }, [interactions]);
 
   if (interactions.length === 0) {
-    return React.createElement('div', {
+    return React.createElement('div', { 'data-slot': 'AIObservability.ToolWaterfall',
       style: { color: 'var(--text-muted)', fontSize: 11, textAlign: 'center', padding: '60px 0', fontFamily: 'var(--font-mono)' }
     }, '— no interactions to display in waterfall —');
   }
@@ -1018,7 +1027,7 @@ function AIObservability() {
     }, count)
   );
 
-  return React.createElement('div', {
+  return React.createElement('div', { 'data-slot': 'AIObservability.AIObservability',
     style: { padding: 16, height: '100%', display: 'flex', flexDirection: 'column',
              background: 'var(--bg-base,#0a0a0a)', overflow: 'hidden' }
   },

@@ -640,12 +640,26 @@ function executeTool(toolName, target, options, res) {
   }
   const args = parseArgs(options);
 
-  console.log(`[MCP] EXEC  tool=${toolName}  bin=${bin}  target=${target || '(none)'}  args="${args.join(' ')}"`);
+  // [36] Subagents build tool options as SHELL fragments — output redirection (2>&1,
+  // >/dev/null), output capping (| head/tail), noise suppression — expecting shell
+  // semantics (288 occurrences across cloud/container/exploit subagents).  A shell-less
+  // spawn hands `2>&1`, `|`, `tail`, `-20` to the TARGET binary as bogus positional
+  // args, so docker/aws/gcloud/kubectl/kube-bench/hydra/crackmapexec silently error
+  // ('ps accepts no arguments', unknown-arg exit 2, 'more than one service') instead of
+  // returning data.  When an options string contains a shell operator, run it through
+  // `sh -c "<bin> <options>"` so the redirection/pipe is honoured; a plain argv tool
+  // (no operator) keeps the EXACT current argv spawn — no behavior change, and the
+  // upstream safety governor already validated the args before this call.
+  const needsShell = /(?:^|\s)\d*>{1,2}&?\d*|&>|>{1,2}\s*\/|(?:^|\s)<|\||`|\$\(/.test(options || '');
+  const spawnBin  = needsShell ? '/bin/sh' : bin;
+  const spawnArgs = needsShell ? ['-c', `${bin} ${options}`] : args;
+
+  console.log(`[MCP] EXEC  tool=${toolName}  bin=${bin}  target=${target || '(none)'}  shell=${needsShell}  args="${(needsShell ? options : args.join(' '))}"`);
   sseMsg(res, 'info', `Starting ${toolName} (${bin}) | pid pending`);
 
   let proc;
   try {
-    proc = spawn(bin, args, {
+    proc = spawn(spawnBin, spawnArgs, {
       stdio:    ['ignore', 'pipe', 'pipe'],
       env:      { ...process.env, TERM: 'xterm-256color', HOME: process.env.HOME || '/root' },
       detached: true,   // own process group → killTree() can take down the

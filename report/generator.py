@@ -20,6 +20,53 @@ from jinja2 import Environment, BaseLoader
 import db.mongo_client as db
 
 
+def _clean_finding_title(title: Any) -> str:
+    """Turn a raw scanner-output title into a short, clean report title.
+
+    Web scanners (ZAP/nikto/…) store a whole alert sentence as the finding title
+    ("[007352] /: The X-Content-Type-Options header is not set. This could allow the
+    user agent to render…"), which the register then truncates mid-word.  Strip the
+    plugin-id + path prefix and tool-status markers, and cap a verbose title at the
+    first sentence / a WORD boundary so it reads cleanly and never cuts mid-word.
+    The caller keeps the full original text in the finding description."""
+    t = " ".join(str(title or "").split())
+    if not t:
+        return ""
+    t = re.sub(r"^\[\d{3,}\]\s*", "", t)          # "[007352] " ZAP/nikto plugin id
+    t = re.sub(r"^/[^\s:]*:\s+", "", t)           # "/: " or "/path: " location prefix
+    t = re.sub(r"^\[(FAIL|ERROR|WARN|EXIT\s*\d+)\]\s*", "", t, flags=re.I)  # tool status
+    t = t.strip()
+    if len(t) > 72:
+        first = re.split(r"(?<=[.;:])\s", t, maxsplit=1)[0].strip().rstrip(".;:,")
+        t = first if 8 <= len(first) <= 72 else (t[:71].rsplit(" ", 1)[0].rstrip(",.;:") + "…")
+    return t
+
+
+# ANSI CSI / escape sequences (colour codes from commix, sqlmap, metasploit, …) and
+# other C0 control bytes render as tofu boxes (□[1m□[0m) in the PDF — WeasyPrint has
+# no terminal to interpret them.  Strip them so a tool's coloured banner shows as
+# clean text instead of garbage.  Applied to every finding's evidence at render time.
+_ANSI_CSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")   # CSI: ESC [ … final-byte
+_ANSI_OSC_RE = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")  # OSC: ESC ] … BEL/ST
+_ANSI_OTHER_RE = re.compile(r"\x1b[@-Z\\-_]")            # other two-char ESC sequences
+_CTRL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")  # C0 ctrls except \t \n \r
+
+
+def _sanitize_evidence(text: Any) -> str:
+    """Strip terminal control sequences from captured tool output so evidence
+    blocks render as clean monospace text (no ``□[1m`` tofu).  Preserves the
+    actual content — only the non-printable escape/colour bytes are removed."""
+    if not text:
+        return "" if text is None else str(text)
+    s = str(text)
+    if "\x1b" in s:
+        s = _ANSI_OSC_RE.sub("", s)
+        s = _ANSI_CSI_RE.sub("", s)
+        s = _ANSI_OTHER_RE.sub("", s)
+    s = _CTRL_RE.sub("", s)
+    return s
+
+
 REPORT_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="en">
@@ -1269,22 +1316,111 @@ except Exception:
     pass
 
 
+_DEVICE_FAMILY = [
+    ("IP camera / NVR",   re.compile(r"hikvision|dahua|\bonvif\b|\brtsp\b|ip camera|\bnvr\b|\bdvr\b|\baxis\b", re.I)),
+    ("VoIP phone",        re.compile(r"yealink|\bvoip\b|sip phone|polycom|grandstream|cisco ip phone", re.I)),
+    ("Smart TV",          re.compile(r"\btizen\b|smart ?tv|\bwebos\b|android tv", re.I)),
+    ("AV control system", re.compile(r"crestron|\bamx\b|extron|biamp|q-?sys|din-?dli|digital.?loggers", re.I)),
+    ("Firewall",          re.compile(r"fortigate|fortios|palo alto|pan-os|sonicwall|check ?point", re.I)),
+    ("Router",            re.compile(r"mikrotik|routeros|\bpfsense\b|openwrt", re.I)),
+    ("In-flight entertainment", re.compile(r"in-?flight|\bife\b|inflight entertainment", re.I)),
+    ("Mobile device",     re.compile(r"\bipados\b|jailbreak|\bmdm\b", re.I)),
+    ("Printer",           re.compile(r"\bprinter\b|jetdirect|\bpjl\b", re.I)),
+]
+
+
+def _device_family(f: Any):
+    """The mutually-exclusive device family a 'X detected' finding claims, or None."""
+    blob = str((f or {}).get("title") or "") + " " + str((f or {}).get("description") or "")
+    for name, rx in _DEVICE_FAMILY:
+        if rx.search(blob):
+            return name
+    return None
+
+
+def _deconflict_device_identities(findings: "list") -> "list":
+    """[35/I7] Per host, keep the SINGLE strongest device-identity 'X detected' finding and
+    fold contradictory mutually-exclusive family detections into a note — so a host is never
+    reported as two device types (camera+IFE off 554/RTSP, phone+TV off 5060/SIP).  Pure +
+    render-only; returns the de-conflicted list."""
+    if not isinstance(findings, list) or len(findings) < 2:
+        return findings
+    _sevrank = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+    by_host: "dict" = {}
+    for f in findings:
+        if not isinstance(f, dict) or "detect" not in str(f.get("title") or "").lower():
+            continue
+        fam = _device_family(f)
+        if fam:
+            by_host.setdefault(str(f.get("host") or "").lower(), []).append((fam, f))
+    drop = set()
+    for _host, items in by_host.items():
+        if len({fam for fam, _ in items}) <= 1:
+            continue
+        ranked = sorted(items, key=lambda it: (
+            _sevrank.get(str(it[1].get("inherent_risk") or it[1].get("severity") or "info").lower(), 5),
+            -len(str(it[1].get("evidence") or ""))))
+        keep_fam, keep_f = ranked[0]
+        others = sorted({fam for fam, _ in ranked[1:] if fam != keep_fam})
+        if others:
+            keep_f["description"] = (
+                str(keep_f.get("description") or "")
+                + " Device-identity de-confliction: this host also matched "
+                + ", ".join(others) + " on shared ports (likely false positives from generic "
+                "port/banner overlap); kept the strongest identity (" + keep_fam + ").").strip()
+        for _fam, f in ranked[1:]:
+            drop.add(id(f))
+    return [f for f in findings if id(f) not in drop] if drop else findings
+
+
 class ReportGenerator:
     """Generates HTML and PDF pentest reports from MongoDB session data."""
 
     def __init__(self):
         self._jinja_env = Environment(loader=BaseLoader())
         self._template  = self._jinja_env.from_string(REPORT_TEMPLATE)
+        # Dedicated autoescape env for the canonical theme: user/tool text is escaped
+        # by default (defence-in-depth for the print path) while charts use |safe.  The
+        # legacy REPORT_TEMPLATE stays on the non-autoescape env so it is unaffected.
+        self._theme_env = Environment(loader=BaseLoader(), autoescape=True)
 
     def _render(self, ctx: Dict, theme: Optional[str] = None) -> str:
-        """Render the report HTML for a theme key.  Falls back to the legacy
-        professional/dark template when the theme file is missing or fails to
-        render (override-not-delete)."""
+        """Render the report HTML for a theme key.  The selectable themes 'dark'
+        and 'light' are rendered by the vendored operator-authored builder
+        (report/argus_template, used verbatim) from the SAME context; the legacy
+        Jinja template remains only as an internal fallback (override-not-delete)."""
+        import logging as _logging
+        _rlog = _logging.getLogger("report")
         try:
-            from report.themes import get_theme, DEFAULT_THEME
-            tpl = get_theme(theme or DEFAULT_THEME)
+            from report.themes import DEFAULT_THEME, is_builder_theme
+            _theme = theme or DEFAULT_THEME
+            if is_builder_theme(_theme):
+                try:
+                    from report.argus_template.render import render_html
+                except Exception as _imp:              # module missing = NOT DEPLOYED
+                    _rlog.error("[REPORT] builder theme '%s' selected but report/argus_template is "
+                                "NOT importable (%s). The dark/light design is NOT deployed on this "
+                                "host — the report will use the LEGACY design (dark==light). "
+                                "Deploy report/argus_template/ and RESTART the server.", _theme, _imp)
+                    raise
+                _html = render_html(ctx, _theme if _theme in ("dark", "light") else "dark")
+                if _html:
+                    return _html
+                _rlog.error("[REPORT] builder theme '%s' rendered EMPTY — see the 'render_html FAILED' "
+                            "traceback above; falling back to the LEGACY design (dark==light).", _theme)
+        except Exception as _bexc:                     # noqa: BLE001
+            _rlog.error("[REPORT] builder theme '%s' render path failed (%s); falling back to the "
+                        "LEGACY design.", theme, _bexc)
+        # [68] On builder failure, route to the CANONICAL themed template
+        # (report/themes/argus.html.j2 + the report/charts.py SVG engine) BEFORE the
+        # legacy dark==light fallback.  get_theme() returns "" for builder themes by
+        # design, so this fallback used to skip argus.html.j2 entirely and the whole
+        # charts engine was dead code.  get_canonical_theme() reads it unconditionally.
+        try:
+            from report.themes import get_canonical_theme, DEFAULT_THEME
+            tpl = get_canonical_theme(theme or DEFAULT_THEME)
             if tpl:
-                return self._jinja_env.from_string(tpl).render(**ctx)
+                return self._theme_env.from_string(tpl).render(**ctx)
         except Exception as _texc:                     # noqa: BLE001
             print(f"[REPORT] theme '{theme}' render failed ({_texc}); using fallback template")
         return self._template.render(**ctx)
@@ -1300,23 +1436,35 @@ class ReportGenerator:
     async def generate_html(self, session_id: str, theme: Optional[str] = None) -> str:
         """Build and return the full HTML report string for the chosen theme."""
         ctx = await self._build_context(session_id)
-        return self._render(ctx, theme)
+        # [71] Offload the (blocking) template render off the event loop so a report
+        # build never starves the loop while scans stream.  The builder's process-
+        # global state is already serialized by report/argus_template's _LOCK, so a
+        # threaded render is safe.  Mirrors the PDF-engine run_in_executor pattern.
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self._render, ctx, theme)
 
     async def generate_pdf(self, session_id: str, theme: Optional[str] = None,
                            engine: Optional[str] = None) -> Optional[bytes]:
         """
         Render the SELECTED theme's styled HTML to PDF.
 
-        Order (best fidelity first): weasyprint (pure-python, renders the exact
-        styled HTML) → wkhtmltopdf (if the binary exists).  Returns None when no
-        styled engine is available, so the endpoint can fall back to the
-        browser's print-to-PDF (pixel-perfect, zero-dependency) — we NEVER
-        silently serve the raw plaintext writer as the styled download.  The
-        stdlib plaintext writer is reachable ONLY via engine='text' (an explicit
-        headless/API opt-in).
+        Order (best fidelity first): headless Chromium via Playwright → weasyprint
+        (pure-python) → wkhtmltopdf (if the binary exists).  Returns None when no
+        styled engine is available, so the endpoint can fall back to the browser's
+        print-to-PDF (pixel-perfect, zero-dependency) — we NEVER silently serve the
+        raw plaintext writer as the styled download.  The stdlib plaintext writer is
+        reachable ONLY via engine='text' (an explicit headless/API opt-in).
         """
         ctx  = await self._build_context(session_id)
-        html = self._render(ctx, theme)
+        # [71] Render off the event loop (see generate_html).
+        html = await asyncio.get_event_loop().run_in_executor(None, self._render, ctx, theme)
+
+        # Pin the engine via env when the default chain is undesirable — e.g. set
+        # ARGUS_PDF_ENGINE=weasyprint on a host where the apt Playwright/Chromium is
+        # broken, so ARGUS skips the doomed Chromium attempt entirely.  An explicit
+        # ?engine= query param still wins over the env default.
+        if not engine:
+            engine = os.environ.get("ARGUS_PDF_ENGINE") or None
 
         if engine == "text":
             try:
@@ -1328,20 +1476,72 @@ class ReportGenerator:
                 print(f"[REPORT] stdlib PDF fallback failed: {exc}")
                 return None
 
-        # 1) weasyprint — pure-python, renders the styled theme HTML at full fidelity.
+        # Styled engines, best fidelity first.  Chromium (headless, via Playwright) is
+        # the PRIMARY renderer — browser-grade CSS/flex/grid/gradients/web-fonts — with
+        # WeasyPrint as the pure-python fallback and wkhtmltopdf as a last resort.  An
+        # explicit engine= pins one.  Returns None when none succeed so the endpoint
+        # falls back to browser print-to-PDF (we NEVER serve the raw plaintext writer).
+        _order = ([engine] if engine in ("chromium", "weasyprint", "wkhtmltopdf")
+                  else ["chromium", "weasyprint", "wkhtmltopdf"])
+        for _eng in _order:
+            try:
+                if _eng == "chromium":
+                    pdf = await self._playwright_pdf_bytes(html)
+                elif _eng == "weasyprint":
+                    pdf = await self._weasyprint_bytes(html)
+                else:
+                    pdf = await self._wkhtmltopdf_bytes(html)
+            except Exception:                          # noqa: BLE001
+                pdf = None
+            if pdf:
+                return pdf
+        return None
+
+    async def _playwright_pdf_bytes(self, html: str) -> Optional[bytes]:
+        """Render HTML→PDF via headless Chromium (Playwright) — browser-grade fidelity.
+        Chromium ignores CSS @page margin-boxes, so page numbering is drawn via the
+        native footer template.  None if Playwright/Chromium is unavailable."""
+        try:
+            from playwright.async_api import async_playwright
+        except Exception:
+            return None
+        _footer = (
+            '<div style="font-size:7px;color:#9aa4b2;width:100%;margin:0 12mm;'
+            'display:flex;justify-content:space-between;font-family:sans-serif;">'
+            '<span>ARGUS &middot; CONFIDENTIAL</span>'
+            '<span><span class="pageNumber"></span> / <span class="totalPages"></span></span></div>')
+        try:
+            async with async_playwright() as _pw:
+                browser = await _pw.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"])
+                try:
+                    page = await browser.new_page()
+                    await page.set_content(html, wait_until="load")
+                    await page.emulate_media(media="print")
+                    return await page.pdf(
+                        format="A4", print_background=True,
+                        display_header_footer=True,
+                        header_template="<span></span>",
+                        footer_template=_footer,
+                        margin={"top": "14mm", "bottom": "16mm", "left": "12mm", "right": "12mm"})
+                finally:
+                    await browser.close()
+        except Exception as exc:                       # noqa: BLE001
+            print(f"[REPORT] Chromium/Playwright PDF failed ({exc}); trying next engine.")
+            return None
+
+    async def _weasyprint_bytes(self, html: str) -> Optional[bytes]:
+        """Render HTML→PDF via WeasyPrint (pure-python) off the event loop."""
         try:
             import weasyprint  # type: ignore
-            return weasyprint.HTML(string=html).write_pdf()
         except Exception:
-            pass
-
-        # 2) wkhtmltopdf — if the binary happens to be installed.
-        pdf = await self._wkhtmltopdf_bytes(html)
-        if pdf:
-            return pdf
-
-        # 3) No styled engine available → signal the caller to use browser print.
-        return None
+            return None
+        try:
+            loop = asyncio.get_event_loop()
+            return await loop.run_in_executor(
+                None, lambda: weasyprint.HTML(string=html).write_pdf())
+        except Exception as exc:                       # noqa: BLE001
+            print(f"[REPORT] WeasyPrint PDF failed ({exc}); trying next engine.")
+            return None
 
     async def _wkhtmltopdf_bytes(self, html: str) -> Optional[bytes]:
         """Render HTML→PDF via wkhtmltopdf; None if the binary is missing/fails."""
@@ -1391,38 +1591,89 @@ class ReportGenerator:
         # Read-time gate: exclude Issue-Validator-rejected findings (verified
         # explicitly False) so faulty/silly issues never render in the report.
         _validated_only = _os_rg.environ.get("ARGUS_ISSUE_VALIDATOR", "1") != "0"
-        findings = await db.get_findings(session_id, validated_only=_validated_only)
-        summary  = await db.get_findings_summary(session_id)
-        flags    = await db.get_flags(session_id)
+        # Per-host isolation: a multi-target PARENT session's findings live under its
+        # per-host CHILD sessions.  Aggregate parent + children so the report is ONE
+        # combined document covering every host.  For a plain single scan this is just
+        # [session_id], so behaviour is unchanged.
+        try:
+            _scope = await db.resolve_session_scope(session_id)
+        except Exception:
+            _scope = [str(session_id)]
+        _scope_set = {str(s) for s in _scope}
+        findings = await db.get_findings(_scope, validated_only=_validated_only)
+        summary  = await db.get_findings_summary(_scope)
+        flags    = await db.get_flags(_scope)
         graph    = await db.get_attack_graph(session_id)
 
-        # Cross-engagement bleed backstop: drop any finding/flag stamped with a
-        # DIFFERENT session's `_origin` (a prior engagement's evidence must never
-        # render in this report).  Filter by SESSION only — a CIDR session spans
-        # many target hosts, so we must NOT narrow to a single target here.
-        # Legacy items without `_origin` are kept (cannot be proven foreign).
+        # Cross-engagement bleed backstop: drop any finding/flag stamped with an origin
+        # OUTSIDE this report's scope (a prior engagement's evidence must never render).
+        # The scope is the parent + its per-host child sessions, so a child host's
+        # findings (origin = child sid) are KEPT.  Legacy items without `_origin` are
+        # kept (cannot be proven foreign).
         def _same_session(x):
             o = (x or {}).get("_origin") if isinstance(x, dict) else None
-            return (not o) or str(o.get("session_id", "")) == str(session_id)
+            return (not o) or str(o.get("session_id", "")) in _scope_set
         if isinstance(findings, list):
             findings = [f for f in findings if _same_session(f)]
         if isinstance(flags, list):
             flags = [fl for fl in flags if _same_session(fl)]
+
+        # [P3] RAW-store total (before the Issue-Validator dropped verified=False) so the
+        # disclosed reconciliation accounts for EVERY stored finding — validator-rejected +
+        # policy-dropped + deduped + reported == raw store — not just the validated subset.
+        _raw_store_total = None
+        if _validated_only:
+            try:
+                _raw_all = await db.get_findings(_scope, validated_only=False)
+                if isinstance(_raw_all, list):
+                    _raw_all = [f for f in _raw_all if _same_session(f)]
+                    _raw_store_total = len([f for f in _raw_all if isinstance(f, dict)])
+            except Exception:
+                _raw_store_total = None
 
         # ── Operational severity normalization — the SINGLE source of truth ──
         # Render-time only (the DB is never mutated): drop tool-noise / internal
         # diagnostics, and re-grade every finding to an HONEST severity so the report
         # never inflates (service-discovery→info, unproven-RCE→capped, validated CVE
         # kept, demonstrated kept).  This is what makes "critical" mean something.
+        # [I3] disclosed store->report reconciliation — every stored finding is accounted for
+        # (assessed -> dropped-as-unsupported/noise -> deduped -> reported), any severity
+        # downgrade carries a rationale, so the report total is RECONCILABLE to the store
+        # instead of a third mystery number (98 != 93 != 80).
+        _assessed = len([f for f in (findings or []) if isinstance(f, dict)])
+        _recon = {"assessed": _assessed,
+                  # [P3] the raw store count + how many the validator rejected before assessment
+                  "raw_store_total": _raw_store_total if _raw_store_total is not None else _assessed,
+                  "validator_rejected": (max(0, _raw_store_total - _assessed)
+                                         if _raw_store_total is not None else 0),
+                  "dropped_unsupported": 0, "regraded": 0, "downgraded_from_high": 0, "deduped": 0}
+        _RK = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
         try:
             from knowledge import severity_policy as _sp
             _normed = []
             for _f in (findings or []):
                 if not isinstance(_f, dict):
                     _normed.append(_f); continue
+                _orig_sev = str(_f.get("severity") or "").lower().replace("findingseverity.", "").strip()
                 _v = _sp.normalize_finding(_f)
                 if _v.get("drop"):
+                    _recon["dropped_unsupported"] += 1
                     continue   # raw tool output / internal status — never shown to a client
+                # Backstop for the wildcard-DNS false positive: "Wildcard DNS Detected:
+                # *.<bare IP>" is provably bogus (an IP has no DNS zone).  Drop it here
+                # too so it disappears from the report even for findings that predate
+                # the dns_recon subagent fix.
+                if re.match(r"^\s*wildcard dns detected:\s*\*\.\d{1,3}(?:\.\d{1,3}){3}\s*$",
+                            str(_f.get("title") or ""), re.I):
+                    _recon["dropped_unsupported"] += 1
+                    continue
+                # [I3] a re-grade is disclosed, never silent — count it, and flag a
+                # HIGH/CRITICAL downgrade specifically (the report zeroed all 6 HIGH before).
+                _new_sev = str(_v["severity"]).lower()
+                if _orig_sev and _new_sev != _orig_sev:
+                    _recon["regraded"] += 1
+                    if _RK.get(_orig_sev, 0) >= _RK["high"] and _RK.get(_new_sev, 0) < _RK["high"]:
+                        _recon["downgraded_from_high"] += 1
                 # Title-case the canonical severity so BOTH the themes' capitalized
                 # selectattr filters ('Critical'…) AND their `|lower` comparisons agree.
                 _f["severity"] = str(_v["severity"]).capitalize()
@@ -1430,8 +1681,114 @@ class ReportGenerator:
                     _f["evidence_tag"] = _v["evidence_tag"]
                 if _v.get("rationale"):
                     _f.setdefault("severity_rationale", _v["rationale"])
+                # Clean a raw scanner-output title into a short report title (strips a
+                # ZAP/nikto '[007352] /:' plugin+path prefix and tool-status markers,
+                # caps a verbose sentence at a WORD boundary) so the register never
+                # truncates mid-word ("…This could allow the u").  The full original
+                # text is preserved in the description so nothing is lost.
+                _ot = _f.get("title")
+                _ct = _clean_finding_title(_ot)
+                if _ct and _ct != str(_ot or "").strip():
+                    _dsc = str(_f.get("description") or "")
+                    if _ot and str(_ot) not in _dsc:
+                        _f["description"] = (str(_ot) + (("\n\n" + _dsc) if _dsc else "")).strip()
+                    _f["title"] = _ct
+                # Strip ANSI/terminal control bytes from captured tool output so the
+                # evidence block renders as clean text instead of "□[1m□[0m" tofu.
+                for _ekey in ("evidence", "raw_output"):
+                    if _f.get(_ekey):
+                        _f[_ekey] = _sanitize_evidence(_f[_ekey])
+                _ex_f = _f.get("extra")
+                if isinstance(_ex_f, dict) and _ex_f.get("raw"):
+                    _ex_f["raw"] = _sanitize_evidence(_ex_f["raw"])
                 _normed.append(_f)
             findings = _normed
+        except Exception:
+            pass
+
+        # ── Reconcile each finding's CVSS with its HONEST severity band ──────
+        #    A detection re-graded to INFO must not still advertise a stale CVSS
+        #    9.8 inherited from a raw CVE keyword-match (the register otherwise
+        #    read "AD/SMB detected · INFO · 9.8", which looks like a broken
+        #    report).  Render-time only: if the stored cvss_base falls OUTSIDE
+        #    the band the finding's severity implies, suppress it → shows "—".
+        def _cvss_in_band(_sev_name: Any, _cvss: Any) -> bool:
+            try:
+                _v = float(_cvss)
+            except (TypeError, ValueError):
+                return False
+            _b = {"critical": (9.0, 10.0), "high": (7.0, 8.9),
+                  "medium": (4.0, 6.9), "low": (0.1, 3.9)}.get(
+                      str(_sev_name or "").strip().lower())
+            return bool(_b) and _b[0] <= _v <= _b[1]   # info => no band => suppress
+        try:
+            for _f in (findings or []):
+                if not isinstance(_f, dict):
+                    continue
+                _sev = _f.get("severity")
+                _ex = _f.get("extra")
+                if isinstance(_ex, dict) and _ex.get("cvss_base") not in (None, "", 0, "0"):
+                    if not _cvss_in_band(_sev, _ex.get("cvss_base")):
+                        _ex["cvss_base"] = None
+                # [I7] the register + per-host table read these top-level score fields
+                # directly — reconcile them too so a re-graded finding can never still
+                # advertise a stale 9.8 next to an INFO/LOW band.  Vector STRINGS
+                # (CVSS:3.1/…) are left intact — only numeric SCORES are banded.
+                for _ck in ("cvss", "cvss_base", "cvss_score"):
+                    _cv = _f.get(_ck)
+                    if _cv in (None, "", 0, "0"):
+                        continue
+                    try:
+                        float(_cv)
+                    except (TypeError, ValueError):
+                        continue   # a vector string, not a score — leave it
+                    if not _cvss_in_band(_sev, _cv):
+                        _f[_ck] = None
+        except Exception:
+            pass
+
+        # ── Collapse exact-duplicate findings ───────────────────────────────
+        #    Multiple passes (triage + deep) or multiple subagents can each store
+        #    the SAME issue (same host:port:title:severity) — the register showed
+        #    F-06≡F-07, F-08≡F-09 … which inflated the PDF to 58 pages and
+        #    over-counted per-host totals.  Keep the RICHEST copy (most evidence).
+        #    Render-time only; the DB is never mutated.  Everything downstream
+        #    (fids, counts, donut, per-host, register, detail) derives from this.
+        try:
+            if isinstance(findings, list) and len(findings) > 1:
+                _dedup_before = len(findings)
+                def _dedup_key(_f: Any) -> tuple:
+                    _g = _f if isinstance(_f, dict) else {}
+                    return (str(_g.get("host") or "").strip().lower(),
+                            str(_g.get("port") or "").strip(),
+                            " ".join(str(_g.get("title") or "").split()).lower(),
+                            str(_g.get("severity") or "").strip().lower())
+                def _richness(_f: Any) -> tuple:
+                    _g = _f if isinstance(_f, dict) else {}
+                    return (len(str(_g.get("evidence") or _g.get("raw_output") or "")),
+                            1 if _g.get("verified") else 0)
+                _best: Dict[Any, Any] = {}
+                _order: List[Any] = []
+                for _f in findings:
+                    _k = _dedup_key(_f)
+                    if _k not in _best:
+                        _best[_k] = _f
+                        _order.append(_k)
+                    elif _richness(_f) > _richness(_best[_k]):
+                        _best[_k] = _f
+                findings = [_best[_k] for _k in _order]
+                try:
+                    _recon["deduped"] += _dedup_before - len(findings)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        # ── Device-identity de-confliction [35/I7] — no host is two device types ──
+        try:
+            _dc_before = len(findings) if isinstance(findings, list) else 0
+            findings = _deconflict_device_identities(findings)
+            _recon["deduped"] += max(0, _dc_before - len(findings))
         except Exception:
             pass
 
@@ -1446,6 +1803,74 @@ class ReportGenerator:
                 for _i, _f in enumerate(findings):
                     if isinstance(_f, dict):
                         _f["fid"] = "F-%02d" % (_i + 1)
+        except Exception:
+            pass
+
+        # ── Counts are recomputed from the SAME findings the register renders (NOT the
+        #    stale DB summary) so the metric cards / donut / headline can never disagree
+        #    with the table below them, and dropped-noise + demoted-severity are reflected
+        #    exactly.  This is what killed the "report shows a CRITICAL that isn't in the
+        #    findings" class of bug.
+        try:
+            _cnt = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
+            for _f in (findings or []):
+                _s = (str((_f or {}).get("severity") or "").lower()
+                      .replace("findingseverity.", "").strip())
+                if _s in _cnt:
+                    _cnt[_s] += 1
+            _cnt["total"] = sum(_cnt.values())
+            summary = _cnt
+        except Exception:
+            pass
+
+        # ── Per-host grouping for the COMBINED multi-target report: a unified summary
+        #    up top (the counts/charts above cover every host), then one detail section
+        #    per host.  `hosts_report` is [] for a single-host scan → the report keeps its
+        #    flat layout.  Hosts are ranked most-severe first.
+        hosts_report: List[Dict[str, Any]] = []
+        try:
+            _byh: Dict[str, List[Dict[str, Any]]] = {}
+            for _f in (findings or []):
+                if isinstance(_f, dict):
+                    _byh.setdefault(str(_f.get("host") or "unspecified"), []).append(_f)
+            if len(_byh) > 1:
+                for _h, _fs in _byh.items():
+                    _hs = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
+                    for _f in _fs:
+                        _s = str((_f or {}).get("severity") or "").lower().replace("findingseverity.", "").strip()
+                        if _s in _hs:
+                            _hs[_s] += 1
+                    hosts_report.append({"host": _h, "findings": _fs, "sev": _hs,
+                                         "total": len(_fs)})
+                hosts_report.sort(key=lambda g: (g["sev"]["critical"], g["sev"]["high"],
+                                                 g["sev"]["medium"], g["total"]), reverse=True)
+        except Exception:
+            hosts_report = []
+
+        # [I7] Label each host by how its engagement ACTUALLY terminated.  A host
+        # that hit the hard time cap (or errored) was only PARTIALLY assessed — the
+        # report must say so rather than implying every host was fully tested (the
+        # audit found 12/14 hosts time-capped yet presented as complete).  The
+        # per-host terminal status is the LAST host_status log entry for that host;
+        # absent (single-host / legacy single-phase runs) => treated as finalized.
+        try:
+            _hstat: Dict[str, str] = {}
+            for _e in (session.get("host_status") or []):
+                if isinstance(_e, dict) and _e.get("host"):
+                    _hstat[str(_e["host"])] = str(_e.get("status") or "")   # last-wins
+            _unfinal = 0
+            for _g in hosts_report:
+                _st = _hstat.get(str(_g.get("host")), "")
+                _final = _st in ("", "completed")
+                _g["finalized"] = _final
+                _g["status_label"] = {
+                    "time_capped": "Partial — reached time cap before assessment finished",
+                    "error":       "Partial — engagement error",
+                }.get(_st, "Assessed")
+                if not _final:
+                    _unfinal += 1
+            session["hosts_unfinalized"] = _unfinal
+            session["hosts_total"] = len(hosts_report)
         except Exception:
             pass
 
@@ -1489,6 +1914,10 @@ class ReportGenerator:
             or []
         )
         engagement_type   = engagement_ctx.get("engagement_type", session.get("target_type", "pentest"))
+        # An unknown/blank engagement type must not print as "Unknown" on the cover
+        # + subtitle + appendix — fall back to a real label.
+        if str(engagement_type or "").strip().lower() in ("", "none", "null", "unknown", "auto", "n/a"):
+            engagement_type = "penetration_test"
 
         # Build answered-objectives rows for the template (stable shape)
         objectives_rows = []
@@ -1529,6 +1958,33 @@ class ReportGenerator:
             h, rem = divmod(int(delta.total_seconds()), 3600)
             m, s   = divmod(rem, 60)
             duration = f"{h}h {m}m {s}s"
+        except Exception:
+            pass
+
+        # ── Human display values for the cover + appendix (render-time only) ──
+        #    Turn raw ISO microseconds and the literal string "None" into clean,
+        #    readable values: the cover no longer shows "Completed: None" or
+        #    "Started: 2026-07-04T14:32:54.970000Z", and the appendix engagement
+        #    window no longer reads "… → None".  Runs AFTER duration is computed
+        #    (which parses the raw ISO), so nothing downstream re-parses these.
+        def _fmt_ts(_v: Any) -> str:
+            _s = str(_v or "").strip()
+            if not _s or _s.lower() in ("none", "null"):
+                return ""
+            try:
+                return datetime.fromisoformat(_s.replace("Z", "")).strftime("%Y-%m-%d %H:%M UTC")
+            except Exception:
+                return _s.replace("T", " ")[:16]
+        try:
+            _st_disp = _fmt_ts(session.get("started_at"))
+            _ct_disp = _fmt_ts(session.get("completed_at"))
+            session["started_at"]   = _st_disp or "—"
+            session["completed_at"] = _ct_disp or "In progress"
+            if not str(session.get("scope") or "").strip():
+                session["scope"] = (f"{len(hosts_report)} hosts"
+                                    if len(hosts_report) > 1 else "Single host")
+            if str(session.get("target_hostname") or "").strip().lower() in ("none", "null"):
+                session["target_hostname"] = ""
         except Exception:
             pass
 
@@ -1675,6 +2131,35 @@ class ReportGenerator:
                     "source": "harvested", "note": c[:500],
                 })
 
+        # Union DB-persisted credentials.  The operator writes every recovered
+        # credential to db.credentials (store_credential), but the report used to
+        # read ONLY the intel snapshot — so a cred saved to the vault yet not
+        # mirrored into the snapshot never surfaced here (the founder's "it had
+        # credentials, why wasn't it highlighted" gap for any DB-only cred).
+        # Scope-aware, redacted, de-duplicated against the snapshot rows above.
+        try:
+            _seen_users = {str(r.get("user") or "").strip().lower()
+                           for r in creds_summary if r.get("user")}
+            for _c in (await db.get_credentials(_scope) or []):
+                if not isinstance(_c, dict):
+                    continue
+                _u = str(_c.get("user") or "").strip()
+                if not _u or _u.lower() in _seen_users:
+                    continue
+                _sec = _c.get("secret") or ""
+                _loc = str(_c.get("host") or "").strip()
+                _svc = str(_c.get("service") or "").strip()
+                creds_summary.append({
+                    "user":     _u,
+                    "domain":   str(_c.get("domain") or ""),
+                    "password": ("•" * min(len(str(_sec)), 8)) if _sec else "(none)",
+                    "source":   str(_c.get("found_by") or _svc or "credential vault"),
+                    "note":     (_loc + (" · " + _svc if _svc else "")).strip(" ·"),
+                })
+                _seen_users.add(_u.lower())
+        except Exception:
+            pass
+
         # ── Coverage matrix + discovered-issue storyline (concern: rich report) ─
         # The operator now records EVERY probe it ran (with negative results) and
         # every issue it observed, so the report can tell the full storyline —
@@ -1769,31 +2254,125 @@ class ReportGenerator:
         }
         target_display = (session.get("target") or session.get("target_ip")
                           or session.get("target_host") or intel.get("target") or "target")
+        # Compact the COVER TITLE for a multi-host engagement — an 88-char comma list
+        # of IPs rendered as a 52px serif headline is a wall of text.  Collapse it to
+        # "N hosts — 192.168.40.0/24"; the full list still appears in the subtitle,
+        # the meta grid, and the appendix (all read session.target, unchanged).
+        try:
+            _parts = [p.strip() for p in re.split(r"[,\s]+", str(target_display)) if p.strip()]
+            if len(_parts) > 2:
+                _subnets = set()
+                for _p in _parts:
+                    _oct = _p.split(".")
+                    if len(_oct) == 4:
+                        _subnets.add(".".join(_oct[:3]))
+                _pfx = (next(iter(_subnets)) + ".0/24") if len(_subnets) == 1 else "multiple subnets"
+                target_display = f"{len(_parts)} hosts — {_pfx}"
+        except Exception:
+            pass
         tools_used = sorted({(t.get("tool") or "").strip()
                              for t in coverage_tests if t.get("tool")})
 
         # ── Per-finding retest status (drives the register's Verified/Open/Gated
         #    column) + a best-effort, content-agnostic detection/purple-team map.
+        try:
+            from knowledge.severity_policy import evidence_is_successful as _eok_rs
+        except Exception:
+            _eok_rs = None
         for _f in (findings or []):
             if isinstance(_f, dict):
+                # [S5/S57] A finding may wear a VERIFIED badge ONLY if its OWN evidence
+                # confirms it.  The report shipped 13/14 findings "VERIFIED · grounded in
+                # the recorded tool output" whose evidence blocks read "filtered" / "0
+                # hosts up" / "EXIT 28".  Reconcile the stored verified flag against the
+                # evidence so a failed/negating log can never be badged Verified — this
+                # also keeps I7's executed-activity ATT&CK gate honest.
+                if _f.get("verified") is True and _eok_rs is not None and not _eok_rs(_f):
+                    _f["verified"] = False
+                    _f.setdefault("verified_downgrade_reason",
+                                  "VERIFIED cleared — the cited evidence does not confirm the claim")
                 if _f.get("verified") is True:
                     _f["retest_status"] = "Verified"
                 elif _f.get("gated_reason"):
                     _f["retest_status"] = "Gated"
                 else:
                     _f["retest_status"] = "Open"
+                # [S57] Strip leaked Enum reprs (e.g. "AttackPhase.RECON",
+                # "FindingSeverity.HIGH") from human-facing fields so the report never
+                # prints a nonsensical "Vector: AttackPhase.RECON".  These class prefixes
+                # are internal enum names, never legitimate data.
+                for _ek in ("phase", "vector", "attack_phase", "attack_vector"):
+                    _ev = _f.get(_ek)
+                    if isinstance(_ev, str) and _ev:
+                        _f[_ek] = re.sub(
+                            r"\b(?:AttackPhase|AttackVector|FindingSeverity|Severity|Phase)\.",
+                            "", _ev).strip()
+        # [I7] ATT&CK is attributed ONLY to EXECUTED activity — a passive banner
+        # grab or a NEGATIVE scan result must never manufacture technique coverage
+        # (the audit found techniques mapped from passive/negative detections).  A
+        # finding is "executed activity" iff it was verified/demonstrated/reproduced,
+        # carries a captured PoC, OR its evidence shows a genuinely successful run.
+        def _is_executed_activity(_f: Any) -> bool:
+            if not isinstance(_f, dict):
+                return False
+            if (_f.get("verified") is True or _f.get("demonstrated") or _f.get("reproduced")
+                    or _f.get("exploited") or _f.get("poc_captured")):
+                return True
+            if str(_f.get("reproduce_status") or "").strip().lower() in (
+                    "reproduced", "confirmed", "verified", "success"):
+                return True
+            try:
+                from knowledge.severity_policy import evidence_is_successful as _eis
+                return bool(_eis(_f))
+            except Exception:
+                return False
+        _executed_techs: set = set()
+        _passive_techs: set = set()
+        for _f in (findings or []):
+            if not isinstance(_f, dict):
+                continue
+            _t = str(_f.get("mitre") or _f.get("mitre_technique") or "").strip().upper()
+            if not _t:
+                continue
+            (_executed_techs if _is_executed_activity(_f) else _passive_techs).add(_t)
+
+        # [I7] Prune the ATT&CK Coverage table: drop a mapping whose recorded outcome
+        # was negative/failed, or that is attributable ONLY to a passive/negative
+        # detection (present among passive findings, absent from executed ones).
+        # Operator-recorded techniques with a success/unknown outcome are preserved.
+        try:
+            _mm = []
+            for _m in (mitre_mappings or []):
+                if not isinstance(_m, dict):
+                    _mm.append(_m)
+                    continue
+                _tid = str(_m.get("technique_id") or _m.get("id") or "").strip().upper()
+                _outcome = str(_m.get("outcome") or "").strip().lower()
+                if _outcome in ("negative", "fail", "failed", "error", "blocked", "not vulnerable"):
+                    continue
+                if _tid and _tid in _passive_techs and _tid not in _executed_techs:
+                    continue
+                _mm.append(_m)
+            mitre_mappings = _mm
+        except Exception:
+            pass
+
         detection_map = []
         for _f in (findings or []):
             if not isinstance(_f, dict):
                 continue
-            _tech = str(_f.get("mitre") or _f.get("mitre_technique") or "").strip()
+            # A technique is shown for a detection row ONLY when the finding is
+            # executed activity — passive/negative observations carry no ATT&CK id.
+            _exec = _is_executed_activity(_f)
+            _tech = str(_f.get("mitre") or _f.get("mitre_technique") or "").strip() if _exec else ""
             _host = _f.get("host") or ""
             detection_map.append({
                 "finding":     _f.get("title", ""),
                 "technique":   _tech or "—",
                 "opportunity": f"Activity on {_host or 'the asset'} consistent with this finding",
-                "telemetry":   ("Correlate the producing tool/command with host telemetry; alert on the "
-                                + (_tech or "matching ATT&CK") + " behaviour"),
+                "telemetry":   ("Correlate the producing tool/command with host telemetry"
+                                + ("; alert on the " + _tech + " behaviour" if _tech
+                                   else " (no executed ATT&CK technique for this observation)")),
                 "caught":      "Open",
             })
 
@@ -1846,10 +2425,103 @@ class ReportGenerator:
         except Exception:
             ai_security = {}
 
+        # ── Reproducibility + basis-of-claim (report defensibility) ──────────
+        #    Every finding is enriched with the EXACT human-rerunnable steps ARGUS
+        #    executed (real recorded commands only — never fabricated).  A compromise
+        #    claim additionally gets a transparency block: the BASIS it rests on,
+        #    whether a proof artifact was captured, and — when not — the honest reason
+        #    plus the method steps, so a client can manually reproduce and verify.
+        compromise_evidence: Dict[str, Any] = {}
+        try:
+            from knowledge import severity_policy as _sp_repro
+            for _f in (findings or []):
+                if not isinstance(_f, dict):
+                    continue
+                _f["reproduction"] = _sp_repro.build_reproduction(_f, coverage_tests)
+                _bk, _bnote = _sp_repro.finding_basis(_f)
+                _f.setdefault("basis_kind", _bk)
+                if _bnote:
+                    _f.setdefault("basis_note", _bnote)
+            compromise_evidence = _sp_repro.compromise_evidence_state(
+                findings, flags, intel, coverage_tests, loot_entries)
+        except Exception:
+            compromise_evidence = {}
+
+        # ── Charts: server-side inline SVG (WeasyPrint runs no JavaScript) ────
+        #    The chart engine takes primitives; we adapt the real scan data here.
+        charts: Dict[str, Any] = {}
+        try:
+            from report import charts as _ch
+            _rating_ratio = {"critical": 1.0, "high": 0.78, "medium": 0.52,
+                             "low": 0.30, "none": 0.08, "info": 0.16}
+            _rating_color = {"critical": "#c0392b", "high": "#e8743b", "medium": "#d9a441",
+                             "low": "#3d7fc1", "none": "#2f9e5f", "info": "#7a8699"}
+            _cov_rows = [{"label": str(k).capitalize(), "value": int(v),
+                          "color": _ch.OUTCOME_COLORS.get(str(k).lower(), _ch.ACCENT)}
+                         for k, v in (coverage_counts or {}).items() if v]
+            _tac: Dict[str, int] = {}
+            for _m in (mitre_mappings or []):
+                _t = str((_m or {}).get("tactic") or "").strip() or "Uncategorised"
+                _tac[_t] = _tac.get(_t, 0) + 1
+            _mitre_rows = [{"label": k, "value": v, "color": "#15233b"}
+                           for k, v in sorted(_tac.items(), key=lambda kv: -kv[1])][:10]
+            _kc: List[Dict[str, Any]] = []
+            for _s in (attack_path if isinstance(attack_path, list) else []):
+                if not isinstance(_s, dict):
+                    continue
+                _lbl = str(_s.get("result") or _s.get("label") or _s.get("phase") or "").strip()
+                if _lbl:
+                    _kc.append({"label": _lbl[:60], "phase": _s.get("phase") or ""})
+            if not _kc and isinstance(graph, dict):
+                for _nd in (graph.get("nodes") or []):
+                    if isinstance(_nd, dict) and _nd.get("label"):
+                        _kc.append({"label": str(_nd.get("label"))[:60],
+                                    "phase": _nd.get("phase") or _nd.get("node_type") or ""})
+            # Author each chart at the width it actually renders (no CSS down-scaling →
+            # SVG text stays crisp): ~300px in a .panel-2 cell, ~640px full-width.
+            charts = {
+                "severity_donut": _ch.severity_donut(_sev, size=300),
+                "risk_gauge":     _ch.risk_gauge(_rating_ratio.get(final_rating, 0.5),
+                                                 (final_rating or "info").upper(),
+                                                 _rating_color.get(final_rating, "#c0392b")),
+                "severity_stack": _ch.stacked_severity_bar(_sev, width=640),
+                "coverage_bars":  _ch.hbar_chart(_cov_rows, width=300) if _cov_rows else "",
+                "mitre_tactics":  _ch.hbar_chart(_mitre_rows, width=640) if _mitre_rows else "",
+                "killchain":      _ch.killchain(_kc) if _kc else "",
+                "has_any":        True,
+            }
+        except Exception:
+            charts = {}
+
+        # [I3] finalize the disclosed store->report reconciliation (every assessed finding
+        # accounted for; totals reconcile; downgrades are counted, never silent).
+        try:
+            _recon["reported_total"] = len([f for f in (findings or []) if isinstance(f, dict)])
+            # [P3] Reconcile to the RAW STORE: raw = validator-rejected + policy-dropped +
+            # deduped + reported.  Every stored finding is accounted for, including the ones
+            # the Issue-Validator rejected before assessment — no silent completeness claim.
+            _recon["reconciles"] = (
+                _recon.get("raw_store_total", _recon.get("assessed", 0)) ==
+                _recon.get("validator_rejected", 0) + _recon.get("dropped_unsupported", 0)
+                + _recon.get("deduped", 0) + _recon["reported_total"])
+            _recon["note"] = (
+                "%d in store -> %d rejected by the issue-validator, %d dropped as unsupported/"
+                "tool-noise, %d de-duplicated -> %d reported (%d re-graded to an honest severity; "
+                "%d downgraded from HIGH+ each with a stated rationale)." % (
+                    _recon.get("raw_store_total", _recon.get("assessed", 0)),
+                    _recon.get("validator_rejected", 0), _recon.get("dropped_unsupported", 0),
+                    _recon.get("deduped", 0), _recon["reported_total"],
+                    _recon.get("regraded", 0), _recon.get("downgraded_from_high", 0)))
+        except Exception:
+            _recon = {"note": "", "reconciles": True}
         return {
+            "findings_reconciliation": _recon,
             "ai_security":       ai_security,
+            "compromise_evidence": compromise_evidence,
+            "charts":            charts,
             "session":           session,
             "findings":          findings,
+            "hosts_report":      hosts_report,
             "detection_map":     detection_map,
             "summary":           summary,
             "sev":               _sev,

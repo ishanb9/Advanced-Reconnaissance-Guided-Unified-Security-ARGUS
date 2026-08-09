@@ -7,7 +7,7 @@ const { useState: _useState } = React;
 
 // ─── Stat cell used in Summary tab ────────────────────────────────────────────
 function _MetaStatCell({ value, label, color }) {
-  return React.createElement('div', {
+  return React.createElement('div', { 'data-slot': 'MetaAgentsPanel._MetaStatCell',
     style: {
       textAlign: 'center', padding: '10px 6px',
       background: 'var(--bg-base)',
@@ -33,7 +33,7 @@ function _MetaStatCell({ value, label, color }) {
 
 // ─── Custom tab bar ────────────────────────────────────────────────────────────
 function _MetaTabBar({ tabs, active, onSelect }) {
-  return React.createElement('div', {
+  return React.createElement('div', { 'data-slot': 'MetaAgentsPanel._MetaTabBar',
     style: {
       display: 'flex', gap: 0,
       borderBottom: '1px solid var(--border)',
@@ -87,7 +87,7 @@ function _MetaSubPanel({ agentKey, label, icon, accentColor, agentState }) {
   const [activeTab, setActiveTab] = _useState('stream');
 
   if (!agentState) {
-    return React.createElement('div', {
+    return React.createElement('div', { 'data-slot': 'MetaAgentsPanel._MetaSubPanel',
       style: {
         background: 'var(--bg-surface)', border: '1px solid var(--border)',
         borderRadius: 'var(--radius-lg)', padding: 20,
@@ -351,7 +351,7 @@ function MetaAgentsPanel() {
       ? 'rgba(123,108,246,0.35)'
       : 'var(--border)';
 
-  return React.createElement('div', {
+  return React.createElement('div', { 'data-slot': 'MetaAgentsPanel.MetaAgentsPanel',
     style: {
       marginTop:    12,
       background:   'var(--bg-surface)',

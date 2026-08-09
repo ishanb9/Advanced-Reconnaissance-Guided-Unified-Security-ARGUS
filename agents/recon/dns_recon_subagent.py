@@ -254,35 +254,50 @@ class DnsReconSubagent(BaseSubagent):
         except Exception as exc:
             logger.warning("[dns_recon] zone transfer error (non-critical): %s", exc)
 
-        # ── Step 4: Wildcard DNS detection ────────────────────────────────
-        try:
-            wildcard_probe = f"nonexistent-{int(time.monotonic()*1000)}.{target}"
-            ns_out = await self.collect_tool(
-                "nslookup",
-                target,
-                {"options": f"{wildcard_probe}"},
-            )
-            self._tool_outputs["nslookup_wildcard"] = ns_out
-            if re.search(r"Address:\s*\d+\.\d+\.\d+\.\d+", ns_out):
-                await self.store_finding(Finding(
-                    title=f"Wildcard DNS Detected: *.{target}",
-                    description=(
-                        f"Wildcard DNS is configured for *.{target}. "
-                        f"All subdomains resolve, making subdomain enumeration unreliable "
-                        f"and potentially enabling subdomain takeover risks."
-                    ),
-                    severity="HIGH",
-                    evidence=ns_out[:400],
-                    tool="nslookup",
-                    host=target,
-                    mitre_technique="T1584",
-                    exploit_suggestion=(
-                        "Wildcard DNS may enable subdomain takeover. "
-                        "Check CNAME records pointing to unclaimed cloud services."
-                    ),
-                ))
-        except Exception as exc:
-            logger.debug("[dns_recon] wildcard probe error: %s", exc)
+        # ── Step 4: Wildcard DNS detection (DOMAIN targets ONLY) ──────────
+        # A bare IP has NO DNS zone, so "*.192.168.40.8" is nonsensical.  Probing a
+        # random label under an IP made nslookup echo its own DNS-SERVER "Address:"
+        # header line, which the naive regex read as a resolved wildcard → a HIGH
+        # false-positive on EVERY IP target (error_analyzer correctly flagged the
+        # bad-args probe).  So: skip the probe for an IP, and for a real domain treat
+        # it as wildcard ONLY when the random probe actually RESOLVES to an answer
+        # address AND the resolver did not return NXDOMAIN / "can't find".
+        _t = str(target or "")
+        _is_ip_target = bool(re.match(r"^\d{1,3}(?:\.\d{1,3}){3}$", _t)) or ":" in _t
+        if not _is_ip_target and "." in _t:
+            try:
+                wildcard_probe = f"nonexistent-{int(time.monotonic()*1000)}.{_t}"
+                ns_out = await self.collect_tool(
+                    "nslookup", _t, {"options": f"{wildcard_probe}"})
+                self._tool_outputs["nslookup_wildcard"] = ns_out
+                _up = str(ns_out).upper()
+                _negative = any(m in _up for m in (
+                    "NXDOMAIN", "CAN'T FIND", "SERVFAIL", "NO ANSWER", "NON-EXISTENT"))
+                # Ignore the leading "Server:/Address:" resolver header — only an
+                # address in the ANSWER section counts as a real resolution.
+                _low = str(ns_out).lower()
+                _body = ns_out[_low.index("answer:"):] if "answer:" in _low else ns_out
+                _resolved = bool(re.search(r"Address:\s*\d+\.\d+\.\d+\.\d+", _body))
+                if _resolved and not _negative:
+                    await self.store_finding(Finding(
+                        title=f"Wildcard DNS Detected: *.{_t}",
+                        description=(
+                            f"Wildcard DNS is configured for *.{_t}. "
+                            f"All subdomains resolve, making subdomain enumeration unreliable "
+                            f"and potentially enabling subdomain takeover risks."
+                        ),
+                        severity="HIGH",
+                        evidence=str(ns_out)[:400],
+                        tool="nslookup",
+                        host=_t,
+                        mitre_technique="T1584",
+                        exploit_suggestion=(
+                            "Wildcard DNS may enable subdomain takeover. "
+                            "Check CNAME records pointing to unclaimed cloud services."
+                        ),
+                    ))
+            except Exception as exc:
+                logger.debug("[dns_recon] wildcard probe error: %s", exc)
 
         # ── Step 5: Resolve subdomains with dnsx ──────────────────────────
         logger.info("[dns_recon] Step 5 — resolving %d subdomains with dnsx", len(subdomains))

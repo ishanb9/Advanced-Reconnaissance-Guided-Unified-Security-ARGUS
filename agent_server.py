@@ -149,6 +149,7 @@ from agents.master_agent       import MasterAgent
 from agents.shell_agent        import ShellAgent
 from agents.payload_agent      import PayloadAgent
 from agents.cidr_orchestrator  import CIDROrchestrator
+from utils import resource_governor as _resgov
 from agents.domain_recon_orchestrator import DomainReconOrchestrator
 from agents import target_selection as target_selection
 from report.generator          import ReportGenerator
@@ -167,6 +168,13 @@ class WebSocketManager:
         "master_plan", "state_change", "agent_status", "phase_change",
         "parallel_intel", "llm_comm", "rag_query", "agent_reasoning",
         "finding", "flag_found", "graph_node", "graph_edge",
+        # The pre-launch target/authorization gate.  MUST be buffered: it blocks the
+        # scan for up to 30 minutes waiting for a human, and only buffered events are
+        # replayed on connect.  A tab refresh or a dropped socket during that window
+        # used to lose the dialog permanently — the operator saw nothing, never
+        # answered, and the scan timed out having selected zero targets.
+        "target_selection_request", "dns_records_complete", "target_authorization",
+        "authorization_block", "authorization_approval_consumed",
         # Subagent events
         "subagent_start", "subagent_complete", "subagent_error", "subagent_finding",
         # Post-exploitation events
@@ -281,16 +289,30 @@ ws_manager = WebSocketManager()
 # Active state
 active_agents:        Dict[str, Any]          = {}   # MasterAgent OR CIDROrchestrator
 active_tasks:         Dict[str, asyncio.Task] = {}
+# [8] Handles for manually-dispatched subagent runs, per session, so stop/delete can
+# cancel them instead of leaving fire-and-forget tasks running after the session ends.
+manual_subagent_tasks: Dict[str, set]        = {}
 active_shell_agents:  Dict[str, ShellAgent]   = {}
 report_generator = ReportGenerator()
 
 
 def _detect_session_mode(target_ip: str) -> SessionMode:
     """Return CIDR, MULTI, or SINGLE based on target_ip string."""
-    if "/" in target_ip:
-        return SessionMode.CIDR
-    if "," in target_ip:
+    _t = (target_ip or "").strip()
+    if "," in _t:
         return SessionMode.MULTI
+    # [47] Only a REAL IP network (e.g. 10.0.0.0/24) is a CIDR scan.  A URL or a
+    # host-with-path (http://app/api, host/path) ALSO contains '/', but must route to a
+    # SINGLE MasterAgent so normalise_target can classify it as url/app — the old
+    # `if "/" in target` sent every URL target to the CIDR orchestrator, where
+    # ip_network(url) raised and it was rejected as 'Invalid CIDR: <url>'.
+    if "/" in _t and "://" not in _t and not _t.lower().startswith(("http", "www.")):
+        import ipaddress as _ipa
+        try:
+            _ipa.ip_network(_t, strict=False)
+            return SessionMode.CIDR
+        except ValueError:
+            pass
     return SessionMode.SINGLE
 
 
@@ -368,29 +390,69 @@ def _resolve_agent_or_subagent(identifier: str):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await db.setup(MONGO_URI)
+    # ── Auth housekeeping [82] — sweep expired sessions + enforce audit retention.
+    # install_auth() registers this via @app.on_event('startup'), which FastAPI IGNORES
+    # when a custom lifespan= is passed, so it never ran.  Start it here explicitly.
+    _auth_hk_task = None
+    try:
+        from auth.integration import _housekeeping_loop as _auth_hk
+        _auth_hk_task = asyncio.create_task(_auth_hk())
+    except Exception:
+        _auth_hk_task = None
     # ── LLM provider bootstrap ─────────────────────────────────────────────
     # Resolve LLM_PROVIDER (ollama | openai-compat | anthropic | gemini | auto)
     # at startup so the rest of the platform sees a consistent backend.
+    _prov_name = None
     try:
         from utils.llm_providers import get_provider, set_provider_auto, PROVIDER
         _prov = get_provider()
         if PROVIDER == "auto":
             _prov = await set_provider_auto()
         _ok, _msg, _ = await _prov.check_available()
+        _prov_name = getattr(_prov, "name", None)
         _provider_line = f"  LLM    : {_prov.name} / {_prov.model} — {'OK' if _ok else 'OFFLINE'}"
         _provider_detail = f"           {_msg}"
     except Exception as _exc:
         _provider_line = f"  LLM    : provider bootstrap failed: {_exc}"
         _provider_detail = ""
+    # ── Resource governor ──────────────────────────────────────────────────
+    # Auto-size concurrency + RAG heaviness to THIS host (CPU/RAM/LLM tier) so a
+    # scan never OOM-kills a small box yet runs at full speed on a big one.  Sets
+    # env knobs via setdefault (hand-set values win); starts a RAM watchdog that
+    # pauses new host admission under memory pressure.
+    _gov_line = ""
+    try:
+        from utils import resource_governor as _rg
+        _snap = _rg.autotune(_prov_name)
+        _rg.start_watchdog()
+        _ap = _snap.get("applied", {})
+        _gov_line = (f"  Compute: {_snap.get('label','?')} — {_snap.get('resources',{}).get('cores','?')}c / "
+                     f"{_snap.get('resources',{}).get('mem_avail_gb','?')}GB → hosts="
+                     f"{_ap.get('ARGUS_MAX_PARALLEL_HOSTS','?')} triage={_ap.get('ARGUS_CIDR_TRIAGE_PARALLEL','?')} "
+                     f"reranker={_snap.get('reranker','?')}")
+    except Exception as _exc:
+        _gov_line = f"  Compute: governor unavailable ({_exc})"
     print("=" * 65)
     print("  ARGUS — Advanced Reconnaissance & Guided Unified Security")
     print(_provider_line)
     if _provider_detail:
         print(_provider_detail)
+    if _gov_line:
+        print(_gov_line)
     print(f"  MCP    : {MCP_URL}")
     print(f"  Mongo  : {MONGO_URI}")
     print("=" * 65)
     yield
+    if _auth_hk_task is not None:
+        try:
+            _auth_hk_task.cancel()
+        except Exception:
+            pass
+    try:
+        from utils import resource_governor as _rg
+        await _rg.stop_watchdog()
+    except Exception:
+        pass
     await db.teardown()
 
 
@@ -412,6 +474,61 @@ except Exception as _auth_err:                                    # pragma: no c
         "auth module not installed: %s — install via `pip install -r auth/requirements.txt`",
         _auth_err,
     )
+
+
+# ══════════════════════════════════════════════════════════════
+#  AUTHENTICATION ENFORCEMENT [81] — every REST route requires a valid session/JWT
+#  except a small public allowlist (SPA shell, static assets, /auth + /scim routers,
+#  health/docs, CORS preflight).  FAIL-CLOSED: a missing auth stack or ANY auth error
+#  denies with 401 — the tool-executing platform is never reachable unauthenticated.
+#  ARGUS_AUTH_BYPASS_TOKEN enables a header bypass for tests/CI only (unset = no bypass).
+# ══════════════════════════════════════════════════════════════
+import hmac as _hmac
+
+_AUTH_PUBLIC_EXACT = {
+    "/", "/index.html", "/favicon.ico", "/healthz", "/healthz/auth",
+    "/openapi.json", "/docs", "/docs/oauth2-redirect", "/redoc",
+}
+_AUTH_PUBLIC_PREFIX = ("/static/", "/assets/", "/auth/", "/scim/v2/")
+
+
+def _auth_is_public(method: str, path: str) -> bool:
+    """A request is public (no auth) only for CORS preflight, the SPA shell + static
+    assets, the login/SCIM routers, and health/docs.  Everything else requires auth."""
+    if (method or "").upper() == "OPTIONS":
+        return True
+    if path in _AUTH_PUBLIC_EXACT:
+        return True
+    return any(path.startswith(p) for p in _AUTH_PUBLIC_PREFIX)
+
+
+@app.middleware("http")
+async def _require_authentication(request: Request, call_next):
+    if _auth_is_public(request.method, request.url.path):
+        return await call_next(request)
+    _bypass = os.environ.get("ARGUS_AUTH_BYPASS_TOKEN", "")
+    if _bypass and _hmac.compare_digest(request.headers.get("X-Argus-Auth-Bypass", ""), _bypass):
+        return await call_next(request)
+    try:
+        from auth.db import SessionLocal
+        from auth.dependencies import _do_auth
+    except Exception:
+        # Auth stack unavailable → DENY (fail-closed); never expose the platform open.
+        return JSONResponse({"detail": "authentication required (auth module unavailable)"},
+                            status_code=401)
+    _adb = SessionLocal()
+    try:
+        _do_auth(request, request.headers.get("authorization"), _adb, require=True)
+    except HTTPException as _he:
+        return JSONResponse({"detail": _he.detail}, status_code=_he.status_code)
+    except Exception:
+        return JSONResponse({"detail": "authentication error"}, status_code=401)
+    finally:
+        try:
+            _adb.close()
+        except Exception:
+            pass
+    return await call_next(request)
 
 
 # ══════════════════════════════════════════════════════════════
@@ -461,7 +578,7 @@ async def create_session(body: StartPentestRequest):
         threading_enabled   = body.threading_enabled,
         max_threads         = body.max_threads,
         session_mode        = session_mode,
-        max_parallel_hosts  = getattr(body, "max_parallel_hosts", 5),
+        max_parallel_hosts  = min(getattr(body, "max_parallel_hosts", 5) or 5, _resgov.recommended_hosts(5)),
         mission_brief       = mission_brief,
     )
     session    = await db.create_session(session_data)
@@ -530,6 +647,15 @@ async def create_session(body: StartPentestRequest):
                 pass
         return _cb
 
+    # `master` is bound ONLY by the single-host branch below.  It must exist as a
+    # name before the branch because the shell-agent wiring reads it afterwards:
+    # `session_mode` is NOT a safe proxy for "a MasterAgent was built".  A bare
+    # domain classifies as SINGLE (there is one target), yet with
+    # hunt_subdomains it takes the domain branch and builds a
+    # DomainReconOrchestrator instead — so the wiring read an unbound local and
+    # every domain scan died with UnboundLocalError -> HTTP 500 before it could
+    # return a session.  Key off the object, never off the mode.
+    master = None
     if getattr(body, "hunt_subdomains", False) and _looks_like_domain(body.target_ip):
         # ── Domain mode: hunt subdomains → human selects → scan selected ───
         domain_orch = DomainReconOrchestrator(
@@ -537,21 +663,21 @@ async def create_session(body: StartPentestRequest):
             domain             = body.target_ip,
             broadcast          = broadcast,
             session_kwargs     = master_kwargs,
-            max_parallel_hosts = getattr(body, "max_parallel_hosts", 5),
+            max_parallel_hosts = min(getattr(body, "max_parallel_hosts", 5) or 5, _resgov.recommended_hosts(5)),
             passive            = getattr(body, "subdomain_passive", True),
             active             = getattr(body, "subdomain_active",  True),
         )
         active_agents[session_id] = domain_orch
-        task = asyncio.create_task(domain_orch.run())
+        scan_coro = domain_orch.run()
     elif session_mode == SessionMode.SINGLE:
         # ── Original single-host path — zero behaviour change ──────────────
         master = MasterAgent(broadcast=broadcast)
         active_agents[session_id] = master
-        task = asyncio.create_task(master.run(
+        scan_coro = master.run(
             session_id = session_id,
             target     = body.target_ip,
             **master_kwargs,
-        ))
+        )
     else:
         # ── Multi-host / CIDR path ─────────────────────────────────────────
         orchestrator = CIDROrchestrator(
@@ -559,22 +685,19 @@ async def create_session(body: StartPentestRequest):
             target_input       = body.target_ip,
             broadcast          = broadcast,
             session_kwargs     = master_kwargs,
-            max_parallel_hosts = getattr(body, "max_parallel_hosts", 5),
+            max_parallel_hosts = min(getattr(body, "max_parallel_hosts", 5) or 5, _resgov.recommended_hosts(5)),
         )
         active_agents[session_id] = orchestrator
-        task = asyncio.create_task(orchestrator.run())
-
-    task.add_done_callback(_on_scan_task_done(session_id))
-    active_tasks[session_id] = task
+        scan_coro = orchestrator.run()
 
     # Pre-create ShellAgent for this session
     shell_agent = ShellAgent(broadcast=broadcast)
     shell_agent._session_id = session_id
     # Recommendation A — back-reference so manual listener / SSH captures
-    # flow through MasterAgent.register_shell.  Multi-host orchestrator's
-    # MasterAgent reference is resolved at first foothold (each host has
-    # its own MasterAgent inside CIDROrchestrator).
-    shell_agent._master = master if session_mode == SessionMode.SINGLE else None
+    # flow through MasterAgent.register_shell.  Stays None for the domain and
+    # multi-host paths: each of those owns per-host MasterAgents created inside
+    # the orchestrator, so the reference is resolved at first foothold instead.
+    shell_agent._master = master
     active_shell_agents[session_id] = shell_agent
     # SHARED SESSION: the master must drive post-exploitation through the SAME
     # ShellAgent the operator's WebSocket terminal (shell_input/shell_output)
@@ -582,8 +705,18 @@ async def create_session(body: StartPentestRequest):
     # can never see or take over.  master._execute_shell_command reuses this
     # instance (its construct is guarded by `if self._shell_agent is None`), so
     # operator and ARGUS share one interactive session + its live output.
-    if session_mode == SessionMode.SINGLE:
+    if master is not None:
         master._shell_agent = shell_agent
+
+    # Start the scan LAST.  Everything above can still raise (a bad kwarg, a
+    # missing attribute); if the task were already running, that exception would
+    # return 500 to the operator while the scan kept going headless — no
+    # WebSocket, no visibility, no way to stop it.  Three orphaned subdomain
+    # hunts is exactly what the domain-mode 500 produced.  With the task created
+    # after the wiring, a failed launch launches nothing.
+    task = asyncio.create_task(scan_coro)
+    task.add_done_callback(_on_scan_task_done(session_id))
+    active_tasks[session_id] = task
 
     return {"session": session, "message": f"Pentest started on {body.target_ip}",
             "ws_url": f"/ws/{session_id}", "session_mode": session_mode.value}
@@ -597,7 +730,15 @@ async def list_sessions():
 
 @app.get("/sessions/{session_id}")
 async def get_session(session_id: str):
-    s = await db.get_session(session_id)
+    # [44] session_meta_cache was declared, imported, size-reported and cleared but never
+    # populated or read — a fully dead cache.  Wire it into the session-meta read (the
+    # same get/set-around-DB pattern findings_cache uses); the 10s TTL self-expires and
+    # delete_session invalidates it so a removed session can't linger.
+    hit, s = await session_meta_cache.get(session_id)
+    if not hit:
+        s = await db.get_session(session_id)
+        if s:
+            await session_meta_cache.set(session_id, s)
     if not s:
         raise HTTPException(status_code=404, detail="Session not found")
     return s
@@ -627,6 +768,19 @@ async def stop_session(session_id: str):
     if task and not task.done():
         task.cancel()
     await db.update_session(session_id, {"status": "stopped"})
+
+    # [8] Cancel any manually-dispatched subagent tasks for this session — they were
+    # fire-and-forget (asyncio.create_task with no handle) and outlived stop/delete.
+    for _mt in manual_subagent_tasks.pop(session_id, set()):
+        if not _mt.done():
+            _mt.cancel()
+
+    # [4] Drop the dead registry entries (mirror delete_session) so a later
+    # POST /sessions/{id}/resume takes the cold restore-from-checkpoint path instead
+    # of finding the cancelled agent still registered and treating it as live — the
+    # resume-after-stop was silently a no-op.
+    active_tasks.pop(session_id, None)
+    active_agents.pop(session_id, None)
 
     # ── Auto-ingest the stopped session into the RAG corpus (E15 wiring) ──
     # Convert the now-finalized logs into a markdown summary that the next
@@ -850,6 +1004,15 @@ async def delete_session(session_id: str):
     Permanently delete a session and all related data.
     Stops any active pentest for this session first.
     """
+    # [44] Drop the cached session-meta so a just-deleted session can't be served stale.
+    try:
+        await session_meta_cache.invalidate(session_id)
+    except Exception:
+        pass
+    # [8] Cancel any manually-dispatched subagent tasks for this session too.
+    for _mt in manual_subagent_tasks.pop(session_id, set()):
+        if not _mt.done():
+            _mt.cancel()
     # Stop any running agent for this session
     if session_id in active_agents:
         agent = active_agents[session_id]
@@ -1054,6 +1217,40 @@ async def get_osint(session_id: str):
 async def get_report_themes():
     """List the selectable report themes (key/name/description) for the picker."""
     return report_generator.list_themes()
+
+
+@app.get("/report/selftest")
+async def report_selftest():
+    """Confirm the RUNNING server actually renders the dark/light builder design
+    (not the legacy fallback). Catches the 'files copied but server not restarted'
+    and 'argus_template not deployed' cases that make dark==light.  Hit it in a
+    browser: builder_active must be true and dark_differs_from_light must be true."""
+    out = {"builder_importable": False, "builder_active": False,
+           "dark_differs_from_light": False, "dark_len": 0, "light_len": 0,
+           "dark_is_builder_design": False, "themes": [], "error": ""}
+    try:
+        out["themes"] = [t.get("key") for t in report_generator.list_themes()]
+    except Exception:
+        pass
+    _demo = {"sev": {"critical": 0, "high": 1, "medium": 0, "low": 0, "info": 0},
+             "summary": {"total": 1}, "outcome": {}, "session": {},
+             "findings": [{"fid": "F1", "severity": "High", "host": "10.0.0.1",
+                           "title": "selftest", "description": "d", "evidence": "e",
+                           "mitre": "", "extra": {}}]}
+    try:
+        from report.argus_template.render import render_html
+        out["builder_importable"] = True
+        d = render_html(_demo, "dark") or ""
+        l = render_html(_demo, "light") or ""
+        out["dark_len"], out["light_len"] = len(d), len(l)
+        # builder HTML carries data-report-theme; the legacy design never does
+        out["dark_is_builder_design"] = ('data-report-theme="dark"' in d)
+        out["dark_differs_from_light"] = bool(d) and bool(l) and (d != l)
+        out["builder_active"] = (out["dark_is_builder_design"]
+                                 and out["dark_differs_from_light"])
+    except Exception as exc:                       # noqa: BLE001
+        out["error"] = f"{type(exc).__name__}: {exc} — report/argus_template is not deployed/importable on this host."
+    return out
 
 
 @app.get("/sessions/{session_id}/report")
@@ -1848,6 +2045,27 @@ async def fuzz_campaign_stop(body: dict):
     return {"stopped": _camp.stop_campaign(job_id), "job_id": job_id}
 
 
+@app.post("/fuzz/campaign/approve")
+async def fuzz_campaign_approve(body: dict):
+    """[90] Human decision on a PoC held above the intrusiveness ceiling.
+    action=approve -> prove it now with the real oracle; action=reject -> drop it.
+    Without this route the fuzz_approval_request emitted by the campaign was a dead
+    end: the developed PoC could never be proven or cleared."""
+    from agents.fuzzing import campaign as _camp
+    b = body or {}
+    job_id = b.get("job_id", "")
+    approval_id = b.get("approval_id", "")
+    action = (b.get("action") or "approve").lower()
+    if not job_id or not approval_id:
+        return {"ok": False, "error": "job_id and approval_id are required",
+                "job_id": job_id, "approval_id": approval_id}
+    if action == "reject":
+        ok = await _camp.reject_campaign(job_id, approval_id)
+    else:
+        ok = await _camp.approve_campaign(job_id, approval_id)
+    return {"ok": bool(ok), "action": action, "job_id": job_id, "approval_id": approval_id}
+
+
 @app.get("/fuzz/campaigns")
 async def fuzz_campaigns(session: str = ""):
     from agents.fuzzing import campaign as _camp
@@ -1893,11 +2111,16 @@ async def fuzz_engines():
         "binary_blackbox": ("Binary / 0-day lab", "Closed-source greybox (AFL++ QEMU + ASan) → memory-corruption 0-days · LLM harness synthesis · triage + offline novelty",
                     [("afl-fuzz (AFL++)", "bin", _bin("afl-fuzz")), ("afl-qemu-trace", "bin", _bin("afl-qemu-trace")),
                      ("clang", "bin", _bin("clang")), ("casr", "bin", _bin("casr"))]),
+        "source":  ("Source / code audit", "Taint (semgrep/bandit) → LLM code-reasoning hypotheses → harness-build prove · offline novelty",
+                    [("semgrep", "bin", _bin("semgrep")), ("bandit", "bin", _bin("bandit")),
+                     ("graudit", "bin", _bin("graudit")), ("clang", "bin", _bin("clang"))]),
+        "differential": ("Differential (logic bugs)", "Same input → target + a reference impl → flag silent logic/parse divergences (smuggling · parser confusion · cert/SQL semantics)",
+                    [("built-in HTTP differ", "builtin", True), ("httpx", "lib", _pylib("httpx"))]),
         "ai":      ("AI / LLM endpoint", "Adversarial prompts → system-prompt leak / jailbreak",
                     [("built-in red-team probes", "builtin", True), ("httpx", "lib", _pylib("httpx"))]),
     }
     out = []
-    for m in ("web", "api", "network", "file", "binary", "binary_blackbox", "ai"):
+    for m in ("web", "api", "network", "file", "binary", "binary_blackbox", "source", "differential", "ai"):
         try:
             eng = _eng.get_engine(m)
             ok, why = (eng.is_available() if eng else (False, "engine missing"))
@@ -2171,7 +2394,7 @@ async def get_attack_tree(session_id: str):
     if not tree:
         # Try to get from active agent's intel
         agent = active_agents.get(session_id)
-        if agent and agent._intel.get("attack_tree"):
+        if agent and (getattr(agent, "_intel", None) or {}).get("attack_tree"):
             return {"attack_tree": agent._intel["attack_tree"], "session_id": session_id}
         return {"attack_tree": None, "session_id": session_id}
     return {"attack_tree": tree.get("tree"), "session_id": session_id, "created_at": tree.get("created_at")}
@@ -2206,14 +2429,17 @@ async def get_session_state(session_id: str):
     """Get the current state machine state of an active session."""
     agent = active_agents.get(session_id)
     if agent:
+        # Orchestrators (domain / CIDR) drive per-host MasterAgents and have no
+        # `phase` of their own — reading it raised AttributeError -> 500 for the
+        # entire endpoint on every multi-target session.
         return {
-            "state":           agent._intel.get("state", "UNKNOWN"),
-            "current_phase":   str(agent.phase),
-            "mitre_count":     len(agent._intel.get("mitre_techniques", [])),
-            "evidence_count":  len(agent._intel.get("evidence", [])),
-            "lateral_targets": agent._intel.get("lateral_targets", []),
-            "attack_tree":     bool(agent._intel.get("attack_tree")),
-            "memory_hits":     len(agent._intel.get("long_term_hits", [])),
+            "state":           (getattr(agent, "_intel", None) or {}).get("state", "UNKNOWN"),
+            "current_phase":   str(getattr(agent, "phase", "") or "orchestrating"),
+            "mitre_count":     len((getattr(agent, "_intel", None) or {}).get("mitre_techniques", [])),
+            "evidence_count":  len((getattr(agent, "_intel", None) or {}).get("evidence", [])),
+            "lateral_targets": (getattr(agent, "_intel", None) or {}).get("lateral_targets", []),
+            "attack_tree":     bool((getattr(agent, "_intel", None) or {}).get("attack_tree")),
+            "memory_hits":     len((getattr(agent, "_intel", None) or {}).get("long_term_hits", [])),
         }
     # Session not active — check DB
     session = await db.get_session(session_id)
@@ -2429,6 +2655,8 @@ async def status():
         "active_sessions": [sid for sid, t in active_tasks.items() if not t.done()],
         "agent_count":     len(active_agents),
         "shell_sessions":  sum(len(a._shells) for a in active_shell_agents.values()),
+        # Resource governor: the auto-detected compute profile + live RAM pressure.
+        "resource_profile": {**_resgov.snapshot(), "under_pressure": _resgov.under_pressure()},
     }
 
 
@@ -2593,7 +2821,7 @@ async def get_credentials(session_id: str, service: Optional[str] = None,
     except AttributeError:
         # Fallback for older deployments that don't have the helper yet
         mdb = db.get_db()
-        query: dict = {"session_id": session_id}
+        query: dict = {"session_id": {"$in": await db.resolve_session_scope(session_id)}}
         if service:
             query["service"] = service
         if cred_type:
@@ -2619,7 +2847,10 @@ async def get_tunnels(session_id: str, active_only: bool = False):
 async def get_persistence(session_id: str):
     """Get all persistence mechanisms established during a session."""
     mdb = db.get_db()
-    docs = await mdb.persistence.find({"session_id": session_id}, {"_id": 0}).sort("timestamp", -1).to_list(200)
+    # [0] Aggregate per-host child sessions so a MULTI/CIDR parent shows their persistence.
+    _scope = await db.resolve_session_scope(session_id)
+    docs = await mdb.persistence.find(
+        {"session_id": {"$in": _scope}}, {"_id": 0}).sort("timestamp", -1).to_list(200)
     return {"persistence": docs, "count": len(docs)}
 
 
@@ -2627,13 +2858,15 @@ async def get_persistence(session_id: str):
 async def get_lateral_findings(session_id: str):
     """Get lateral movement findings for a session."""
     mdb = db.get_db()
+    # Aggregate per-host child sessions so a multi-target parent shows lateral data.
+    _scope = await db.resolve_session_scope(session_id)
     docs = await mdb.findings.find(
-        {"session_id": session_id, "agent": "lateral"},
+        {"session_id": {"$in": _scope}, "agent": "lateral"},
         {"_id": 0}
     ).sort("timestamp", -1).to_list(500)
     # Also get subagent results for lateral phase
     sub_results = await mdb.subagent_results.find(
-        {"session_id": session_id, "agent": "lateral"},
+        {"session_id": {"$in": _scope}, "agent": "lateral"},
         {"_id": 0}
     ).sort("timestamp", -1).to_list(50)
     return {"findings": docs, "subagent_results": sub_results, "count": len(docs)}
@@ -2748,6 +2981,14 @@ async def run_subagent_manually(session_id: str, subagent_name: str, body: RunSu
         "wifi_scan":             "agents.wireless.wifi_scan_subagent.WifiScanSubagent",
         "wpa2_crack":            "agents.wireless.wpa2_crack_subagent.Wpa2CrackSubagent",
         "evil_twin":             "agents.wireless.evil_twin_subagent.EvilTwinSubagent",
+        # ── IoT ───────────────────────────────────────────────────────────
+        # [63] These four were listed as operator-dispatchable in the UI
+        # (SubagentConsolePage.jsx) but were MISSING from this registry, so every
+        # IoT button 404'd. The classes exist under agents/iot/.
+        "iot_device_scan":       "agents.iot.iot_device_scan_subagent.IoTDeviceScanSubagent",
+        "iot_default_creds":     "agents.iot.iot_default_creds_subagent.IoTDefaultCredsSubagent",
+        "iot_protocol":          "agents.iot.iot_protocol_subagent.IoTProtocolSubagent",
+        "iot_firmware":          "agents.iot.iot_firmware_subagent.IoTFirmwareSubagent",
         # ── Web (gap-fill) ────────────────────────────────────────────────
         "ssrf":                  "agents.web.ssrf_subagent.SsrfSubagent",
         "auth_bypass":           "agents.web.auth_bypass_subagent.AuthBypassSubagent",
@@ -2800,7 +3041,11 @@ async def run_subagent_manually(session_id: str, subagent_name: str, body: RunSu
                 "subagent": subagent_name, "error": str(exc)
             })
 
-    asyncio.create_task(_run())
+    # [8] Track the task so stop/delete can cancel it (was fire-and-forget, outliving
+    # the session).  A done-callback discards the handle so the set can't grow unbounded.
+    _mt = asyncio.create_task(_run())
+    manual_subagent_tasks.setdefault(session_id, set()).add(_mt)
+    _mt.add_done_callback(lambda _t, _s=session_id: manual_subagent_tasks.get(_s, set()).discard(_t))
     return {"status": "started", "subagent": subagent_name, "target": target, "session_id": session_id}
 
 
@@ -2842,6 +3087,41 @@ async def get_pentest_context(session_id: str):
 #  WEBSOCKET (Phase 3 — adds shell I/O routing)
 # ══════════════════════════════════════════════════════════════
 
+async def _ws_authenticated(ws: WebSocket) -> bool:
+    """True when the WS handshake carries a valid session cookie or JWT (?token=).
+    The WS streams tool output + interactive shell I/O, so it must be authenticated
+    like any REST route [81].  FAIL-CLOSED: any error → not authenticated.  Test bypass
+    via ARGUS_AUTH_BYPASS_TOKEN (?bypass=<token>)."""
+    try:
+        _bypass = os.environ.get("ARGUS_AUTH_BYPASS_TOKEN", "")
+        if _bypass and _hmac.compare_digest(ws.query_params.get("bypass", ""), _bypass):
+            return True
+        from auth.db import SessionLocal
+        from auth.config import CONFIG as _AC
+        from auth.sessions import load_active_session
+        _wdb = SessionLocal()
+        try:
+            _cookie = ws.cookies.get(_AC.session_cookie_name)
+            if _cookie and load_active_session(_wdb, _cookie):
+                return True
+            _tok = ws.query_params.get("token") or ""
+            if _tok:
+                try:
+                    from auth.security.tokens import verify_access_token
+                    _claims = verify_access_token(_tok)
+                    _sid = (getattr(_claims, "session_id", None)
+                            or getattr(_claims, "sid", None) or getattr(_claims, "jti", None))
+                    if _sid and load_active_session(_wdb, _sid):
+                        return True
+                except Exception:
+                    pass
+        finally:
+            _wdb.close()
+    except Exception:
+        return False
+    return False
+
+
 @app.websocket("/ws/{session_id}")
 async def websocket_endpoint(ws: WebSocket, session_id: str):
     """
@@ -2854,6 +3134,14 @@ async def websocket_endpoint(ws: WebSocket, session_id: str):
       shell_input   : { shell_id, data } → PTY stdin
       shell_resize  : { shell_id, cols, rows } → PTY resize
     """
+    # [81] Reject an unauthenticated socket BEFORE connecting (it carries tool I/O +
+    # interactive shell streams).  Fail-closed: close with 1008 (policy violation).
+    if not await _ws_authenticated(ws):
+        try:
+            await ws.close(code=1008)
+        except Exception:
+            pass
+        return
     await ws_manager.connect(session_id, ws)
     try:
         summary = await db.get_session_summary(session_id)
@@ -2978,12 +3266,17 @@ async def websocket_endpoint(ws: WebSocket, session_id: str):
                     try:
                         selection_id = msg.get("selection_id") or msg.get("session_id") or ""
                         selected     = msg.get("selected") or msg.get("targets") or []
-                        resolved     = target_selection.resolve(selection_id, selected)
+                        # Per-host authorization the operator REVIEWED before launch
+                        # ({host: profile}).  Absent => keep the derived fail-closed
+                        # policy; unknown profiles/hosts are dropped server-side.
+                        authz        = msg.get("authz") or msg.get("authorization") or {}
+                        resolved     = target_selection.resolve(selection_id, selected, authz)
                         await ws.send_text(json.dumps({
                             "type": "target_selection_ack",
                             "data": {"selection_id": selection_id,
                                      "resolved": resolved,
-                                     "count": len(selected) if isinstance(selected, list) else 0},
+                                     "count": len(selected) if isinstance(selected, list) else 0,
+                                     "authz_overrides": len(authz) if isinstance(authz, dict) else 0},
                         }))
                     except Exception as _ex:
                         await ws.send_text(json.dumps({
@@ -3088,22 +3381,41 @@ async def websocket_endpoint(ws: WebSocket, session_id: str):
 # ══════════════════════════════════════════════════════════════
 
 @app.post("/sessions/{session_id}/extend/{phase}")
-async def extend_phase(session_id: str, phase: str):
+async def extend_phase(session_id: str, phase: str, minutes: float = 0, body: dict = None):
     """
-    Grant a time extension for a running phase that has hit its timeout.
-    Called from the frontend when the user clicks "Extend" in the time-extension dialog.
-    Also used to confirm a web-phase confirmation gate.
+    Grant a time extension for a running phase whose soft deadline elapsed.  The tool
+    kept running the whole time (non-blocking popup); this just pushes the deadline out.
+    ``minutes`` (query or JSON body, any number) sets how much more time to grant;
+    0 = one more default period.  Also confirms a web-phase confirmation gate.
     """
     agent = active_agents.get(session_id)
     if not agent:
         raise HTTPException(status_code=404, detail="No active agent for this session")
+    _mins = minutes or ((body or {}).get("minutes") if isinstance(body, dict) else 0) or 0
     if hasattr(agent, "extend_phase"):
-        agent.extend_phase(phase)
+        agent.extend_phase(phase, _mins)
         await ws_manager.broadcast_raw(session_id, "phase_extended", {
-            "phase": phase, "message": f"Time extension granted for {phase}"
+            "phase": phase, "minutes": _mins,
+            "message": (f"Extended {phase} by {_mins} min" if _mins
+                        else f"Time extension granted for {phase}")
         })
-        return {"status": "extended", "phase": phase}
+        return {"status": "extended", "phase": phase, "minutes": _mins}
     raise HTTPException(status_code=400, detail="Agent does not support phase extension")
+
+
+@app.post("/sessions/{session_id}/stop-phase/{phase}")
+async def stop_phase(session_id: str, phase: str):
+    """Operator clicked 'Stop' on a still-running timed phase (the deadline popup's
+    'exit').  Cancels that phase's running tool now and lets the engagement move on."""
+    agent = active_agents.get(session_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail="No active agent for this session")
+    if hasattr(agent, "stop_phase"):
+        agent.stop_phase(phase)
+        await ws_manager.broadcast_raw(session_id, "phase_stopped", {
+            "phase": phase, "message": f"{phase} stopped by operator"})
+        return {"status": "stopped", "phase": phase}
+    raise HTTPException(status_code=400, detail="Agent does not support phase stop")
 
 
 @app.post("/sessions/{session_id}/select-targets")
@@ -3115,10 +3427,12 @@ async def select_targets(session_id: str, body: dict):
     list means scan nothing.  Usable from the GUI panel or via curl/API.
     """
     selected = (body or {}).get("selected") or (body or {}).get("targets") or []
-    resolved = target_selection.resolve(session_id, selected)
+    authz    = (body or {}).get("authz") or (body or {}).get("authorization") or {}
+    resolved = target_selection.resolve(session_id, selected, authz)
     await ws_manager.broadcast_raw(session_id, "target_selection_ack", {
         "selection_id": session_id, "resolved": resolved,
         "count": len(selected) if isinstance(selected, list) else 0,
+        "authz_overrides": len(authz) if isinstance(authz, dict) else 0,
     })
     if not resolved:
         raise HTTPException(

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>ARGUS Security Assessment — {{ target_display }} — CONFIDENTIAL</title>
+<title>ARGUS Security Assessment — 10.129.21.254 — CONFIDENTIAL</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -1093,13 +1093,13 @@ h3.subsection-title {
   size: A4;
   margin: 16mm 14mm 18mm 14mm;
   @bottom-right {
-    content: "{{ target_display }} — CONFIDENTIAL — Page " counter(page) " of " counter(pages);
+    content: "10.129.21.254 — CONFIDENTIAL — Page " counter(page) " of " counter(pages);
     font-size: 8pt;
     color: #838799;
     font-family: Inter, sans-serif;
   }
   @bottom-left {
-    content: "ARGUS Security Assessment · {{ target_display }} · {{ generated_at }}";
+    content: "ARGUS Security Assessment · 10.129.21.254 · 2026-06-19 09:30 UTC";
     font-size: 8pt;
     color: #838799;
     font-family: Inter, sans-serif;
@@ -1132,7 +1132,7 @@ h3.subsection-title {
 <!-- ══════════════════════════════════════════════════════════
      CONFIDENTIAL BANNER
      ══════════════════════════════════════════════════════════ -->
-<div class="conf-banner">CONFIDENTIAL — CLIENT PRIVILEGED &nbsp;·&nbsp; ARGUS Security Assessment &nbsp;·&nbsp; {{ target_display }} &nbsp;·&nbsp; {{ generated_at }}</div>
+<div class="conf-banner">CONFIDENTIAL — CLIENT PRIVILEGED &nbsp;·&nbsp; ARGUS Security Assessment &nbsp;·&nbsp; 10.129.21.254 &nbsp;·&nbsp; 2026-06-19 09:30 UTC</div>
 
 <!-- ══════════════════════════════════════════════════════════
      SECTION 0 — COVER PAGE
@@ -1147,26 +1147,26 @@ h3.subsection-title {
     </div>
 
     <div class="cover-title">Penetration Test<br>Assessment Report</div>
-    <div class="cover-subtitle">{{ engagement_type }}</div>
+    <div class="cover-subtitle">pentest</div>
 
     <div class="cover-meta-grid">
       <div class="cover-meta-cell">
         <div class="cover-meta-label">Target</div>
-        <div class="cover-meta-value">{{ target_display }}</div>
+        <div class="cover-meta-value">10.129.21.254</div>
       </div>
-      {% if session %}
+      
       <div class="cover-meta-cell">
         <div class="cover-meta-label">IP / Host</div>
-        <div class="cover-meta-value">{{ session.target_ip }}{% if session.target_hostname %} "{{ session.target_hostname }}"{% endif %}</div>
+        <div class="cover-meta-value">10.129.21.254 "FORGE"</div>
       </div>
       <div class="cover-meta-cell">
         <div class="cover-meta-label">Engagement Window</div>
-        <div class="cover-meta-value">{{ session.started_at }}{% if session.completed_at %} → {{ session.completed_at }}{% endif %}</div>
+        <div class="cover-meta-value">2026-06-18 → 2026-06-19</div>
       </div>
-      {% endif %}
+      
       <div class="cover-meta-cell">
         <div class="cover-meta-label">Report Date</div>
-        <div class="cover-meta-value">{{ generated_at }}</div>
+        <div class="cover-meta-value">2026-06-19 09:30 UTC</div>
       </div>
     </div>
   </div>
@@ -1176,18 +1176,18 @@ h3.subsection-title {
       <div class="cover-field-group">
         <div class="cover-field">
           <span class="cover-field-label">Assessment Type</span>
-          <span class="cover-field-value">{{ engagement_type }}</span>
+          <span class="cover-field-value">pentest</span>
         </div>
-        {% if session %}
+        
         <div class="cover-field">
           <span class="cover-field-label">Scope</span>
-          <span class="cover-field-value">{{ session.scope }}</span>
+          <span class="cover-field-value">single host</span>
         </div>
         <div class="cover-field">
           <span class="cover-field-label">Target</span>
-          <span class="cover-field-value mono">{{ session.target_hostname }} · {{ session.target_ip }}{% if intel and intel.os_guess %} · {{ intel.os_guess }}{% endif %}</span>
+          <span class="cover-field-value mono">FORGE · 10.129.21.254 · Ubuntu 20.04</span>
         </div>
-        {% endif %}
+        
         <div class="cover-field">
           <span class="cover-field-label">Analysts</span>
           <span class="cover-field-value">ARGUS Autonomous Engine (operator-reviewed)</span>
@@ -1196,16 +1196,16 @@ h3.subsection-title {
           <span class="cover-field-label">Classification</span>
           <span class="cover-field-value">CONFIDENTIAL — Client Privileged</span>
         </div>
-        {% if duration %}
+        
         <div class="cover-field">
           <span class="cover-field-label">Duration</span>
-          <span class="cover-field-value">{{ duration }}</span>
+          <span class="cover-field-value">1h 42m</span>
         </div>
-        {% endif %}
+        
       </div>
 
       <div class="cover-field-group">
-        {% if outcome %}
+        
         <div class="cover-field">
           <span class="cover-field-label">Overall Risk</span>
           <div class="mt-4">
@@ -1215,22 +1215,22 @@ h3.subsection-title {
         <div class="cover-field">
           <span class="cover-field-label">Outcome</span>
           <div class="mt-4">
-            <span class="outcome-badge">{{ outcome.label }}</span>
+            <span class="outcome-badge">FULL COMPROMISE — ROOT</span>
           </div>
         </div>
-        {% endif %}
-        {% if executive_summary %}
+        
+        
         <div class="cover-field mt-8">
           <span class="cover-field-label">Executive Summary</span>
-          <span class="cover-field-value" style="font-size:13px;line-height:1.6;color:var(--gray-700);">{{ executive_summary }}</span>
+          <span class="cover-field-value" style="font-size:13px;line-height:1.6;color:var(--gray-700);">ARGUS chained upload-RCE then sudo-git to root.</span>
         </div>
-        {% endif %}
+        
       </div>
     </div>
 
     <div class="cover-classification">
       <span class="classification-tag">CONFIDENTIAL — CLIENT PRIVILEGED · ARGUS SECURITY ASSESSMENT</span>
-      <span class="classification-tag">{{ target_display }} · {{ generated_at }}</span>
+      <span class="classification-tag">10.129.21.254 · 2026-06-19 09:30 UTC</span>
     </div>
   </div>
 
@@ -1257,13 +1257,13 @@ h3.subsection-title {
         <tr><td class="font-600">Document Title</td><td>ARGUS Security Assessment — Penetration Test Report</td></tr>
         <tr><td class="font-600">Version</td><td>1.0 — Final</td></tr>
         <tr><td class="font-600">Classification</td><td><strong>CONFIDENTIAL — Client Privileged</strong></td></tr>
-        {% if session %}
-        <tr><td class="font-600">Target System</td><td class="mono">{{ session.target_ip }}{% if session.target_hostname %} "{{ session.target_hostname }}"{% endif %}{% if intel and intel.os_guess %} · {{ intel.os_guess }}{% endif %}</td></tr>
-        <tr><td class="font-600">Scope</td><td>{{ session.scope }}</td></tr>
-        <tr><td class="font-600">Engagement Window</td><td>{{ session.started_at }}{% if session.completed_at %} → {{ session.completed_at }}{% endif %}</td></tr>
-        {% endif %}
+        
+        <tr><td class="font-600">Target System</td><td class="mono">10.129.21.254 "FORGE" · Ubuntu 20.04</td></tr>
+        <tr><td class="font-600">Scope</td><td>single host</td></tr>
+        <tr><td class="font-600">Engagement Window</td><td>2026-06-18 → 2026-06-19</td></tr>
+        
         <tr><td class="font-600">Assessment Engine</td><td>ARGUS Autonomous Pentesting Engine (operator-reviewed)</td></tr>
-        <tr><td class="font-600">Report Generated</td><td class="mono">{{ generated_at }}</td></tr>
+        <tr><td class="font-600">Report Generated</td><td class="mono">2026-06-19 09:30 UTC</td></tr>
         <tr><td class="font-600">Distribution</td><td>Authorised recipient only — do not forward or copy without written consent</td></tr>
       </tbody>
     </table>
@@ -1304,71 +1304,68 @@ h3.subsection-title {
     <span class="risk-badge critical">Overall Risk: Critical</span>
   </div>
 
-  {% if executive_summary %}
+  
   <div class="card accent-left critical mb-24 no-break">
     <div class="card-title" style="font-size:15px;margin-bottom:12px;">Key Finding</div>
-    <p style="font-size:14px;line-height:1.7;color:var(--gray-700);">{{ executive_summary }}</p>
+    <p style="font-size:14px;line-height:1.7;color:var(--gray-700);">ARGUS chained upload-RCE then sudo-git to root.</p>
   </div>
-  {% endif %}
+  
 
   <!-- Stat Tiles -->
   <div class="stat-tiles">
     <div class="stat-tile critical">
-      <div class="tile-count">{{ summary.critical }}</div>
+      <div class="tile-count">1</div>
       <div class="tile-label">Critical</div>
     </div>
     <div class="stat-tile high">
-      <div class="tile-count">{{ summary.high }}</div>
+      <div class="tile-count">1</div>
       <div class="tile-label">High</div>
     </div>
     <div class="stat-tile medium">
-      <div class="tile-count">{{ summary.medium }}</div>
+      <div class="tile-count">0</div>
       <div class="tile-label">Medium</div>
     </div>
     <div class="stat-tile low">
-      <div class="tile-count">{{ summary.low }}</div>
+      <div class="tile-count">0</div>
       <div class="tile-label">Low</div>
     </div>
     <div class="stat-tile info">
-      <div class="tile-count">{{ summary.info }}</div>
+      <div class="tile-count">0</div>
       <div class="tile-label">Info</div>
     </div>
     <div class="stat-tile total">
-      <div class="tile-count">{{ summary.total }}</div>
+      <div class="tile-count">2</div>
       <div class="tile-label">Total</div>
     </div>
-    {% if outcome %}
+    
     <div class="stat-tile access">
-      <div class="tile-count">{% if outcome.root %}ROOT{% elif outcome.compromised %}USER{% else %}—{% endif %}</div>
+      <div class="tile-count">ROOT</div>
       <div class="tile-label">Access</div>
     </div>
-    {% endif %}
+    
   </div>
 
   <!-- Priority Actions derived from critical/high findings -->
-  {% if findings %}
+  
   <h3 class="subsection-title">Priority Actions</h3>
   <div class="priority-list">
-    {% for f in findings %}
-    {% if f.severity|lower == 'critical' %}
+    
+    
     <div class="priority-item p1 no-break">
       <span class="priority-pill">P1 — Immediate</span>
-      <span class="priority-text"><strong>{{ f.title }}</strong>{% if f.remediation %} — {{ f.remediation }}{% endif %}</span>
+      <span class="priority-text"><strong>Unauthenticated file-upload to RCE</strong> — validate uploads</span>
     </div>
-    {% elif f.severity|lower == 'high' %}
+    
+    
+    
     <div class="priority-item p2 no-break">
       <span class="priority-pill">P2 — 30 days</span>
-      <span class="priority-text"><strong>{{ f.title }}</strong>{% if f.remediation %} — {{ f.remediation }}{% endif %}</span>
+      <span class="priority-text"><strong>Outdated Apache 2.4.41</strong> — patch</span>
     </div>
-    {% elif f.severity|lower == 'medium' %}
-    <div class="priority-item p3 no-break">
-      <span class="priority-pill">P3 — 90 days</span>
-      <span class="priority-text"><strong>{{ f.title }}</strong>{% if f.remediation %} — {{ f.remediation }}{% endif %}</span>
-    </div>
-    {% endif %}
-    {% endfor %}
+    
+    
   </div>
-  {% endif %}
+  
 </section>
 
 <!-- ══════════════════════════════════════════════════════════
@@ -1384,37 +1381,37 @@ h3.subsection-title {
 
   <div class="card-grid-2 mb-24">
     <!-- Target card -->
-    {% if session %}
+    
     <div class="card no-break">
       <div class="card-title">Target System</div>
       <div class="card-subtitle">Primary host under assessment</div>
       <div class="kv-grid">
-        {% if session.target_hostname %}<span class="kv-key">Hostname</span>     <span class="kv-val mono">{{ session.target_hostname }}</span>{% endif %}
-        <span class="kv-key">IP Address</span>   <span class="kv-val mono">{{ session.target_ip }}</span>
-        {% if intel and intel.os_guess %}<span class="kv-key">OS</span>           <span class="kv-val">{{ intel.os_guess }}</span>{% endif %}
-        <span class="kv-key">Engagement</span>  <span class="kv-val">{{ engagement_type }}</span>
-        {% if session.scope %}<span class="kv-key">Scope</span>       <span class="kv-val">{{ session.scope }}</span>{% endif %}
-        {% if session.started_at %}<span class="kv-key">Window</span>      <span class="kv-val">{{ session.started_at }}{% if session.completed_at %} → {{ session.completed_at }}{% endif %}</span>{% endif %}
+        <span class="kv-key">Hostname</span>     <span class="kv-val mono">FORGE</span>
+        <span class="kv-key">IP Address</span>   <span class="kv-val mono">10.129.21.254</span>
+        <span class="kv-key">OS</span>           <span class="kv-val">Ubuntu 20.04</span>
+        <span class="kv-key">Engagement</span>  <span class="kv-val">pentest</span>
+        <span class="kv-key">Scope</span>       <span class="kv-val">single host</span>
+        <span class="kv-key">Window</span>      <span class="kv-val">2026-06-18 → 2026-06-19</span>
       </div>
     </div>
-    {% endif %}
+    
 
     <!-- Intel / shell access card -->
-    {% if intel %}
+    
     <div class="card accent-left critical no-break">
       <div class="card-title">Reconnaissance Intel</div>
       <div class="card-subtitle">Discovered during engagement</div>
       <div class="kv-grid">
-        {% if intel.os_guess %}<span class="kv-key">OS Guess</span>     <span class="kv-val">{{ intel.os_guess }}</span>{% endif %}
-        {% if intel.open_ports %}<span class="kv-key">Open Ports</span>   <span class="kv-val mono">{% for p in intel.open_ports %}{{ p }}{% if not loop.last %}, {% endif %}{% endfor %}</span>{% endif %}
-        {% if intel.shell_access %}<span class="kv-key">Shell Access</span> <span class="kv-val">{{ intel.shell_access }}</span>{% endif %}
+        <span class="kv-key">OS Guess</span>     <span class="kv-val">Ubuntu 20.04</span>
+        <span class="kv-key">Open Ports</span>   <span class="kv-val mono">22, 80</span>
+        <span class="kv-key">Shell Access</span> <span class="kv-val">True</span>
       </div>
     </div>
-    {% endif %}
+    
   </div>
 
   <!-- Services table -->
-  {% if intel and intel.services %}
+  
   <h3 class="subsection-title">Discovered Services</h3>
   <div class="table-wrap mb-24">
     <table class="report-table">
@@ -1426,32 +1423,38 @@ h3.subsection-title {
         </tr>
       </thead>
       <tbody>
-        {% for port, s in intel.services.items() %}
+        
         <tr>
-          <td class="mono">{{ port }}</td>
-          <td class="font-600">{{ s.service }}</td>
-          <td>{{ s.version }}</td>
+          <td class="mono">22</td>
+          <td class="font-600">ssh</td>
+          <td>8.2p1</td>
         </tr>
-        {% endfor %}
+        
+        <tr>
+          <td class="mono">80</td>
+          <td class="font-600">http</td>
+          <td>2.4.41</td>
+        </tr>
+        
       </tbody>
     </table>
   </div>
-  {% endif %}
+  
 
   <!-- Scope statement -->
-  {% if session and session.scope %}
+  
   <h3 class="subsection-title">Scope Statement</h3>
   <div class="card no-break">
     <div class="kv-grid">
       <span class="kv-key">Target</span>
-      <span class="kv-val">{{ session.target }}{% if session.target_ip %} ({{ session.target_ip }}){% endif %}</span>
+      <span class="kv-val">10.129.21.254 (10.129.21.254)</span>
       <span class="kv-key">Scope</span>
-      <span class="kv-val">{{ session.scope }}</span>
+      <span class="kv-val">single host</span>
       <span class="kv-key">Authorisation</span>
       <span class="kv-val">Written authorisation on file; assessment conducted in isolated lab environment</span>
     </div>
   </div>
-  {% endif %}
+  
 </section>
 
 <!-- ══════════════════════════════════════════════════════════
@@ -1555,12 +1558,8 @@ h3.subsection-title {
   </div>
   <p class="section-lead">The graph below traces every hop from initial external access to full compromise. Each node is colour-coded by severity; arrows show causal dependency. MITRE technique IDs annotate each stage.</p>
 
-  {% if attack_path %}
-  <div class="svg-wrap">
-    {%- set ns = namespace(node_count = attack_path|length) -%}
-    {%- set spacing = [140, (900 // (ns.node_count + 1))]|min -%}
-    {%- set svg_w = (ns.node_count * spacing) + 100 -%}
-    <svg viewBox="0 0 {{ svg_w }} 260" xmlns="http://www.w3.org/2000/svg" style="width:100%;display:block;font-family:Inter,sans-serif;">
+  
+  <div class="svg-wrap"><svg viewBox="0 0 520 260" xmlns="http://www.w3.org/2000/svg" style="width:100%;display:block;font-family:Inter,sans-serif;">
       <defs>
         <marker id="arr-red"    markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#e8112d"/></marker>
         <marker id="arr-orange" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><polygon points="0 0,8 3,0 6" fill="#e85d04"/></marker>
@@ -1578,41 +1577,44 @@ h3.subsection-title {
           <feMerge><feMergeNode in="shadow"/><feMergeNode in="SourceGraphic"/></feMerge>
         </filter>
       </defs>
-      <rect width="{{ svg_w }}" height="260" fill="#f8f9fc" rx="8"/>
-      {% for s in attack_path %}
-        {%- set cx = (loop.index0 * spacing) + 60 -%}
-        {%- set cy = 100 -%}
-        {%- set phase_lower = s.phase|lower -%}
-        {%- if 'root' in phase_lower or 'compromise' in phase_lower or 'rce' in phase_lower -%}
-          {%- set fill = '#e8112d' -%}{%- set stroke = '#b30e24' -%}{%- set txt = 'white' -%}
-        {%- elif 'privesc' in phase_lower or 'escalat' in phase_lower -%}
-          {%- set fill = '#e85d04' -%}{%- set stroke = '#b84d00' -%}{%- set txt = 'white' -%}
-        {%- elif 'recon' in phase_lower or 'scan' in phase_lower -%}
-          {%- set fill = '#f0f7fd' -%}{%- set stroke = '#0b66c3' -%}{%- set txt = '#0b2044' -%}
-        {%- else -%}
-          {%- set fill = '#fff5ed' -%}{%- set stroke = '#e85d04' -%}{%- set txt = '#b84d00' -%}
-        {%- endif -%}
-        <g>
-          <rect x="{{ cx - 55 }}" y="{{ cy - 36 }}" width="110" height="72" rx="8" fill="{{ fill }}" stroke="{{ stroke }}" stroke-width="1.5"/>
-          <text x="{{ cx }}" y="{{ cy - 14 }}" text-anchor="middle" font-size="10" font-weight="700" fill="{{ txt }}">{{ s.phase|truncate(16, True, '') }}</text>
-          <text x="{{ cx }}" y="{{ cy + 2 }}" text-anchor="middle" font-size="9" fill="{{ txt }}" opacity="0.85">{{ s.result|truncate(18, True, '') }}</text>
-          {% if s.source %}<text x="{{ cx }}" y="{{ cy + 17 }}" text-anchor="middle" font-size="8" fill="{{ txt }}" opacity="0.7">{{ s.source|truncate(18, True, '') }}</text>{% endif %}
+      <rect width="520" height="260" fill="#f8f9fc" rx="8"/>
+      <g>
+          <rect x="5" y="64" width="110" height="72" rx="8" fill="#f0f7fd" stroke="#0b66c3" stroke-width="1.5"/>
+          <text x="60" y="86" text-anchor="middle" font-size="10" font-weight="700" fill="#0b2044">recon</text>
+          <text x="60" y="102" text-anchor="middle" font-size="9" fill="#0b2044" opacity="0.85">ports found</text>
+          <text x="60" y="117" text-anchor="middle" font-size="8" fill="#0b2044" opacity="0.7">nmap</text>
         </g>
-        {% if not loop.last %}
-        <line x1="{{ cx + 56 }}" y1="{{ cy }}" x2="{{ cx + spacing - 56 }}" y2="{{ cy }}" stroke="#e8112d" stroke-width="2" marker-end="url(#arr-red)"/>
-        {% endif %}
-      {% endfor %}
+        
+        <line x1="116" y1="100" x2="144" y2="100" stroke="#e8112d" stroke-width="2" marker-end="url(#arr-red)"/>
+        
+      <g>
+          <rect x="145" y="64" width="110" height="72" rx="8" fill="#fff5ed" stroke="#e85d04" stroke-width="1.5"/>
+          <text x="200" y="86" text-anchor="middle" font-size="10" font-weight="700" fill="#b84d00">exploit</text>
+          <text x="200" y="102" text-anchor="middle" font-size="9" fill="#b84d00" opacity="0.85">RCE</text>
+          <text x="200" y="117" text-anchor="middle" font-size="8" fill="#b84d00" opacity="0.7">upload</text>
+        </g>
+        
+        <line x1="256" y1="100" x2="284" y2="100" stroke="#e8112d" stroke-width="2" marker-end="url(#arr-red)"/>
+        
+      <g>
+          <rect x="285" y="64" width="110" height="72" rx="8" fill="#e85d04" stroke="#b84d00" stroke-width="1.5"/>
+          <text x="340" y="86" text-anchor="middle" font-size="10" font-weight="700" fill="white">privesc</text>
+          <text x="340" y="102" text-anchor="middle" font-size="9" fill="white" opacity="0.85">root</text>
+          <text x="340" y="117" text-anchor="middle" font-size="8" fill="white" opacity="0.7">sudo git</text>
+        </g>
+        
+      
       <!-- Legend -->
-      <rect x="{{ svg_w - 180 }}" y="180" width="165" height="64" rx="6" fill="white" stroke="#e2e4ec" stroke-width="1"/>
-      <text x="{{ svg_w - 165 }}" y="198" font-size="9" font-weight="700" fill="#474c62" letter-spacing="0.08em">LEGEND</text>
-      <rect x="{{ svg_w - 165 }}" y="206" width="12" height="12" rx="2" fill="#e8112d"/>
-      <text x="{{ svg_w - 149 }}" y="216" font-size="9" fill="#2d3142">Critical / exploited</text>
-      <rect x="{{ svg_w - 165 }}" y="223" width="12" height="12" rx="2" fill="#e85d04"/>
-      <text x="{{ svg_w - 149 }}" y="233" font-size="9" fill="#2d3142">High severity</text>
-      <rect x="{{ svg_w - 70 }}" y="206" width="12" height="12" rx="2" fill="#f0f7fd" stroke="#0b66c3" stroke-width="1"/>
-      <text x="{{ svg_w - 54 }}" y="216" font-size="9" fill="#2d3142">Recon / info</text>
-      <line x1="{{ svg_w - 70 }}" y1="229" x2="{{ svg_w - 58 }}" y2="229" stroke="#e8112d" stroke-width="2" marker-end="url(#arr-red)"/>
-      <text x="{{ svg_w - 54 }}" y="233" font-size="9" fill="#2d3142">Attack path</text>
+      <rect x="340" y="180" width="165" height="64" rx="6" fill="white" stroke="#e2e4ec" stroke-width="1"/>
+      <text x="355" y="198" font-size="9" font-weight="700" fill="#474c62" letter-spacing="0.08em">LEGEND</text>
+      <rect x="355" y="206" width="12" height="12" rx="2" fill="#e8112d"/>
+      <text x="371" y="216" font-size="9" fill="#2d3142">Critical / exploited</text>
+      <rect x="355" y="223" width="12" height="12" rx="2" fill="#e85d04"/>
+      <text x="371" y="233" font-size="9" fill="#2d3142">High severity</text>
+      <rect x="450" y="206" width="12" height="12" rx="2" fill="#f0f7fd" stroke="#0b66c3" stroke-width="1"/>
+      <text x="466" y="216" font-size="9" fill="#2d3142">Recon / info</text>
+      <line x1="450" y1="229" x2="462" y2="229" stroke="#e8112d" stroke-width="2" marker-end="url(#arr-red)"/>
+      <text x="466" y="233" font-size="9" fill="#2d3142">Attack path</text>
     </svg>
   </div>
 
@@ -1620,17 +1622,19 @@ h3.subsection-title {
   <div class="mt-16 card no-break">
     <div class="card-title mb-8">Kill-Chain Narrative</div>
     <div class="kv-grid" style="grid-template-columns:90px 1fr;">
-      {% for s in attack_path %}
-      <span class="kv-key">Step {{ loop.index }}</span>
-      <span class="kv-val"><strong>{{ s.phase }}</strong>{% if s.result %} — {{ s.result }}{% endif %}{% if s.source %} <span class="text-mono color-muted">({{ s.source }})</span>{% endif %}</span>
-      {% endfor %}
+      
+      <span class="kv-key">Step 1</span>
+      <span class="kv-val"><strong>recon</strong> — ports found <span class="text-mono color-muted">(nmap)</span></span>
+      
+      <span class="kv-key">Step 2</span>
+      <span class="kv-val"><strong>exploit</strong> — RCE <span class="text-mono color-muted">(upload)</span></span>
+      
+      <span class="kv-key">Step 3</span>
+      <span class="kv-val"><strong>privesc</strong> — root <span class="text-mono color-muted">(sudo git)</span></span>
+      
     </div>
   </div>
-  {% else %}
-  <div class="card no-break" style="background:var(--gray-50);">
-    <p class="finding-text color-muted">No attack path data available for this engagement.</p>
-  </div>
-  {% endif %}
+  
 </section>
 
 <!-- ══════════════════════════════════════════════════════════
@@ -1645,7 +1649,7 @@ h3.subsection-title {
   </div>
   <p class="section-lead">All attack attempts — successful and unsuccessful — are logged below for full coverage transparency. Non-exploitable results are retained as evidence that the attack surface was thoroughly exercised.</p>
 
-  {% if coverage_tests %}
+  
   <div class="table-wrap">
     <table class="report-table">
       <thead>
@@ -1658,39 +1662,41 @@ h3.subsection-title {
         </tr>
       </thead>
       <tbody>
-        {% for c in coverage_tests %}
-        {%- set oc = c.outcome|lower -%}
-        {%- if oc == 'success' or oc == 'exploitable' -%}
-          {%- set row_bg = 'background:var(--sev-critical-bg);' -%}
-        {%- elif oc == 'negative' or oc == 'blocked' or oc == 'error' -%}
-          {%- set row_bg = 'background:var(--sev-low-bg);' -%}
-        {%- else -%}
-          {%- set row_bg = '' -%}
-        {%- endif -%}
-        <tr style="{{ row_bg }}">
-          <td class="mono color-muted">{{ '%02d'|format(loop.index) }}</td>
-          <td class="font-600">{{ c.tool }}</td>
-          <td class="mono" style="font-size:11px;max-width:260px;word-break:break-all;">{{ c.command }}</td>
+        <tr style="background:var(--sev-critical-bg);">
+          <td class="mono color-muted">01</td>
+          <td class="font-600">nmap</td>
+          <td class="mono" style="font-size:11px;max-width:260px;word-break:break-all;">nmap -sCV</td>
           <td>
-            {% if oc == 'success' %}<span class="badge success">Success</span>
-            {% elif oc == 'exploitable' %}<span class="badge exploitable">Exploitable</span>
-            {% elif oc == 'negative' %}<span class="badge non-exploitable">Negative</span>
-            {% elif oc == 'blocked' %}<span class="badge blocked">Blocked</span>
-            {% elif oc == 'error' %}<span class="badge blocked">Error</span>
-            {% else %}<span class="badge info">{{ c.outcome }}</span>
-            {% endif %}
+            <span class="badge success">Success</span>
+            
           </td>
-          <td>{{ c.note }}</td>
+          <td>3 ports</td>
         </tr>
-        {% endfor %}
+        <tr style="background:var(--sev-low-bg);">
+          <td class="mono color-muted">02</td>
+          <td class="font-600">sqlmap</td>
+          <td class="mono" style="font-size:11px;max-width:260px;word-break:break-all;">sqlmap /api?id=</td>
+          <td>
+            <span class="badge non-exploitable">Negative</span>
+            
+          </td>
+          <td>not injectable</td>
+        </tr>
+        <tr style="background:var(--sev-low-bg);">
+          <td class="mono color-muted">03</td>
+          <td class="font-600">hydra</td>
+          <td class="mono" style="font-size:11px;max-width:260px;word-break:break-all;">hydra ssh</td>
+          <td>
+            <span class="badge blocked">Blocked</span>
+            
+          </td>
+          <td>rate-limited</td>
+        </tr>
+        
       </tbody>
     </table>
   </div>
-  {% else %}
-  <div class="card no-break" style="background:var(--gray-50);">
-    <p class="finding-text color-muted">No coverage log data available for this engagement.</p>
-  </div>
-  {% endif %}
+  
 </section>
 
 <!-- ══════════════════════════════════════════════════════════
@@ -1703,7 +1709,7 @@ h3.subsection-title {
       <h2 class="section-title">Findings Register</h2>
     </div>
   </div>
-  <p class="section-lead">{% if findings %}All {{ findings|length }} finding{% if findings|length != 1 %}s{% endif %} from this engagement are listed below in severity order.{% else %}No findings have been recorded for this engagement.{% endif %} Each finding references its detailed card in Section 8 and its MITRE ATT&amp;CK technique.</p>
+  <p class="section-lead">All 2 findings from this engagement are listed below in severity order. Each finding references its detailed card in Section 8 and its MITRE ATT&amp;CK technique.</p>
 
   <div class="flex gap-8 flex-wrap items-center mb-16">
     <span class="text-xs color-muted font-600" style="letter-spacing:0.06em;text-transform:uppercase;">Severity:</span>
@@ -1718,7 +1724,7 @@ h3.subsection-title {
     <span class="badge gated">Gated</span>
   </div>
 
-  {% if findings %}
+  
   <div class="table-wrap">
     <table class="report-table">
       <thead>
@@ -1733,33 +1739,33 @@ h3.subsection-title {
         </tr>
       </thead>
       <tbody>
-        {% for f in findings %}
-        {%- set sev = f.severity|lower -%}
-        {%- if sev == 'critical' -%}{%- set row_bg = 'background:var(--sev-critical-bg);' -%}
-        {%- elif sev == 'high' -%}{%- set row_bg = 'background:var(--sev-high-bg);' -%}
-        {%- else -%}{%- set row_bg = '' -%}
-        {%- endif -%}
-        <tr style="{{ row_bg }}">
-          <td class="mono font-600" style="color:var(--sev-{{ sev }}-txt);">{{ f.fid | default('F-%02d'|format(loop.index)) }}</td>
-          <td class="font-600">{{ f.title }}</td>
-          <td><span class="badge {{ sev }}">{{ f.severity }}</span></td>
-          <td class="mono font-600" style="color:var(--sev-{{ sev }}-txt);">{% if f.extra and f.extra.cvss_base %}{{ f.extra.cvss_base }}{% else %}—{% endif %}</td>
-          <td class="mono">{{ f.host }}{% if f.port %}:{{ f.port }}{% endif %}</td>
-          <td class="mono" style="color:var(--blue-400);">{% if f.mitre %}{{ f.mitre }}{% else %}—{% endif %}</td>
-          <td>
-            {%- set rs = f.retest_status|lower if f.retest_status else '' -%}
-            {% if rs == 'verified' %}<span class="badge verified">Verified</span>
-            {% elif rs == 'open' %}<span class="badge open">Open</span>
-            {% elif rs == 'gated' %}<span class="badge gated">Gated</span>
-            {% else %}<span class="badge info">{{ f.retest_status or 'Open' }}</span>
-            {% endif %}
+        <tr style="background:var(--sev-critical-bg);">
+          <td class="mono font-600" style="color:var(--sev-critical-txt);">F-01</td>
+          <td class="font-600">Unauthenticated file-upload to RCE</td>
+          <td><span class="badge critical">critical</span></td>
+          <td class="mono font-600" style="color:var(--sev-critical-txt);">9.8</td>
+          <td class="mono">10.129.21.254:80</td>
+          <td class="mono" style="color:var(--blue-400);">T1059</td>
+          <td><span class="badge verified">Verified</span>
+            
           </td>
         </tr>
-        {% endfor %}
+        <tr style="background:var(--sev-high-bg);">
+          <td class="mono font-600" style="color:var(--sev-high-txt);">F-02</td>
+          <td class="font-600">Outdated Apache 2.4.41</td>
+          <td><span class="badge high">high</span></td>
+          <td class="mono font-600" style="color:var(--sev-high-txt);">7.5</td>
+          <td class="mono">10.129.21.254:80</td>
+          <td class="mono" style="color:var(--blue-400);">—</td>
+          <td><span class="badge open">Open</span>
+            
+          </td>
+        </tr>
+        
       </tbody>
     </table>
   </div>
-  {% endif %}
+  
 </section>
 
 <!-- ══════════════════════════════════════════════════════════
@@ -1774,82 +1780,103 @@ h3.subsection-title {
   </div>
   <p class="section-lead">Each card below provides a full technical description, business impact, evidence chain, and specific remediation guidance.</p>
 
-  {% if findings %}
-  {% for f in findings %}
-  {%- set sev = f.severity|lower -%}
-  {%- set fid = f.fid | default('F-' ~ '%02d'|format(loop.index)) -%}
+  
   <div class="finding-card no-break">
-    <div class="finding-card-header {{ sev }}">
+    <div class="finding-card-header critical">
       <div>
-        <div class="finding-card-id">{{ fid }}{% if f.extra and f.extra.cvss_base %} · CVSS {{ f.extra.cvss_base }}{% if f.extra.cvss_vector %} ({{ f.extra.cvss_vector }}){% endif %}{% endif %}</div>
-        <div class="finding-card-name">{{ f.title }}</div>
-        {%- set _basis = f.severity_rationale if f.severity_rationale else (f.extra.severity_rationale if f.extra and f.extra.severity_rationale else '') -%}
-        {% if _basis %}<div class="finding-card-basis" style="font-size:7.5pt;color:#5b6470;margin-top:2px;">Severity basis: {{ _basis }}</div>{% endif %}
+        <div class="finding-card-id">F-01 · CVSS 9.8 (CVSS:3.1/AV:N/AC:L)</div>
+        <div class="finding-card-name">Unauthenticated file-upload to RCE</div>
       </div>
       <div class="finding-card-meta">
-        <span class="badge {{ sev }}">{{ f.severity }}</span>
-        {%- set _etag = f.evidence_tag if f.evidence_tag else (f.extra.evidence_tag if f.extra and f.extra.evidence_tag else '') -%}
-        {% if _etag %}<span class="badge info" title="What ARGUS established">{{ _etag }}</span>{% endif %}
-        {%- set _bv = f.browser_verified if f.browser_verified is defined else (f.extra.browser_verified if f.extra else none) -%}
-        {% if _bv == true %}<span style="padding:1px 6px;border-radius:4px;font-size:7pt;font-weight:700;background:#e8f7ee;color:#157339;border:1px solid #19a34a;" title="Confirmed by a real headless browser">BROWSER-VERIFIED</span>
-        {% elif _bv == false %}<span style="padding:1px 6px;border-radius:4px;font-size:7pt;font-weight:700;background:#fff4e5;color:#9a6700;border:1px solid #d29922;" title="A browser could not confirm this — needs manual review">UNVERIFIED</span>{% endif %}
-        {%- set _rps = f.reproduce_status if f.reproduce_status is defined else (f.extra.reproduce_status if f.extra else none) -%}
-        {% if _bv is none and _rps == 'reproduced' %}<span style="padding:1px 6px;border-radius:4px;font-size:7pt;font-weight:700;background:#e8f7ee;color:#157339;border:1px solid #19a34a;" title="Independently reproduced on a separate path">REPRODUCED</span>
-        {% elif _bv is none and _rps == 'unreproduced' %}<span style="padding:1px 6px;border-radius:4px;font-size:7pt;font-weight:700;background:#fff4e5;color:#9a6700;border:1px solid #d29922;" title="High/critical claim not independently reproduced">UNREPRODUCED</span>{% endif %}
-        {%- set rs = f.retest_status|lower if f.retest_status else '' -%}
-        {% if rs == 'verified' %}<span class="badge verified">Verified</span>
-        {% elif rs == 'open' %}<span class="badge open">Open</span>
-        {% elif rs == 'gated' %}<span class="badge gated">Gated</span>
-        {% elif f.retest_status %}<span class="badge info">{{ f.retest_status }}</span>{% endif %}
-        {% if f.mitre %}<span class="badge info">{{ f.mitre }}</span>{% endif %}
+        <span class="badge critical">critical</span><span class="badge verified">Verified</span>
+        
+        <span class="badge info">T1059</span>
       </div>
     </div>
     <div class="finding-card-body">
-      {% if f.description %}
+      
       <div class="no-break">
         <div class="finding-section-label">Description</div>
-        <p class="finding-text">{{ f.description }}</p>
+        <p class="finding-text">Webshell via upload bypass.</p>
       </div>
-      {% endif %}
+      
 
       <div class="no-break">
         <div class="finding-section-label">Metadata</div>
         <div class="kv-grid" style="grid-template-columns:120px 1fr;">
-          <span class="kv-key">Host</span><span class="kv-val mono">{{ f.host }}{% if f.port %}:{{ f.port }}{% endif %}</span>
-          {% if f.mitre %}<span class="kv-key">MITRE</span><span class="kv-val mono">{{ f.mitre }}</span>{% endif %}
-          {% if f.cves and f.cves|length > 0 %}<span class="kv-key">CVEs</span><span class="kv-val mono">{{ f.cves|join(', ') }}</span>{% endif %}
-          {% if f.extra and f.extra.cvss_base %}<span class="kv-key">CVSS Base</span><span class="kv-val mono">{{ f.extra.cvss_base }}</span>{% endif %}
-          {% if f.extra and f.extra.cvss_vector %}<span class="kv-key">CVSS Vector</span><span class="kv-val mono" style="font-size:10px;">{{ f.extra.cvss_vector }}</span>{% endif %}
+          <span class="kv-key">Host</span><span class="kv-val mono">10.129.21.254:80</span>
+          <span class="kv-key">MITRE</span><span class="kv-val mono">T1059</span>
+          
+          <span class="kv-key">CVSS Base</span><span class="kv-val mono">9.8</span>
+          <span class="kv-key">CVSS Vector</span><span class="kv-val mono" style="font-size:10px;">CVSS:3.1/AV:N/AC:L</span>
         </div>
       </div>
 
-      {% if f.evidence %}
+      
       <div class="no-break">
         <div class="finding-section-label">Evidence</div>
-        <div class="code-block">{{ f.evidence }}</div>
+        <div class="code-block">uid=33(www-data)</div>
       </div>
-      {% endif %}
+      
 
-      {% if f.remediation %}
+      
       <div class="no-break">
-        <div class="finding-section-label">Remediation</div>
-        {%- if sev == 'critical' -%}{%- set pclass = 'p1' -%}
-        {%- elif sev == 'high' -%}{%- set pclass = 'p2' -%}
-        {%- else -%}{%- set pclass = 'p3' -%}
-        {%- endif -%}
-        <div class="priority-item {{ pclass }}" style="border-radius:6px;">
-          <span class="priority-text">{{ f.remediation }}</span>
+        <div class="finding-section-label">Remediation</div><div class="priority-item p1" style="border-radius:6px;">
+          <span class="priority-text">validate uploads</span>
         </div>
       </div>
-      {% endif %}
+      
     </div>
   </div>
-  {% endfor %}
-  {% else %}
-  <div class="card no-break" style="background:var(--gray-50);">
-    <p class="finding-text color-muted">No findings recorded for this engagement.</p>
+  <div class="finding-card no-break">
+    <div class="finding-card-header high">
+      <div>
+        <div class="finding-card-id">F-02 · CVSS 7.5</div>
+        <div class="finding-card-name">Outdated Apache 2.4.41</div>
+      </div>
+      <div class="finding-card-meta">
+        <span class="badge high">high</span><span class="badge open">Open</span>
+        
+        
+      </div>
+    </div>
+    <div class="finding-card-body">
+      
+      <div class="no-break">
+        <div class="finding-section-label">Description</div>
+        <p class="finding-text">Version banner.</p>
+      </div>
+      
+
+      <div class="no-break">
+        <div class="finding-section-label">Metadata</div>
+        <div class="kv-grid" style="grid-template-columns:120px 1fr;">
+          <span class="kv-key">Host</span><span class="kv-val mono">10.129.21.254:80</span>
+          
+          <span class="kv-key">CVEs</span><span class="kv-val mono">CVE-2021-41773</span>
+          <span class="kv-key">CVSS Base</span><span class="kv-val mono">7.5</span>
+          
+        </div>
+      </div>
+
+      
+      <div class="no-break">
+        <div class="finding-section-label">Evidence</div>
+        <div class="code-block">Server: Apache/2.4.41</div>
+      </div>
+      
+
+      
+      <div class="no-break">
+        <div class="finding-section-label">Remediation</div><div class="priority-item p2" style="border-radius:6px;">
+          <span class="priority-text">patch</span>
+        </div>
+      </div>
+      
+    </div>
   </div>
-  {% endif %}
+  
+  
 </section>
 
 <!-- ══════════════════════════════════════════════════════════
@@ -1864,8 +1891,8 @@ h3.subsection-title {
   </div>
   <p class="section-lead">The following attack vectors were fully exercised and found to be not exploitable in this engagement. These results are retained as explicit coverage evidence — demonstrating that the attack surface was thoroughly tested, not merely skipped.</p>
 
-  {% set non_exploitable = coverage_tests|selectattr('outcome', 'in', ['negative', 'blocked', 'error'])|list if coverage_tests else [] %}
-  {% if non_exploitable %}
+  
+  
   <div class="table-wrap">
     <table class="report-table">
       <thead>
@@ -1877,20 +1904,25 @@ h3.subsection-title {
         </tr>
       </thead>
       <tbody>
-        {% for c in non_exploitable %}
+        
         <tr>
-          <td class="font-600">{{ c.command }}</td>
-          <td class="mono">{{ c.tool }}</td>
-          <td>
-            {%- set oc = c.outcome|lower -%}
-            {% if oc == 'negative' %}<span class="badge non-exploitable">Negative</span>
-            {% elif oc == 'blocked' %}<span class="badge blocked">Blocked</span>
-            {% else %}<span class="badge blocked">Error</span>
-            {% endif %}
+          <td class="font-600">sqlmap /api?id=</td>
+          <td class="mono">sqlmap</td>
+          <td><span class="badge non-exploitable">Negative</span>
+            
           </td>
-          <td>{{ c.note }}</td>
+          <td>not injectable</td>
         </tr>
-        {% endfor %}
+        
+        <tr>
+          <td class="font-600">hydra ssh</td>
+          <td class="mono">hydra</td>
+          <td><span class="badge blocked">Blocked</span>
+            
+          </td>
+          <td>rate-limited</td>
+        </tr>
+        
       </tbody>
     </table>
   </div>
@@ -1899,11 +1931,7 @@ h3.subsection-title {
     <div class="card-title" style="color:var(--sev-low-txt);">Coverage Statement</div>
     <p class="finding-text" style="margin-top:6px;">The above non-exploitable results are a positive finding — they demonstrate that these controls are correctly implemented. These controls should be preserved through future code changes and validated on each major release.</p>
   </div>
-  {% else %}
-  <div class="card no-break" style="background:var(--gray-50);">
-    <p class="finding-text color-muted">No non-exploitable test results recorded for this engagement.</p>
-  </div>
-  {% endif %}
+  
 </section>
 
 <!-- ══════════════════════════════════════════════════════════
@@ -1918,7 +1946,7 @@ h3.subsection-title {
   </div>
   <p class="section-lead">The table below maps each major attack stage to its detection opportunity — the telemetry source, specific rule or alert, and whether it was caught during this engagement.</p>
 
-  {% if detection_map %}
+  
   <div class="table-wrap mb-16">
     <table class="report-table">
       <thead>
@@ -1931,21 +1959,17 @@ h3.subsection-title {
         </tr>
       </thead>
       <tbody>
-        {% for d in detection_map %}
+        
         <tr>
-          <td><span class="detect-stage">{{ d.finding }}</span></td>
-          <td class="mono" style="color:var(--blue-400);font-size:11px;">{{ d.technique }}</td>
-          <td>{{ d.opportunity }}</td>
-          <td class="mono" style="font-size:11px;">{{ d.telemetry }}</td>
-          <td>
-            {%- set caught = d.caught|lower if d.caught else 'open' -%}
-            {% if caught == 'yes' or caught == 'covered' %}<span class="detect-status covered">Covered</span>
-            {% elif caught == 'partial' %}<span class="detect-status partial">Partial</span>
-            {% else %}<span class="detect-status open">Open</span>
-            {% endif %}
+          <td><span class="detect-stage">RCE</span></td>
+          <td class="mono" style="color:var(--blue-400);font-size:11px;">T1059</td>
+          <td>child proc from apache</td>
+          <td class="mono" style="font-size:11px;">EDR</td>
+          <td><span class="detect-status open">Open</span>
+            
           </td>
         </tr>
-        {% endfor %}
+        
       </tbody>
     </table>
   </div>
@@ -1961,11 +1985,7 @@ h3.subsection-title {
       <span class="kv-val">Run tabletop exercises using this kill-chain as the scenario. Schedule quarterly purple-team exercises.</span>
     </div>
   </div>
-  {% else %}
-  <div class="card no-break" style="background:var(--gray-50);">
-    <p class="finding-text color-muted">No detection mapping data available for this engagement.</p>
-  </div>
-  {% endif %}
+  
 </section>
 
 <!-- ══════════════════════════════════════════════════════════
@@ -1984,7 +2004,7 @@ h3.subsection-title {
     <p class="finding-text" style="margin-top:6px;">All captured artefacts have been <strong>redacted for client delivery</strong>. SHA-256 hashes allow the client to independently verify artefact integrity. Artefacts are stored encrypted at rest and will be destroyed 30 days post-engagement per ARGUS data-retention policy.</p>
   </div>
 
-  {% if loot_entries %}
+  
   <h3 class="subsection-title">Evidence Register</h3>
   <div class="table-wrap mb-24">
     <table class="report-table">
@@ -1999,35 +2019,35 @@ h3.subsection-title {
         </tr>
       </thead>
       <tbody>
-        {% for l in loot_entries %}
+        
         <tr>
-          <td class="mono font-600">{{ l.doi_label }}</td>
-          <td class="mono" style="font-size:11px;">{{ l.source }}</td>
-          <td class="mono" style="font-size:11px;">{{ l.target }}</td>
-          <td><span class="badge {{ l.severity|lower }}">{{ l.severity }}</span></td>
-          <td class="mono text-xs color-muted">{{ l.sha256[:16] if l.sha256 else '—' }}…</td>
-          <td class="mono text-xs color-muted">{% if l.size_bytes %}{{ l.size_bytes }} B{% else %}—{% endif %}</td>
+          <td class="mono font-600">root.txt</td>
+          <td class="mono" style="font-size:11px;">/root/root.txt</td>
+          <td class="mono" style="font-size:11px;">10.129.21.254</td>
+          <td><span class="badge critical">critical</span></td>
+          <td class="mono text-xs color-muted">3b71dea0…</td>
+          <td class="mono text-xs color-muted">33 B</td>
         </tr>
-        {% endfor %}
+        
       </tbody>
     </table>
   </div>
 
   <h3 class="subsection-title">Captured Loot — Redacted Samples</h3>
   <div style="display:flex;flex-direction:column;gap:10px;">
-    {% for l in loot_entries %}
+    
     <div class="loot-card no-break">
       <div class="loot-header">
-        <span class="loot-filename">{{ l.doi_label }} · {{ l.source }}{% if l.target %} &nbsp;·&nbsp; {{ l.target }}{% endif %}</span>
-        <span class="loot-hash">{% if l.sha256 %}SHA-256: {{ l.sha256[:16] }}…{% endif %}{% if l.severity %} &nbsp;·&nbsp; {{ l.severity|upper }}{% endif %}</span>
+        <span class="loot-filename">root.txt · /root/root.txt &nbsp;·&nbsp; 10.129.21.254</span>
+        <span class="loot-hash">SHA-256: 3b71dea0… &nbsp;·&nbsp; CRITICAL</span>
       </div>
       <div class="loot-content"><span class="redacted">[redacted — hash verified, present in encrypted evidence package]</span></div>
     </div>
-    {% endfor %}
+    
   </div>
-  {% endif %}
+  
 
-  {% if creds_summary %}
+  
   <h3 class="subsection-title mt-24">Captured Credentials (Redacted)</h3>
   <div class="table-wrap">
     <table class="report-table">
@@ -2040,24 +2060,20 @@ h3.subsection-title {
         </tr>
       </thead>
       <tbody>
-        {% for cr in creds_summary %}
+        
         <tr>
-          <td class="mono font-600">{{ cr.user }}</td>
-          <td class="mono"><span class="redacted">{{ cr.password or '••••••(redacted)' }}</span></td>
-          <td class="mono">{{ cr.domain or '—' }}</td>
-          <td class="text-xs">{{ cr.source }}</td>
+          <td class="mono font-600">forge_app</td>
+          <td class="mono"><span class="redacted">••••••</span></td>
+          <td class="mono">—</td>
+          <td class="text-xs">config.php</td>
         </tr>
-        {% endfor %}
+        
       </tbody>
     </table>
   </div>
-  {% endif %}
+  
 
-  {% if not loot_entries and not creds_summary %}
-  <div class="card no-break" style="background:var(--gray-50);">
-    <p class="finding-text color-muted">No loot or credential data recorded for this engagement.</p>
-  </div>
-  {% endif %}
+  
 </section>
 
 <!-- ══════════════════════════════════════════════════════════
@@ -2072,49 +2088,28 @@ h3.subsection-title {
   </div>
   <p class="section-lead">All techniques observed or exercised during this engagement, mapped to the MITRE ATT&amp;CK Enterprise framework. Exploited techniques are highlighted.</p>
 
-  {% if mitre_mappings %}
-  <!-- ATT&CK heatmap — inline SVG derived from mitre_mappings -->
-  {%- set tactics_seen = mitre_mappings|map(attribute='tactic')|unique|list -%}
-  {%- set col_w = 133 -%}
-  {%- set svg_w = [980, (tactics_seen|length * (col_w + 15)) + 16]|max -%}
-  <div class="svg-wrap mb-24">
-    <svg viewBox="0 0 {{ svg_w }} 180" xmlns="http://www.w3.org/2000/svg" style="width:100%;display:block;font-family:Inter,sans-serif;">
-      <rect width="{{ svg_w }}" height="180" fill="#f8f9fc" rx="8"/>
-      {%- set blues = ['#0b2044','#0b3060','#0b4080','#0b55a8','#0b66c3','#1a7fd4','#4da3e8','#6db8f2','#8dcef7'] -%}
-      {% for tactic in tactics_seen %}
-        {%- set col = loop.index0 -%}
-        {%- set cx = col * (col_w + 15) + 8 -%}
-        {%- set blue = blues[col % blues|length] -%}
-        <rect x="{{ cx }}" y="8" width="{{ col_w }}" height="36" rx="5" fill="{{ blue }}"/>
-        <text x="{{ cx + col_w // 2 }}" y="24" text-anchor="middle" font-size="8" font-weight="700" fill="white" letter-spacing="0.06em">{{ tactic|upper|truncate(18, True, '') }}</text>
-        {%- set tactic_techs = mitre_mappings|selectattr('tactic', 'equalto', tactic)|list -%}
-        {% for tech in tactic_techs %}
-          {%- set ty = 52 + loop.index0 * 48 -%}
-          {%- if ty < 170 -%}
-          <rect x="{{ cx }}" y="{{ ty }}" width="{{ col_w }}" height="40" rx="4" fill="#e8112d" opacity="0.9" stroke="#b30e24" stroke-width="1.5"/>
-          <text x="{{ cx + col_w // 2 }}" y="{{ ty + 16 }}" text-anchor="middle" font-size="9" font-weight="700" fill="white">{{ tech.technique_id }}</text>
-          <text x="{{ cx + col_w // 2 }}" y="{{ ty + 30 }}" text-anchor="middle" font-size="8" fill="rgba(255,255,255,0.85)">{{ tech.technique_name|truncate(20, True, '') }}</text>
-          {%- endif -%}
-        {% endfor %}
-      {% endfor %}
+  
+  <!-- ATT&CK heatmap — inline SVG derived from mitre_mappings --><div class="svg-wrap mb-24">
+    <svg viewBox="0 0 980 180" xmlns="http://www.w3.org/2000/svg" style="width:100%;display:block;font-family:Inter,sans-serif;">
+      <rect width="980" height="180" fill="#f8f9fc" rx="8"/><rect x="8" y="8" width="133" height="36" rx="5" fill="#0b2044"/>
+        <text x="74" y="24" text-anchor="middle" font-size="8" font-weight="700" fill="white" letter-spacing="0.06em">INITIAL ACCESS</text><rect x="8" y="52" width="133" height="40" rx="4" fill="#e8112d" opacity="0.9" stroke="#b30e24" stroke-width="1.5"/>
+          <text x="74" y="68" text-anchor="middle" font-size="9" font-weight="700" fill="white">T1190</text>
+          <text x="74" y="82" text-anchor="middle" font-size="8" fill="rgba(255,255,255,0.85)">Exploit Public-Facing App</text>
+      
     </svg>
   </div>
 
   <div class="mitre-grid">
-    {% for m in mitre_mappings %}
+    
     <div class="mitre-cell no-break">
-      <div class="mitre-tactic">{{ m.tactic }}</div>
-      <div class="mitre-id">{{ m.technique_id }}</div>
-      <div class="mitre-name">{{ m.technique_name }}</div>
-      {% if m.tool_used %}<div class="mitre-note">Tool: {{ m.tool_used }}</div>{% endif %}
+      <div class="mitre-tactic">Initial Access</div>
+      <div class="mitre-id">T1190</div>
+      <div class="mitre-name">Exploit Public-Facing App</div>
+      <div class="mitre-note">Tool: operator</div>
     </div>
-    {% endfor %}
+    
   </div>
-  {% else %}
-  <div class="card no-break" style="background:var(--gray-50);">
-    <p class="finding-text color-muted">No MITRE ATT&amp;CK mapping data available for this engagement.</p>
-  </div>
-  {% endif %}
+  
 </section>
 
 <!-- ══════════════════════════════════════════════════════════
@@ -2129,10 +2124,6 @@ h3.subsection-title {
   </div>
   <p class="section-lead">Remediation items are grouped into three priority tiers. P1 items are blocking. P2 and P3 items should be tracked in the vulnerability management system with the timelines below.</p>
 
-  {% if findings %}
-  {%- set crit_findings = findings|selectattr('severity', 'equalto', 'Critical')|list -%}
-  {%- set high_findings = findings|selectattr('severity', 'equalto', 'High')|list -%}
-  {%- set med_findings  = findings|selectattr('severity', 'in', ['Medium', 'Low'])|list -%}
   <div class="card-grid-3">
     <!-- P1 Critical -->
     <div class="roadmap-col no-break">
@@ -2141,16 +2132,9 @@ h3.subsection-title {
         <span class="roadmap-timeline-tag">Immediate / &lt;7 days</span>
       </div>
       <div class="roadmap-body p1">
-        {% if crit_findings %}
-        {% for f in crit_findings %}
-        <div class="roadmap-item p1">
-          <div class="roadmap-bullet">{{ loop.index }}</div>
-          <div><strong>{{ f.title }}</strong>{% if f.remediation %} — {{ f.remediation }}{% endif %} <span class="text-xs color-muted">({{ f.fid | default('F-%02d'|format(loop.index)) }})</span></div>
-        </div>
-        {% endfor %}
-        {% else %}
+        
         <div class="roadmap-item p1"><div class="roadmap-bullet">—</div><div>No critical findings identified.</div></div>
-        {% endif %}
+        
       </div>
     </div>
 
@@ -2161,16 +2145,9 @@ h3.subsection-title {
         <span class="roadmap-timeline-tag">30 days</span>
       </div>
       <div class="roadmap-body p2">
-        {% if high_findings %}
-        {% for f in high_findings %}
-        <div class="roadmap-item p2">
-          <div class="roadmap-bullet">{{ loop.index }}</div>
-          <div><strong>{{ f.title }}</strong>{% if f.remediation %} — {{ f.remediation }}{% endif %}</div>
-        </div>
-        {% endfor %}
-        {% else %}
+        
         <div class="roadmap-item p2"><div class="roadmap-bullet">—</div><div>No high findings identified.</div></div>
-        {% endif %}
+        
       </div>
     </div>
 
@@ -2181,24 +2158,13 @@ h3.subsection-title {
         <span class="roadmap-timeline-tag">90 days</span>
       </div>
       <div class="roadmap-body p3">
-        {% if med_findings %}
-        {% for f in med_findings %}
-        <div class="roadmap-item p3">
-          <div class="roadmap-bullet">{{ loop.index }}</div>
-          <div><strong>{{ f.title }}</strong>{% if f.remediation %} — {{ f.remediation }}{% endif %}</div>
-        </div>
-        {% endfor %}
-        {% else %}
+        
         <div class="roadmap-item p3"><div class="roadmap-bullet">—</div><div>No medium/low findings identified.</div></div>
-        {% endif %}
+        
       </div>
     </div>
   </div>
-  {% else %}
-  <div class="card no-break" style="background:var(--gray-50);">
-    <p class="finding-text color-muted">No findings to remediate for this engagement.</p>
-  </div>
-  {% endif %}
+  
 </section>
 
 <!-- ══════════════════════════════════════════════════════════
@@ -2216,150 +2182,106 @@ h3.subsection-title {
     <!-- Timeline -->
     <div>
       <h3 class="subsection-title">Engagement Timeline</h3>
-      {% if engagement_timeline %}
+      
       <div class="timeline">
-        {% for t in engagement_timeline %}
+        
         <div class="timeline-item">
-          <div class="timeline-dot {% if 'root' in t.label|lower or 'compromise' in t.label|lower %}critical{% elif 'start' in t.label|lower or 'end' in t.label|lower or 'report' in t.label|lower %}milestone{% endif %}"></div>
-          <div class="timeline-time">{{ t.ts }}</div>
-          <div class="timeline-label">{{ t.label }}</div>
-          {% if t.detail %}<div class="timeline-note">{{ t.detail }}</div>{% endif %}
+          <div class="timeline-dot "></div>
+          <div class="timeline-time">14:02</div>
+          <div class="timeline-label">recon</div>
+          <div class="timeline-note">start</div>
         </div>
-        {% endfor %}
+        
+        <div class="timeline-item">
+          <div class="timeline-dot critical"></div>
+          <div class="timeline-time">16:05</div>
+          <div class="timeline-label">root</div>
+          <div class="timeline-note">sudo git</div>
+        </div>
+        
       </div>
-      {% else %}
-      <div class="card no-break" style="background:var(--gray-50);">
-        <p class="finding-text color-muted">No timeline data available.</p>
-      </div>
-      {% endif %}
+      
     </div>
 
     <!-- Charts column -->
     <div style="display:flex;flex-direction:column;gap:20px;">
 
       <!-- Chart 1: Severity Distribution — Donut (hand-computed from summary) -->
-      {% if summary %}
+      
       <div class="chart-wrap no-break">
-        <div class="chart-title">Severity Distribution — {{ summary.total }} Findings</div>
-        {#
-          Donut chart angles (degrees, starting at top = -90°):
-          Each sev occupies (count/total)*360°. We build arcs manually.
-          cx=100 cy=90 R=70 r=42
-          Helper: convert angle to point on circle:
-            x = cx + R*sin(rad), y = cy - R*cos(rad)
-          We do this in Python-style Jinja math.
-        #}
-        {%- set total = summary.total|int if summary.total else 1 -%}
-        {%- set c_frac = summary.critical|int / total -%}
-        {%- set h_frac = summary.high|int / total -%}
-        {%- set m_frac = summary.medium|int / total -%}
-        {%- set l_frac = summary.low|int / total -%}
-        {%- set i_frac = summary.info|int / total -%}
+        <div class="chart-title">Severity Distribution — 2 Findings</div>
         <svg viewBox="0 0 320 180" xmlns="http://www.w3.org/2000/svg" style="width:100%;display:block;font-family:Inter,sans-serif;">
           <!-- Simplified pie representation using rects as proportional bars instead of path math -->
-          <!-- Bar chart approach: vertical bars for each severity -->
-          {%- set bar_max_h = 100 -%}
-          {%- set bar_w = 28 -%}
-          {%- set bar_base_y = 130 -%}
-          {%- set bar_start_x = 20 -%}
-          {%- set bar_gap = 36 -%}
-          <!-- Critical -->
-          {%- set bh = (summary.critical|int / total * bar_max_h)|int -%}
-          <rect x="{{ bar_start_x }}" y="{{ bar_base_y - bh }}" width="{{ bar_w }}" height="{{ bh }}" rx="3" fill="#e8112d"/>
-          <text x="{{ bar_start_x + bar_w//2 }}" y="{{ bar_base_y - bh - 4 }}" text-anchor="middle" font-size="11" font-weight="700" fill="#e8112d">{{ summary.critical }}</text>
-          <text x="{{ bar_start_x + bar_w//2 }}" y="{{ bar_base_y + 12 }}" text-anchor="middle" font-size="8" fill="#474c62">Crit</text>
-          <!-- High -->
-          {%- set bh = (summary.high|int / total * bar_max_h)|int -%}
-          <rect x="{{ bar_start_x + bar_gap }}" y="{{ bar_base_y - bh }}" width="{{ bar_w }}" height="{{ bh }}" rx="3" fill="#e85d04"/>
-          <text x="{{ bar_start_x + bar_gap + bar_w//2 }}" y="{{ bar_base_y - bh - 4 }}" text-anchor="middle" font-size="11" font-weight="700" fill="#e85d04">{{ summary.high }}</text>
-          <text x="{{ bar_start_x + bar_gap + bar_w//2 }}" y="{{ bar_base_y + 12 }}" text-anchor="middle" font-size="8" fill="#474c62">High</text>
-          <!-- Medium -->
-          {%- set bh = (summary.medium|int / total * bar_max_h)|int -%}
-          <rect x="{{ bar_start_x + bar_gap*2 }}" y="{{ bar_base_y - bh }}" width="{{ bar_w }}" height="{{ bh }}" rx="3" fill="#d4a017"/>
-          <text x="{{ bar_start_x + bar_gap*2 + bar_w//2 }}" y="{{ bar_base_y - bh - 4 }}" text-anchor="middle" font-size="11" font-weight="700" fill="#d4a017">{{ summary.medium }}</text>
-          <text x="{{ bar_start_x + bar_gap*2 + bar_w//2 }}" y="{{ bar_base_y + 12 }}" text-anchor="middle" font-size="8" fill="#474c62">Med</text>
-          <!-- Low -->
-          {%- set bh = (summary.low|int / total * bar_max_h)|int -%}
-          <rect x="{{ bar_start_x + bar_gap*3 }}" y="{{ bar_base_y - bh }}" width="{{ bar_w }}" height="{{ bh }}" rx="3" fill="#19a34a"/>
-          <text x="{{ bar_start_x + bar_gap*3 + bar_w//2 }}" y="{{ bar_base_y - bh - 4 }}" text-anchor="middle" font-size="11" font-weight="700" fill="#19a34a">{{ summary.low }}</text>
-          <text x="{{ bar_start_x + bar_gap*3 + bar_w//2 }}" y="{{ bar_base_y + 12 }}" text-anchor="middle" font-size="8" fill="#474c62">Low</text>
-          <!-- Info -->
-          {%- set bh = (summary.info|int / total * bar_max_h)|int -%}
-          <rect x="{{ bar_start_x + bar_gap*4 }}" y="{{ bar_base_y - bh }}" width="{{ bar_w }}" height="{{ bh }}" rx="3" fill="#0b66c3"/>
-          <text x="{{ bar_start_x + bar_gap*4 + bar_w//2 }}" y="{{ bar_base_y - bh - 4 }}" text-anchor="middle" font-size="11" font-weight="700" fill="#0b66c3">{{ summary.info }}</text>
-          <text x="{{ bar_start_x + bar_gap*4 + bar_w//2 }}" y="{{ bar_base_y + 12 }}" text-anchor="middle" font-size="8" fill="#474c62">Info</text>
+          <!-- Bar chart approach: vertical bars for each severity --><!-- Critical --><rect x="20" y="80" width="28" height="50" rx="3" fill="#e8112d"/>
+          <text x="34" y="76" text-anchor="middle" font-size="11" font-weight="700" fill="#e8112d">1</text>
+          <text x="34" y="142" text-anchor="middle" font-size="8" fill="#474c62">Crit</text>
+          <!-- High --><rect x="56" y="80" width="28" height="50" rx="3" fill="#e85d04"/>
+          <text x="70" y="76" text-anchor="middle" font-size="11" font-weight="700" fill="#e85d04">1</text>
+          <text x="70" y="142" text-anchor="middle" font-size="8" fill="#474c62">High</text>
+          <!-- Medium --><rect x="92" y="130" width="28" height="0" rx="3" fill="#d4a017"/>
+          <text x="106" y="126" text-anchor="middle" font-size="11" font-weight="700" fill="#d4a017">0</text>
+          <text x="106" y="142" text-anchor="middle" font-size="8" fill="#474c62">Med</text>
+          <!-- Low --><rect x="128" y="130" width="28" height="0" rx="3" fill="#19a34a"/>
+          <text x="142" y="126" text-anchor="middle" font-size="11" font-weight="700" fill="#19a34a">0</text>
+          <text x="142" y="142" text-anchor="middle" font-size="8" fill="#474c62">Low</text>
+          <!-- Info --><rect x="164" y="130" width="28" height="0" rx="3" fill="#0b66c3"/>
+          <text x="178" y="126" text-anchor="middle" font-size="11" font-weight="700" fill="#0b66c3">0</text>
+          <text x="178" y="142" text-anchor="middle" font-size="8" fill="#474c62">Info</text>
           <!-- Baseline -->
-          <line x1="{{ bar_start_x - 4 }}" y1="{{ bar_base_y }}" x2="{{ bar_start_x + bar_gap*4 + bar_w + 8 }}" y2="{{ bar_base_y }}" stroke="#e2e4ec" stroke-width="1.5"/>
+          <line x1="16" y1="130" x2="200" y2="130" stroke="#e2e4ec" stroke-width="1.5"/>
           <!-- Summary pill -->
           <rect x="200" y="40" width="106" height="56" rx="6" fill="#fff0f0" stroke="#e8112d" stroke-width="1.5"/>
-          <text x="253" y="62" text-anchor="middle" font-size="22" font-weight="800" fill="#0b2044">{{ summary.total }}</text>
+          <text x="253" y="62" text-anchor="middle" font-size="22" font-weight="800" fill="#0b2044">2</text>
           <text x="253" y="78" text-anchor="middle" font-size="9" font-weight="600" fill="#838799" letter-spacing="0.06em">FINDINGS</text>
-          {% if outcome %}
+          
           <rect x="200" y="106" width="106" height="32" rx="5" fill="#fff0f0" stroke="#e8112d" stroke-width="1.5"/>
           <text x="253" y="121" text-anchor="middle" font-size="9" font-weight="700" fill="#b30e24" letter-spacing="0.06em">OUTCOME</text>
-          <text x="253" y="133" text-anchor="middle" font-size="9" font-weight="800" fill="#e8112d">{{ outcome.label|truncate(18, True, '') }}</text>
-          {% endif %}
+          <text x="253" y="133" text-anchor="middle" font-size="9" font-weight="800" fill="#e8112d">FULL COMPROMISE — ROOT</text>
+          
         </svg>
       </div>
-      {% endif %}
+      
 
       <!-- Chart 2: Attempt-Outcome Breakdown — Horizontal bars from coverage_counts -->
-      {% if coverage_counts %}
+      
       <div class="chart-wrap no-break">
-        <div class="chart-title">Attempt-Outcome Breakdown</div>
-        {%- set max_count = coverage_counts.values()|max|int -%}
-        {%- set bar_scale = 200.0 / max_count if max_count > 0 else 1 -%}
-        <svg viewBox="0 0 320 {{ (coverage_counts|length * 38) + 30 }}" xmlns="http://www.w3.org/2000/svg" style="width:100%;display:block;font-family:Inter,sans-serif;">
-          <line x1="80" y1="10" x2="80" y2="{{ (coverage_counts|length * 38) + 10 }}" stroke="#e2e4ec" stroke-width="1"/>
-          {% for outcome_key, cnt in coverage_counts.items() %}
-          {%- set y = loop.index0 * 38 + 18 -%}
-          {%- set bw = (cnt|int * bar_scale)|int -%}
-          {%- set oc = outcome_key|lower -%}
-          {%- if oc in ['success', 'exploitable'] -%}{%- set bar_color = '#e8112d' -%}
-          {%- elif oc in ['negative'] -%}{%- set bar_color = '#19a34a' -%}
-          {%- elif oc in ['blocked', 'error'] -%}{%- set bar_color = '#d4a017' -%}
-          {%- else -%}{%- set bar_color = '#0b66c3' -%}
-          {%- endif -%}
-          <text x="76" y="{{ y + 8 }}" text-anchor="end" font-size="10" font-weight="600" fill="#474c62">{{ outcome_key|capitalize }}</text>
-          <rect x="80" y="{{ y }}" width="{{ bw }}" height="20" rx="3" fill="{{ bar_color }}"/>
-          <text x="{{ 82 + bw }}" y="{{ y + 14 }}" font-size="10" font-weight="700" fill="{{ bar_color }}">{{ cnt }}</text>
-          {% endfor %}
+        <div class="chart-title">Attempt-Outcome Breakdown</div><svg viewBox="0 0 320 182" xmlns="http://www.w3.org/2000/svg" style="width:100%;display:block;font-family:Inter,sans-serif;">
+          <line x1="80" y1="10" x2="80" y2="162" stroke="#e2e4ec" stroke-width="1"/>
+          <text x="76" y="26" text-anchor="end" font-size="10" font-weight="600" fill="#474c62">Success</text>
+          <rect x="80" y="18" width="200" height="20" rx="3" fill="#e8112d"/>
+          <text x="282" y="32" font-size="10" font-weight="700" fill="#e8112d">8</text>
+          <text x="76" y="64" text-anchor="end" font-size="10" font-weight="600" fill="#474c62">Negative</text>
+          <rect x="80" y="56" width="75" height="20" rx="3" fill="#19a34a"/>
+          <text x="157" y="70" font-size="10" font-weight="700" fill="#19a34a">3</text>
+          <text x="76" y="102" text-anchor="end" font-size="10" font-weight="600" fill="#474c62">Blocked</text>
+          <rect x="80" y="94" width="25" height="20" rx="3" fill="#d4a017"/>
+          <text x="107" y="108" font-size="10" font-weight="700" fill="#d4a017">1</text>
+          <text x="76" y="140" text-anchor="end" font-size="10" font-weight="600" fill="#474c62">Error</text>
+          <rect x="80" y="132" width="0" height="20" rx="3" fill="#d4a017"/>
+          <text x="82" y="146" font-size="10" font-weight="700" fill="#d4a017">0</text>
+          
         </svg>
       </div>
-      {% endif %}
+      
 
     </div><!-- /.charts column -->
   </div><!-- /.card-grid-2 -->
 
   <!-- CVSS Score bar chart from findings -->
-  {% if findings %}
-  {%- set scored = findings|selectattr('extra')|selectattr('extra.cvss_base')|list -%}
-  {% if scored %}
+  
   <h3 class="subsection-title">CVSS Score Distribution — Findings with Scores</h3>
-  <div class="chart-wrap no-break">
-    {%- set bar_max_h = 98 -%}
-    {%- set bar_w = 60 -%}
-    {%- set bar_gap = 95 -%}
-    {%- set svg_chart_w = scored|length * bar_gap + 80 -%}
-    <svg viewBox="0 0 {{ svg_chart_w }} 140" xmlns="http://www.w3.org/2000/svg" style="width:100%;display:block;font-family:Inter,sans-serif;">
-      <line x1="60" y1="100" x2="{{ svg_chart_w - 20 }}" y2="100" stroke="#e2e4ec" stroke-width="1.5"/>
+  <div class="chart-wrap no-break"><svg viewBox="0 0 270 140" xmlns="http://www.w3.org/2000/svg" style="width:100%;display:block;font-family:Inter,sans-serif;">
+      <line x1="60" y1="100" x2="250" y2="100" stroke="#e2e4ec" stroke-width="1.5"/>
       <!-- Critical threshold line -->
-      <line x1="60" y1="{{ 100 - 90 }}" x2="{{ svg_chart_w - 20 }}" y2="{{ 100 - 90 }}" stroke="#e8112d" stroke-width="1" stroke-dasharray="4,3" opacity="0.4"/>
-      <text x="{{ svg_chart_w - 18 }}" y="{{ 100 - 87 }}" font-size="7" fill="#e8112d" opacity="0.7">9.0</text>
-      {% for f in scored|sort(attribute='extra.cvss_base', reverse=True) %}
-      {%- set score = f.extra.cvss_base|float -%}
-      {%- set bh = (score / 10.0 * bar_max_h)|int -%}
-      {%- set bx = loop.index0 * bar_gap + 80 -%}
-      {%- set sev = f.severity|lower -%}
-      {%- if sev == 'critical' -%}{%- set bc = '#e8112d' -%}
-      {%- elif sev == 'high' -%}{%- set bc = '#e85d04' -%}
-      {%- elif sev == 'medium' -%}{%- set bc = '#d4a017' -%}
-      {%- else -%}{%- set bc = '#19a34a' -%}
-      {%- endif -%}
-      <rect x="{{ bx }}" y="{{ 100 - bh }}" width="{{ bar_w }}" height="{{ bh }}" rx="4" fill="{{ bc }}"/>
-      <text x="{{ bx + bar_w//2 }}" y="115" text-anchor="middle" font-size="9" font-weight="700" fill="{{ bc }}">{{ f.extra.cvss_base }}</text>
-      <text x="{{ bx + bar_w//2 }}" y="128" text-anchor="middle" font-size="8" fill="#474c62">{{ f.fid | default('F-%02d'|format(loop.index)) }}</text>
-      {% endfor %}
+      <line x1="60" y1="10" x2="250" y2="10" stroke="#e8112d" stroke-width="1" stroke-dasharray="4,3" opacity="0.4"/>
+      <text x="252" y="13" font-size="7" fill="#e8112d" opacity="0.7">9.0</text>
+      <rect x="80" y="4" width="60" height="96" rx="4" fill="#e8112d"/>
+      <text x="110" y="115" text-anchor="middle" font-size="9" font-weight="700" fill="#e8112d">9.8</text>
+      <text x="110" y="128" text-anchor="middle" font-size="8" fill="#474c62">F-01</text>
+      <rect x="175" y="27" width="60" height="73" rx="4" fill="#e85d04"/>
+      <text x="205" y="115" text-anchor="middle" font-size="9" font-weight="700" fill="#e85d04">7.5</text>
+      <text x="205" y="128" text-anchor="middle" font-size="8" fill="#474c62">F-02</text>
+      
       <!-- Y-axis -->
       <text x="54" y="5"  text-anchor="end" font-size="8" fill="#838799">10</text>
       <text x="54" y="55" text-anchor="end" font-size="8" fill="#838799">5</text>
@@ -2367,188 +2289,9 @@ h3.subsection-title {
       <line x1="58" y1="2" x2="58" y2="100" stroke="#e2e4ec" stroke-width="1"/>
     </svg>
   </div>
-  {% endif %}
-  {% endif %}
+  
+  
 </section>
-
-{% if ai_security and ai_security.findings %}
-<!-- ══════════════════════════════════════════════════════════
-     SECTION 15 — AI / LLM SECURITY (RED-TEAM)
-     ══════════════════════════════════════════════════════════ -->
-<section class="report-section page-break-before">
-  <div class="section-header">
-    <div class="section-header-left">
-      <div class="section-number">Section 15</div>
-      <h2 class="section-title">AI / LLM Security (Red-Team)</h2>
-    </div>
-    <span class="risk-badge {% if ai_security.max_aivss >= 9.0 %}critical{% elif ai_security.max_aivss >= 7.0 %}high{% elif ai_security.max_aivss >= 4.0 %}medium{% else %}low{% endif %}">Max AIVSS: {{ ai_security.max_aivss }}</span>
-  </div>
-  <p class="section-lead">Results of the AI/LLM adversarial red-team exercise. Findings are scored using AIVSS (AI Vulnerability Scoring System) and Attack Success Rate (ASR), and mapped to OWASP LLM Top-10 and MITRE ATLAS.</p>
-
-  <!-- ── Summary stat tiles ── -->
-  <div class="stat-tiles" style="grid-template-columns:repeat(4,1fr);margin-bottom:28px;">
-    <div class="stat-tile total">
-      <div class="tile-count">{{ ai_security.count }}</div>
-      <div class="tile-label">AI Findings</div>
-    </div>
-    <div class="stat-tile {% if ai_security.max_aivss >= 9.0 %}critical{% elif ai_security.max_aivss >= 7.0 %}high{% elif ai_security.max_aivss >= 4.0 %}medium{% else %}low{% endif %}">
-      <div class="tile-count">{{ ai_security.max_aivss }}</div>
-      <div class="tile-label">Max AIVSS</div>
-    </div>
-    <div class="stat-tile {% if ai_security.avg_asr >= 70 %}critical{% elif ai_security.avg_asr >= 40 %}high{% elif ai_security.avg_asr >= 20 %}medium{% else %}low{% endif %}">
-      <div class="tile-count">{{ ai_security.avg_asr }}%</div>
-      <div class="tile-label">Avg ASR</div>
-    </div>
-    <div class="stat-tile info">
-      <div class="tile-count" style="font-size:13px;line-height:1.5;letter-spacing:0;">{{ ai_security.owasp_classes|join(', ') }}</div>
-      <div class="tile-label">OWASP-LLM Classes</div>
-    </div>
-  </div>
-
-  <!-- ── Findings table ── -->
-  <h3 class="subsection-title">AI Findings Register</h3>
-  <div class="flex gap-8 flex-wrap items-center mb-16">
-    <span class="text-xs color-muted font-600" style="letter-spacing:0.06em;text-transform:uppercase;">Severity:</span>
-    <span class="badge critical">Critical</span>
-    <span class="badge high">High</span>
-    <span class="badge medium">Medium</span>
-    <span class="badge low">Low</span>
-  </div>
-
-  <div class="table-wrap mb-24">
-    <table class="report-table">
-      <thead>
-        <tr>
-          <th>#</th>
-          <th>Finding</th>
-          <th>Severity</th>
-          <th>AIVSS</th>
-          <th>ASR %</th>
-          <th>OWASP-LLM</th>
-          <th>ATLAS</th>
-          <th>Attack Vector</th>
-          <th>Model</th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for af in ai_security.findings %}
-        {%- set sev = af.severity|lower -%}
-        {%- if sev == 'critical' -%}{%- set row_bg = 'background:var(--sev-critical-bg);' -%}
-        {%- elif sev == 'high' -%}{%- set row_bg = 'background:var(--sev-high-bg);' -%}
-        {%- else -%}{%- set row_bg = '' -%}
-        {%- endif -%}
-        <tr style="{{ row_bg }}">
-          <td class="mono font-600" style="color:var(--sev-{{ sev }}-txt);">AI-{{ '%02d'|format(loop.index) }}</td>
-          <td class="font-600">{{ af.title }}</td>
-          <td><span class="badge {{ sev }}">{{ af.severity }}</span></td>
-          <td class="mono font-600" style="color:var(--sev-{{ sev }}-txt);">{{ af.aivss }}</td>
-          <td>
-            <!-- ASR inline bar -->
-            <div style="display:flex;align-items:center;gap:6px;">
-              <div style="width:60px;height:7px;border-radius:4px;background:var(--gray-200);overflow:hidden;">
-                <div style="height:100%;width:{{ af.asr }}%;border-radius:4px;background:{%- if af.asr >= 70 -%}var(--sev-critical-bdr){%- elif af.asr >= 40 -%}var(--sev-high-bdr){%- elif af.asr >= 20 -%}var(--sev-medium-bdr){%- else -%}var(--sev-low-bdr){%- endif -%};"></div>
-              </div>
-              <span class="mono" style="font-size:11px;font-weight:700;color:{%- if af.asr >= 70 -%}var(--sev-critical-txt){%- elif af.asr >= 40 -%}var(--sev-high-txt){%- elif af.asr >= 20 -%}var(--sev-medium-txt){%- else -%}var(--sev-low-txt){%- endif -%};">{{ af.asr }}%</span>
-            </div>
-          </td>
-          <td class="mono" style="color:var(--blue-400);font-size:11px;">{{ af.owasp_llm|default('') }}</td>
-          <td class="mono" style="font-size:11px;color:var(--gray-600);">{{ af.atlas|default('') }}</td>
-          <td style="font-size:12px;">{{ af.attack_vector|default('') }}</td>
-          <td class="mono" style="font-size:11px;">{{ af.target_model|default('') }}</td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-  </div>
-
-  <!-- ── Per-finding detailed cards ── -->
-  <h3 class="subsection-title">Detailed AI Finding Cards</h3>
-  {% for af in ai_security.findings %}
-  {%- set sev = af.severity|lower -%}
-  {%- set afid = 'AI-' ~ '%02d'|format(loop.index) -%}
-  <div class="finding-card no-break">
-    <div class="finding-card-header {{ sev }}">
-      <div>
-        <div class="finding-card-id">{{ afid }} · AIVSS {{ af.aivss }}{% if af.vector|default('') %} ({{ af.vector }}){% endif %}</div>
-        <div class="finding-card-name">{{ af.title }}</div>
-      </div>
-      <div class="finding-card-meta">
-        <span class="badge {{ sev }}">{{ af.severity }}</span>
-        {% if af.owasp_llm|default('') %}<span class="badge info">{{ af.owasp_llm }}</span>{% endif %}
-        {% if af.atlas|default('') %}<span class="badge info">{{ af.atlas }}</span>{% endif %}
-      </div>
-    </div>
-    <div class="finding-card-body">
-
-      <div class="no-break">
-        <div class="finding-section-label">AI Red-Team Metadata</div>
-        <div class="kv-grid" style="grid-template-columns:140px 1fr;">
-          <span class="kv-key">AIVSS Score</span>       <span class="kv-val mono">{{ af.aivss }}</span>
-          {% if af.cvss|default('') %}<span class="kv-key">CVSS (Classical)</span><span class="kv-val mono">{{ af.cvss }}</span>{% endif %}
-          <span class="kv-key">Attack Success Rate</span>
-          <span class="kv-val">
-            <div style="display:flex;align-items:center;gap:8px;">
-              <div style="width:120px;height:8px;border-radius:4px;background:var(--gray-200);overflow:hidden;">
-                <div style="height:100%;width:{{ af.asr }}%;border-radius:4px;background:{%- if af.asr >= 70 -%}var(--sev-critical-bdr){%- elif af.asr >= 40 -%}var(--sev-high-bdr){%- elif af.asr >= 20 -%}var(--sev-medium-bdr){%- else -%}var(--sev-low-bdr){%- endif -%};"></div>
-              </div>
-              <span class="mono font-700" style="font-size:12px;color:{%- if af.asr >= 70 -%}var(--sev-critical-txt){%- elif af.asr >= 40 -%}var(--sev-high-txt){%- elif af.asr >= 20 -%}var(--sev-medium-txt){%- else -%}var(--sev-low-txt){%- endif -%};">{{ af.asr }}% ({{ af.successes|default(0) }}/{{ af.trials|default(0) }} trials)</span>
-            </div>
-          </span>
-          {% if af.owasp_llm|default('') %}<span class="kv-key">OWASP-LLM</span>     <span class="kv-val mono" style="color:var(--blue-400);">{{ af.owasp_llm }}</span>{% endif %}
-          {% if af.atlas|default('') %}<span class="kv-key">MITRE ATLAS</span>   <span class="kv-val mono" style="color:var(--blue-400);">{{ af.atlas }}</span>{% endif %}
-          {% if af.attack_vector|default('') %}<span class="kv-key">Attack Vector</span>  <span class="kv-val">{{ af.attack_vector }}</span>{% endif %}
-          {% if af.target_model|default('') %}<span class="kv-key">Target Model</span>   <span class="kv-val mono">{{ af.target_model }}</span>{% endif %}
-          {% if af.vector|default('') %}<span class="kv-key">AIVSS Vector</span>   <span class="kv-val mono" style="font-size:10px;word-break:break-all;">{{ af.vector }}</span>{% endif %}
-        </div>
-      </div>
-
-      {% if af.evidence|default('') %}
-      <div class="no-break">
-        <div class="finding-section-label">Evidence</div>
-        <div class="code-block">{{ af.evidence }}</div>
-      </div>
-      {% endif %}
-
-      {% if af.remediation|default('') %}
-      <div class="no-break">
-        <div class="finding-section-label">Remediation</div>
-        {%- if sev == 'critical' -%}{%- set pclass = 'p1' -%}
-        {%- elif sev == 'high' -%}{%- set pclass = 'p2' -%}
-        {%- else -%}{%- set pclass = 'p3' -%}
-        {%- endif -%}
-        <div class="priority-item {{ pclass }}" style="border-radius:6px;">
-          <span class="priority-text">{{ af.remediation }}</span>
-        </div>
-      </div>
-      {% endif %}
-
-    </div>
-  </div>
-  {% endfor %}
-
-  <!-- ── Attack-class distribution bar chart ── -->
-  {% if ai_security.by_class %}
-  <h3 class="subsection-title mt-32">Attack Vector Distribution</h3>
-  <div class="chart-wrap no-break">
-    <div class="chart-title">AI Findings by Attack Vector</div>
-    {%- set av_max = ai_security.by_class.values()|max|int -%}
-    {%- set av_scale = 200.0 / av_max if av_max > 0 else 1 -%}
-    {%- set av_count = ai_security.by_class|length -%}
-    <svg viewBox="0 0 320 {{ (av_count * 38) + 30 }}" xmlns="http://www.w3.org/2000/svg" style="width:100%;display:block;font-family:Inter,sans-serif;">
-      <line x1="100" y1="10" x2="100" y2="{{ (av_count * 38) + 10 }}" stroke="#e2e4ec" stroke-width="1"/>
-      {% for av_key, av_cnt in ai_security.by_class.items() %}
-      {%- set y = loop.index0 * 38 + 18 -%}
-      {%- set bw = (av_cnt|int * av_scale)|int -%}
-      <text x="96" y="{{ y + 8 }}" text-anchor="end" font-size="10" font-weight="600" fill="#474c62">{{ av_key|truncate(18, True, '') }}</text>
-      <rect x="100" y="{{ y }}" width="{{ bw }}" height="20" rx="3" fill="var(--blue-400)"/>
-      <text x="{{ 104 + bw }}" y="{{ y + 14 }}" font-size="10" font-weight="700" fill="var(--blue-400)">{{ av_cnt }}</text>
-      {% endfor %}
-    </svg>
-  </div>
-  {% endif %}
-
-</section>
-{% endif %}
 
 <!-- ══════════════════════════════════════════════════════════
      FOOTER
@@ -2556,7 +2299,7 @@ h3.subsection-title {
 <footer class="report-footer">
   <div>
     <div class="footer-brand">ARGUS Security · Autonomous Pentesting Engine</div>
-    <div style="margin-top:3px;">Target: {{ target_display }} &nbsp;·&nbsp; Generated: {{ generated_at }}</div>
+    <div style="margin-top:3px;">Target: 10.129.21.254 &nbsp;·&nbsp; Generated: 2026-06-19 09:30 UTC</div>
   </div>
   <div style="text-align:right;">
     <div style="font-weight:600;color:var(--gray-700);">CONFIDENTIAL — CLIENT PRIVILEGED</div>
@@ -2567,7 +2310,6 @@ h3.subsection-title {
 </div><!-- /.page-wrap -->
 </body>
 </html>
-
 
 
 

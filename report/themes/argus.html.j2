@@ -1,0 +1,763 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<!-- ARGUS · Canonical penetration-test report (single theme).
+     "Dark hero + light body." Server-side inline-SVG charts (WeasyPrint runs no JS).
+     Renders from ReportGenerator._build_context. Every section is guarded so empty
+     data degrades gracefully. User/tool text is escaped (autoescape ON + |e); charts
+     are trusted server-generated SVG (|safe). -->
+<meta charset="utf-8">
+<title>ARGUS Report — {{ (target_display or session.target or 'engagement')|e }}</title>
+<style>
+  :root{
+    --ink:#1a2332; --ink2:#3a4657; --muted:#8a94a6; --faint:#b3bcc8;
+    --navy:#15233b; --hero1:#0b0e14; --hero2:#16273f;
+    --paper:#ffffff; --paper2:#f7f9fb; --paper3:#eef2f6;
+    --line:#e4e9ef; --line2:#eef1f5;
+    --accent:#c0392b; --cyan:#6cc7ff; --gold:#b8933e; --green:#2f9e5f; --amber:#b26a00;
+    /* one severity palette, used everywhere (body) */
+    --crit:#c0392b; --high:#e8743b; --med:#c8922c; --low:#3d7fc1; --info:#7a8699;
+    /* on-dark tints of the SAME hues, for the dark hero cover only */
+    --crit-d:#e86055; --high-d:#f0894e; --med-d:#e6c24d; --low-d:#7ea0c4; --info-d:#9aa7b8;
+    --font-sans:'Inter',system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    --font-serif:'Noto Serif','Source Serif 4',Georgia,"Times New Roman",serif;
+    --font-mono:'JetBrains Mono','Fira Code','Hack','Cascadia Code','SFMono-Regular',Consolas,"Liberation Mono",Menlo,monospace;
+  }
+  @page{
+    size:A4; margin:16mm 13mm 17mm;
+    @bottom-left{ content:"ARGUS · CONFIDENTIAL"; font-family:'Inter',system-ui,sans-serif; font-size:7pt; color:#9aa4b2; }
+    @bottom-center{ content:"{{ (target_display or session.target or '')|replace('\\','')|replace('"','')|replace('\n',' ')|replace('\r',' ')|safe }}"; font-family:'Inter',system-ui,sans-serif; font-size:7pt; color:#9aa4b2; }
+    @bottom-right{ content:"Page " counter(page) " of " counter(pages); font-family:'Inter',system-ui,sans-serif; font-size:7pt; color:#9aa4b2; }
+  }
+  *{ box-sizing:border-box; }
+  html,body{ margin:0; padding:0; }
+  body{ font-family:var(--font-sans); color:var(--ink); font-size:10.2pt; line-height:1.6;
+        background:var(--paper); -webkit-print-color-adjust:exact; print-color-adjust:exact;
+        counter-reset:secnum; }
+  h1,h2,h3,h4{ margin:0; font-weight:800; }
+  p{ margin:0 0 9px; }
+  .mono{ font-family:var(--font-mono); }
+
+  /* ── cover / hero ─────────────────────────────────────────────── */
+  .cover{ background:linear-gradient(135deg,var(--hero1),var(--hero2)); color:#eef2f7;
+          margin:-16mm -13mm 0; padding:24mm 13mm 16mm; page-break-after:always; }
+  .brandline{ display:flex; align-items:center; gap:10px; margin-bottom:18mm; }
+  .brandmark{ width:32px; height:32px; border:2px solid var(--gold); border-radius:7px;
+              display:flex; align-items:center; justify-content:center; font-weight:900;
+              color:#fff; font-size:16px; background:rgba(184,147,62,.16); }
+  .brandtext{ font-size:16px; font-weight:800; letter-spacing:.5px; }
+  .brandtext b{ color:var(--gold); }
+  .cover-eyebrow{ font-size:11px; letter-spacing:.26em; color:var(--gold); font-weight:700; }
+  .cover-title{ font-family:var(--font-serif); font-size:52px; font-weight:700; line-height:1.05;
+                letter-spacing:-0.01em; margin:10px 0 6px; color:#fff; word-break:break-word; }
+  /* long / multi-target titles (e.g. 6 comma-separated IPs) shrink so they never
+     dominate the cover with a 6-line wall of serif text */
+  .cover-title.t-long{ font-size:34px; line-height:1.12; }
+  .cover-title.t-xlong{ font-size:23px; line-height:1.2; letter-spacing:0; }
+  .cover-sub{ font-size:13px; color:#aab6c6; margin-bottom:24px; }
+  .verdict{ display:inline-block; padding:9px 20px; border-radius:5px; font-size:15px;
+            font-weight:800; letter-spacing:.02em; color:#fff; }
+  .v-critical{ background:var(--crit);} .v-high{ background:var(--high);}
+  .v-medium{ background:var(--med); color:#3a2c00;} .v-low{ background:var(--low);}
+  .v-none{ background:var(--green);} .v-info{ background:var(--info);}
+  .cover-flex{ display:flex; gap:20px; margin-top:26px; align-items:flex-end; }
+  .cover-gauge{ background:rgba(255,255,255,.05); border:1px solid rgba(255,255,255,.12);
+                border-radius:10px; padding:12px 16px 6px; }
+  .cover-gauge svg{ display:block; }
+  .cover-chips{ display:flex; gap:9px; flex-wrap:wrap; flex:1; }
+  .chip{ background:rgba(255,255,255,.05); border:1px solid rgba(255,255,255,.13);
+         border-radius:8px; padding:9px 13px; min-width:70px; }
+  .chip .n{ font-size:24px; font-weight:800; line-height:1; }
+  .chip .l{ font-size:8.5px; letter-spacing:.13em; color:#9fb0c4; margin-top:6px; text-transform:uppercase; }
+  .meta-grid{ display:grid; grid-template-columns:repeat(4,1fr); gap:1px;
+              background:rgba(255,255,255,.10); border:1px solid rgba(255,255,255,.10);
+              border-radius:8px; overflow:hidden; margin-top:28px; }
+  .meta-cell{ background:rgba(9,13,20,.35); padding:11px 13px; }
+  .meta-cell .k{ font-size:8px; letter-spacing:.15em; color:#8ea0b6; text-transform:uppercase; }
+  .meta-cell .v{ font-size:12px; font-weight:600; color:#eaf0f6; margin-top:3px; word-break:break-word; }
+
+  /* ── section scaffolding ──────────────────────────────────────── */
+  section{ page-break-inside:auto; }
+  .sec{ margin:24px 0 0; }
+  .sec-head{ page-break-after:avoid; border-bottom:2px solid var(--navy); padding-bottom:8px;
+             margin-bottom:14px; display:flex; align-items:baseline; gap:11px; }
+  .sec-num{ font-family:var(--font-mono); font-size:11px; font-weight:700; color:var(--accent);
+            background:var(--paper3); padding:3px 8px; border-radius:4px; }
+  /* Number sections by a counter, not hardcoded text, so a guarded-off section
+     (e.g. 04 Basis of Compromise when nothing was compromised) does not leave a
+     visible gap (…03, 05, 06). Only rendered .sec-num elements increment. */
+  .sec-num::before{ counter-increment:secnum; content:counter(secnum, decimal-leading-zero); }
+  .sec-eyebrow{ font-size:9px; letter-spacing:.2em; color:var(--muted); text-transform:uppercase; }
+  .sec-title{ font-size:20px; font-weight:800; color:var(--navy); }
+  .sec-lead{ color:var(--ink2); font-size:10.4pt; margin-bottom:14px; max-width:158mm; }
+
+  /* ── metric tiles ─────────────────────────────────────────────── */
+  .tiles{ display:grid; grid-template-columns:repeat(7,1fr); gap:10px; margin:6px 0 14px; }
+  .tile{ border:1px solid var(--line); border-top:3px solid var(--muted); border-radius:7px;
+         padding:11px 8px; text-align:center; background:var(--paper); page-break-inside:avoid; }
+  .tile .n{ font-size:25px; font-weight:800; line-height:1; }
+  .tile .l{ font-size:8.5px; letter-spacing:.1em; color:var(--muted); margin-top:7px; text-transform:uppercase; }
+  .t-critical{ border-top-color:var(--crit);} .t-critical .n{ color:var(--crit); font-size:28px;}
+  .t-high{ border-top-color:var(--high);} .t-high .n{ color:var(--high); font-size:28px;}
+  .t-medium{ border-top-color:var(--med);} .t-medium .n{ color:var(--med);}
+  .t-low{ border-top-color:var(--low);} .t-low .n{ color:var(--low);}
+  .t-info{ border-top-color:var(--info);} .t-info .n{ color:var(--info);}
+  .t-total{ border-top-color:var(--navy); background:var(--paper2);} .t-total .n{ color:var(--navy);}
+  .t-access{ border-top-color:var(--accent); background:linear-gradient(135deg,#fbeceb,#fff);}
+  .t-access .n{ color:var(--accent); font-size:15px; padding-top:5px; }
+
+  /* ── generic cards / panels ───────────────────────────────────── */
+  .panel{ border:1px solid var(--line); border-radius:9px; padding:15px 17px; background:var(--paper);
+          margin-bottom:14px; page-break-inside:avoid; }
+  .panel-2{ display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+  .panel-title{ font-size:9px; letter-spacing:.16em; text-transform:uppercase; color:var(--muted);
+                font-weight:700; margin-bottom:10px; }
+  .chart-wrap{ page-break-inside:avoid; text-align:center; }
+  .chart-wrap svg{ max-width:100%; height:auto; }
+  .legend{ display:flex; flex-wrap:wrap; gap:12px; margin-top:8px; justify-content:center; }
+  .legend span{ font-size:8.6pt; color:var(--ink2); display:inline-flex; align-items:center; gap:5px; }
+  .legend i{ width:10px; height:10px; border-radius:2px; display:inline-block; }
+
+  /* ── priority actions ─────────────────────────────────────────── */
+  .pa{ display:flex; gap:11px; padding:9px 0; border-bottom:1px solid var(--line2); page-break-inside:avoid; }
+  .pa:last-child{ border-bottom:none; }
+  .pa-badge{ flex:0 0 24px; height:24px; border-radius:50%; background:var(--navy); color:#fff;
+             font-size:12px; font-weight:800; display:flex; align-items:center; justify-content:center; }
+  .pa-body .t{ font-weight:700; font-size:11pt; }
+  .pa-body .d{ color:var(--ink2); font-size:9.6pt; max-width:150mm; }
+
+  /* ── badges / chips ───────────────────────────────────────────── */
+  .badge{ display:inline-block; padding:3px 9px; border-radius:4px; font-size:9.5px; font-weight:800;
+          letter-spacing:.04em; color:#fff; text-transform:uppercase; line-height:1.35; white-space:nowrap; }
+  .sev-critical{ background:var(--crit);} .sev-high{ background:var(--high);}
+  .sev-medium{ background:var(--med); color:#3a2c00;} .sev-low{ background:var(--low);}
+  .sev-info{ background:var(--info);}
+  .tag{ display:inline-block; font-family:var(--font-mono); font-size:8.8px; padding:2px 7px;
+        border-radius:4px; background:var(--paper3); color:var(--navy); font-weight:600; }
+  .tag-mitre{ background:#efe9fb; color:#5b3ba8; }
+  .tag-cve{ background:#fdeeec; color:#a5342a; }
+  .rt{ font-size:9px; font-weight:800; padding:3px 9px; border-radius:10px; text-transform:uppercase; }
+  .rt-Verified{ background:#e5f5ec; color:#1a7f42; } .rt-Open{ background:#fdeeec; color:#b0362a; }
+  .rt-Gated{ background:#fdf4e3; color:#8a6300; }
+
+  /* ── tables ───────────────────────────────────────────────────── */
+  table{ width:100%; border-collapse:collapse; font-size:9.4pt; }
+  .reg th{ background:var(--navy); color:#eaf0f6; text-align:left; padding:8px 9px; font-size:9px;
+           letter-spacing:.06em; text-transform:uppercase; font-weight:700; }
+  .reg td{ padding:7px 9px; border-bottom:1px solid var(--line2); vertical-align:top;
+           word-break:break-word; overflow-wrap:anywhere; }
+  /* host / IP:port tokens must stay on one line — never break "…40.11:8080" into "808/0" */
+  .reg td.host{ white-space:nowrap; word-break:normal; overflow-wrap:normal; }
+  .reg tr{ page-break-inside:avoid; }
+  .reg tr:nth-child(even) td{ background:var(--paper2); }
+  .cvss{ font-family:var(--font-mono); font-weight:700; }
+  .cov th{ background:var(--navy); color:#eaf0f6; text-align:left; padding:7px 9px; font-size:8.6px;
+           letter-spacing:.05em; text-transform:uppercase; }
+  .cov td{ padding:6px 9px; border-bottom:1px solid var(--line2); vertical-align:top;
+           word-break:break-word; overflow-wrap:anywhere; }
+  .cov tr{ page-break-inside:avoid; }
+  .cov .cmd{ font-family:var(--font-mono); font-size:8.4pt; color:var(--ink2); word-break:break-all; }
+  .o-success{ color:var(--accent); font-weight:700; } .o-negative{ color:var(--green); font-weight:700; }
+  .o-blocked{ color:var(--amber); font-weight:700; } .o-error{ color:var(--muted); font-weight:700; }
+  .cov tr td:first-child{ border-left:3px solid transparent; }
+  .row-success td:first-child{ border-left-color:var(--accent); }
+  .row-negative td:first-child{ border-left-color:var(--green); }
+  .row-blocked td:first-child{ border-left-color:var(--amber); }
+
+  /* ── finding cards ────────────────────────────────────────────── */
+  .fc{ border:1px solid var(--line); border-left:5px solid var(--muted); border-radius:8px;
+       padding:15px 17px; margin-bottom:15px; page-break-inside:avoid; background:var(--paper); }
+  .fc.crit{ border-left-color:var(--crit);} .fc.high{ border-left-color:var(--high);}
+  .fc.medium{ border-left-color:var(--med);} .fc.low{ border-left-color:var(--low);}
+  .fc.info{ border-left-color:var(--info);}
+  .fc-head{ display:flex; justify-content:space-between; align-items:flex-start; gap:12px; margin-bottom:9px; }
+  .fc-id{ font-family:var(--font-mono); font-size:9px; color:var(--muted); font-weight:700; }
+  .fc-title{ font-family:var(--font-serif); font-size:15.5px; font-weight:700; color:var(--navy);
+             line-height:1.2; margin-top:2px; }
+  .fc-meta{ text-align:right; white-space:nowrap; }
+  .fc-loc{ font-size:8.6pt; color:var(--muted); margin-top:5px; }
+  .fc-field{ margin-top:11px; }
+  .fc-field.prose{ max-width:158mm; }
+  .fc-label{ font-size:8px; letter-spacing:.14em; text-transform:uppercase; color:var(--muted);
+             font-weight:700; margin-bottom:4px; }
+  .fc-basis{ font-size:9.2pt; color:var(--ink2); border-left:3px solid var(--gold);
+             padding:5px 10px; background:var(--paper2); max-width:158mm; }
+  .code{ font-family:var(--font-mono); font-size:8.6pt; line-height:1.5; white-space:pre-wrap;
+         word-break:break-all; background:#0d1117; color:#c9d1d9; border-radius:6px; padding:10px 12px; }
+  .rem{ font-size:9.4pt; color:var(--ink2); border-left:3px solid var(--green);
+        padding:6px 11px; background:#f2faf5; border-radius:0 4px 4px 0; max-width:158mm; }
+
+  /* ── per-host grouping (combined multi-target report) ─────────── */
+  .host-group{ margin-bottom:6px; }
+  .host-head{ page-break-after:avoid; margin:22px 0 12px; padding:9px 13px; background:var(--navy);
+              color:#eaf0f6; border-radius:6px; font-family:var(--font-mono); font-size:13px;
+              font-weight:800; display:flex; align-items:center; justify-content:space-between; gap:10px; }
+  .host-chips{ font-family:var(--font-sans); font-weight:600; }
+
+  /* ── compromise basis block ───────────────────────────────────── */
+  .compromise{ border:1px solid var(--accent); border-radius:9px; padding:16px 18px;
+               margin:6px 0 16px; page-break-inside:avoid; background:#fdf6f5; }
+  .cmp-h{ font-size:13px; font-weight:800; letter-spacing:.03em; text-transform:uppercase;
+          color:var(--accent); margin-bottom:8px; }
+  .cmp-badge-ok{ color:var(--green); font-size:10px; } .cmp-badge-no{ color:var(--amber); font-size:10px; }
+  .cmp-reason{ font-size:9.4pt; line-height:1.55; border-left:3px solid var(--amber);
+               padding:8px 11px; background:#fdf6ea; margin:8px 0; max-width:158mm; }
+
+  /* ── timeline ─────────────────────────────────────────────────── */
+  .tl-item{ position:relative; padding:0 0 13px 16px; border-left:2px solid var(--line); page-break-inside:avoid; }
+  .tl-dot{ position:absolute; left:-7px; top:2px; width:11px; height:11px; border-radius:50%;
+           background:var(--accent); border:2px solid #fff; }
+  .tl-t{ font-family:var(--font-mono); font-size:8.4pt; color:var(--muted); }
+  .tl-title{ font-weight:700; font-size:10.4pt; }
+  .tl-d{ color:var(--ink2); font-size:9.4pt; max-width:150mm; }
+
+  /* ── loot / creds ─────────────────────────────────────────────── */
+  .loot-grid{ display:grid; grid-template-columns:1fr 1fr; gap:11px; }
+  .loot{ border:1px solid var(--line); border-radius:7px; padding:10px 12px; page-break-inside:avoid; background:var(--paper2); }
+  .loot .src{ font-family:var(--font-mono); font-size:8.8pt; color:var(--navy); font-weight:700; word-break:break-all; }
+  .loot .hash{ font-family:var(--font-mono); font-size:7.6pt; color:var(--muted); margin-top:5px; word-break:break-all; }
+  .redact{ display:inline-block; background:repeating-linear-gradient(45deg,#2a2a2a,#2a2a2a 4px,#3a3a3a 4px,#3a3a3a 8px);
+           color:#fff; font-size:7px; letter-spacing:.18em; font-weight:800; padding:2px 12px; border-radius:3px; }
+
+  /* ── methodology / framework ──────────────────────────────────── */
+  .meth-grid{ display:grid; grid-template-columns:1.15fr 1fr; gap:16px; }
+  .step{ display:flex; gap:9px; margin-bottom:9px; }
+  .step-n{ flex:0 0 20px; height:20px; border-radius:5px; background:var(--navy); color:#fff;
+           font-size:10px; font-weight:800; display:flex; align-items:center; justify-content:center; }
+  .cvss-band{ display:flex; align-items:center; gap:8px; padding:4px 0; font-size:9pt; }
+  .cvss-chip{ width:46px; text-align:center; color:#fff; font-weight:800; border-radius:3px; font-size:8.4pt; padding:2px 0; }
+  .foot{ margin-top:26px; border-top:1px solid var(--line); padding-top:12px; color:var(--muted); font-size:8.4pt; max-width:170mm; }
+  .confidential{ display:inline-block; border:1px solid var(--accent); color:var(--accent);
+                 font-size:8px; letter-spacing:.16em; font-weight:800; padding:3px 9px; border-radius:4px; }
+  ul.clean{ margin:4px 0 0; padding-left:16px; } ul.clean li{ margin:3px 0; font-size:9.6pt; max-width:155mm; }
+  @media print{ a{ color:inherit; } .cover{ page-break-after:always; } body{ font-size:9.8pt; }
+    .fc,.panel,.tile,.reg tr,.cov tr,.loot,.compromise,.tl-item{ page-break-inside:avoid; } }
+</style>
+</head>
+<body>
+
+{# ═══════════════════════════ COVER ═══════════════════════════ #}
+{% set _fr = (final_rating or 'info')|lower %}
+<div class="cover">
+  <div class="brandline">
+    <div class="brandmark">A</div>
+    <div class="brandtext">ARG<b>U</b>S</div>
+    <div style="margin-left:auto;font-size:9px;letter-spacing:.2em;color:#8ea0b6;">AUTONOMOUS OFFENSIVE SECURITY</div>
+  </div>
+  <div class="cover-eyebrow">AUTONOMOUS PENETRATION TEST · ENGAGEMENT REPORT</div>
+  {% set _ct = (target_display or session.target or 'Security Assessment')|string %}
+  <div class="cover-title{% if _ct|length > 48 %} t-xlong{% elif _ct|length > 24 %} t-long{% endif %}">{{ _ct|e }}</div>
+  <div class="cover-sub">
+    {% if session.target_hostname %}{{ session.target_hostname|e }} · {% endif %}
+    {{ (session.target_ip or session.target or '')|e }}
+    {% if engagement_type %} · {{ engagement_type|replace('_',' ')|title|e }}{% endif %}
+  </div>
+  <span class="verdict v-{{ _fr }}">{{ (final_rating_label or 'ASSESSMENT COMPLETE')|e }}</span>
+
+  <div class="cover-flex">
+    {% if charts and charts.risk_gauge %}<div class="cover-gauge">{{ charts.risk_gauge|safe }}</div>{% endif %}
+    <div class="cover-chips">
+      <div class="chip"><div class="n" style="color:var(--crit-d)">{{ sev.critical|default(0) }}</div><div class="l">Critical</div></div>
+      <div class="chip"><div class="n" style="color:var(--high-d)">{{ sev.high|default(0) }}</div><div class="l">High</div></div>
+      <div class="chip"><div class="n" style="color:var(--med-d)">{{ sev.medium|default(0) }}</div><div class="l">Medium</div></div>
+      <div class="chip"><div class="n" style="color:var(--low-d)">{{ sev.low|default(0) }}</div><div class="l">Low</div></div>
+      <div class="chip"><div class="n" style="color:var(--info-d)">{{ sev.info|default(0) }}</div><div class="l">Info</div></div>
+      <div class="chip"><div class="n">{{ summary.total|default(0) }}</div><div class="l">Findings</div></div>
+      <div class="chip"><div class="n" style="color:{{ 'var(--crit-d)' if outcome.compromised else 'var(--low-d)' }}">{{ 'ROOT' if outcome.root else ('USER' if outcome.compromised else '—') }}</div><div class="l">Access</div></div>
+    </div>
+  </div>
+
+  <div class="meta-grid">
+    <div class="meta-cell"><div class="k">Target</div><div class="v">{{ (session.target_ip or session.target or '—')|e }}</div></div>
+    <div class="meta-cell"><div class="k">Hostname</div><div class="v">{{ session.target_hostname|default('—', true)|e }}</div></div>
+    <div class="meta-cell"><div class="k">Scope</div><div class="v">{{ session.scope|default('Single host', true)|e }}</div></div>
+    <div class="meta-cell"><div class="k">Engagement</div><div class="v">{{ (engagement_type or 'pentest')|replace('_',' ')|title|e }}</div></div>
+    <div class="meta-cell"><div class="k">Started</div><div class="v">{{ session.started_at|default('—')|e }}</div></div>
+    <div class="meta-cell"><div class="k">Completed</div><div class="v">{{ session.completed_at|default('—')|e }}</div></div>
+    <div class="meta-cell"><div class="k">Duration</div><div class="v">{{ duration|default('—')|e }}</div></div>
+    <div class="meta-cell"><div class="k">Generated</div><div class="v">{{ generated_at|default('—')|e }}</div></div>
+  </div>
+  <div style="margin-top:16px;"><span class="confidential">CONFIDENTIAL</span>
+    <span style="font-size:8pt;color:#8ea0b6;margin-left:10px;">Prepared by ARGUS · Distribution restricted to authorised personnel</span></div>
+</div>
+
+{# ═══════════════════════════ 01 · EXECUTIVE SUMMARY ═══════════════════════════ #}
+<section class="sec">
+  <div class="sec-head"><span class="sec-num"></span>
+    <div><div class="sec-eyebrow">For leadership</div><div class="sec-title">Executive Summary</div></div></div>
+  {% if executive_summary %}<p class="sec-lead">{{ executive_summary|e }}</p>{% endif %}
+  <div class="tiles">
+    <div class="tile t-critical"><div class="n">{{ sev.critical|default(0) }}</div><div class="l">Critical</div></div>
+    <div class="tile t-high"><div class="n">{{ sev.high|default(0) }}</div><div class="l">High</div></div>
+    <div class="tile t-medium"><div class="n">{{ sev.medium|default(0) }}</div><div class="l">Medium</div></div>
+    <div class="tile t-low"><div class="n">{{ sev.low|default(0) }}</div><div class="l">Low</div></div>
+    <div class="tile t-info"><div class="n">{{ sev.info|default(0) }}</div><div class="l">Info</div></div>
+    <div class="tile t-total"><div class="n">{{ summary.total|default(0) }}</div><div class="l">Total</div></div>
+    <div class="tile t-access"><div class="n">{{ 'ROOT' if outcome.root else ('USER' if outcome.compromised else 'NONE') }}</div><div class="l">Access</div></div>
+  </div>
+  {% if charts and charts.severity_stack %}<div class="chart-wrap" style="margin:6px 0 14px">{{ charts.severity_stack|safe }}</div>{% endif %}
+  {% if hosts_report %}
+  <div class="panel">
+    <div class="panel-title">Per-host breakdown — {{ hosts_report|length }} hosts (most severe first)</div>
+    {% if session.hosts_unfinalized %}
+    <div style="margin:0 0 8px;color:var(--amber,#c99);font-size:8.5pt">⚠ {{ session.hosts_unfinalized }} of {{ session.hosts_total or hosts_report|length }} hosts reached the per-host time cap before assessment finished — their findings are <strong>partial</strong>, not a full result.</div>
+    {% endif %}
+    <table class="reg" style="font-size:9pt">
+      <thead><tr><th style="width:28%">Host</th><th>Critical</th><th>High</th><th>Medium</th><th>Low</th><th>Info</th><th>Total</th><th>Status</th></tr></thead>
+      <tbody>
+      {% for g in hosts_report %}
+        <tr><td class="mono"><strong>{{ g.host|e }}</strong></td>
+          <td>{% if g.sev.critical %}<span class="badge sev-critical">{{ g.sev.critical }}</span>{% else %}—{% endif %}</td>
+          <td>{% if g.sev.high %}<span class="badge sev-high">{{ g.sev.high }}</span>{% else %}—{% endif %}</td>
+          <td>{{ g.sev.medium or '—' }}</td><td>{{ g.sev.low or '—' }}</td><td>{{ g.sev.info or '—' }}</td>
+          <td><strong>{{ g.total }}</strong></td>
+          <td style="font-size:8pt">{% if g.finalized is defined and not g.finalized %}<span style="color:var(--amber,#c99)">⚠ {{ g.status_label|default('Partial')|e }}</span>{% else %}{{ g.status_label|default('Assessed')|e }}{% endif %}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+  {% if findings %}
+  <div class="panel">
+    <div class="panel-title">Priority Actions — highest-severity findings first</div>
+    {% for f in findings if f.severity|lower in ['critical','high'] %}{% if loop.index <= 5 %}
+    <div class="pa"><div class="pa-badge">{{ loop.index }}</div>
+      <div class="pa-body"><div class="t">{{ f.title|e }} <span class="badge sev-{{ f.severity|lower }}">{{ f.severity|e }}</span></div>
+        <div class="d">{{ (f.remediation or f.description or 'Remediate per the detailed finding card.')|e }}</div></div></div>
+    {% endif %}{% endfor %}
+    {% if not (findings|selectattr('severity','equalto','Critical')|list or findings|selectattr('severity','equalto','High')|list) %}
+    <div class="pa"><div class="pa-badge">✓</div><div class="pa-body"><div class="t">No critical or high-severity findings</div>
+      <div class="d">The most significant items are listed in the findings register below.</div></div></div>
+    {% endif %}
+  </div>
+  {% endif %}
+</section>
+
+{# ═══════════════════════════ 02 · ATTACK SURFACE ═══════════════════════════ #}
+{% if intel and (intel.services or intel.open_ports) %}
+<section class="sec">
+  <div class="sec-head"><span class="sec-num"></span>
+    <div><div class="sec-eyebrow">Reconnaissance</div><div class="sec-title">Attack Surface</div></div></div>
+  <p class="sec-lead">Services and open ports discovered on the target{% if intel.os_guess %} · OS: {{ intel.os_guess|e }}{% endif %}.</p>
+  {% if intel.services %}
+  <table class="reg">
+    <thead><tr><th style="width:12%">Port</th><th style="width:22%">Service</th><th style="width:44%">Version / Product</th><th style="width:22%">Protocol</th></tr></thead>
+    <tbody>
+    {% for port, svc in intel.services.items() %}
+      <tr><td class="mono">{{ port|e }}</td><td>{{ svc.service|default('—')|e }}</td>
+        <td>{{ svc.version|default('—')|e }}</td><td class="mono">{{ svc.protocol|default('tcp')|e }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% elif intel.open_ports %}
+  <div>{% for p in intel.open_ports %}<span class="tag" style="margin:2px">{{ p }}</span>{% endfor %}</div>
+  {% endif %}
+</section>
+{% endif %}
+
+{# ═══════════════════════════ 03 · DASHBOARD (charts) ═══════════════════════════ #}
+{% if charts and charts.has_any %}
+<section class="sec">
+  <div class="sec-head"><span class="sec-num"></span>
+    <div><div class="sec-eyebrow">At a glance</div><div class="sec-title">Engagement Dashboard</div></div></div>
+  <div class="panel-2">
+    <div class="panel"><div class="panel-title">Findings by severity</div>
+      <div class="chart-wrap">{{ charts.severity_donut|safe }}</div></div>
+    {% if charts.coverage_bars %}
+    <div class="panel"><div class="panel-title">Test coverage — attack attempts by outcome</div>
+      <div class="chart-wrap">{{ charts.coverage_bars|safe }}</div></div>
+    {% endif %}
+  </div>
+  {% if charts.mitre_tactics %}
+  <div class="panel"><div class="panel-title">MITRE ATT&CK — techniques observed per tactic</div>
+    <div class="chart-wrap">{{ charts.mitre_tactics|safe }}</div></div>
+  {% endif %}
+</section>
+{% endif %}
+
+{# ═══════════════════════════ 04 · BASIS OF COMPROMISE ═══════════════════════════ #}
+{% if compromise_evidence and compromise_evidence.claimed %}
+<section class="sec">
+  <div class="sec-head"><span class="sec-num"></span>
+    <div><div class="sec-eyebrow">Defensible verdict</div><div class="sec-title">Basis of Compromise Claim</div></div></div>
+  <div class="compromise">
+    <div class="cmp-h">Compromise achieved — {{ compromise_evidence.level|upper|e }}
+      {% if compromise_evidence.proven %}<span class="cmp-badge-ok">&#10003; PROOF ARTIFACT CAPTURED</span>
+      {% else %}<span class="cmp-badge-no">&#9888; NO ARTIFACT AUTO-CAPTURED — MANUALLY REPRODUCIBLE</span>{% endif %}</div>
+    <div style="font-size:9.6pt;max-width:158mm"><strong>On what basis:</strong> {{ compromise_evidence.basis|e }}</div>
+    {% if compromise_evidence.proof_items %}
+    <div class="fc-label" style="margin-top:9px">Proof artifacts</div>
+    <ul class="clean">{% for p in compromise_evidence.proof_items %}<li>{{ p|e }}</li>{% endfor %}</ul>{% endif %}
+    {% if compromise_evidence.no_artifact_reason %}<div class="cmp-reason">{{ compromise_evidence.no_artifact_reason|e }}</div>{% endif %}
+    {% if compromise_evidence.method_steps %}
+    <div class="fc-label" style="margin-top:9px">How it was achieved — exact steps a human can rerun to verify</div>
+    <div class="code">{% for s in compromise_evidence.method_steps %}$ {{ s|e }}
+{% endfor %}</div>{% endif %}
+  </div>
+</section>
+{% endif %}
+
+{# ═══════════════════════════ 05 · ATTACK PATH ═══════════════════════════ #}
+{% if charts and charts.killchain %}
+<section class="sec">
+  <div class="sec-head"><span class="sec-num"></span>
+    <div><div class="sec-eyebrow">Kill chain</div><div class="sec-title">Attack Path</div></div></div>
+  <p class="sec-lead">The ordered sequence of steps ARGUS executed from first contact to the deepest access achieved.</p>
+  <div class="panel chart-wrap">{{ charts.killchain|safe }}
+    <div class="legend">
+      <span><i style="background:#3d5a80"></i>Recon</span>
+      <span><i style="background:#c0392b"></i>Exploit / Foothold</span>
+      <span><i style="background:#e8743b"></i>Privilege Esc</span>
+      <span><i style="background:#8e2f8e"></i>Post-exploit / Loot</span>
+      <span><i style="background:#6a4fb3"></i>Persistence</span>
+      <span><i style="background:#2f7d64"></i>Lateral</span>
+    </div>
+  </div>
+</section>
+{% endif %}
+
+{# ═══════════════════════════ 06 · FINDINGS REGISTER ═══════════════════════════ #}
+<section class="sec">
+  <div class="sec-head"><span class="sec-num"></span>
+    <div><div class="sec-eyebrow">Consolidated</div><div class="sec-title">Findings Register</div></div></div>
+  {% if findings %}
+  <table class="reg">
+    <thead><tr><th style="width:8%">ID</th><th style="width:34%">Finding</th><th style="width:10%">Severity</th>
+      <th style="width:8%">CVSS</th><th style="width:16%">Host</th><th style="width:12%">MITRE</th><th style="width:12%">Retest</th></tr></thead>
+    <tbody>
+    {% for f in findings %}
+      <tr><td class="mono">{{ f.fid|default('F-%02d'|format(loop.index))|e }}</td>
+        <td><strong>{{ f.title|e }}</strong></td>
+        <td><span class="badge sev-{{ f.severity|lower }}">{{ f.severity|e }}</span></td>
+        <td class="cvss">{% if f.extra and f.extra.cvss_base %}{{ f.extra.cvss_base }}{% else %}—{% endif %}</td>
+        <td class="host">{{ f.host|default('—')|e }}{% if f.port %}:{{ f.port }}{% endif %}</td>
+        <td>{% if f.mitre %}<span class="tag tag-mitre">{{ f.mitre|e }}</span>{% else %}—{% endif %}</td>
+        <td><span class="rt rt-{{ f.retest_status|default('Open') }}">{{ f.retest_status|default('Open')|e }}</span></td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}<p class="sec-lead">No validated findings were recorded for this engagement.</p>{% endif %}
+</section>
+
+{# ═══════════════════════════ 07 · DETAILED FINDINGS ═══════════════════════════ #}
+{% macro fcard(f, idx) %}
+  {% set _sc = 'crit' if f.severity|lower=='critical' else f.severity|lower %}
+  <div class="fc {{ _sc }}">
+    <div class="fc-head">
+      <div><span class="fc-id">{{ f.fid|default('F-%02d'|format(idx))|e }}</span>
+        <div class="fc-title">{{ f.title|e }}</div>
+        <div class="fc-loc">{% if f.host %}{{ f.host|e }}{% if f.port %}:{{ f.port }}{% endif %}{% endif %}
+          {% if f.service %} · {{ f.service|e }}{% endif %}{% if f.phase %} · {{ f.phase|replace('_',' ')|e }}{% endif %}</div></div>
+      <div class="fc-meta"><span class="badge sev-{{ f.severity|lower }}">{{ f.severity|e }}</span>
+        {% if f.extra and f.extra.cvss_base %}<div style="font-size:8.6pt;margin-top:6px" class="mono">CVSS {{ f.extra.cvss_base }}</div>{% endif %}
+        <div style="margin-top:6px"><span class="rt rt-{{ f.retest_status|default('Open') }}">{{ f.retest_status|default('Open')|e }}</span></div></div>
+    </div>
+    {% if f.description %}<div class="fc-field prose">{{ f.description|e }}</div>{% endif %}
+    {% if f.severity_rationale %}<div class="fc-field"><div class="fc-label">Severity basis</div>
+      <div class="fc-basis">{{ f.severity_rationale|e }}</div></div>{% endif %}
+    {% if f.cves %}<div class="fc-field"><div class="fc-label">CVEs</div>
+      {% for c in f.cves %}<span class="tag tag-cve">{{ c|e }}</span> {% endfor %}
+      {% if f.mitre %}<span class="tag tag-mitre">{{ f.mitre|e }}</span>{% endif %}</div>{% endif %}
+    {% if f.evidence %}<div class="fc-field"><div class="fc-label">Evidence</div>
+      <div class="code">{{ f.evidence|e }}</div></div>{% endif %}
+    {% if f.reproduction %}<div class="fc-field"><div class="fc-label">Steps to reproduce</div>
+      <div class="code">{% for s in f.reproduction %}$ {{ s|e }}
+{% endfor %}</div></div>{% endif %}
+    {% if f.remediation %}<div class="fc-field"><div class="fc-label">Remediation</div>
+      <div class="rem">{{ f.remediation|e }}</div></div>{% endif %}
+  </div>
+{% endmacro %}
+{% if findings %}
+<section class="sec">
+  <div class="sec-head"><span class="sec-num"></span>
+    <div><div class="sec-eyebrow">Technical detail</div><div class="sec-title">Detailed Findings</div></div></div>
+  {% if hosts_report %}
+    {% for g in hosts_report %}
+    <div class="host-group">
+      <div class="host-head">{{ g.host|e }}
+        {% if g.finalized is defined and not g.finalized %}<span class="badge" style="background:var(--amber,#c99);color:#1a1a1a">⚠ {{ g.status_label|default('Partial')|e }}</span>{% endif %}
+        <span class="host-chips">
+          {% if g.sev.critical %}<span class="badge sev-critical">{{ g.sev.critical }} Critical</span> {% endif %}
+          {% if g.sev.high %}<span class="badge sev-high">{{ g.sev.high }} High</span> {% endif %}
+          {% if g.sev.medium %}<span class="badge sev-medium">{{ g.sev.medium }} Medium</span> {% endif %}
+          {% if g.sev.low %}<span class="badge sev-low">{{ g.sev.low }} Low</span> {% endif %}
+          {% if g.sev.info %}<span class="badge sev-info">{{ g.sev.info }} Info</span>{% endif %}
+        </span></div>
+      {% for f in g.findings %}{{ fcard(f, loop.index) }}{% endfor %}
+    </div>
+    {% endfor %}
+  {% else %}
+    {% for f in findings %}{{ fcard(f, loop.index) }}{% endfor %}
+  {% endif %}
+</section>
+{% endif %}
+
+{# ═══════════════════════════ 08 · OBSERVED ISSUES ═══════════════════════════ #}
+{% if discovered_issues %}
+<section class="sec">
+  <div class="sec-head"><span class="sec-num"></span>
+    <div><div class="sec-eyebrow">Unvalidated</div><div class="sec-title">Observed Issues</div></div></div>
+  <p class="sec-lead">Signals ARGUS observed but did not yet promote to a validated finding — recorded for completeness and to substantiate the overall rating. These are <strong>not confirmed exploitable</strong>.</p>
+  <table class="reg">
+    <thead><tr><th style="width:44%">Issue</th><th style="width:12%">Severity</th><th style="width:18%">Host</th><th style="width:16%">Tool</th><th style="width:10%">Status</th></tr></thead>
+    <tbody>
+    {% for d in discovered_issues %}
+      <tr><td>{{ d.title|default('')|e }}</td>
+        <td>{% if d.severity %}<span class="badge sev-{{ d.severity|lower }}">{{ d.severity|e }}</span>{% else %}—{% endif %}</td>
+        <td>{{ d.host|default('—')|e }}</td><td class="mono">{{ d.tool|default('—')|e }}</td>
+        <td>{{ d.status|default('observed')|e }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
+
+{# ═══════════════════════════ 09 · COVERAGE / ATTEMPTS ═══════════════════════════ #}
+{% if coverage_tests %}
+<section class="sec">
+  <div class="sec-head"><span class="sec-num"></span>
+    <div><div class="sec-eyebrow">Transparency</div><div class="sec-title">Test Coverage &amp; Attempts</div></div></div>
+  <p class="sec-lead">Every probe ARGUS executed and its outcome. Negative results are reported deliberately — they attest that the attack surface was exercised.
+    {% if coverage_counts %}<strong>{{ coverage_counts.success|default(0) }}</strong> succeeded ·
+    <strong>{{ coverage_counts.negative|default(0) }}</strong> confirmed-safe ·
+    <strong>{{ coverage_counts.blocked|default(0) }}</strong> blocked ·
+    <strong>{{ coverage_counts.error|default(0) }}</strong> errored.{% endif %}</p>
+  <table class="cov">
+    <thead><tr><th style="width:12%">Tool</th><th style="width:44%">Command</th><th style="width:12%">Outcome</th><th style="width:32%">Note</th></tr></thead>
+    <tbody>
+    {% for t in coverage_tests %}
+      <tr class="row-{{ t.outcome|default('') }}">
+        <td class="mono">{{ t.tool|default('—')|e }}</td>
+        <td class="cmd">{{ t.command|default('')|e }}</td>
+        <td class="o-{{ t.outcome|default('error') }}">{{ (t.outcome or 'n/a')|e }}</td>
+        <td>{{ t.note|default('')|e }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
+
+{# ═══════════════════════════ 10 · MITRE MAPPING ═══════════════════════════ #}
+{% if mitre_mappings %}
+<section class="sec">
+  <div class="sec-head"><span class="sec-num">10</span>
+    <div><div class="sec-eyebrow">Framework</div><div class="sec-title">MITRE ATT&amp;CK Mapping</div></div></div>
+  <table class="reg">
+    <thead><tr><th style="width:14%">Technique</th><th style="width:20%">Tactic</th><th style="width:32%">Name</th>
+      <th style="width:18%">Tool</th><th style="width:16%">Result</th></tr></thead>
+    <tbody>
+    {% for m in mitre_mappings %}
+      <tr><td><span class="tag tag-mitre">{{ (m.technique_id or m.technique or '—')|e }}</span></td>
+        <td>{{ m.tactic|default('—')|e }}</td><td>{{ (m.technique_name or m.name or '')|e }}</td>
+        <td class="mono">{{ (m.tool_used or m.tool or '')|e }}</td>
+        <td>{% if m.outcome %}{{ m.outcome|e }}{% elif m.success %}<span class="badge sev-high">success</span>{% else %}<span class="tag">attempted</span>{% endif %}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
+
+{# ═══════════════════════════ 11 · DETECTION / PURPLE TEAM ═══════════════════════════ #}
+{% if detection_map %}
+<section class="sec">
+  <div class="sec-head"><span class="sec-num">11</span>
+    <div><div class="sec-eyebrow">Blue-team value</div><div class="sec-title">Detection Opportunities</div></div></div>
+  <table class="reg">
+    <thead><tr><th style="width:30%">Finding</th><th style="width:12%">Technique</th><th style="width:34%">Detection opportunity</th>
+      <th style="width:14%">Telemetry</th><th style="width:10%">Status</th></tr></thead>
+    <tbody>
+    {% for d in detection_map %}
+      <tr><td>{{ d.finding|default('')|e }}</td><td><span class="tag tag-mitre">{{ d.technique|default('—')|e }}</span></td>
+        <td>{{ d.opportunity|default('')|e }}</td><td>{{ d.telemetry|default('')|e }}</td>
+        <td><span class="rt rt-{{ 'Verified' if d.caught in ['Caught','Detected','Verified'] else 'Open' }}">{{ d.caught|default('Open')|e }}</span></td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
+
+{# ═══════════════════════════ 12 · LOOT / EVIDENCE / FLAGS ═══════════════════════════ #}
+{% if loot_entries or flags %}
+<section class="sec">
+  <div class="sec-head"><span class="sec-num">12</span>
+    <div><div class="sec-eyebrow">Chain of custody</div><div class="sec-title">Evidence, Loot &amp; Flags</div></div></div>
+  {% if flags %}
+  <div class="panel"><div class="panel-title">Captured flags — proof of the access level above</div>
+    <table class="reg" style="font-size:9pt"><thead><tr><th style="width:16%">Type</th><th style="width:44%">Location</th><th style="width:40%">Value</th></tr></thead>
+    <tbody>{% for fl in flags %}
+      <tr><td><span class="badge sev-{{ 'critical' if fl.flag_type=='root' else 'high' }}">{{ (fl.flag_type or 'flag')|upper|e }}</span></td>
+        <td class="mono">{{ fl.location|default('—')|e }}</td><td><span class="redact">CAPTURED · REDACTED</span></td></tr>
+    {% endfor %}</tbody></table></div>
+  {% endif %}
+  {% if loot_entries %}
+  <p class="sec-lead">Artifacts captured during the engagement, SHA-256 integrity-hashed at capture time. Credential and key material is redacted.</p>
+  <div class="loot-grid">
+    {% for l in loot_entries %}
+    <div class="loot"><div class="src">{{ (l.source or l.target or 'artifact')|e }}
+      {% if l.severity %}<span class="badge sev-{{ l.severity|lower }}" style="float:right">{{ l.severity|e }}</span>{% endif %}</div>
+      {% if l.doi_label %}<div style="font-size:8.4pt;color:var(--muted);margin-top:3px">{{ l.doi_label|e }}{% if l.size_bytes %} · {{ l.size_bytes }} bytes{% endif %}</div>{% endif %}
+      {% if l.sha256 %}<div class="hash">SHA-256 {{ l.sha256|e }}</div>{% endif %}</div>
+    {% endfor %}
+  </div>
+  {% endif %}
+</section>
+{% endif %}
+
+{# ═══════════════════════════ 13 · CREDENTIALS ═══════════════════════════ #}
+{% if creds_summary %}
+<section class="sec">
+  <div class="sec-head"><span class="sec-num">13</span>
+    <div><div class="sec-eyebrow">Access material</div><div class="sec-title">Credentials Recovered</div></div></div>
+  <table class="reg">
+    <thead><tr><th>User</th><th>Domain</th><th>Secret</th><th>Source</th><th>Note</th></tr></thead>
+    <tbody>
+    {% for c in creds_summary %}
+      <tr><td class="mono">{{ c.user|default('—')|e }}</td><td>{{ c.domain|default('—')|e }}</td>
+        <td><span class="redact">REDACTED</span></td><td>{{ c.source|default('')|e }}</td><td>{{ c.note|default('')|e }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
+
+{# ═══════════════════════════ 14 · OBJECTIVES ═══════════════════════════ #}
+{% if objectives or (win_conditions and win_conditions.conditions) %}
+<section class="sec">
+  <div class="sec-head"><span class="sec-num">14</span>
+    <div><div class="sec-eyebrow">Mission</div><div class="sec-title">Objectives &amp; Outcomes
+      {% if objectives %}<span style="font-size:11px;color:var(--muted);font-weight:600">({{ objectives_done|default(0) }}/{{ objectives_total|default(objectives|length) }} answered)</span>{% endif %}</div></div></div>
+  {% if win_conditions and win_conditions.conditions %}
+  <div class="panel"><div class="panel-title">Win conditions ({{ win_conditions.achieved_count|default(0) }}/{{ win_conditions.total|default(win_conditions.conditions|length) }} met)</div>
+    <ul class="clean">{% for wc in win_conditions.conditions %}<li>{{ '✓' if wc.achieved else '✗' }} {{ wc.name|default('')|e }}{% if wc.evidence %} — {{ wc.evidence|e }}{% endif %}</li>{% endfor %}</ul></div>
+  {% endif %}
+  {% if objectives %}
+  <table class="reg">
+    <thead><tr><th style="width:6%">#</th><th style="width:44%">Objective</th><th style="width:40%">Outcome</th><th style="width:10%">Status</th></tr></thead>
+    <tbody>
+    {% for o in objectives %}
+      <tr><td>{{ o.index|default(loop.index) }}</td><td>{{ o.question|default('')|e }}</td>
+        <td>{{ o.answer|default('—')|e }}</td>
+        <td><span class="rt rt-{{ 'Verified' if o.answered else 'Open' }}">{{ 'Answered' if o.answered else 'Open' }}</span></td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</section>
+{% endif %}
+
+{# ═══════════════════════════ 15 · TIMELINE ═══════════════════════════ #}
+{% if engagement_timeline %}
+<section class="sec">
+  <div class="sec-head"><span class="sec-num">15</span>
+    <div><div class="sec-eyebrow">Chronology</div><div class="sec-title">Engagement Timeline</div></div></div>
+  <div>
+    {% for e in engagement_timeline %}
+    <div class="tl-item"><div class="tl-dot"></div>
+      <div class="tl-t">{{ e.ts|default('')|e }}</div><div class="tl-title">{{ e.label|default('')|e }}</div>
+      {% if e.detail %}<div class="tl-d">{{ e.detail|e }}</div>{% endif %}</div>
+    {% endfor %}
+  </div>
+</section>
+{% endif %}
+
+{# ═══════════════════════════ 16 · AI / LLM SECURITY ═══════════════════════════ #}
+{% if ai_security and ai_security.count %}
+<section class="sec">
+  <div class="sec-head"><span class="sec-num">16</span>
+    <div><div class="sec-eyebrow">AI red-team</div><div class="sec-title">AI / LLM Security</div></div></div>
+  <p class="sec-lead">{{ ai_security.count }} AI/LLM finding(s) · max AIVSS {{ ai_security.max_aivss|default(0) }} · avg attack-success-rate {{ ai_security.avg_asr|default(0) }}%
+    {% if ai_security.owasp_classes %}· OWASP-LLM: {{ ai_security.owasp_classes|join(', ')|e }}{% endif %}</p>
+  <table class="reg">
+    <thead><tr><th style="width:36%">Finding</th><th>Severity</th><th>AIVSS</th><th>ASR</th><th>OWASP-LLM</th><th>Vector</th></tr></thead>
+    <tbody>
+    {% for a in ai_security.findings %}
+      <tr><td><strong>{{ a.title|e }}</strong></td><td><span class="badge sev-{{ a.severity|lower }}">{{ a.severity|e }}</span></td>
+        <td class="cvss">{{ a.aivss|default('—') }}</td><td>{{ a.asr|default(0) }}%</td>
+        <td>{{ a.owasp_llm|default('—')|e }}</td><td>{{ a.attack_vector|default('—')|e }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
+
+{# ═══════════════════════════ 17 · METHODOLOGY ═══════════════════════════ #}
+<section class="sec">
+  <div class="sec-head"><span class="sec-num">17</span>
+    <div><div class="sec-eyebrow">How ARGUS works</div><div class="sec-title">Methodology &amp; Assurance</div></div></div>
+  <div class="meth-grid">
+    <div class="panel">
+      <div class="panel-title">Plan → Execute → Validate</div>
+      <div class="step"><div class="step-n">1</div><div><strong>Plan.</strong> ARGUS builds a hypothesis tree of testable attack paths from reconnaissance, activating nodes as evidence accrues.</div></div>
+      <div class="step"><div class="step-n">2</div><div><strong>Execute.</strong> Ordered tool dispatch against each hypothesis; every action is logged with its command, raw output, and MITRE ATT&amp;CK annotation. Non-exploitable paths are retained as coverage evidence.</div></div>
+      <div class="step"><div class="step-n">3</div><div><strong>Validate.</strong> A finding is published only when it passes the Issue-Validator gate — grounded in concrete tool output, accurately CVSS-scored, with reproduction recorded. Unsubstantiated claims are demoted, not shipped.</div></div>
+    </div>
+    <div class="panel">
+      <div class="panel-title">CVSS v3.1 severity bands</div>
+      <div class="cvss-band"><span class="cvss-chip" style="background:var(--crit)">9–10</span> Critical — demonstrated compromise / catastrophic impact</div>
+      <div class="cvss-band"><span class="cvss-chip" style="background:var(--high)">7–8.9</span> High — public exploit or confirmed direct exploitability</div>
+      <div class="cvss-band"><span class="cvss-chip" style="background:var(--med);color:#3a2c00">4–6.9</span> Medium — confirmed, chainable weakness</div>
+      <div class="cvss-band"><span class="cvss-chip" style="background:var(--low)">0.1–3.9</span> Low — minor issue / information leak</div>
+      <div class="cvss-band"><span class="cvss-chip" style="background:var(--info)">0</span> Info — detection / attack surface</div>
+      <div style="margin-top:9px;font-size:8.6pt;color:var(--muted)">Aligned to MITRE ATT&amp;CK Enterprise · OWASP Top 10 · CVSS v3.1 · PTES.</div>
+    </div>
+  </div>
+</section>
+
+{# ═══════════════════════════ 18 · REASONING JOURNAL ═══════════════════════════ #}
+{% if reasoning_journal %}
+<section class="sec">
+  <div class="sec-head"><span class="sec-num">18</span>
+    <div><div class="sec-eyebrow">Audit trail</div><div class="sec-title">Reasoning Journal</div></div></div>
+  {% if journal_truncated %}<p class="sec-lead">Showing the most recent {{ reasoning_journal|length }} of {{ journal_total }} decision entries.</p>{% endif %}
+  <div class="panel" style="font-size:9pt">
+    {% for j in reasoning_journal %}<div style="padding:4px 0;border-bottom:1px solid var(--line2)">{{ j|e }}</div>{% endfor %}
+  </div>
+</section>
+{% endif %}
+
+{# ═══════════════════════════ APPENDIX / FOOTER ═══════════════════════════ #}
+<section class="sec">
+  <div class="sec-head"><span class="sec-num">A</span>
+    <div><div class="sec-eyebrow">Reference</div><div class="sec-title">Appendix &amp; Handling</div></div></div>
+  {% if tools_used %}<div class="panel"><div class="panel-title">Tooling used ({{ tools_used|length }})</div>
+    <div>{% for t in tools_used %}<span class="tag" style="margin:2px">{{ t|e }}</span>{% endfor %}</div></div>{% endif %}
+  {% if exploit_modules %}
+  <div class="panel"><div class="panel-title">Exploit modules &amp; public PoCs considered</div>
+    <table class="reg" style="font-size:9pt"><thead><tr><th style="width:46%">Reference</th><th style="width:16%">Used</th><th style="width:38%">Source</th></tr></thead>
+    <tbody>{% for e in exploit_modules %}
+      <tr><td class="mono">{{ (e.cves|join(', ') if e.cves else e.type|default('module'))|e }}</td>
+        <td>{{ '✓ run' if e.used else '— considered' }}</td><td class="mono" style="word-break:break-all">{{ e.url|default('')|e }}</td></tr>
+    {% endfor %}</tbody></table></div>
+  {% endif %}
+  {% if primer_rows %}
+  <div class="panel"><div class="panel-title">Tool-chain coverage</div>
+    <table class="reg" style="font-size:9pt"><thead><tr><th style="width:40%">Chain</th><th style="width:20%">Coverage</th><th style="width:20%">Status</th><th style="width:20%">Missing</th></tr></thead>
+    <tbody>{% for r in primer_rows %}
+      <tr><td>{{ r.chain|default('')|e }}</td><td>{{ r.present|default(0) }}/{{ r.total|default(0) }} ({{ r.coverage|default(0) }}%)</td>
+        <td>{% if r.status=='DEGRADED' %}<span class="badge sev-medium">DEGRADED</span>{% else %}<span class="rt rt-Verified">OK</span>{% endif %}</td>
+        <td class="mono" style="font-size:8pt">{{ r.missing|default('')|e }}</td></tr>
+    {% endfor %}</tbody></table></div>
+  {% endif %}
+  {% if web_intel_hints %}
+  <div class="panel"><div class="panel-title">Reconnaissance intel sources</div>
+    <ul class="clean">{% for h in web_intel_hints %}<li>{{ (h.hint or h.note or h.description or h.source or '')|e }}{% if h.confidence %} · conf {{ h.confidence }}{% endif %}</li>{% endfor %}</ul></div>
+  {% endif %}
+  <div class="panel">
+    <div class="panel-title">Document control</div>
+    <table style="font-size:9pt"><tbody>
+      <tr><td style="width:32%;color:var(--muted);padding:4px 0">Classification</td><td><span class="confidential">CONFIDENTIAL</span></td></tr>
+      <tr><td style="color:var(--muted);padding:4px 0">Target / scope</td><td>{{ (session.target or target_display or '—')|e }}{% if session.scope %} · {{ session.scope|e }}{% endif %}</td></tr>
+      <tr><td style="color:var(--muted);padding:4px 0">Engagement window</td><td>{{ session.started_at|default('—')|e }} → {{ session.completed_at|default('—')|e }} ({{ duration|default('—')|e }})</td></tr>
+      <tr><td style="color:var(--muted);padding:4px 0">Report generated</td><td>{{ generated_at|default('—')|e }}</td></tr>
+      <tr><td style="color:var(--muted);padding:4px 0">Findings gate</td><td>ARGUS Issue-Validator (evidence-grounded, severity-scaled)</td></tr>
+    </tbody></table>
+  </div>
+  <div class="foot">
+    <strong>Confidentiality.</strong> This report and its evidence artifacts are strictly confidential and intended solely for authorised personnel of the engaging organisation.
+    Do not reproduce or distribute without written authorisation. All testing was conducted under an authorised engagement against systems in scope.
+    Every published finding is grounded in concrete tool evidence and reproduction steps; credential and key material is redacted.
+    <div style="margin-top:8px">Generated autonomously by <strong>ARGUS</strong> · {{ generated_at|default('')|e }}</div>
+  </div>
+</section>
+</body>
+</html>

@@ -99,7 +99,10 @@ function LateralPanel({ sessionId }) {
       size: 'small', title: React.createElement(Text, { style: { color: 'var(--medium)' } }, '🎯 Internal Pivot Targets'),
       style: { background: 'var(--bg-panel)', borderColor: 'var(--border-light)', marginBottom: 12 },
     },
-      React.createElement(Space, { wrap: true },
+      // OVERFLOW: a wrapped tag row grows without bound once a scan discovers
+      // dozens of pivot targets — the same defect as the MissionControl host
+      // selector. Capped + internally scrolled via .a-chiprow-wrap.
+      React.createElement(Space, { wrap: true, className: 'a-chiprow-wrap' },
         targets.map(ip => React.createElement(Tag, {
           key: ip, color: 'orange', style: { fontSize: 13, padding: '2px 10px' },
         }, ip)),
@@ -120,12 +123,15 @@ function LateralPanel({ sessionId }) {
       ),
     ),
 
-    // Findings list
+    // Findings list — wrapped in a capped, internally-scrolling pane so a long
+    // result set cannot push the panels above it off-screen. The rows were
+    // previously bare siblings with no container, so there was nothing to cap.
     loading
       ? React.createElement('div', { style: { color: 'var(--text-secondary)', padding: 20 } }, 'Loading…')
       : findings.length === 0
         ? React.createElement('div', { style: { color: 'var(--text-muted)', padding: 20 } }, 'No lateral movement findings yet.')
-        : findings.map((f, i) => React.createElement(FindingRow, { key: f.finding_id || i, f })),
+        : React.createElement('div', { className: 'a-listpane', 'data-slot': 'LateralPostPage.lateralFindings' },
+            findings.map((f, i) => React.createElement(FindingRow, { key: f.finding_id || i, f }))),
   );
 }
 
@@ -211,13 +217,14 @@ function PostPanel({ sessionId }) {
       )
     ),
 
-    // All findings fallback
+    // All findings fallback — capped + internally scrolling (see _containment.css)
     credFinds.length === 0 && c2Finds.length === 0 && exfilFinds.length === 0 && (
       loading
         ? React.createElement('div', { style: { color: 'var(--text-secondary)', padding: 20 } }, 'Loading…')
         : findings.length === 0
           ? React.createElement('div', { style: { color: 'var(--text-muted)', padding: 20 } }, 'No post-exploitation findings yet.')
-          : findings.map((f, i) => React.createElement(FindingRow, { key: f.finding_id || i, f }))
+          : React.createElement('div', { className: 'a-listpane', 'data-slot': 'LateralPostPage.postFindings' },
+              findings.map((f, i) => React.createElement(FindingRow, { key: f.finding_id || i, f })))
     ),
   );
 }
@@ -240,7 +247,8 @@ function TrafficPanel() {
     ),
     captures.length === 0
       ? React.createElement('div', { style: { color: 'var(--text-muted)', padding: 20 } }, 'No traffic captures yet. Traffic subagents run during the post-exploit phase.')
-      : captures.map((cap, i) =>
+      : React.createElement('div', { className: 'a-listpane', 'data-slot': 'LateralPostPage.captures' },
+        captures.map((cap, i) =>
           React.createElement(Card, {
             key: cap.id || i, size: 'small',
             style: { background: 'var(--bg-panel)', borderColor: 'var(--border-light)', marginBottom: 8,
@@ -275,6 +283,7 @@ function TrafficPanel() {
             )
           )
         )
+      )
   );
 }
 
@@ -309,7 +318,8 @@ function EvidencePanel({ sessionId }) {
     ),
     all.length === 0
       ? React.createElement('div', { style: { color: 'var(--text-muted)', padding: 20 } }, 'No evidence captured yet. Evidence is collected by flag_capture and screenshot subagents.')
-      : all.map((ev, i) =>
+      : React.createElement('div', { className: 'a-listpane', 'data-slot': 'LateralPostPage.evidence' },
+        all.map((ev, i) =>
           React.createElement(Card, {
             key: ev.id || i, size: 'small',
             style: { background: 'var(--bg-panel)', borderColor: 'var(--border-light)', marginBottom: 8,
@@ -344,6 +354,7 @@ function EvidencePanel({ sessionId }) {
             )
           )
         )
+      )
   );
 }
 
@@ -382,7 +393,7 @@ function LateralPostPage({ sessionId }) {
     },
   ];
 
-  return React.createElement('div', { style: { padding: 24 } },
+  return React.createElement('div', { 'data-slot': 'LateralPostPage.LateralPostPage', style: { padding: 24 } },
     React.createElement(Title, { level: 3, style: { color: 'var(--cyan)', marginBottom: 16 } },
       '↔🎭 Lateral Movement & Post-Exploitation'),
     React.createElement(Tabs, {

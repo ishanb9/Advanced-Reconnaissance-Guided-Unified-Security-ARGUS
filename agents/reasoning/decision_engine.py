@@ -164,6 +164,7 @@ class DecisionEngine:
         intel:           dict,
         used_tools:      Dict[str, int],
         negative_memory: NegativeMemory,
+        ranked_paths:    Optional[List[RankedAttackPath]] = None,
     ) -> Optional[JustifiedAction]:
         """
         Select the best actionable hypothesis and return a JustifiedAction.
@@ -361,6 +362,10 @@ class DecisionEngine:
                 # on /admin/api/users.php?id=.
                 if negative_memory.has_failed_before(tool, target_service, args=args):
                     count = negative_memory.attempt_count(tool, target_service, args=args)
+                    # [29] Apply the documented -10 repeated-failure penalty at the
+                    # skip site (score_action_result never sees it — the action is
+                    # dropped here first), so the engagement score reflects wasted picks.
+                    self._action_score += _SCORE_REPEATED_FAILURE
                     await self._emit_reasoning(
                         f"Skipping {tool} on {target_service} (this variant) — "
                         f"failed {count}x previously"
@@ -370,6 +375,9 @@ class DecisionEngine:
                 # Hard skip: scan already exhausted
                 tool_key = f"{tool}:{target_service}"
                 if used_tools.get(tool_key, 0) >= 3:
+                    # [29] Apply the documented -3 redundant-scan penalty here (same
+                    # reason: the candidate is dropped before scoring).
+                    self._action_score += _SCORE_REDUNDANT_SCAN
                     await self._emit_reasoning(
                         f"Skipping redundant scan: {tool} on {target_service} "
                         f"already run {used_tools[tool_key]}x"
@@ -385,6 +393,13 @@ class DecisionEngine:
                     "confidence":     hypothesis.confidence,
                     "_hypothesis":    hypothesis,
                 })
+
+        # #4 — matched device/tech skill quick-wins become first-class candidates,
+        # scored through the SAME VoI + reliability pipeline below (empty list, hence
+        # byte-identical, when no skill matched).
+        candidates.extend(self._skill_quick_win_candidates(
+            intel=intel, target=target, used_tools=used_tools,
+            negative_memory=negative_memory))
 
         if not candidates:
             return None
@@ -423,6 +438,34 @@ class DecisionEngine:
         # keeps failing THIS engagement is softly demoted.  Re-orders only — the
         # action is never dropped, and a strong VoI score still wins.
         ranked = await self._apply_tool_reliability(ranked)
+
+        # [27] Path-affinity re-rank — the AttackPlanner computes node/path scores that
+        # were otherwise discarded here.  When a top ranked path exists, softly bubble
+        # candidates whose tool or MITRE technique lies ON that path ahead of ties.
+        # STABLE, so VoI/reliability order is preserved within each group; default None
+        # (no paths passed) leaves ordering byte-identical.
+        if ranked_paths:
+            try:
+                _top = ranked_paths[0]
+                _ptools: set = set()
+                _ptechs: set = set()
+                for _n in (getattr(_top, "nodes", []) or []):
+                    for _t in (getattr(_n, "tools", []) or []):
+                        _ptools.add(str(_t).lower())
+                    _mt = getattr(_n, "mitre_technique", None)
+                    if _mt:
+                        _ptechs.add(str(_mt).upper())
+                if _ptools or _ptechs:
+                    def _affine(r):
+                        if str(r.get("tool", "")).lower() in _ptools:
+                            return 1
+                        _h = r.get("_hypothesis")
+                        if _h is not None and str(getattr(_h, "mitre_technique", "") or "").upper() in _ptechs:
+                            return 1
+                        return 0
+                    ranked.sort(key=_affine, reverse=True)
+            except Exception as _pexc:
+                await self._emit_reasoning(f"path-affinity re-rank skipped: {_pexc}")
 
         if not ranked:
             return None
@@ -2443,6 +2486,68 @@ class DecisionEngine:
                 requires_confirmation= False,
             )
         return None
+
+    def _skill_quick_win_candidates(self, *, intel: dict, target: str,
+                                    used_tools: Dict[str, int],
+                                    negative_memory: NegativeMemory) -> List[Dict[str, Any]]:
+        """Turn matched device/tech SKILL quick-wins into first-class scored candidates.
+
+        The reasoning loop used to be skill-blind — it scored only hypothesis-derived
+        actions and never consulted the matched OT/IoT/IT skills.  This appends each
+        matched skill's ceiling-safe quick-win (in rank_matches priority order) as an
+        ordinary candidate so it flows through the SAME VoI + tool-reliability ranking as
+        every other action.  Additive + guarded: no skill matched (or ARGUS_SKILL_CANDIDATES=0)
+        → returns [] → the candidate list is byte-identical to before.  Reads only
+        read-only (authorized=False) quick-wins, and the synthetic confidence stays below
+        the auto-execute threshold so these always require confirmation.  Never raises."""
+        out: List[Dict[str, Any]] = []
+        try:
+            import os as _os
+            if _os.environ.get("ARGUS_SKILL_CANDIDATES", "1") == "0":
+                return out
+            from knowledge.skill_registry import match_skills, rank_matches, safe_quick_wins
+            dets = match_skills(intel) or []
+            if not dets:                       # no device/tech skill matched → no change
+                return out
+            _domain = "OT" if any(d.get("domain") == "OT" for d in dets) else "IT"
+            ceiling = str(intel.get("scan_intrusiveness") or "safe")
+            phase   = intel.get("current_phase", "")
+            for d in rank_matches(dets)[:5]:
+                _conf = min(0.65, round(0.4 + float(d.get("priority_score", 0.0) or 0.0), 2))
+                for q in safe_quick_wins(d, ceiling, d.get("domain", _domain),
+                                         authorized=False)[:2]:
+                    cmd = str((q or {}).get("cmd", "")).strip()
+                    cmd = cmd.replace("{host}", target).replace("{target}", target)
+                    if not cmd or "{" in cmd:          # unresolved placeholder → skip
+                        continue
+                    tool, args, tsvc = self._parse_action_str(cmd, target)
+                    if tool in ("", "unknown"):
+                        continue
+                    if negative_memory.has_failed_before(tool, tsvc, args=args):
+                        continue
+                    if used_tools.get(f"{tool}:{tsvc}", 0) >= 3:
+                        continue
+                    hyp = Hypothesis(
+                        hypothesis_id            = f"skill:{d.get('id','')}:{tool}",
+                        statement                = (f"{d.get('technology','')} skill quick-win "
+                                                    f"({d.get('evidence','')})"),
+                        confidence               = _conf,
+                        evidence_supporting      = [str(d.get("evidence", ""))],
+                        recommended_next_actions = [cmd],
+                        attack_phase             = "initial_access",
+                    )
+                    out.append({
+                        "tool":           tool,
+                        "args":           args,
+                        "target_service": tsvc,
+                        "action_str":     cmd,
+                        "phase":          phase,
+                        "confidence":     _conf,
+                        "_hypothesis":    hyp,
+                    })
+        except Exception:
+            return out
+        return out
 
     def _build_reason(self, hypothesis: Hypothesis) -> str:
         """Format a justification string from a hypothesis."""

@@ -42,6 +42,28 @@ _PRINTNIGHTMARE_RE = re.compile(
     r"(PrintNightmare|CVE-2021-1675|CVE-2021-34527|print.*spooler.*VULNERABLE)",
     re.IGNORECASE,
 )
+# [51] An SMB CVE is CONFIRMED only when the nmap smb-vuln script emits an explicit
+# VULNERABLE VERDICT for it ("State: VULNERABLE" / a "VULNERABLE:" block) — NOT the bare
+# CVE/exploit NAME (nmap echoes every --script name it runs and prints script headers) nor
+# a lone "VULNERABLE" keyword.  Stops a CRITICAL EternalBlue/MS08-067 from a test-name.
+_SMB_VERDICT_POS_RE = re.compile(
+    r"state:\s*vulnerable|^\s*\|?\s*vulnerable:\s*$|\bis vulnerable\b", re.I | re.M)
+_SMB_VERDICT_NEG_RE = re.compile(r"not vulnerable|state:\s*(?:not|likely)\b|likely safe", re.I)
+
+
+def _confirmed_smb_vuln(text: str, *terms: str) -> bool:
+    """True only when the scanner explicitly flagged one of ``terms`` as VULNERABLE — a
+    positive verdict within a short window of the term, no negation nearby — never from the
+    exploit/CVE name or a bare keyword alone.  Pure + unit-testable."""
+    t = text or ""
+    for term in terms:
+        for m in re.finditer(re.escape(term), t, re.I):
+            win = t[max(0, m.start() - 60): m.end() + 320]
+            if _SMB_VERDICT_POS_RE.search(win) and not _SMB_VERDICT_NEG_RE.search(win):
+                return True
+    return False
+
+
 _NULL_SESSION_RE = re.compile(
     r"(null session|anonymous.*session|IPC\$.*OK|\$.*Disk|session.*established)",
     re.IGNORECASE,
@@ -180,8 +202,8 @@ class SmbVulnSubagent(BaseSubagent):
 
         # ── Parse findings ────────────────────────────────────────────────
 
-        # MS17-010 / EternalBlue
-        if _MS17010_RE.search(combined):
+        # MS17-010 / EternalBlue — gated on an explicit VULNERABLE verdict [51]
+        if _confirmed_smb_vuln(combined, "ms17-010", "smb-vuln-ms17-010", "eternalblue", "CVE-2017-0144"):
             await self.store_finding(Finding(
                 title=f"MS17-010 EternalBlue on {target}:{smb_port}",
                 description=(
@@ -203,8 +225,8 @@ class SmbVulnSubagent(BaseSubagent):
                 ),
             ))
 
-        # MS08-067
-        if _MS08067_RE.search(combined):
+        # MS08-067 — gated on an explicit VULNERABLE verdict [51]
+        if _confirmed_smb_vuln(combined, "ms08-067", "smb-vuln-ms08-067", "CVE-2008-4250"):
             await self.store_finding(Finding(
                 title=f"MS08-067 NetAPI on {target}:{smb_port}",
                 description=(
@@ -222,8 +244,8 @@ class SmbVulnSubagent(BaseSubagent):
                 exploit_suggestion="MSF: exploit/windows/smb/ms08_067_netapi",
             ))
 
-        # MS10-054
-        if _MS10054_RE.search(combined):
+        # MS10-054 — gated on an explicit VULNERABLE verdict [51]
+        if _confirmed_smb_vuln(combined, "ms10-054", "smb-vuln-ms10-054", "CVE-2010-2550"):
             await self.store_finding(Finding(
                 title=f"MS10-054 SMB DoS on {target}:{smb_port}",
                 description=(
@@ -240,8 +262,8 @@ class SmbVulnSubagent(BaseSubagent):
                 exploit_suggestion="Apply MS10-054 patch.",
             ))
 
-        # PrintNightmare
-        if _PRINTNIGHTMARE_RE.search(combined):
+        # PrintNightmare — gated on an explicit VULNERABLE verdict [51]
+        if _confirmed_smb_vuln(combined, "printnightmare", "CVE-2021-1675", "CVE-2021-34527"):
             await self.store_finding(Finding(
                 title=f"PrintNightmare on {target}",
                 description=(

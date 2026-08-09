@@ -304,6 +304,19 @@ class ReasoningLoop:
         if stored_paths:
             self._attack_planner.restore_from_dicts(stored_paths)
 
+        # [15] Restore the phase-dispatch ledger so _safe_phase/_consider_pivots do
+        # NOT re-run already-completed phases after a pause/resume.
+        self._phases_dispatched.update(self._intel.get("phases_dispatched") or {})
+        # [86] Restore the hypotheses + iteration cursor so a resumed run continues
+        # from where it paused instead of restarting from hypothesis-zero/iter-zero.
+        _stored_hyp = self._intel.get("hypotheses") or []
+        if _stored_hyp:
+            try:
+                self._hypotheses = [Hypothesis.from_dict(h) for h in _stored_hyp]
+            except Exception:
+                pass
+        _resume_iter = int(self._intel.get("reasoning_iteration") or 0)
+
         # --- INITIAL RECON BOOTSTRAP ---
         # If no ports have been discovered yet, run the basic recon phase first
         # so the hypothesis engine has evidence to work with.
@@ -328,8 +341,11 @@ class ReasoningLoop:
         # much sooner.
         loop_start = time.monotonic()
 
-        for iteration in range(self.MAX_ITERATIONS):
+        # [86] Resume the iteration cursor from the checkpoint (0 on a fresh run) so a
+        # resumed reasoning loop continues its budget rather than restarting from 0.
+        for iteration in range(_resume_iter, self.MAX_ITERATIONS):
             self._iteration = iteration
+            converged = False   # [28] reset the convergence flag each iteration
 
             # ── WALL-CLOCK BACKSTOP ──────────────────────────────────────
             _elapsed = time.monotonic() - loop_start
@@ -340,6 +356,19 @@ class ReasoningLoop:
                     f"cycle. Raise ARGUS_MAX_LOOP_SECONDS to allow longer runs.",
                     "DONE",
                 )
+                break
+
+            # ── PER-TARGET TOKEN BUDGET ──────────────────────────────────
+            # [107] The human-set per-target LLM-token budget was enforced ONLY by
+            # OperatorCore; on the legacy ReasoningLoop fallback it was ignored, so a
+            # runaway reasoning run could blow past the budget unbounded.  Honour it at
+            # the iteration boundary here too.
+            _tok_budget = int(getattr(self._master, "_token_budget_per_target", 0) or 0)
+            _tok_used   = int(getattr(self._master, "_tokens_used", 0) or 0)
+            if _tok_budget > 0 and _tok_used >= _tok_budget:
+                await self._emit_status(
+                    f"Per-target token budget reached ({_tok_used}/{_tok_budget}) — "
+                    f"stopping the reasoning loop.", "DONE")
                 break
 
             # ── PLAYBOOK DISPATCH (E1 wiring) ──────────────────────────────
@@ -405,7 +434,13 @@ class ReasoningLoop:
                         # operator decided to stop instead of resume.
                         if getattr(self._master, "_stop_requested", False):
                             await self._emit_status("Stop requested while paused — exiting", "DONE")
-                            return
+                            # [25] MUST return self._intel (run() is annotated -> dict and the
+                            # caller does `final_intel = await loop.run()` then `key in
+                            # final_intel`).  A bare `return` here returned None, so a
+                            # pause-then-stop (a normal operator UI sequence) raised TypeError
+                            # in _reasoning_loop_run and SKIPPED evidence-collection + report
+                            # generation — the run produced no pentest report at all.
+                            return self._intel
                         try:
                             still_paused = await self._check_pause()
                         except Exception:
@@ -525,6 +560,38 @@ class ReasoningLoop:
                 "escalated":        self._stall_escalated,
             })
 
+            # ── Follow-through guard ──────────────────────────────────────────
+            # Never abandon a host ONE STEP short of a foothold.  If a
+            # challenge/salt handshake was fetched but not consumed (Hikvision
+            # activation), a backup/config artifact was enumerated but not
+            # downloaded+grepped (Crestron device.bak/web.config), or a credential
+            # surface was hit only once, surface the MANDATORY next action and delay
+            # convergence ONCE so ARGUS finishes the started exploit.  (scan
+            # 20260712-174430: .21 stopped one encode-and-submit short of camera
+            # admin.)  Bounded by _followups_forced so it can only delay once.
+            if (self._no_breakthrough >= self.STALL_BREAK_AT
+                    and not self._intel.get("shell_access")
+                    and not getattr(self, "_followups_forced", False)):
+                try:
+                    from agents.exploit.follow_through import detect_followups
+                    _fups = detect_followups(self._intel, "")
+                except Exception:
+                    _fups = []
+                if _fups:
+                    self._followups_forced = True
+                    self._no_breakthrough = 0            # fresh window for the started exploit
+                    self._intel["pending_followups"] = _fups
+                    _hints = self._intel.setdefault("operator_hints", [])
+                    for _f in _fups:
+                        _hints.append(f"[FOLLOW-THROUGH] {_f.get('reason','')} → {_f.get('next_action','')}")
+                        try:
+                            await self._emit_reasoning(
+                                f"🎯 FOLLOW-THROUGH ({_f.get('kind')}): {_f.get('reason','')} "
+                                f"NEXT → {_f.get('next_action','')}")
+                        except Exception:
+                            pass
+                    continue                             # carry the exploit to completion, don't converge
+
             # Converge & finish: clearly stuck AND we already tried to escalate
             # to genuine exploitation — stop instead of spinning to iter 50.
             if (self._no_breakthrough >= self.STALL_BREAK_AT
@@ -639,7 +706,12 @@ class ReasoningLoop:
 
             # ── CONVERGENCE CHECK ────────────────────────────────────────
             top_path = self._attack_planner.get_best_path()
-            if top_path and top_path.total_score >= self.CONVERGENCE_THRESHOLD:
+            # [28] Set a flag (was a no-op emit) so the loop actually STOPS once the
+            # best path clears the threshold.  The flag is read at the loop tail AFTER
+            # this iteration executes the converged best path once — matching the
+            # "executing best path" wording.
+            converged = bool(top_path and top_path.total_score >= self.CONVERGENCE_THRESHOLD)
+            if converged:
                 await self._emit_reasoning(
                     f"Convergence threshold reached "
                     f"(score={top_path.total_score:.3f}) — executing best path"
@@ -651,6 +723,9 @@ class ReasoningLoop:
                 intel           = self._intel,
                 used_tools      = getattr(self._master, "_used_tools", {}),
                 negative_memory = self._neg_memory,
+                # [27] Feed the ranked attack paths so the decision engine can bubble
+                # candidates that lie on the best path (was computed then discarded).
+                ranked_paths    = self._ranked_paths,
             )
 
             # Improvement #17 — record selection trace step parented on
@@ -1203,6 +1278,13 @@ class ReasoningLoop:
                 "score":       self._decision_eng.get_score(),
             })
 
+            # [28] Convergence early-stop — the best path scored >= threshold and was
+            # executed this iteration; now stop the loop instead of spinning on.
+            if converged:
+                await self._emit_reasoning(
+                    "Best attack path executed at convergence — ending reasoning loop.")
+                break
+
         # Sync final state back to intel
         self._intel["action_score"]        = self._decision_eng.get_score()
         self._intel["negative_memory"]     = self._neg_memory.to_dict_list()
@@ -1556,7 +1638,18 @@ class ReasoningLoop:
                 self._intel["services"] = cur_svcs
             if new_cves:
                 cur_cves = list(self._intel.get("cves") or [])
-                self._intel["cves"] = list(dict.fromkeys(cur_cves + new_cves))
+                # Coerce every entry to a canonical, HASHABLE CVE-id string before dedup.
+                # A CVE lookup path can store a dict ({"id":..,"cvss":..} or malformed), and
+                # dict.fromkeys() would raise "unhashable type: 'dict'" and abort the phase
+                # (the exact crash that killed this engagement).  Dropping id-less dicts also
+                # keeps undefendable records out of intel.
+                def _cid(_c):
+                    if isinstance(_c, dict):
+                        _c = (_c.get("id") or _c.get("cve") or _c.get("cve_id")
+                              or _c.get("name") or "")
+                    return str(_c or "").strip().upper()
+                self._intel["cves"] = [x for x in dict.fromkeys(
+                    _cid(c) for c in (cur_cves + new_cves)) if x]
             await self._emit_reasoning(
                 f"Reconciled {len(new_ports)} additional open port(s) from the "
                 f"findings store — in-memory list was partial (now "
@@ -2750,7 +2843,8 @@ class ReasoningLoop:
                     elif cred.get("dsn"):
                         _cred_type = "db_dsn"
                         _secret    = str(cred.get("dsn"))
-                    _vault = get_vault()
+                    # Per-engagement vault (was a process-wide singleton).
+                    _vault = get_vault(getattr(self, '_session_id', None))
                     await _vault.ingest(
                         Credential(
                             cred_type   = _cred_type,
@@ -3220,6 +3314,26 @@ class ReasoningLoop:
     # Improvement #4 — Unified decision loop: cross-phase pivots
     # ------------------------------------------------------------------
 
+    def _phase_enabled(self, slug: str) -> bool:
+        """[14] Honour the operator's Target-Config phase selection in the reasoning
+        pivot path (it was ignored — every detected pivot fired regardless).
+        master._phases_to_run holds canonical AttackPhase tokens; map each pivot slug
+        onto one.  An EMPTY selection means 'all phases' (the default) → True, exact
+        parity with the linear pipeline's phase_enabled closure."""
+        want = getattr(self._master, "_phases_to_run", None)
+        if not want:
+            return True
+        canon = {
+            "web_testing":      "exploit",
+            "ad_enum":          "vuln_id",
+            "lateral_movement": "lateral",
+        }.get(slug, slug)
+        try:
+            want_l = {str(p).lower().split(".")[-1] for p in want}
+        except Exception:
+            return True
+        return canon in want_l or slug in want_l
+
     async def _consider_pivots(self) -> List[str]:
         """Per-iteration cross-phase audit.
 
@@ -3357,7 +3471,7 @@ class ReasoningLoop:
         # Filter to phases not yet dispatched whose triggers are satisfied.
         to_fire = [
             (slug, factory) for slug, ok, factory in candidates
-            if ok and slug not in self._phases_dispatched
+            if ok and slug not in self._phases_dispatched and self._phase_enabled(slug)
         ]
         if not to_fire:
             return []
@@ -4299,4 +4413,7 @@ class ReasoningLoop:
             "action_score":         self._decision_eng.get_score(),
             "ranked_attack_paths":  self._attack_planner.get_paths_as_dicts(),
             "reasoning_journal":    self._journal,
+            # [15] Persist the phase-dispatch idempotency ledger so a resumed run does
+            # not re-fire phases it already completed before the pause.
+            "phases_dispatched":    dict(self._phases_dispatched),
         }

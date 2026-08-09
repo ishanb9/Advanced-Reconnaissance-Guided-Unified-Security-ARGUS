@@ -168,8 +168,20 @@ class OsintAgent(BaseAgent):
             dt  = raw.get("data_type", "")
             if dt == "email" and raw.get("email"):
                 result["emails"].append(raw["email"])
-            if dt in ("harvester_results", "recon_ng_results"):
+            # Every source that yields hostnames must land here, or its subdomains
+            # never reach master intel.  crt.sh (certificate transparency) is the
+            # single richest free source and its data_type is "crtsh_subdomains" —
+            # it was absent from this list, so every CT-discovered name was parsed,
+            # stored for the UI, and then silently dropped before the intel merge.
+            if dt in ("harvester_results", "recon_ng_results", "crtsh_subdomains",
+                      "securitytrails_subdomains", "censys_subdomains",
+                      "shodan_dns", "subdomains"):
                 result["subdomains"].extend(raw.get("subdomains", []))
+                # Some sources name the field differently.
+                for _alt in ("hostnames", "hosts", "domains"):
+                    _vals = raw.get(_alt)
+                    if isinstance(_vals, list):
+                        result["subdomains"].extend(str(v) for v in _vals if v)
             if dt == "tech_profile":
                 result["technologies"].extend(raw.get("technologies", []))
             if dt == "shodan_host":

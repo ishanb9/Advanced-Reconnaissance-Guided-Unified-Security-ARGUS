@@ -247,17 +247,26 @@ class LdapVulnSubagent(BaseSubagent):
                     ),
                 ))
 
-        # LDAP signing not enforced
-        if _LDAP_SIGNING_RE.search(combined) and not _SIGNING_REQUIRED_RE.search(combined):
+        # [55] "LDAP Signing Not Required" was fired HIGH whenever the rootDSE was merely
+        # READABLE — _LDAP_SIGNING_RE matches supportedCapabilities/ldapServiceName (present
+        # in EVERY AD rootDSE) and _SIGNING_REQUIRED_RE looks for a "signing required" keyword
+        # that ldapsearch/nmap ldap-rootdse NEVER emit — so it fabricated a HIGH on essentially
+        # every reachable DC with no test of signing at all.  Only flag it on a REAL positive
+        # signal: an unauthenticated/anonymous bind that actually SUCCEEDED over CLEARTEXT ldap
+        # (389), which demonstrates the server accepts unsigned binds (the NTLM-relay
+        # precondition).  LDAPS/636 is signed by the transport, so it never qualifies.
+        _unsigned_bind_proven = (str(ldap_port) == "389"
+                                 and bool(_ANON_SUCCESS_RE.search(combined)))
+        if _unsigned_bind_proven:
             await self.store_finding(Finding(
-                title=f"LDAP Signing Not Required on {target}:{ldap_port}",
+                title=f"LDAP Signing Not Enforced on {target}:{ldap_port}",
                 description=(
-                    f"The LDAP server on {target}:{ldap_port} does not require "
-                    f"channel binding or message signing. An attacker performing "
-                    f"LDAP relay attacks (e.g., via NTLM relay) can authenticate "
-                    f"without needing valid credentials."
+                    f"An unauthenticated LDAP bind on cleartext {target}:{ldap_port} "
+                    f"returned directory data, so the server accepts unsigned binds. An "
+                    f"attacker performing an NTLM relay can authenticate to it without "
+                    f"valid credentials."
                 ),
-                severity="HIGH",
+                severity="MEDIUM",
                 evidence=combined[:2000],
                 tool="nmap_ldap",
                 host=target,

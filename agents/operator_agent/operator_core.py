@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import os
 import re
 import time
@@ -36,6 +37,13 @@ from typing import Any, Dict, List, Optional
 
 from .http_session import HttpSession
 from . import tool_catalog as catalog
+
+# Module logger.  Its ABSENCE was a critical latent bug: `_maybe_commit_exploit`'s
+# except handlers referenced a `logger` that was never defined, so the FIRST operator
+# loop iteration raised NameError → master caught it and silently dropped ARGUS to the
+# weaker LEGACY phase pipeline on EVERY run (no committed-exploit loop, no fuzz pivot,
+# no scope discipline).  Defining it here restores the strong operator engagement path.
+logger = logging.getLogger(__name__)
 
 
 class OperatorUnavailable(Exception):
@@ -171,7 +179,41 @@ _UNREACHABLE_MARKERS = (
     "destination host unreachable", "connection timed out",
     "could not resolve host", "name or service not known",
     "0 hosts up",
+    # [108] — a provably-dead route/host also surfaces as connect/timeout failures; the
+    # breaker must count these too (the 23x curl exit-7 calls on the fabrication host were
+    # previously invisible to it).  NOTE: a bare "[FAIL]"/"[CIRCUIT-BREAKER]" is NOT a
+    # connectivity signal — it is ARGUS's generic tool-status prefix and often wraps a
+    # perfectly-reachable HTTP 404 — so only genuine connect/timeout phrasings appear here.
+    "failed to connect", "unable to connect", "could not connect", "couldn't connect",
+    "connection refused", "empty reply from server", "operation timed out",
+    "http_code 000", "http 000", "host seems down",
 )
+
+# Connectivity-failure EXIT codes surfaced in tool-output text: curl 7 (connect),
+# 28/124 (timeout), 35/56/60 (TLS).  Consulted by _connectivity_signal alongside the
+# prose markers so an exit-coded failure is not missed.
+_CONN_FAIL_RE = re.compile(
+    r"\[exit (?:7|28|35|56|60|124)\]|\bcurl:\s*\(7\)|"
+    r"\bexit(?:ed| code)?[:=\s]+(?:7|28|35|56|60|124)\b", re.I)
+
+# ── I2 provenance: local static-artifact reads are NOT on-target execution ──────────
+# A uid=/gid= (or flag) token found while READING a local PoC / wordlist / doc under
+# /usr/share (exploit-DB, seclists, …) is DOCUMENTATION text — it can never prove a
+# foothold.  The 40.36 fabrication was exactly `cat /usr/share/exploitdb/.../50509.txt`
+# whose PoC body contained a sample "uid=0(root)".
+_DOC_READERS = ("cat", "less", "more", "head", "tail", "strings", "bat", "nl", "xxd",
+                "od", "grep", "egrep", "zcat", "searchsploit", "view")
+_LOCAL_DOC_RE = re.compile(
+    r"/usr/share/(?:exploitdb|seclists|nmap|metasploit|wordlists|doc|set|webshells)/|"
+    r"\bexploit-?db\b|searchsploit\s+-[xpm]\b", re.I)
+
+
+def _is_local_doc_read(inner_tool: str, inner_args: str) -> bool:
+    """True when a tool call is READING a local static artifact (exploit-DB PoC,
+    seclists, a wordlist/doc under /usr/share) — documentation whose sample uid=/flag
+    tokens are NOT proof of on-target execution.  Pure + unit-testable (I2)."""
+    rd = str(inner_tool or "").strip().lower().split(" ")[0] in _DOC_READERS
+    return bool(rd and _LOCAL_DOC_RE.search(str(inner_args or "")))
 
 
 def resolve_blocker_decision(session_id: str, action: str, *, target: str = "") -> bool:
@@ -283,6 +325,28 @@ class OperatorCore:
         # already exhausted so it commits to each candidate exactly once.
         self._committed_exploit_active = False
         self._committed_done: set = set()
+        # Credential-reuse spray pivot (turn a recovered cred into confirmed reuse /
+        # lateral foothold).  `_sprayed_surfaces` guards against re-spraying the same
+        # (creds × auth-surface) set; `_fuzzed_surfaces` / `_fuzz_pivots_used` gate the
+        # fuzz-for-novel pivot so it never thrashes or stalls the loop.
+        self._cred_spray_active = False
+        self._sprayed_surfaces: set = set()
+        self._fuzz_pivot_active = False
+        self._fuzzed_surfaces: set = set()
+        self._fuzz_pivots_used = 0
+        # Meta-agent remediation authority: a BLOCKING correction (issue-validator
+        # false-positive / wrong-severity …) suppresses the contradicted finding at
+        # write time.  The set persists across iterations so a late async correction
+        # still blocks the NEXT write of the same finding.
+        self._vetoed_keys: set = set()
+        self._vetoed_finding_ids: set = set()
+        # Brute / heavy-enum tools run in the BACKGROUND so they never hold up the scan;
+        # their result (creds / users / paths) is injected back into the loop when ready.
+        # `_brute_tried` remembers wordlists already used so each no-hit run ESCALATES to
+        # a different/larger list (or a technique change) instead of repeating itself.
+        self._bg_brute: Dict[str, Any] = {}
+        self._bg_results: List[str] = []
+        self._brute_tried: set = set()
         self._method_max_tries = max(3, min(5, int(
             os.environ.get("ARGUS_OPERATOR_METHOD_MAX_TRIES", "4"))))
         # Per-ENDPOINT repeat cap for actions that declare NO hypothesis/CVE
@@ -405,12 +469,139 @@ class OperatorCore:
                 lines.append(f"{label}: " + ", ".join(str(x) for x in flat))
         if it.get("shell_access"):
             lines.append("A shell/foothold is already active — use the shell tool.")
+        skills = self._skill_advisory_block()
+        reasoning = self._reasoning_context_block()
         if not lines:
-            return ("No recon recorded yet. Establish what you are looking at "
+            base = ("No recon recorded yet. Establish what you are looking at "
                     "(scan + fetch the web root) and take your first action.")
+            base = (base + "\n\n" + skills) if skills else base
+            return (base + "\n\n" + reasoning) if reasoning else base
         return ("ENGAGEMENT STATE (already known — do NOT re-discover):\n"
                 + "\n".join(lines)
+                + (("\n\n" + skills) if skills else "")
+                + (("\n\n" + reasoning) if reasoning else "")
                 + "\n\nContinue from here; take your next best action.")
+
+    def _reasoning_context_block(self) -> str:
+        """[33/34] Surface ARGUS's reasoning context to the DRIVING operator LLM —
+        episodic priors from past engagements, EDR/WAF defensive posture, RAG technique
+        chains, Neo4j-inferred attack paths, the hypothesis scan bias, the goal timeline
+        and the last self-critique verdict.  These render blocks previously reached an
+        LLM ONLY through master._intel_summary(), which the operator bypasses, so the
+        documented reasoning biases never informed the shipped default driver.  We cheaply
+        fingerprint defensive posture from intel ARGUS already holds (standalone — no
+        hypothesis engine), then delegate to master's single render source of truth.
+        Purely additive; never raises; returns "" when there is nothing to say."""
+        try:
+            # [33] Populate the one reasoning key with a cheap, standalone builder
+            # (EDR/WAF fingerprint from already-collected banners/headers) so it is LIVE
+            # on the operator path — not only when the reasoning loop drives.
+            it = self._intel
+            _dp = it.get("defensive_posture")
+            if not (isinstance(_dp, dict) and (_dp.get("products") or {})):
+                from agents.reasoning.defensive_posture import fingerprint_posture
+                from dataclasses import asdict as _asdict
+                _posture = fingerprint_posture(it)
+                if _posture and getattr(_posture, "products", None):
+                    it["defensive_posture"] = _asdict(_posture)
+        except Exception:
+            pass
+        try:
+            render = getattr(self.master, "_reasoning_context_for_prompt", None)
+            block = render() if callable(render) else ""
+        except Exception:
+            block = ""
+        if not block:
+            return ""
+        return ("REASONING CONTEXT (priors from ARGUS's memory + live fingerprints — "
+                "treat as leads, verify before acting):\n" + block)
+
+    def _skill_advisory_block(self) -> str:
+        """Surface the MATCHED technology/device skills as an operator directive.
+
+        ARGUS's skill registry fingerprints the host and matches device/tech-specific
+        playbooks — real quick-win COMMANDS + CVEs — that beat the generic web battery.
+        Those matches used to be computed and then dropped before any acting agent saw
+        them (the only skill→planner formatter had zero callers).  This renders them into
+        the operator's brief so it runs the authored device vector FIRST — the system
+        prompt already tells it to 'prefer the skill's safe quick-win', and this is the
+        data that finally makes that instruction true.
+
+        Reads only intel the master already stamped (``skill_advisory`` from the
+        capability scan, ``device_playbook`` from the device router) and falls back to
+        computing the device route on-demand.  Purely additive + never raises; returns ""
+        when nothing matched, so the brief is then byte-identical to before."""
+        it = self._intel
+        try:
+            # (item 2) a precomputed, ceiling-aware advisory — master stamps
+            # intel['skill_advisory'] (previously it only reached a dead buffer).
+            pre = it.get("skill_advisory")
+            pre = pre.strip() if isinstance(pre, str) else ""
+            # (items 1 & 5) device-router matches: id / severity / CVEs / quick-win cmds.
+            route = it.get("device_playbook")
+            if not isinstance(route, dict):
+                try:
+                    from knowledge.device_playbook import route_host
+                    route = route_host(it)
+                except Exception:
+                    route = {}
+            dev_skills = route.get("device_skills") if isinstance(route, dict) else None
+            # [35] The recon device classifier stamps intel['device_classification'] but
+            # NOTHING read it (route_host re-classifies independently for routing).  Give
+            # the verdict a real consumer here — surface its kind + suggested playbook
+            # chain in the operator brief.  Additive: route_host still owns the
+            # suppress-generic-web decision, so default routing is unchanged.
+            devc = it.get("device_classification")
+            devc = devc if isinstance(devc, dict) else None
+            if not pre and not dev_skills and not devc:
+                return ""
+            ceiling = str(it.get("scan_intrusiveness") or "safe")
+            out: List[str] = [
+                "MATCHED TECHNOLOGY SKILLS — run the device/tech-specific vector FIRST "
+                "(it beats the generic web battery). Respect the scan-intrusiveness "
+                f"ceiling = {ceiling}; OT/ICS stays read-only unless explicitly authorized:"]
+            if isinstance(route, dict) and route.get("suppress_generic_web"):
+                out.append("  ! Generic web-app sweep SUPPRESSED for this device class — "
+                           "do not spend turns on WordPress/sqlmap/dir-busting; drive the "
+                           "device playbook below.")
+            for s in (dev_skills or [])[:6]:
+                if not isinstance(s, dict):
+                    continue
+                _sid = s.get("id") or s.get("technology") or "skill"
+                sev = str(s.get("severity") or "").upper()
+                saf = str(s.get("safety") or "")
+                refs = ", ".join(str(r) for r in (s.get("references") or [])[:4])
+                hdr = f"  • {_sid}"
+                if sev:
+                    hdr += f" [{sev}]"
+                if saf:
+                    hdr += f" (safety: {saf})"
+                if refs:
+                    hdr += f" — {refs}"
+                out.append(hdr)
+                for cmd in (s.get("quick_wins") or [])[:4]:
+                    if cmd:
+                        out.append(f"      $ {cmd}")
+            # [35] Render the classifier verdict as an operator hint (kind + chain).
+            if devc and (devc.get("kind") or devc.get("playbooks")):
+                out.append("")
+                _line = f"DEVICE CLASSIFICATION: {devc.get('kind') or 'unknown'}"
+                _conf = devc.get("confidence")
+                if _conf is not None:
+                    try:
+                        _line += f" (confidence {float(_conf):.2f})"
+                    except (TypeError, ValueError):
+                        pass
+                out.append(_line)
+                _chain = " → ".join(str(p) for p in (devc.get("playbooks") or [])[:5])
+                if _chain:
+                    out.append(f"  suggested per-device chain: {_chain}")
+            if pre:
+                out.append("")
+                out.append(pre)
+            return "\n".join(out).rstrip()
+        except Exception:
+            return ""
 
     # ── lifecycle ────────────────────────────────────────────────────────────
     async def run(self) -> Dict[str, Any]:
@@ -454,6 +645,17 @@ class OperatorCore:
             await self._maybe_commit_exploit()
             if getattr(self.master, "_stop_requested", False):
                 done_reason = "stopped"; break
+            # ── Credential-reuse pivot: spray any recovered credential across the
+            # in-scope auth surface so a found cred becomes a confirmed foothold. ──
+            await self._maybe_credential_pivot()
+            if getattr(self.master, "_stop_requested", False):
+                done_reason = "stopped"; break
+            # ── Background brute results: inject any that finished so the operator
+            # acts on the creds/users/paths NOW — it never waited on the brute. ──
+            if self._bg_results:
+                for _bn in self._bg_results:
+                    self.transcript.append({"role": "user", "content": _bn})
+                self._bg_results = []
             # ── Iteration budget is ADVISORY once progress exists ─────────────
             # The step cap must NEVER cut off a run that is actively exploiting.
             # With NO progress the ordinary max_iters ends a spinning engagement
@@ -508,6 +710,8 @@ class OperatorCore:
                     self._critic_ran = True
                     await self._run_completeness_critic()
                 if self._backlog is None or self._backlog.high_value_remaining() == 0:
+                    if await self._fuzz_before_converge():
+                        continue
                     done_reason = "objective_met_assessment_complete"; break
             # Hypothesis-exhaustion only ends the run PRE-foothold. Once a shell
             # exists the web-surface backlog is no longer the work — privesc,
@@ -521,6 +725,8 @@ class OperatorCore:
                     self._critic_ran = True
                     await self._run_completeness_critic()
                 if self._backlog.high_value_remaining() == 0:
+                    if await self._fuzz_before_converge():
+                        continue
                     done_reason = "hypotheses_exhausted"; break
 
             # ── Per-target token budget (human-set) ───────────────────────────
@@ -654,6 +860,24 @@ class OperatorCore:
                         "approach (more enumeration, or a different lead)."})
                     continue
                 self._intrusive_approved = True
+                # Carry the human's YES to the enforcement point.  Without this the
+                # boundary re-reads the profile, still sees require_approval, and
+                # refuses the action the human just approved — approve-to-exploit
+                # could never complete.  Single-use and short-lived by construction.
+                try:
+                    from knowledge.authorization import grant_approval as _grant
+                    _intel = self._intel if isinstance(self._intel, dict) else {}
+                    _gh = str(_intel.get("target_host") or _intel.get("target") or "")
+                    _grant(_intel.setdefault("authz_approvals", {}), _gh, tool,
+                           args=action.get("args"))
+                    logger.info("[authz] human approved %s on %s — one single-use "
+                                "grant issued", tool, _gh)
+                except Exception as _gexc:                      # noqa: BLE001
+                    # Never let bookkeeping kill the engagement; the boundary simply
+                    # refuses (fail-CLOSED) if the grant did not land.
+                    logger.warning("[authz] could not record the approval grant for "
+                                   "%s (%s) — the action will be refused at the "
+                                   "boundary", tool, _gexc)
 
             observation = await self._run_action(tool, action["args"])
             # Feed the connectivity detector so the circuit-breaker can trip when
@@ -759,6 +983,14 @@ class OperatorCore:
             # operator the REAL CVE list + PoC repos.  Idempotent per product.
             await self._seed_cve_intel()
             await self._maybe_compact()
+
+        # Final brute drain: let still-running background brutes finish within a bounded
+        # grace so a brute about to land creds isn't lost (its result is recorded via the
+        # normal success path), then cancel any stragglers.
+        try:
+            await self._drain_background_brutes()
+        except Exception:
+            pass
 
         # Write the honest objectives summary + outcome to intel + a finding so
         # the findings page reflects what was (and wasn't) achieved.
@@ -878,18 +1110,145 @@ class OperatorCore:
             phase="operator", timeout=int(args.get("timeout", 300)))
         return self._fmt_tool_result(tool, targs, res)
 
+    #: Tools whose job IS brute-forcing / heavy wordlist enumeration — these run in the
+    #: BACKGROUND so they can NEVER hold up the engagement (the operator keeps testing).
+    _BRUTE_TOOLS = ("kerbrute", "hydra", "medusa", "patator", "ncrack", "crowbar",
+                    "gobuster", "ffuf", "wfuzz", "feroxbuster", "dirb", "dirsearch", "dirbuster")
+
+    def _is_brute(self, tool: str, args: str) -> bool:
+        """True for a brute / heavy-wordlist tool — by tool name, or a shell command
+        that invokes a brute binary (e.g. run_tool shell_exec 'hydra …')."""
+        t = (tool or "").lower()
+        if any(b in t for b in self._BRUTE_TOOLS):
+            return True
+        if t in ("shell_exec", "shell", "bash", "sh"):
+            a = str(args or "").lower().lstrip("( '\"")
+            return any(a.startswith(b) or (" " + b + " ") in (" " + a) for b in self._BRUTE_TOOLS)
+        return False
+
+    def _bg_brute_enabled(self) -> bool:
+        if os.environ.get("ARGUS_BRUTE_BACKGROUND", "1") == "0":
+            return False
+        return len(self._bg_brute) < int(os.environ.get("ARGUS_BRUTE_BACKGROUND_MAX", "4"))
+
+    async def _pre_exec_safety_gate(self, *, tool: str, args: str, phase: str):
+        """[30/31/32] Run the SAME dry-run / self-critique / noise-budget safety gates
+        the reasoning loop uses — but on the DEFAULT operator path, where they were dead
+        code (so the 'DRY-RUN MODE: ON' + stealth-budget banners were a false promise on
+        the shipped config).  Returns a result dict to SHORT-CIRCUIT (the tool is NOT
+        run), or None to proceed.  Every sub-gate is fail-open-to-proceed so a gate bug
+        can never wedge a legitimate run, and each only ACTS when its mode is genuinely
+        active (dry_run_mode on / risky-or-destructive action / stealth budget), so
+        lab/CTF autonomy and long default-mode engagements are unaffected."""
+        m = self.master
+        action = {"tool": tool, "args": args, "target_service": phase or "",
+                  "confidence": 1.0, "hypothesis_id": ""}
+        _tier = "safe"
+        try:
+            from agents.reasoning.dry_run import classify_action
+            _tier = classify_action(action).tier
+        except Exception:
+            _tier = "safe"
+        _nb = getattr(m, "noise_budget", None)
+        _stealth = bool(_nb and getattr(_nb, "mode", "") == "stealth")
+
+        # 1) DRY-RUN [30] — preview + hold a destructive (or risky-on-stealth) action
+        #    when dry_run_mode is on (production/red-team), instead of firing it blind.
+        try:
+            if getattr(m, "dry_run_mode", False) and (
+                    _tier == "destructive" or (_stealth and _tier == "risky")):
+                from agents.reasoning.dry_run import build_preview
+                _preview = build_preview(action, session_id=self._session_id, iteration=0)
+                await self._emit("dry_run_preview", {"tool": tool, "args": str(args)[:200],
+                                                     "tier": _tier, "preview": _preview})
+                return {"stdout": "", "exit_code": -1, "dry_run_gated": True,
+                        "stderr": (f"[dry-run] {_tier} action '{tool}' PREVIEWED and held — "
+                                   "DRY-RUN MODE is ON for this engagement, so host-destructive "
+                                   "operations are not executed without confirmation. Toggle "
+                                   "dry-run off in the UI or choose a non-destructive technique.")}
+        except Exception:
+            pass
+
+        # 2) SELF-CRITIQUE [32] — pre-mortem on risky/destructive actions (scope
+        #    membership, precondition, defender compatibility); ABORT/HOLD => skip.
+        try:
+            if _tier in ("risky", "destructive"):
+                from agents.reasoning.self_critique import critique_action
+                _eng = self._intel.get("engagement_context") or {}
+                _scope = _eng.get("scope_hosts") or _eng.get("targets") or []
+                _crit = critique_action(
+                    action, hypothesis=None, intel=self._intel, tier=_tier,
+                    neg_memory=getattr(m, "_neg_memory", None),
+                    posture=self._intel.get("defensive_posture"), scope_hosts=_scope,
+                    target=self._intel.get("target_host") or self._intel.get("target") or "")
+                self._intel["last_self_critique"] = _crit.to_dict()
+                await self._emit("self_critique", {"tool": tool, "tier": _tier,
+                                                   "critique": _crit.to_dict()})
+                # Enforce the pre-mortem ABORT/HOLD only for HOST-DESTRUCTIVE actions.
+                # For merely 'risky' exploitation the critique runs ADVISORY (emitted +
+                # recorded, and feeds the operator's own approve-to-exploit gate) so a
+                # context-light critique can never wrongly block legitimate exploitation
+                # on the default path — the operator, not this gate, owns exploit consent.
+                if _tier == "destructive" and _crit.recommendation in ("abort", "hold"):
+                    return {"stdout": "", "exit_code": -1, "self_critique_gated": True,
+                            "stderr": (f"[self-critique] {_crit.recommendation.upper()} '{tool}' — "
+                                       f"{str(getattr(_crit, 'reason', '') or '')[:160]}. Not "
+                                       "executed; address the pre-mortem concern or override.")}
+        except Exception:
+            pass
+
+        # 3) NOISE BUDGET [31] — HARD-block only in STEALTH mode (where throttling is
+        #    the explicit, documented intent); default-mode budgets are tracked + warned
+        #    (see _dispatch_bounded) but never halt a long legitimate engagement.
+        try:
+            if _stealth and _nb is not None and _nb.would_exceed(action):
+                _cost = _nb.cost_of(action)
+                await self._emit("noise_budget_blocked", {"tool": tool, "cost": _cost,
+                                 "budget": _nb.to_dict() if hasattr(_nb, "to_dict") else {}})
+                return {"stdout": "", "exit_code": -1, "noise_budget_gated": True,
+                        "stderr": (f"[noise-budget] '{tool}' (cost {_cost}) would exceed the "
+                                   "remaining STEALTH budget — skipped to stay under the loudness "
+                                   "cap. Choose a quieter technique or raise the budget.")}
+        except Exception:
+            pass
+        return None
+
     async def _dispatch_bounded(self, *, tool: str, args: str, purpose: str,
                                 phase: str, timeout: int):
-        """Dispatch a tool.  The per-call `timeout` drives the tool's watchdog —
-        which PROMPTS THE HUMAN (extend / kill) when a tool exceeds its expected
-        runtime — and a tool is stopped only by the human, a real error, or
-        completion.  Taking time is NOT failing, so this wait is bounded only by a
-        large BACKSTOP ceiling (ARGUS_OPERATOR_TOOL_CEILING_SEC, default 30 min):
-        it exists purely so a TRULY frozen process can't wedge the loop forever
-        when no human is watching — it must not pre-empt the extend/kill prompt.
-        A human 'kill' returns immediately (the tool task is cancelled), and a
-        human 'extend' keeps it running within this ceiling."""
-        _ceiling = max(int(timeout) + 30, int(getattr(self, "_tool_wait_ceiling", 1800)))
+        """Dispatch a tool, awaiting its result — UNLESS it is a brute / heavy-enum
+        tool, in which case it is launched in the BACKGROUND so it NEVER holds up the
+        scan: the operator keeps testing other avenues and the brute's result (creds /
+        users / paths) is injected back into the loop the moment it finishes."""
+        # [30/31/32] Pre-execution safety gates on the default path (dry-run preview,
+        # self-critique pre-mortem, stealth noise cap) — short-circuit if one fires.
+        _gate = await self._pre_exec_safety_gate(tool=tool, args=args, phase=phase)
+        if _gate is not None:
+            return _gate
+        # [31] Track the action's noise cost so the budget reflects reality and warns as
+        # it drains (all modes); the stealth HARD-block above is what actually throttles.
+        try:
+            _nb = getattr(self.master, "noise_budget", None)
+            if _nb is not None:
+                _nb.consume({"tool": tool, "args": args}, note="operator dispatch")
+        except Exception:
+            pass
+        if self._is_brute(tool, args) and self._bg_brute_enabled():
+            return self._launch_background_brute(tool=tool, args=args, purpose=purpose,
+                                                 phase=phase, timeout=timeout)
+        return await self._run_tool_inline(tool=tool, args=args, purpose=purpose,
+                                           phase=phase, timeout=timeout)
+
+    async def _run_tool_inline(self, *, tool: str, args: str, purpose: str,
+                               phase: str, timeout: int):
+        """Await a tool to completion.  The per-call `timeout` drives the tool's
+        watchdog (extend / kill prompt); a large BACKSTOP ceiling exists only so a
+        truly frozen process can't wedge the loop.  Brute tools are NEVER artificially
+        capped — they may legitimately need a long run — they just get a GENEROUS
+        ceiling (they run in the background, so they don't hold up the scan)."""
+        if any(b in (tool or "").lower() for b in self._BRUTE_TOOLS):
+            _ceiling = max(int(timeout) + 30, int(os.environ.get("ARGUS_BRUTE_CEILING_SEC", "7200")))
+        else:
+            _ceiling = max(int(timeout) + 30, int(getattr(self, "_tool_wait_ceiling", 1800)))
         try:
             return await asyncio.wait_for(
                 self.master._dispatch_to_agent(
@@ -905,6 +1264,114 @@ class OperatorCore:
         except Exception as exc:   # noqa: BLE001
             return {"stdout": "", "stderr": f"{type(exc).__name__}: {exc}",
                     "exit_code": -1, "error": str(exc)}
+
+    def _launch_background_brute(self, *, tool: str, args: str, purpose: str,
+                                 phase: str, timeout: int) -> Dict[str, Any]:
+        """Fire a brute tool as a background task and return IMMEDIATELY so the operator
+        keeps working.  ``_on_brute_done`` records its result when it finishes."""
+        import uuid as _uuid
+        job_id = f"brute_{_uuid.uuid4().hex[:8]}"
+
+        async def _runner():
+            try:
+                res = await self._run_tool_inline(tool=tool, args=args, purpose=purpose,
+                                                  phase=phase, timeout=timeout)
+            except Exception as exc:   # noqa: BLE001
+                res = {"stdout": "", "stderr": f"{type(exc).__name__}: {exc}", "exit_code": -1}
+            await self._on_brute_done(job_id, tool, args, res)
+
+        self._bg_brute[job_id] = asyncio.ensure_future(_runner())
+        try:
+            asyncio.ensure_future(self._emit("operator_brute_started", {
+                "session_id": self._session_id, "job_id": job_id, "tool": tool,
+                "args": str(args)[:200], "running": len(self._bg_brute)}))
+        except Exception:
+            pass
+        return {"stdout": (f"[brute] '{tool}' is now running in the BACKGROUND (job {job_id}) so it "
+                           f"does NOT hold up the scan. Do OTHER testing now — its result (creds / "
+                           f"users / paths) is injected here automatically when it finishes. Do NOT "
+                           f"wait for it and do NOT re-launch the same brute."),
+                "exit_code": 0, "background": True, "job_id": job_id}
+
+    async def _on_brute_done(self, job_id: str, tool: str, args: str,
+                             res: Dict[str, Any]) -> None:
+        """A background brute finished — record any creds/foothold and queue its output
+        so the operator picks it up on its next turn (it never had to wait).  On a NO-HIT
+        it attaches a SMART-ESCALATION advisory (next/larger wordlist, password-spray,
+        AS-REP/Kerberoast, offline crack with rules / rainbow tables) so brute-forcing is
+        adaptive — never a fixed run that just gives up."""
+        self._bg_brute.pop(job_id, None)
+        out = (str(res.get("stdout", "")) + "\n" + str(res.get("stderr", "")))[:4000].strip()
+        try:
+            await self._record_operator_success(tool, args, out)
+        except Exception:
+            pass
+        for _wl in self._extract_wordlists(args):
+            self._brute_tried.add(_wl)
+        found = self._brute_found_creds(out)
+        advisory = ""
+        try:
+            from knowledge import brute_strategy as _bs
+            _kind = "username" if ("userenum" in str(args).lower()
+                                   or "kerbrute" in (tool or "").lower()) else "password"
+            advisory = _bs.advisory(service=self._brute_service(tool, args), kind=_kind,
+                                    tried_paths=sorted(self._brute_tried), found=found)
+        except Exception:
+            advisory = ""
+        note = (f"[BACKGROUND BRUTE RESULT] job {job_id} ('{tool}') finished.\n"
+                f"{out[:1200] or '(no output)'}")
+        if advisory:
+            note += "\n" + advisory
+        self._bg_results.append(note)
+        try:
+            await self._emit("operator_brute_done", {
+                "session_id": self._session_id, "job_id": job_id, "tool": tool,
+                "summary": out[:300], "found_creds": found, "running": len(self._bg_brute)})
+        except Exception:
+            pass
+
+    @staticmethod
+    def _brute_found_creds(out: str) -> bool:
+        """Heuristic: did the brute actually recover a credential / valid user?"""
+        import re as _re
+        t = str(out or "")
+        if "0 valid" in t.lower() or "no valid" in t.lower():
+            return False
+        return bool(_re.search(
+            r"\bvalid\b|\[\+\]|succe(ss|eded)|password found|login:\s*\S+\s+password:|"
+            r"\bGET TGT\b|\bVALID USERNAME\b|\b\d+\s+valid\b|host:\s*\S+\s+login:", t, _re.I))
+
+    @staticmethod
+    def _extract_wordlists(args: str) -> "list[str]":
+        """Pull wordlist paths out of a brute command so we can escalate to a new one."""
+        toks = str(args or "").replace("=", " ").split()
+        return [tk.strip("'\"") for tk in toks
+                if "/" in tk and (tk.endswith(".txt") or "wordlist" in tk.lower()
+                                  or "seclists" in tk.lower() or "rockyou" in tk.lower())]
+
+    @staticmethod
+    def _brute_service(tool: str, args: str) -> str:
+        """Infer the service being brute-forced (drives the technique escalation)."""
+        blob = f"{tool} {args}".lower()
+        for svc in ("kerbrute", "kerberos", "ldaps", "ldap", "smb", "winrm", "ssh", "ftp",
+                    "rdp", "mysql", "mssql", "https", "http", "telnet", "vnc", "postgres"):
+            if svc in blob:
+                return "kerberos" if svc == "kerbrute" else svc
+        return ""
+
+    async def _drain_background_brutes(self, grace: Optional[int] = None) -> None:
+        """At loop end, give still-running brutes a bounded grace to finish (so a brute
+        that's about to land creds isn't lost), then cancel the rest."""
+        if not self._bg_brute:
+            return
+        grace = int(grace if grace is not None else os.environ.get("ARGUS_BRUTE_DRAIN_SEC", "60"))
+        try:
+            await asyncio.wait(list(self._bg_brute.values()), timeout=max(0, grace))
+        except Exception:
+            pass
+        for t in list(self._bg_brute.values()):
+            if not t.done():
+                t.cancel()
 
     def _do_note(self, args: Dict[str, Any]) -> str:
         text = str(args.get("text", "")).strip()
@@ -937,8 +1404,17 @@ class OperatorCore:
         if kind in ("vuln", "finding"):
             sev = str(args.get("severity")
                       or ("MEDIUM" if kind == "vuln" else "INFO")).upper()
-            title = (str(args.get("title") or "").strip()
-                     or text.split(".")[0][:80] or "Operator finding")
+            title = str(args.get("title") or "").strip()
+            if not title:
+                # IP-SAFE first-sentence extraction.  ``text.split('.')[0]`` cut titles
+                # at the first octet of an IPv4 address ("Target 192.168.40.21 …" → "Target
+                # 192"), producing garbage like "CRITICAL: 192"/"Host 192".  Split only on
+                # a REAL sentence boundary (period/newline followed by whitespace and NOT
+                # inside a dotted token), then strip a leading severity label.
+                _first = re.split(r"(?<=\D)\.\s|\n", text.strip(), maxsplit=1)[0].strip()
+                _first = re.sub(r"^(critical|high|medium|low|info)\s*[:\-]\s*", "",
+                                _first, flags=re.I).strip()
+                title = _first[:90] or "Operator finding"
             asyncio.ensure_future(self._store_finding_safe(
                 sev, title, text, self._target, "operator",
                 evidence=(str(args.get("evidence") or "")[:400] or None)))
@@ -955,6 +1431,18 @@ class OperatorCore:
                     "'Permission denied' line). Read the flag file CLEANLY — "
                     "`cat /home/<user>/user.txt` — and submit the real token. If "
                     "the read fails with permission denied, you must escalate first.")
+        # I2 provenance — credit a flag ONLY when its exact value appears in a CAPTURED
+        # tool output for this target, never from the model's own submit_flag args (the
+        # fabricated-root-flag class: the value existed only in narration, 0x in any
+        # tool_calls artifact).  Kill-switch ARGUS_FLAG_PROVENANCE=0 restores prior behaviour.
+        if os.environ.get("ARGUS_FLAG_PROVENANCE", "1") != "0":
+            _corpus = getattr(self, "_captured_tool_text", "") or ""
+            if flag not in _corpus:
+                return ("submit_flag REJECTED (no artifact): that flag value does not appear "
+                        "in ANY captured tool output for this target. A flag is credited only "
+                        "from a REAL tool read (e.g. `cat /root/root.txt`), never from "
+                        "narration. Re-read the flag file through a tool call, then submit the "
+                        "EXACT captured token.")
         which = str(args.get("which", "")).strip().lower()
         if which not in ("user", "root"):
             which = "root" if self._intel.get("user_flag") else "user"
@@ -1265,6 +1753,34 @@ class OperatorCore:
         return ("loot_hunt: run this through your RCE channel (e.g. your PoC's -c "
                 "argument), then I will record what it returns:\n" + sweep)
 
+    def _confirmed_vuln_digest(self, limit: int = 12) -> str:
+        """A compact, severity-ranked list of the confirmed weaknesses this
+        engagement found — the substance of a graceful-quit writeup.  Pure; reads the
+        same intel keys the progress signal uses; enumerates titles only (no payload
+        literals), so a run that gets no shell still REPORTS its vulnerabilities."""
+        it = self._intel
+        _rank = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+        items = [v for b in ((it.get("vulnerabilities") or []), (it.get("web_vulns") or []),
+                             (it.get("discovered_issues") or []))
+                 for v in b if isinstance(v, dict)]
+        items.sort(key=lambda v: _rank.get(str(v.get("severity") or "").lower(), 5))
+        seen: set = set()
+        rows: list = []
+        for v in items:
+            title = str(v.get("title") or v.get("name") or "").strip()
+            if not title or title.lower()[:60] in seen:
+                continue
+            seen.add(title.lower()[:60])
+            sev = (str(v.get("severity") or "").upper() or "—")
+            host = str(v.get("host") or "")
+            rows.append(f"  • [{sev}] {title[:90]}" + (f" ({host})" if host else ""))
+            if len(rows) >= limit:
+                break
+        ncreds = len(it.get("credentials") or [])
+        if ncreds:
+            rows.append(f"  • [HIGH] {ncreds} credential(s) recovered — reuse not yet confirmed")
+        return "\n".join(rows)
+
     async def _finalize_objectives(self) -> None:
         """Write an honest objectives summary + outcome to intel + a finding, so
         the findings page shows what ARGUS achieved vs the stated objectives —
@@ -1301,13 +1817,91 @@ class OperatorCore:
             st = ostatus.get(name) or ostatus.get(f"obj_{i}") or ""
             lines.append(f"  [{'✓' if str(st).lower() in ('complete','done','achieved') else '○'}] {name[:90]}")
         it["objectives_summary"] = "\n".join(lines)
-        sev = "CRITICAL" if outcome != "no_access" else "INFO"
+        # Graceful-quit report: even with NO foothold, enumerate the CONFIRMED
+        # vulnerabilities so an exhausted run reads like a human pentester's writeup
+        # ("here is what I found and could not (yet) exploit"), not an empty INFO note.
+        try:
+            digest = self._confirmed_vuln_digest()
+        except Exception:
+            digest = ""
+        if digest:
+            it["objectives_summary"] += "\n\nCONFIRMED VULNERABILITIES:\n" + digest
+        # A run that found real weaknesses is never merely INFO, even without a foothold.
+        sev = ("CRITICAL" if outcome != "no_access" else ("HIGH" if digest else "INFO"))
         await self._store_finding_safe(
             sev, f"Engagement objectives — {outcome.replace('_', ' ')}",
             it["objectives_summary"], self._target, "operator")
         await self._emit("operator_objectives", {
             "session_id": self._session_id, "outcome": outcome,
             "achieved": achieved, "summary": it["objectives_summary"]})
+
+    # ── meta-agent remediation authority (blocking corrections get teeth) ───
+    @staticmethod
+    def _finding_veto_key(title: Any, host: Any = "") -> str:
+        """Stable veto key for a finding — normalized title (+host), whitespace/case
+        insensitive — so a blocking correction can suppress the exact finding it
+        contradicts even if it is re-emitted later."""
+        t = " ".join(str(title or "").split()).lower()
+        h = str(host or "").strip().lower()
+        return f"{h}|{t}" if t else ""
+
+    @staticmethod
+    def should_veto(correction: Dict[str, Any], blocking_threshold: float = 0.8) -> bool:
+        """A meta-correction earns veto authority when it is tier='blocking' (or high
+        confidence) AND classifies the finding as one that should NOT ship
+        (false positive / duplicate / wrong severity / invalid)."""
+        c = correction if isinstance(correction, dict) else {}
+        tier = str(c.get("tier") or "").lower()
+        itype = str(c.get("issue_type") or c.get("type") or "").lower()
+        try:
+            conf = float(c.get("confidence") or 0)
+        except (TypeError, ValueError):
+            conf = 0.0
+        blocking = (tier == "blocking") or (conf >= blocking_threshold)
+        return blocking and itype in ("false_positive", "duplicate_finding",
+                                      "wrong_severity", "invalid_finding", "not_a_finding")
+
+    @staticmethod
+    def _correction_as_dict(item: Any) -> Dict[str, Any]:
+        if isinstance(item, dict):
+            return item
+        out: Dict[str, Any] = {}
+        for k in ("tier", "issue_type", "type", "confidence", "finding", "title", "host",
+                  "affected_finding_ids", "description", "recommended_action", "source"):
+            v = getattr(item, k, None)
+            if v is not None:
+                out[k] = v
+        return out
+
+    @staticmethod
+    def _finding_title_from_correction(c: Dict[str, Any]) -> str:
+        """The issue-validator's Correction carries no `title` field — it embeds the
+        finding title in its description ('Finding gated out of the report (reason):
+        <title>').  Recover it so the veto can key on the finding."""
+        desc = str(c.get("description") or c.get("recommended_action") or "")
+        if "report" in desc.lower() and "): " in desc:
+            return desc.rsplit("): ", 1)[-1].strip()
+        return ""
+
+    def _capture_veto(self, item: Any) -> None:
+        """Record a blocking correction so the contradicted finding is suppressed at
+        write time (see _store_finding_safe).  Best-effort + non-fatal."""
+        try:
+            c = self._correction_as_dict(item)
+            if not self.should_veto(c):
+                return
+            title = (c.get("finding") or c.get("title")
+                     or self._finding_title_from_correction(c))
+            if title:
+                # host-keyed (precise) AND title-only (so a correction that carries no
+                # host — the issue-validator's — vetoes that finding on its host).
+                self._vetoed_keys.add(self._finding_veto_key(title, c.get("host")))
+                self._vetoed_keys.add(self._finding_veto_key(title, ""))
+            for fid in (c.get("affected_finding_ids") or []):
+                if fid:
+                    self._vetoed_finding_ids.add(str(fid))
+        except Exception:
+            pass
 
     # ── success persistence (the ROOT fix) ─────────────────────────────────
     async def _store_finding_safe(self, severity: str, title: str, description: str,
@@ -1318,6 +1912,21 @@ class OperatorCore:
         Without this, a working RCE leaves the findings page empty and the
         red-team Expert (which judges progress by intel/findings) falsely
         reports a HARD STALL.  Falls back to intel-only on any error."""
+        # Meta-agent veto: a BLOCKING correction (issue-validator false-positive /
+        # wrong-severity) suppresses the contradicted finding at write time, so a
+        # meta agent's blocking judgement actually STOPS the bad finding instead of
+        # being purely advisory (the bogus wildcard-DNS finding shipped anyway before).
+        try:
+            _vk = getattr(self, "_vetoed_keys", set())
+            if _vk:
+                for vkey in (self._finding_veto_key(title, host),
+                             self._finding_veto_key(title, "")):
+                    if vkey and vkey in _vk:
+                        await self._emit("finding_vetoed",
+                                         {"session_id": self._session_id, "title": title, "host": host})
+                        return
+        except Exception:
+            pass
         fn = getattr(self.master, "store_finding", None)
         sev = severity
         try:
@@ -1465,6 +2074,39 @@ class OperatorCore:
                     host=host, found_by=found, phase="exploit")
         except Exception:
             pass
+        # Elevate a TOOL-SOURCED credential to a durable finding + queue it for the
+        # spray pivot.  A credential parsed from the model's own prose (found_by=
+        # 'operator') is deliberately EXCLUDED — that is exactly how a hallucinated
+        # 'root:...' was kept out of the report; only a real recovered secret is
+        # surfaced + reused.  Best-effort; the WS event + vault write already ran.
+        try:
+            if secret and self._is_tool_sourced_cred(cred) and not cred.get("_finding_emitted"):
+                cred["_finding_emitted"] = True
+                _u = user or "(secret)"
+                await self._store_finding_safe(
+                    "HIGH", f"Credential recovered: {_u}",
+                    f"Tool-recovered {ctype} credential for {_u} on {host} via {found} "
+                    f"— reuse for authentication, privilege escalation, or lateral movement.",
+                    host, found or "operator",
+                    evidence=(f"{user}:{secret}" if user else str(secret))[:200])
+                self._intel.setdefault("credentials_pending_spray", []).append(cred)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _is_tool_sourced_cred(cred: Dict[str, Any]) -> bool:
+        """True only for a credential recovered by a real credential TOOL (or one
+        already verified/sprayed) — never for a credential parsed from LLM prose
+        (found_by='operator').  This is the gate that keeps a fabricated/hallucinated
+        credential from being elevated into the report as a finding."""
+        c = cred or {}
+        _tools = ("john", "hashcat", "hydra", "medusa", "crackmapexec", "nxc",
+                  "netexec", "secretsdump", "mimikatz", "responder", "sqlmap",
+                  "credential_spray")
+        f = str(c.get("found_by") or "").lower()
+        if any(t in f for t in _tools):
+            return True
+        return bool(c.get("verified") or c.get("sprayed_ok"))
 
     def _mark_win_condition(self, name: str, evidence: str = "") -> None:
         """Flip a structured win-condition to achieved (and recompute the rollup),
@@ -1548,6 +2190,221 @@ class OperatorCore:
         except Exception as exc:   # noqa: BLE001
             return {"stdout": "", "stderr": f"{type(exc).__name__}: {exc}"}
 
+    async def _maybe_credential_pivot(self) -> None:
+        """Re-use a recovered credential across the in-scope auth surface — the pivot
+        that turns 'found a credential' into 'confirmed reuse / lateral foothold'.
+        Wires the previously-dead CredentialVault.spray: derive sprayable creds +
+        auth targets from intel (scope-safe), spray them (rate-limited), and turn every
+        hit into a CRITICAL finding + a pivot target.  Best-effort; env opt-out
+        ARGUS_CRED_SPRAY=0; can never touch a host outside scope."""
+        if self._cred_spray_active or os.environ.get("ARGUS_CRED_SPRAY", "1") == "0":
+            return
+        try:
+            import shlex
+            from agents.credential_pipeline import get_vault, spray_plan
+            scope = {str(h) for h in (self._intel.get("target_scope") or [])} | {self._target}
+            # Spray ONLY the tool-sourced creds the elevation gate queued — never the
+            # raw credentials bucket, so a prose/hallucinated cred (found_by='operator',
+            # gate-rejected) is never reused operationally against an auth surface.
+            _gated = self._intel.get("credentials_pending_spray") or []
+            if not _gated:
+                return
+            _intel_spray = dict(self._intel)
+            _intel_spray["credentials"] = _gated
+            creds, targets = spray_plan(_intel_spray, scope_hosts=scope)
+            if not creds or not targets:
+                return
+            key = (len(creds), tuple(sorted(f"{h}:{p}:{s}" for h, p, s in targets)))
+            if key in self._sprayed_surfaces:
+                return
+            self._sprayed_surfaces.add(key)
+            # Per-engagement vault: another client's credentials must never be
+            # in scope for this spray.
+            vault = get_vault(getattr(self, '_session_id', None))
+            for c in creds:
+                try:
+                    await vault.ingest(c)
+                except Exception:
+                    pass
+
+            async def _runner(prog, argv, timeout):
+                cmd = " ".join(shlex.quote(str(x)) for x in ([prog] + list(argv)))
+                r = await self._dispatch_bounded(tool="shell_exec", args=cmd,
+                                                 purpose="credential spray", phase="exploit",
+                                                 timeout=int(timeout))
+                r = r if isinstance(r, dict) else {"stdout": str(r or "")}
+                return (int(r.get("exit_code", r.get("returncode", 0) or 0)),
+                        str(r.get("stdout", "")), str(r.get("stderr", "")))
+
+            self._cred_spray_active = True
+            hits = await vault.spray(creds, targets, _runner, on_event=self._emit,
+                                     scope_hosts=scope)
+            for h in (hits or []):
+                await self._store_finding_safe(
+                    "CRITICAL", f"Credential reuse: valid {h.service} login on {h.host}",
+                    f"A recovered credential authenticated to {h.service} on "
+                    f"{h.host}:{h.port} — confirmed credential reuse / lateral movement.",
+                    h.host, "credential_spray", evidence=str(getattr(h, "detail", ""))[:200])
+                self._intel.setdefault("pivot_targets", []).append(
+                    {"host": h.host, "service": h.service, "port": h.port})
+        except Exception as exc:   # noqa: BLE001
+            logger.debug("credential pivot failed: %s", exc)
+        finally:
+            self._cred_spray_active = False
+
+    # ── Fuzz-for-novel pivot (find a previously-unknown weakness, then exploit it) ──
+    @staticmethod
+    def _surface_key(surface: Dict[str, Any]) -> str:
+        s = surface or {}
+        return f"{s.get('host','')}:{s.get('port','')}:{s.get('surface_type','')}"
+
+    @staticmethod
+    def _surface_target_url(surface: Dict[str, Any]) -> str:
+        s = surface or {}
+        host = str(s.get("host") or "")
+        port = s.get("port")
+        st = str(s.get("surface_type") or "network")
+        if st in ("web", "api"):
+            scheme = "https" if str(port) in ("443", "8443") else "http"
+            tail = f":{port}" if (port and str(port) not in ("80", "443")) else ""
+            return f"{scheme}://{host}{tail}"
+        return f"{host}:{port}" if port else host
+
+    @staticmethod
+    def _select_fuzz_surface(intel: Dict[str, Any],
+                             fuzzed: Optional[set] = None) -> Optional[Dict[str, Any]]:
+        """Pick the highest-tier fuzzable surface not yet fuzzed (pure).  Only a
+        'high'/'medium' surface qualifies, so the operator fuzzes where a novel bug is
+        most likely (parsers, custom/proprietary services, OT/IoT) — not every port."""
+        fuzzed = fuzzed or set()
+        try:
+            from knowledge.fuzz_targeting import rank_targets
+            for t in (rank_targets(intel or {}).get("targets") or []):
+                if (isinstance(t, dict) and t.get("tier") in ("high", "medium")
+                        and t.get("host")
+                        and OperatorCore._surface_key(t) not in fuzzed):
+                    return t
+        except Exception:
+            return None
+        return None
+
+    async def _maybe_fuzz_pivot(self) -> None:
+        """Fuzz-for-novel: when NO known exploit exists but a promising surface does,
+        launch a bounded fuzz campaign to search for a previously-unknown weakness; a
+        weaponizable anomaly becomes a new exploit candidate (Source 3 in
+        detect_candidate) that the grounded develop loop then tries to LAND.
+        Best-effort; env caps ARGUS_OPERATOR_FUZZ_MAX_SEC (300s) + ARGUS_OPERATOR_FUZZ_PIVOTS
+        (3) keep it bounded; it NEVER runs while a known exploit candidate is in hand."""
+        if self._fuzz_pivot_active or os.environ.get("ARGUS_OPERATOR_FUZZ", "1") == "0":
+            return
+        try:
+            try:
+                _cap = int(os.environ.get("ARGUS_OPERATOR_FUZZ_PIVOTS", "3"))
+            except (TypeError, ValueError):
+                _cap = 3
+            if self._fuzz_pivots_used >= _cap:
+                return
+            from .committed_exploit import detect_candidate
+            if detect_candidate(self._intel) is not None:
+                return                        # a known exploit exists — commit, don't fuzz
+            surface = self._select_fuzz_surface(self._intel, self._fuzzed_surfaces)
+            if not surface:
+                return
+            self._fuzzed_surfaces.add(self._surface_key(surface))   # mark BEFORE (no re-fuzz)
+            st = str(surface.get("surface_type") or "network")
+            modality = {"web": "web", "api": "api", "network": "network",
+                        "iot": "network", "ot": "network"}.get(st, "network")
+            from agents.fuzzing.engines import get_engine
+            eng = get_engine(modality)
+            if eng is None:
+                return
+            try:
+                avail = bool(eng.is_available()[0])
+            except Exception:
+                avail = False
+            if not avail:
+                return
+            from agents.fuzzing.session_bridge import build_ctx
+            from agents.fuzzing.campaign import FuzzCampaign
+            ctx = build_ctx(session_id=self._session_id, agent=self.master,
+                            target=self._surface_target_url(surface), modality=modality,
+                            surface={"fuzzer_id": surface.get("fuzzer_id"),
+                                     "port": surface.get("port"),
+                                     "input_kind": surface.get("input_kind")},
+                            ceiling="intrusive", domain=("OT" if st == "ot" else "IT"),
+                            authorized=True, emit=self._emit)
+            self._fuzz_pivots_used += 1
+            camp = FuzzCampaign(job_id=f"op_fuzz_{self._session_id}_{self._fuzz_pivots_used}",
+                                ctx=ctx, engine=eng, on_finding=self._fuzz_finding_persist,
+                                max_sec=int(os.environ.get("ARGUS_OPERATOR_FUZZ_MAX_SEC", "300")))
+            self._fuzz_pivot_active = True
+            await asyncio.wait_for(camp.run(), timeout=camp.max_sec + 30)
+            host = str(surface.get("host") or "")
+            for a in (getattr(camp, "anomalies", []) or []):
+                try:
+                    d = a.to_dict() if hasattr(a, "to_dict") else {}
+                    self._intel.setdefault("fuzz_anomalies", []).append({
+                        "exploit_class": d.get("exploit_class") or getattr(a, "exploit_class", ""),
+                        "evidence": str(d.get("evidence") or getattr(a, "evidence", ""))[:120],
+                        "target_url": self._surface_target_url(surface),
+                        "host": host, "confidence": 0.72})
+                except Exception:
+                    pass
+        except asyncio.TimeoutError:
+            logger.debug("fuzz pivot timed out")
+        except Exception as exc:   # noqa: BLE001
+            logger.debug("fuzz pivot failed: %s", exc)
+        finally:
+            self._fuzz_pivot_active = False
+
+    async def _fuzz_finding_persist(self, finding: Dict[str, Any]) -> None:
+        """Persist a fuzz-campaign finding through the operator's durable gate."""
+        try:
+            f = finding or {}
+            await self._store_finding_safe(
+                str(f.get("severity") or "MEDIUM").upper(),
+                str(f.get("title") or "Fuzzing anomaly"),
+                str(f.get("description") or f.get("evidence") or "")[:500],
+                str(f.get("host") or self._target), "fuzz_campaign",
+                evidence=str(f.get("evidence") or "")[:200])
+        except Exception:
+            pass
+
+    @staticmethod
+    def _has_unfuzzed_surface(intel: Dict[str, Any], fuzzed: Optional[set] = None) -> bool:
+        """True when a high/medium fuzz surface remains untried (pure)."""
+        return OperatorCore._select_fuzz_surface(intel, fuzzed) is not None
+
+    async def _fuzz_before_converge(self) -> bool:
+        """At an exhaustion point, try fuzz-for-novel BEFORE concluding — like a human
+        pentester who, out of known exploits, starts fuzzing for a novel bug rather than
+        writing an empty report.  Returns True if a fuzz pivot was launched (the caller
+        keeps looping to act on any new anomaly), False when nothing remains to fuzz.
+        Fully self-guarded: it must NEVER raise into run() (a bad env value would
+        otherwise crash the loop), and it must NEVER force a 'continue' while a live
+        commit candidate exists (that would spin the loop forever)."""
+        try:
+            if os.environ.get("ARGUS_OPERATOR_FUZZ", "1") == "0":
+                return False
+            try:
+                _cap = int(os.environ.get("ARGUS_OPERATOR_FUZZ_PIVOTS", "3"))
+            except (TypeError, ValueError):
+                _cap = 3
+            if self._fuzz_pivots_used >= _cap:
+                return False
+            # A live/landed commit candidate belongs to the commit loop, not the fuzz
+            # pivot — returning True here would 'continue' forever (the candidate never
+            # gets fuzz-marked, so the surface stays "unfuzzed" every iteration).
+            from .committed_exploit import detect_candidate
+            if detect_candidate(self._intel) is not None:
+                return False
+            if not self._has_unfuzzed_surface(self._intel, self._fuzzed_surfaces):
+                return False
+            await self._maybe_fuzz_pivot()
+            return True
+        except Exception:
+            return False
+
     async def _commit_record_attempt(self, attempt: Dict[str, Any]) -> None:
         """Master-awareness: record every FAILED adaptation to the Master's
         negative_memory + intel.failed_attempts (fixes the empty-memory bug)."""
@@ -1585,11 +2442,14 @@ class OperatorCore:
         self._intel["committed_exploit"] = {
             "candidate": cand.to_dict(), "status": "landed" if res.landed else "exhausted",
             "attempts": res.attempts, "landed": res.landed, "reason": res.exhausted_reason}
-        if not res.landed:
-            # Mark exhausted so detect_candidate won't re-pick it (commit once).
-            self._intel.setdefault("failed_attempts", []).append({
-                "tool": "committed_exploit", "signature": cand.signature,
-                "committed_exhausted": True, "reason": res.exhausted_reason})
+        # Mark the signature exhausted on EITHER outcome so detect_candidate won't
+        # re-pick it — on a LAND this is essential: an un-marked landed candidate is
+        # returned every iteration, which starved the fuzz pivot and spun the loop.
+        self._intel.setdefault("failed_attempts", []).append({
+            "tool": "committed_exploit", "signature": cand.signature,
+            "committed_exhausted": True, "reason": ("landed" if res.landed else res.exhausted_reason)})
+        if res.landed:
+            self._intel["rce_confirmed"] = True
         await self._emit("committed_exploit_result", {
             "session_id": self._session_id, "landed": res.landed, "attempts": res.attempts,
             "reason": res.exhausted_reason, **cand.to_dict()})
@@ -1629,6 +2489,46 @@ class OperatorCore:
                 pass
         self._intel.setdefault("verified_rce", []).append(
             {"target": cand.target_url, "cve": cand.cve, "poc": (res.poc or {}).get("code", "")})
+
+        # [103] A landed committed exploit is a PROVEN compromise from the operator's
+        # OWN exploit path.  The regular path credits an identical uid=-proof by
+        # setting shell_access, marking initial_access/foothold, flipping the
+        # shell_obtained win-condition and opening an RCE console — but this path
+        # only stored a finding, so shell_access stayed False and the win-condition
+        # rollups silently UNDER-reported the compromise (and verified_rce/poc had no
+        # consumer).  Credit it the same way, but ONLY for code-execution classes:
+        # a landed sqli_exfil / ssrf / auth_bypass proves impact, not a shell.
+        _rce_classes = {"rce", "cmd_injection", "ssti", "deserialization", "file_upload_rce"}
+        if str(cand.exploit_class or "").strip().lower() in _rce_classes:
+            self._intel["shell_access"] = True
+            self._intel["rce_confirmed"] = True
+            try:
+                self._mark_objective("initial_access", "complete")
+                self._mark_objective("foothold", "complete")
+            except Exception:
+                pass
+            self._mark_win_condition(
+                "shell_obtained",
+                f"committed {cand.cve or cand.exploit_class} landed on {cand.target_url}")
+            # Advance the legacy phase so MissionControl leaves VULN_ID.
+            try:
+                _adv = getattr(self.master, "_advance_phase", None)
+                if _adv is not None:
+                    from db.schemas import AttackPhase as _AP
+                    asyncio.ensure_future(_adv(_AP.POST_EXPLOIT))
+            except Exception:
+                pass
+            # Give the stashed PoC a consumer: open an operator-drivable RCE console
+            # when a {cmd}-parameterizable channel exists (best-effort — no channel
+            # simply means no console, never a fabricated one).
+            try:
+                await self._ensure_rce_console()
+            except Exception:
+                pass
+            await self._reason(
+                f"COMMITTED EXPLOIT LANDED ({cand.cve or cand.exploit_class}) — credited "
+                "shell_obtained + foothold, shell_access set. Priority: read user.txt + root.txt.")
+
         await self._emit("fuzz_finding", {"session_id": self._session_id, **finding})
 
     async def _record_operator_success(self, tool: str, args: Any, observation: str) -> None:
@@ -1645,8 +2545,26 @@ class OperatorCore:
         args_s = str(args)
         args_l = args_s.lower()
 
+        # I2 provenance corpus — accumulate REAL tool observations so a flag/credential
+        # can be credited ONLY when its exact value appears in captured tool output, never
+        # from model narration (the fabricated-root-flag class).  Bounded.
+        try:
+            self._captured_tool_text = ((getattr(self, "_captured_tool_text", "") or "")
+                                        + "\n" + text)[-200000:]
+        except Exception:
+            pass
+
+        # I2 provenance — a uid=/gid= proof token found while READING A LOCAL STATIC
+        # ARTIFACT (exploit-DB PoC / seclists / doc under /usr/share) is documentation,
+        # not on-target execution, so it can NEVER establish a foothold.
+        _inner_tool = (str((args or {}).get("tool") or "") if isinstance(args, dict) else "")
+        _inner_args = (str((args or {}).get("args") or (args or {}).get("cmd")
+                           or (args or {}).get("command") or args_s)
+                       if isinstance(args, dict) else args_s)
+        _doc_read = _is_local_doc_read(_inner_tool, _inner_args)
+
         # 1) RCE / foothold proof.
-        if not self._intel.get("shell_access"):
+        if not self._intel.get("shell_access") and not _doc_read:
             m = _re.search(r"uid=\d+\(([^)]+)\)", text)
             if m or "rce success" in text.lower() or _re.search(r"\bgid=\d+\(", text):
                 self._intel["shell_access"] = True
@@ -2355,7 +3273,7 @@ class OperatorCore:
         unreachable — a network-layer blocker, not a finding.  Used to detect a
         down VPN/route so ARGUS pauses instead of spinning doomed scans."""
         t = (text or "").lower()
-        return any(m in t for m in _UNREACHABLE_MARKERS)
+        return any(m in t for m in _UNREACHABLE_MARKERS) or bool(_CONN_FAIL_RE.search(t))
 
     def note_tool_connectivity(self, text: str) -> None:
         """Feed every tool result through the unreachable detector, tracking a
@@ -2393,48 +3311,39 @@ class OperatorCore:
             thresh = 3
         if self._consec_unreachable < max(1, thresh):
             return None
+        _tgt = self._intel.get("target_host") or self._target
+        # If the human already confirmed the route is back (pre-resolved), honour it
+        # without waiting and keep going.
+        if (self._blocker_decision or "").strip().lower() == "resume":
+            self._consec_unreachable = 0
+            self._blocker_decision = ""
+            await self._reason(f"Connectivity confirmed on {_tgt} — resuming.")
+            return None
+        # NON-BLOCKING defer.  Previously this PAUSED the operator on an Event.wait()
+        # for up to _blocker_wait seconds — which froze the engagement and, in a CIDR
+        # run, held this host's concurrency slot so the whole queue starved.  Instead:
+        # surface the blocker, mark the host DEFERRED, and hand control back so ARGUS
+        # MOVES ON to the next system immediately.  The host is revisited on the
+        # end-of-run revisit pass, or sooner when the human confirms it is reachable.
         self._blocker_decision = ""
         self._blocker_decision_event = asyncio.Event()
-        _tgt = self._intel.get("target_host") or self._target
+        self._intel["blocker"] = {"kind": "unreachable", "target": _tgt, "deferred": True}
         try:
             await self._emit("engagement_blocker", {
                 "session_id": self._session_id, "target": _tgt, "kind": "unreachable",
+                "deferred": True, "consec": self._consec_unreachable,
                 "detail": ("Repeated network-unreachable signals — the target appears "
-                           "offline (check the VPN/route). Paused: resume after restoring "
-                           "connectivity, or abort this target."),
-                "consec": self._consec_unreachable, "wait_sec": self._blocker_wait})
+                           "offline (check the VPN/route). DEFERRED: ARGUS is moving on to "
+                           "the other systems and will revisit this one when you confirm "
+                           "it is reachable, or on the end-of-run revisit pass."),
+            })
         except Exception:
             pass
         await self._reason(
             f"CONNECTIVITY BLOCKER on {_tgt}: {self._consec_unreachable} consecutive "
-            "network-unreachable signals. PAUSING — waiting for the human to restore "
-            "connectivity and RESUME, or ABORT this target (no false 'complete').")
-        try:
-            await asyncio.wait_for(self._blocker_decision_event.wait(),
-                                   timeout=self._blocker_wait)
-        except asyncio.TimeoutError:
-            self._blocker_decision = "timeout"
-        if self._blocker_decision == "resume":
-            self._consec_unreachable = 0
-            await self._reason(f"Human restored connectivity on {_tgt} — resuming.")
-            try:
-                await self._emit("engagement_blocker_resolved", {
-                    "session_id": self._session_id, "target": _tgt, "decision": "resume"})
-            except Exception:
-                pass
-            return None
-        # abort OR no-answer timeout → halt this target HONESTLY
-        self._intel["blocker"] = {"kind": "unreachable", "target": _tgt}
-        await self._reason(
-            f"Connectivity blocker {'unresolved (no answer)' if self._blocker_decision == 'timeout' else 'ABORTED by human'} "
-            f"on {_tgt} — halting this target honestly rather than reporting a false 'complete'.")
-        try:
-            await self._emit("engagement_blocker_resolved", {
-                "session_id": self._session_id, "target": _tgt,
-                "decision": self._blocker_decision or "timeout"})
-        except Exception:
-            pass
-        return "blocker_unreachable"
+            "network-unreachable signals. DEFERRING this target and moving on to the next "
+            "system (no freeze, no false 'complete') — it will be revisited.")
+        return "deferred_unreachable"
 
     def _has_progress_signal(self) -> bool:
         """True once ARGUS holds ANY real progress — a confirmed finding/vuln, a
@@ -2647,20 +3556,88 @@ class OperatorCore:
         return self._diff_surface(label, before, after)
 
     async def _run_playbook(self, name: str) -> str:
+        # [74] Previously this only *located* a playbook (and via eng.get/eng.names,
+        # which PlaybookEngine doesn't even expose, so it always said "not found").
+        # The tool is meant to EXECUTE the playbook's steps.  Load the engine, find
+        # the playbook by id/name, build a run context from live intel, and drive
+        # eng.run() through the operator's bounded dispatch — persisting whatever
+        # findings the steps prove.
         if not name:
             return "run_playbook: missing 'name'."
         try:
-            from agents.playbook.engine import PlaybookEngine  # type: ignore
+            from agents.playbook.engine import PlaybookEngine, match_playbook  # type: ignore
         except Exception:
             return "playbook engine unavailable on this build."
         try:
             eng = getattr(self.master, "_playbook_engine", None) or PlaybookEngine()
-            pb = eng.get(name) if hasattr(eng, "get") else None
-            if not pb:
-                names = ", ".join(sorted(getattr(eng, "names", lambda: [])())[:40]) \
-                    if hasattr(eng, "names") else ""
-                return f"playbook '{name}' not found. Available: {names}"
-            return f"playbook '{name}' located; run it via run_tool steps as needed."
+            try:
+                eng.load()
+            except Exception:
+                pass
+            key = name.strip().lower()
+            pbs = getattr(eng, "playbooks", []) or []
+            pb = next((p for p in pbs
+                       if str(getattr(p, "id", "")).lower() == key
+                       or str(getattr(p, "name", "")).lower() == key), None)
+            if pb is None:
+                avail = ", ".join(sorted(str(getattr(p, "id", "")) for p in pbs)[:40])
+                return f"playbook '{name}' not found. Available: {avail}"
+
+            # Run context: prefer the engine's own intel match (fills host/port/url
+            # templating); fall back to a minimal target context.
+            ctx = None
+            try:
+                ctx = match_playbook(pb, self._intel)
+            except Exception:
+                ctx = None
+            if not ctx:
+                _host = (self._target or "").split("/")[0]
+                ctx = {"host": _host, "target": self._target,
+                       "target_url": self._intel.get("target_url") or self._target}
+
+            # Adapt the operator's bounded dispatch to the engine's ToolRunner
+            # contract: (tool_name, args_list, timeout) -> (exit, stdout, stderr).
+            async def _runner(_tool, _args_list, _timeout):
+                res = await self._dispatch_bounded(
+                    tool=str(_tool),
+                    args=" ".join(str(a) for a in (_args_list or [])),
+                    purpose=f"playbook:{getattr(pb, 'id', name)}",
+                    phase="operator", timeout=int(_timeout or 120))
+                _stdout = str(res.get("stdout") or "")
+                _stderr = str(res.get("stderr") or "")
+                _exit = res.get("exit_code")
+                if _exit is None:
+                    _exit = 0 if (_stdout and not res.get("error")) else 1
+                return int(_exit), _stdout, _stderr
+
+            findings = await eng.run(pb, ctx, _runner, on_event=self._emit)
+
+            # Persist the findings the playbook actually proved.
+            stored = 0
+            store = getattr(self.master, "store_finding", None)
+            for f in (findings or []):
+                if store is None:
+                    break
+                try:
+                    _sev = str(getattr(f, "severity", "") or "info")
+                    try:
+                        from db.schemas import FindingSeverity as _FS
+                        _sev_v = _FS(_sev.lower())
+                    except Exception:
+                        _sev_v = _sev
+                    await store(
+                        severity=_sev_v, title=getattr(f, "title", "playbook finding"),
+                        description=getattr(f, "description", ""),
+                        host=getattr(f, "host", "") or ctx.get("host", ""),
+                        evidence=getattr(f, "evidence", ""),
+                        cves=[getattr(f, "cve")] if getattr(f, "cve", None) else [],
+                        extra={"source": f"playbook:{getattr(pb, 'id', name)}",
+                               "step": getattr(f, "step_name", "")})
+                    stored += 1
+                except Exception:
+                    pass
+            return (f"playbook '{getattr(pb, 'id', name)}' ran {len(getattr(pb, 'steps', []))} "
+                    f"steps; {len(findings or [])} findings ({stored} stored).")
         except Exception as exc:   # noqa: BLE001
             return f"run_playbook error: {type(exc).__name__}: {exc}"
 
@@ -2753,7 +3730,53 @@ class OperatorCore:
             if reply and reply.strip():
                 await self._reason(f"Recovered on retry {attempt} — operator is driving.")
                 return reply
+        # Every LLM retry failed.  OPT-IN (ARGUS_OPERATOR_BOOTSTRAP=1): rather than
+        # surrender the whole host to the legacy loop — the forensic showed a host ran
+        # ZERO tools after the opening call timed out — seed a DETERMINISTIC recon+exploit
+        # plan from intel and keep the operator loop alive so its deterministic pivots
+        # (known-exploit commit, credential spray, fuzz-for-novel) still exercise the
+        # target.  Default OFF, so the existing "raise OperatorUnavailable -> legacy
+        # fallback" contract is byte-identical unless a human enables the bootstrap.
+        if os.environ.get("ARGUS_OPERATOR_BOOTSTRAP", "0") == "1":
+            try:
+                plan = self._deterministic_bootstrap_plan()
+                if plan:
+                    for p in plan:
+                        self.transcript.append({"role": "user", "content": p})
+                    await self._reason("Opening LLM unavailable — seeded a deterministic "
+                                       "recon+exploit plan from intel so the host is still "
+                                       "tested instead of skipped.")
+                    return plan[0]
+            except Exception:
+                pass
         return ""
+
+    def _deterministic_bootstrap_plan(self) -> List[str]:
+        """Ordered first directives derived from intel for when the opening LLM call
+        is unavailable, so a host is still tested (recon → any pending public PoC →
+        recovered-credential reuse) rather than skipped.  Pure; contains NO CVE-id or
+        payload literals — only intel-derived ports + tool NAMES."""
+        it = self._intel or {}
+        steps: List[str] = []
+        try:
+            ports = self._web_ports_from_intel()
+        except Exception:
+            ports = []
+        if ports:
+            steps.append("Fingerprint the web service(s) on port(s) "
+                         + ", ".join(str(p) for p in ports[:6])
+                         + " with an http GET to identify the running stack.")
+        if any(isinstance(m, dict) and m.get("type") == "public_poc"
+               for m in (it.get("exploit_modules") or [])):
+            steps.append("A public proof-of-concept was matched to the fingerprinted "
+                         "stack — call cve_lookup, then validate it against the target.")
+        if it.get("credentials"):
+            steps.append("A credential was recovered — attempt to authenticate it against "
+                         "the exposed auth service(s) that are in scope.")
+        if not steps:
+            steps.append(f"Begin with service enumeration of {self._target or 'the target'} "
+                         "to map the attack surface, then probe each service for weaknesses.")
+        return steps
 
     def _shrink_opening_prompt(self, level: int) -> None:
         """Progressively reduce the opening transcript so a small-context model
@@ -2901,6 +3924,7 @@ class OperatorCore:
                     item = q.get_nowait()
                 except Exception:
                     break
+                self._capture_veto(item)
                 txt = self._correction_text(item)
                 if txt:
                     notes.append("• " + txt)
@@ -3153,9 +4177,14 @@ class OperatorCore:
         """Best-effort prior-success hint from the knowledge base, if one is
         wired on the master. Content (techniques that previously worked) lives in
         the KB, not in engine code; this only retrieves it. Safe no-op if absent."""
+        # [75] The master exposes KB retrieval as the inherited BaseAgent._kb
+        # coroutine (the other three names never existed on it, so this hint was a
+        # permanent no-op).  _kb also surfaces the live scan-history corpus now that
+        # per-finding auto-ingest is wired, so prior wins actually flow through here.
         fn = (getattr(self.master, "kb_query", None)
               or getattr(self.master, "_kb_query", None)
-              or getattr(self.master, "query_knowledge", None))
+              or getattr(self.master, "query_knowledge", None)
+              or getattr(self.master, "_kb", None))
         if fn is None:
             return ""
         try:
@@ -3213,9 +4242,33 @@ class OperatorCore:
 
     # ── approval gate ─────────────────────────────────────────────────────────
     def _needs_approval(self, action: Dict[str, Any]) -> bool:
+        intrusive = self._is_intrusive(action)
+        # ── PER-TARGET authorization overrides the autonomy setting ───────────
+        # On a PUBLIC target under an authorized external engagement, exploitation is
+        # in scope but must NEVER be autonomous — a human authorizes each one.  That
+        # is a property of the TARGET, so it outranks the run-wide autonomy choice
+        # (including autonomy="autonomous") and it re-gates EVERY intrusive action,
+        # not just the first.  Third-party targets are denied outright at the tool
+        # boundary (base_agent.run_tool), so they never reach this gate.
+        if intrusive:
+            try:
+                from knowledge.authorization import (AuthorizationPolicy as _AP,
+                                                     TargetAuthorization as _TA,
+                                                     EXPLOIT_APPROVAL as _EX_APPROVE,
+                                                     EXPLOIT_DENY as _EX_DENY)
+                _map = (self._intel or {}).get("target_authorization") or {}
+                if _map:
+                    _host = str((self._intel or {}).get("target_host")
+                                or (self._intel or {}).get("target") or "")
+                    _authz = (_AP.from_dict(_map).resolve(_host)
+                              if ("entries" in _map or "default" in _map)
+                              else _TA.from_dict(_map))
+                    if _authz.exploitation in (_EX_APPROVE, _EX_DENY):
+                        return True
+            except Exception:                                  # noqa: BLE001
+                return True    # fail CLOSED: unknown authorization ⇒ ask the human
         if self.autonomy == "autonomous":
             return False
-        intrusive = self._is_intrusive(action)
         if not intrusive:
             return False
         if self.autonomy == "manual":

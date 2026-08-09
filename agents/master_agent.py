@@ -20,6 +20,7 @@ Pentest Methodology (OSCP/OSWE inspired):
 
 import asyncio
 import json
+import logging
 import os
 import re
 import sys
@@ -44,7 +45,8 @@ try:
 except ImportError:
     _REASONING_AVAILABLE = False
 
-from agents.base_agent import BaseAgent, Instruction, agent_bus, BroadcastFn
+from agents.base_agent import (BaseAgent, Instruction, agent_bus, BroadcastFn,
+                               safety_domain as _safety_domain)
 from db.schemas import (
     AgentName, AgentStatus, AttackPhase, FindingSeverity,
     SessionStatus, WebSocketMessage
@@ -82,6 +84,17 @@ from utils.scan_logger import (
     start_scan_logger, close_scan_logger, get_scan_logger,
 )
 
+# Module logger.  Every other module in the tree binds this, and code here was
+# written assuming it — five call sites used a bare `logger` that this module
+# never defined.  The worst was in run(): the per-target authorization block
+# logged its verdict, raised NameError, and its own `except` handler then called
+# `logger.warning` too, so the second NameError escaped uncaught and killed the
+# scan for EVERY target and every mode.  A fail-safe handler must not depend on
+# the thing that failed; binding the name here is the root fix, and it also
+# revives the two pre-existing dead sites (listener shutdown, web-task failure)
+# whose warnings had been silently turning into crashes.
+logger = logging.getLogger(__name__)
+
 # Meta-agents — plan auditor and findings validator
 _META_AGENTS_IMPORT_ERROR: str = ""
 try:
@@ -95,6 +108,22 @@ except Exception as _meta_import_exc:
     # Catch ImportError, ModuleNotFoundError, AttributeError, etc.
     _META_AGENTS_AVAILABLE    = False
     _META_AGENTS_IMPORT_ERROR = str(_meta_import_exc)
+
+# ── Graph control plane (ADDITIVE, FLAG-GATED — default OFF) ──────────────────
+# Strangler-fig alternative to the loop engine.  Importing it is side-effect free;
+# NOTHING here runs unless ARGUS_GRAPH_ENGINE=1, and ARGUS_GRAPH_KILL=1 forces the
+# loop engine for every host with no code change.  An engine-level failure inside
+# the graph degrades THAT host back to the loop (once, latched, loudly).
+try:
+    from agents.graph.engine import (graph_engine_enabled as _graph_enabled,
+                                     GraphEngine as _GraphEngine,
+                                     make_engagement_state as _make_graph_state)
+    from agents.graph.nodes   import NodeContext as _GraphNodeContext
+    from agents.graph.runtime import MongoCheckpointer as _GraphCheckpointer
+    _GRAPH_AVAILABLE = True
+except Exception as _graph_import_exc:                       # noqa: BLE001
+    _GRAPH_AVAILABLE = False
+    _GRAPH_IMPORT_ERROR = str(_graph_import_exc)
 
 # ── RAG Knowledge Base (graceful degradation if not installed) ─────────────────
 try:
@@ -112,7 +141,8 @@ def _kb_context(
     phase_filter: str = None,
     outcome_filter: str = None,
     chunk_type_filter: str = None,
-    top_k: int = 4
+    top_k: int = 4,
+    tech_bias: Optional[List[str]] = None,
 ) -> str:
     """Return KB context string ready for LLM injection, or '' if KB not available/empty.
     Accepts both phase=/outcome= and phase_filter=/outcome_filter= naming conventions.
@@ -129,6 +159,7 @@ def _kb_context(
             phase_filter=_phase,
             outcome_filter=_outcome,
             chunk_type_filter=chunk_type_filter,
+            tech_bias=tech_bias,
         )
     except Exception:
         return ""
@@ -325,6 +356,13 @@ class MasterAgent(BaseAgent):
     def __init__(self, broadcast: Optional[BroadcastFn] = None):
         super().__init__(AgentName.MASTER, broadcast)
         self.phase = AttackPhase.RECON
+        # [45] MULTI/CIDR parent link (set in run()); None on a normal single scan.
+        self._parent_session_id: Optional[str] = None
+        # [42] Subagents that were in-flight at the last checkpoint (interrupted by the
+        # pause/crash) — restored on resume so the report never treats their phase as
+        # fully assessed.  [105] count of phases force-advanced on wall-clock budget.
+        self._interrupted_subagents: List[str] = []
+        self._phase_budget_forced: int = 0
 
         # Child agents (created lazily)
         self._recon_agent   = None
@@ -361,6 +399,11 @@ class MasterAgent(BaseAgent):
 
         # Phase extension events — SET = user granted extension; cleared on each wait
         self._extend_events: Dict[str, asyncio.Event] = {}
+        # Explicit human "stop this phase now" signal, and the minutes granted on an
+        # extension.  The deadline popup is NON-BLOCKING: the tool keeps running past
+        # the soft deadline and is only cancelled when the human explicitly stops it.
+        self._stop_phase_events: Dict[str, asyncio.Event] = {}
+        self._extend_minutes: Dict[str, float] = {}
 
         # Accumulated intelligence — updated throughout pentest
         self._intel: Dict = {
@@ -483,8 +526,10 @@ class MasterAgent(BaseAgent):
                                    else {}  # type: ignore[assignment]
 
         # ── Phase 5: Hypothesis-driven reasoning engine ──────────────────
-        # All fields default to None / False so the existing linear path is
-        # completely unaffected when use_reasoning_loop=False (the default).
+        # Pre-run placeholder only.  run() sets the real value from the
+        # use_reasoning_loop argument / ARGUS_USE_REASONING_LOOP env (default:
+        # reasoning engine).  The linear path stays fully intact and is reached
+        # whenever the selector resolves to False (see run() [I6]).
         self._use_reasoning_loop:  bool = False
         self._reasoning_loop_inst: Optional[ReasoningLoop] = None  # type: ignore[name-defined]
         self._hypothesis_engine:   Optional[HypothesisEngine] = None   # type: ignore[name-defined]
@@ -542,6 +587,11 @@ class MasterAgent(BaseAgent):
         # Ordered list of phases that have already completed — used to skip
         # already-done phases when resuming from a checkpoint.
         self._phases_completed: List[str] = []
+
+        # [20] Live read-model projection of self._intel (the real single source of
+        # truth) so the documented /sessions/{id}/context 'active' branch — which reads
+        # agent._ctx — is reachable instead of always degrading to the DB snapshot.
+        self._ctx = None
 
         # Master run-config snapshot — saved into checkpoints so resume() can
         # restore the full MasterAgent configuration.
@@ -764,7 +814,15 @@ class MasterAgent(BaseAgent):
         """Best-effort reachability probe at scan start.  Returns True UNLESS we
         have positive evidence the target is unreachable (fail-open — never block
         a run on a flaky probe).  Catches the tun0-down case where every packet
-        was 'Network is unreachable' yet ARGUS scanned for minutes anyway."""
+        was 'Network is unreachable' yet ARGUS scanned for minutes anyway.
+
+        Reachable if ANY candidate TCP port connects OR the host answers an ICMP
+        ping.  The ICMP check is the authoritative "is the VPN/route up" signal the
+        blocker banner actually promises (and the same test host-discovery uses):
+        without it, a perfectly LIVE host that simply doesn't run 80/443/22 — very
+        common on a mixed subnet — was falsely declared dead and the whole scan
+        paused.  Only a host that answers NEITHER TCP NOR ICMP is treated as
+        unreachable (the genuine dead-target / tun0-down case)."""
         import asyncio as _a
         if not host:
             return True
@@ -784,11 +842,40 @@ class MasterAgent(BaseAgent):
                 cands.append(int(p))
             except Exception:
                 pass
-        if not cands:
-            return True
-        results = await _a.gather(*[_try(p) for p in cands[:3]], return_exceptions=True)
-        # Unreachable only if EVERY probe failed (any success ⇒ reachable).
-        return any(r is True for r in results)
+        if cands:
+            results = await _a.gather(*[_try(p) for p in cands[:3]], return_exceptions=True)
+            if any(r is True for r in results):
+                return True   # a TCP port answered ⇒ definitely reachable
+        # No candidate TCP port answered — before calling the target dead, confirm the
+        # ROUTE itself with ICMP.  A ping reply means the network is up and the host is
+        # live (recon must proceed to discover its real ports); only NO-TCP-and-NO-ICMP
+        # is treated as unreachable.
+        return await self._icmp_reachable(host)
+
+    async def _icmp_reachable(self, host: str) -> bool:
+        """True if ``host`` answers a single ICMP echo (route/VPN is up).  Best-effort via
+        the system ``ping``.  A clean 'no route to host' / non-zero exit ⇒ unreachable
+        (False); a probe that cannot even run ⇒ fail-open (True — never block a scan on a
+        broken/absent ping binary)."""
+        import asyncio as _a, sys as _sys
+        try:
+            if _sys.platform.startswith("win"):
+                cmd = ["ping", "-n", "1", "-w", "2000", host]       # Windows: -w is ms
+            else:
+                cmd = ["ping", "-c", "1", "-W", "2", host]          # Linux/Kali: -W is sec
+            proc = await _a.create_subprocess_exec(
+                *cmd, stdout=_a.subprocess.DEVNULL, stderr=_a.subprocess.DEVNULL)
+            try:
+                await _a.wait_for(proc.wait(), timeout=5)
+            except _a.TimeoutError:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+                return False    # no ICMP reply within the window ⇒ treat as unreachable
+            return proc.returncode == 0
+        except Exception:
+            return True         # ping unavailable ⇒ fail-open (don't block on a broken probe)
 
     # ─── Main Entry Point ─────────────────────────────────────
 
@@ -806,15 +893,22 @@ class MasterAgent(BaseAgent):
         notes:              str  = "",
         scope:              str  = "",
         checkpoint_id:      Optional[str] = None,   # resume from checkpoint
-        use_reasoning_loop: bool = False,            # enable hypothesis-driven engine
+        use_reasoning_loop: bool = True,             # engine select: True=reasoning/operator (default), False=linear phase pipeline
         mission_brief:      Optional[Any] = None,    # Improvement #1 — formal mission
         objective:          str  = "",               # operator-supplied goal text
         autonomy:           str  = "",               # operator-core autonomy for this scan
         token_budget_per_target: int = 0,            # human-set LLM-token cap for THIS target (0 = unlimited)
         max_seconds: int = 0,                         # per-host depth budget (0 = use operator default)
+        reachability_confirmed: bool = False,         # caller already PROVED the host live (CIDR discovery) → skip the redundant scan-start reachability blocker
+        target_authorization: Optional[Dict] = None,  # PER-TARGET authorization (knowledge.authorization) — what is authorized against THIS host
         **kwargs
     ) -> Dict:
-        self._use_reasoning_loop = _REASONING_AVAILABLE  # Always use reasoning if available
+        # [I6] Engine selection is REACHABLE, not hardcoded — the caller's argument
+        # (and the ARGUS_USE_REASONING_LOOP env override) genuinely reach the
+        # documented linear phase pipeline instead of being silently ignored.
+        self._use_reasoning_loop = self._resolve_reasoning_selection(
+            use_reasoning_loop, _REASONING_AVAILABLE,
+            os.environ.get("ARGUS_USE_REASONING_LOOP"))
         # Per-scan operator autonomy (UI/selectable) overrides the env default.
         self._operator_autonomy = (autonomy or "").strip().lower() or os.environ.get(
             "ARGUS_OPERATOR_AUTONOMY", "approve_to_exploit")
@@ -894,7 +988,45 @@ class MasterAgent(BaseAgent):
         self._intel["target_host"]   = self._target_host
         self._intel["target_url"]    = self._target_url
         self._intel["target_scope"]  = list(getattr(_norm, "scope_hosts", []) or [target])
+        # Resolved IP must land BEFORE the authorization block below, which reads it
+        # to decide public-vs-private.  It used to be assigned after, so the read
+        # always saw None: is_public_host() then had no IP to judge, fail-SAFEd to
+        # "public", and EVERY hostname target — including a lab box on 10.x — was
+        # classified public and downgraded to human-approval.  Authorization could
+        # not actually vary per target for any name, which was the whole point.
         self._intel["target_resolved_ip"] = getattr(_norm, "resolved_ip", None)
+        # ── PER-TARGET AUTHORIZATION ──────────────────────────────────────────
+        # What is authorized against THIS host, as opposed to the run.  Enforced at
+        # base_agent.run_tool / base_subagent._authz_gate and consulted by the
+        # operator's approve-to-exploit gate and the compromise gate.  When the caller
+        # supplies nothing, DERIVE it from the target's own reachability class so a
+        # PUBLIC target still gets human-approved (never autonomous) exploitation
+        # instead of silently inheriting lab-grade authority.
+        try:
+            from knowledge.authorization import (profile_for_target as _authz_for,
+                                                 min_ceiling as _min_ceil)
+            if target_authorization:
+                self._intel["target_authorization"] = dict(target_authorization)
+            else:
+                _ips = [i for i in [self._intel.get("target_resolved_ip")] if i]
+                _auto = _authz_for(str(self._target_host or target), _ips)
+                _ceil = str(kwargs.get("scan_intrusiveness")
+                            or self._intel.get("scan_intrusiveness") or "intrusive")
+                _auto = _auto.capped_by(_min_ceil(_auto.ceiling, _ceil))
+                self._intel["target_authorization"] = _auto.to_dict()
+            _ta = self._intel["target_authorization"]
+            logger.info("[authz] %s -> ceiling=%s exploitation=%s owner=%s public=%s",
+                        target, _ta.get("ceiling"), _ta.get("exploitation"),
+                        _ta.get("owner"), _ta.get("public"))
+            await self._emit("target_authorization", {
+                "session_id": session_id, "target": target, **_ta,
+                "message": (f"Authorization for {target}: ceiling={_ta.get('ceiling')}, "
+                            f"exploitation={_ta.get('exploitation')} "
+                            f"({_ta.get('owner')}{', public' if _ta.get('public') else ''})")})
+        except Exception as _authz_exc:                          # noqa: BLE001
+            logger.warning("[authz] could not resolve per-target authorization "
+                           "for %s (%s) — the governor's own gates still apply",
+                           target, _authz_exc)
         self._phases_to_run  = phases or [p.value for p in AttackPhase]
 
         # ── Engagement provenance + scrub-on-seed ──────────────────────
@@ -919,7 +1051,17 @@ class MasterAgent(BaseAgent):
         # probes — instead of spinning ~145s of doomed scans and reporting a
         # false "0 findings — complete" (the tun0-down run).  Default on;
         # ARGUS_PREFLIGHT_REACHABILITY=0 disables.
-        if os.environ.get("ARGUS_PREFLIGHT_REACHABILITY", "1") != "0":
+        # [20] Seed the live PentestContext read-model early so the /context 'active'
+        # branch is reachable during the scan (refreshed again post-loop).
+        self._sync_ctx()
+
+        # A CIDR/multi-host run already proved this host LIVE via discovery (nmap -sn /
+        # fping), so re-probing it here would only risk a FALSE "unreachable" block on a
+        # live host that happens not to run 80/443/22 — exactly the stall that paused a
+        # whole /24.  Skip the redundant blocker for a discovery-confirmed host; keep it
+        # for direct single-target runs (where no prior liveness proof exists).
+        if (os.environ.get("ARGUS_PREFLIGHT_REACHABILITY", "1") != "0"
+                and not reachability_confirmed):
             try:
                 _pf_host = self._intel.get("target_resolved_ip") or self._target_host
                 if _pf_host and not await self._preflight_reachable(str(_pf_host)):
@@ -930,6 +1072,25 @@ class MasterAgent(BaseAgent):
                         "detail": ("Pre-flight: target not reachable on any candidate port "
                                    "(check the VPN/route). The engagement will pause for you "
                                    "rather than scan a dead target.")})
+                    # [106] Actually PAUSE for the human — the banner promises it, but the
+                    # code fell straight through and scanned the dead target for ~145s,
+                    # then reported a false "0 findings — complete" (the tun0-down run).
+                    # Block until resume() sets the event.  BOUNDED by ARGUS_BLOCKER_WAIT_SEC
+                    # so a headless/cron run can't hang: on resume we continue; on stop we
+                    # honour it; on timeout we fall through (prior behaviour, liveness kept).
+                    self._pause_event.clear()
+                    _blk_wait = int(os.environ.get("ARGUS_BLOCKER_WAIT_SEC", "600") or 600)
+                    _blk_waited = 0
+                    while not self._pause_event.is_set() and _blk_waited < _blk_wait:
+                        if self._stop_requested:
+                            break
+                        try:
+                            await asyncio.wait_for(self._pause_event.wait(), timeout=1.0)
+                        except asyncio.TimeoutError:
+                            _blk_waited += 1
+                    # Never leave the loop in the paused state (a timeout must not wedge
+                    # the rest of run()'s pause checks).
+                    self._pause_event.set()
             except Exception:
                 pass
 
@@ -1114,6 +1275,20 @@ class MasterAgent(BaseAgent):
                         self._expert.set_mission_brief(self._mission_brief)
                 except Exception:
                     pass
+                # Emit the Expert's INITIAL mission snapshot NOW so its panel shows a live
+                # engagement from t=0 instead of sitting at "Awaiting mission kickoff" until
+                # the first cadence-gated consultation (6 operator turns in, and skipped
+                # entirely once a foothold lands).  Best-effort; never blocks scan start.
+                try:
+                    if hasattr(self._expert, "emit_kickoff"):
+                        await self._expert.emit_kickoff(
+                            target=str(target or ""),
+                            target_type=str(self._intel.get("target_type") or target_type or ""),
+                            engagement_type=str(
+                                (self._intel.get("engagement_context") or {}).get("engagement_type")
+                                or ""))
+                except Exception:
+                    pass
                 # Start background task that keeps the listener alive
                 self._meta_listener_task = asyncio.create_task(
                     self._meta_tool_listener()
@@ -1145,6 +1320,13 @@ class MasterAgent(BaseAgent):
             "notes":              notes,
             "scope":              scope,
             "use_reasoning_loop": use_reasoning_loop,
+            # [85] Persist the operator-run knobs so a resume reconstructs the SAME
+            # engagement (these were set earlier in run() but never saved, so a resumed
+            # session silently reverted to default autonomy / no objective / no budget).
+            "autonomy":                getattr(self, "_operator_autonomy", ""),
+            "objective":               getattr(self, "_operator_objective", "") or "",
+            "token_budget_per_target": getattr(self, "_token_budget_per_target", 0),
+            "max_seconds":             getattr(self, "_operator_max_seconds", 0),
         }
 
         # ── Restore from checkpoint if resuming ──────────────────────────
@@ -1184,6 +1366,8 @@ class MasterAgent(BaseAgent):
                     self._phases_to_run    = cp.get("phases_to_run") or self._phases_to_run
                     resume_from_phase      = cp.get("current_phase")
                     self._intel["state"]   = cp.get("state_machine", "INIT")
+                    # [42] Restore the two checkpoint fields that were WRITTEN but never read.
+                    self._restore_interrupted_state(cp)
                     await self.emit_reasoning(
                         step       = "checkpoint_restored",
                         reasoning  = f"Restored state from checkpoint {checkpoint_id}",
@@ -1379,10 +1563,20 @@ class MasterAgent(BaseAgent):
         # ── Per-session file logger — captures every tool call, LLM call,
         # phase transition, finding and error into logs/<timestamp>_<sid>/
         # for post-scan troubleshooting.  Never raises.
+        # Multi-target/CIDR runs pass parent_session_id so each host's logs nest as
+        # a subfolder of the ONE exercise folder (not a sibling).  Single scans pass
+        # nothing → a top-level logs/<ts>_<sid>/ folder, exactly as before.
+        # [45] Remember the MULTI/CIDR parent so every checkpoint this child writes is
+        # stamped with it — that stamp is what a COLD parent resume uses to find a
+        # half-finished host's checkpoint (the orchestrator's host->child map is gone
+        # after a restart).  None for a normal single/parent scan.
+        self._parent_session_id = kwargs.get("parent_session_id")
         self._scan_logger = start_scan_logger(
-            session_id      = session_id,
-            target          = target,
-            engagement_type = target_type,
+            session_id        = session_id,
+            target            = target,
+            engagement_type   = target_type,
+            parent_session_id = self._parent_session_id,
+            label             = target,
         )
         try:
             self._scan_logger.log_info(
@@ -1681,12 +1875,36 @@ class MasterAgent(BaseAgent):
             except Exception:
                 pass
 
-        # Complete
-        await self.set_status(AgentStatus.DONE, "Pentest lifecycle complete")
-        await db.update_session(session_id, {
-            "status":       SessionStatus.COMPLETED,
-            "completed_at": datetime.utcnow()
-        })
+        # Complete — F2: report the HONEST terminal state.  A reasoning-engine failure that
+        # produced no fallback evidence is an ENGINE ERROR / no scan performed, NOT a
+        # successful empty scan; anything that actually ran (even with zero findings) is a
+        # genuine completed engagement, and a correctly-empty dead-host result is success.
+        _outcome = type(self)._scan_outcome(
+            getattr(self, "_engine_error", None), self._phases_completed, self._intel)
+        if _outcome == "engine_error":
+            _eng = getattr(self, "_engine_error", "") or "reasoning engine failed to start"
+            await self.set_status(AgentStatus.ERROR,
+                                  f"Engine error — no scan performed ({_eng})")
+            await db.update_session(session_id, {
+                "status":       SessionStatus.FAILED,
+                "completed_at": datetime.utcnow(),
+                "engine_error": str(_eng),
+            })
+            try:
+                await self._emit("scan_engine_error", {
+                    "session_id": session_id, "target": target, "error": str(_eng),
+                    "message": ("Engine error — no scan was performed on this host. This is "
+                                "NOT an empty successful scan: the reasoning engine failed "
+                                "to start and the legacy fallback produced no evidence."),
+                })
+            except Exception:
+                pass
+        else:
+            await self.set_status(AgentStatus.DONE, "Pentest lifecycle complete")
+            await db.update_session(session_id, {
+                "status":       SessionStatus.COMPLETED,
+                "completed_at": datetime.utcnow()
+            })
 
         # Improvement #8 — record this engagement as an episode for future recall
         try:
@@ -1900,10 +2118,16 @@ class MasterAgent(BaseAgent):
         Called whenever exploitation/privesc succeeds.
         """
         try:
+            # long_term_memory is read cross-client by design, and `content` here
+            # carries raw attack_path steps — LLM free text naming this engagement's
+            # hosts, vhosts and AD domain.  Scrub at the WRITE so the technique is
+            # kept and the client is not; the read boundary scrubs again for records
+            # written before this.
+            from knowledge.identifier_scrub import scrub_payload as _sp
             await db.store_memory(
                 memory_type  = memory_type,
                 target_type  = self._intel.get("target_type", "unknown"),
-                content      = content,
+                content      = _sp(content if isinstance(content, dict) else {"v": content}),
                 tags         = tags,
                 success      = True,
                 confidence   = 0.85
@@ -1944,12 +2168,34 @@ class MasterAgent(BaseAgent):
                 entry = val
                 break
         if not entry:
+            # [P7] Honest ATT&CK coverage: a tool that EXECUTED but maps to no technique is a
+            # coverage gap.  Record it (deduped) so the report can disclose "N executed tools
+            # unmapped — ATT&CK coverage unknown" rather than silently omitting them.  Never
+            # fabricate a technique for an unmapped tool.
+            try:
+                _unm = self._intel.setdefault("mitre_unmapped_tools", [])
+                _t = str(tool or "").strip().lower()
+                if _t and _t not in _unm:
+                    _unm.append(_t)
+            except Exception:
+                pass
             return
         tech_id, tech_name, tactic = entry
         # Add to in-memory intel
         technique = {"id": tech_id, "name": tech_name, "tactic": tactic, "tool": tool}
         if technique not in self._intel["mitre_techniques"]:
             self._intel["mitre_techniques"].append(technique)
+            # [76] Surface the technique on the live ATT&CK layer.  The cockpit
+            # consumes a `mitre_mapped` WS event but nothing ever emitted it, so the
+            # MITRE view only ever populated at report time.  Emit on first sighting.
+            try:
+                await self._emit("mitre_mapped", {
+                    "id": tech_id, "technique_id": tech_id,
+                    "name": tech_name, "technique_name": tech_name,
+                    "tactic": tactic, "tool": tool, "phase": str(self.phase),
+                    "host": host or self._target, "success": success, "evidence": ""})
+            except Exception:
+                pass
         # Persist
         if self._session_id:
             try:
@@ -2009,6 +2255,17 @@ class MasterAgent(BaseAgent):
                 )
             except Exception:
                 pass
+        # [78] Stream captured evidence to the live RiskDashboard.  The UI consumes
+        # an `evidence_added` WS event that was never emitted, so the evidence panel
+        # stayed empty during a run.
+        try:
+            await self._emit("evidence_added", {
+                "evidence_type": evidence_type, "type": evidence_type,
+                "host": self._target, "description": title,
+                "phase": phase, "severity": severity,
+                "timestamp": item["captured_at"]})
+        except Exception:
+            pass
 
     # ─── Phase Orchestration ──────────────────────────────────
 
@@ -2161,6 +2418,82 @@ class MasterAgent(BaseAgent):
 
     # ══════════════════════════════════════════════════════════════════════════
 
+    def _restore_interrupted_state(self, cp: Dict[str, Any]) -> None:
+        """[42] Restore the two checkpoint fields that were written but never read.
+
+        pending_confirmations: re-seed each pending gate's Event so a post-resume
+        confirm_action(key) for a PRE-checkpoint action actually resolves it.  Without
+        this, _confirm_events is re-init'd empty on resume and an operator confirming a
+        pre-pause reasoning/phase gate hits nothing (the confirm is silently dropped).
+
+        in_flight_subagents: subagents running when the checkpoint was taken were
+        interrupted by the pause/crash — remember them (and surface them in the intel
+        snapshot the report reads) so their phase is not misreported as fully assessed.
+        """
+        import asyncio as _aio_restore
+        for _pc in (cp.get("pending_confirmations") or []):
+            key = str(_pc)
+            if key and key not in self._confirm_events:
+                self._confirm_events[key] = _aio_restore.Event()
+        self._interrupted_subagents = [str(s) for s in (cp.get("in_flight_subagents") or [])]
+        if self._interrupted_subagents:
+            # Consumed by the report/status via the intel snapshot (honest reporting).
+            self._intel["interrupted_subagents"] = list(self._interrupted_subagents)
+
+    async def _run_phase_budgeted(self, phase: str, coro):
+        """[105] Run a linear-pipeline phase under its EngagementContext wall-clock budget.
+
+        `mark_phase_started` was stamped at every phase but its `is_phase_budget_exceeded`
+        predicate had NO consumer, so a stalled phase (the post-mortem's vuln_id ran 40 min,
+        wstg 27 min) overran unbounded under only the global caps.  A background watchdog
+        polls the predicate and cancels the phase the moment it overruns — force-advancing
+        the pipeline exactly as the budget's docstring promises.  A live shell exempts the
+        phase so a productive post-exploit/foothold pass can run to completion.
+        """
+        ctx = getattr(self, "_context", None)
+        task = asyncio.ensure_future(coro)
+        if ctx is None:
+            return await task
+        poll = float(getattr(self, "_phase_budget_poll_sec", 10.0))
+
+        async def _watch():
+            try:
+                while not task.done():
+                    await asyncio.sleep(poll)
+                    if self._intel.get("shell_access"):
+                        continue          # foothold established — let the phase finish
+                    try:
+                        exceeded = ctx.is_phase_budget_exceeded(phase)
+                    except Exception:
+                        exceeded = False
+                    if exceeded and not task.done():
+                        self._phase_budget_forced = getattr(self, "_phase_budget_forced", 0) + 1
+                        task.cancel()
+                        return
+            except asyncio.CancelledError:
+                pass
+
+        watch = asyncio.ensure_future(_watch())
+        try:
+            return await task
+        except asyncio.CancelledError:
+            try:
+                _b = int(ctx.get_phase_budget(phase))
+            except Exception:
+                _b = 0
+            try:
+                await self.emit_reasoning(
+                    step       = "phase_budget_exceeded",
+                    reasoning  = f"Phase {phase} exceeded its {_b}s wall-clock budget",
+                    decision   = "Force-advancing to the next phase",
+                    next_action= "Continue the phase pipeline",
+                )
+            except Exception:
+                pass
+            return {"status": "budget_exceeded", "phase": phase}
+        finally:
+            watch.cancel()
+
     async def _save_checkpoint(self, checkpoint_type: str = "auto") -> Optional[str]:
         """
         Serialise current MasterAgent state to session_checkpoints collection.
@@ -2217,11 +2550,17 @@ class MasterAgent(BaseAgent):
                 intel_snapshot        = _intel_snap,
                 used_tools            = dict(self._used_tools),
                 pending_confirmations = list(self._confirm_events.keys()),
+                # [87] Store an HONEST serializable value — the old `[...] and []`
+                # short-circuited to [] regardless of running tasks, so the checkpoint
+                # always claimed zero in-flight subagents. Store their names.
                 in_flight_subagents   = [
-                    t for t in self._background_tasks if not t.done()
-                    # we can't serialise Task objects; store count placeholder
-                ] and [],
+                    (t.get_name() if hasattr(t, "get_name") else "task")
+                    for t in self._background_tasks if not t.done()
+                ],
                 master_config         = dict(self._master_config),
+                # [45] Stamp the MULTI/CIDR parent so a cold parent resume can locate this
+                # per-host child checkpoint (children checkpoint under their OWN session id).
+                parent_session_id     = getattr(self, "_parent_session_id", None),
             )
             return cid
         except Exception as _e:
@@ -2372,6 +2711,33 @@ class MasterAgent(BaseAgent):
                 coros.append(SslAuditSubagent(**kw).execute())
             if ports & {"445", "139"}:
                 coros.append(SmbVulnSubagent(**kw).execute())
+            # [53] Dispatch the service-adaptive FTP / SSH / LDAP subagents on the
+            # AUTONOMOUS vuln path too — they were registered only for manual
+            # /sessions/{id}/subagents/{name}/run and never instantiated here, so their
+            # deeper checks (FTP anon-write/backdoor confirmation, ssh-audit weak-algo,
+            # LDAP anonymous-bind user enum / kerberoast / signing) only ever ran if an
+            # operator triggered each by hand.  Gate on the real service port so a
+            # non-standard FTP/SSH/LDAP port is still covered, not just 21/22/389.
+            _svc_ports: Dict[str, int] = {}
+            for _p, _s in _svc_map.items():
+                _sn = str((_s.get("service") or _s.get("name")) if isinstance(_s, dict) else _s).lower()
+                for _key in ("ftp", "ssh", "ldap"):
+                    if _key in _sn and _key not in _svc_ports:
+                        try:
+                            _svc_ports[_key] = int(str(_p))
+                        except Exception:
+                            pass
+            _ftp_port = _svc_ports.get("ftp") or (21 if "21" in ports else 0)
+            _ssh_port = _svc_ports.get("ssh") or (22 if "22" in ports else 0)
+            if _ftp_port:
+                from agents.vuln.ftp_vuln_subagent import FtpVulnSubagent
+                coros.append(FtpVulnSubagent(**kw).execute(port=_ftp_port))
+            if _ssh_port:
+                from agents.vuln.ssh_audit_subagent import SshAuditSubagent
+                coros.append(SshAuditSubagent(**kw).execute(port=_ssh_port))
+            if "ldap" in _svc_ports or (ports & {"389", "636"}):
+                from agents.vuln.ldap_vuln_subagent import LdapVulnSubagent
+                coros.append(LdapVulnSubagent(**kw).execute())
             await self._await_and_sync_subagents(coros, phase="vuln", timeout=240.0)
 
         elif phase == "exploit":
@@ -2766,6 +3132,45 @@ class MasterAgent(BaseAgent):
             if pd is None and isinstance(res, dict):
                 pd = res
             if not isinstance(pd, dict):
+                # [52] The vuln subagents (cve_lookup / smb_vuln / ssl_audit / service_vuln
+                # / ldap_vuln / ssh_audit / ftp_vuln) set res.findings but NOT parsed_data,
+                # so this branch used to just `continue` — their CVEs never reached
+                # self._intel['cves'], and the exploit orchestrator (master_agent.py:2423,
+                # `cves=self._intel.get('cves', [])`) plus the hypothesis engine never acted
+                # on them.  Salvage each finding's CVE(s) + title into intel so the parsed
+                # CVEs actually DRIVE exploitation.  Additive; the finding itself is already
+                # stored separately, so this only feeds the decision layer.
+                _fs = getattr(res, "findings", None)
+                if isinstance(_fs, list) and _fs:
+                    _cves: List[Any] = []
+                    _vulns: List[Any] = []
+                    for _f in _fs:
+                        if isinstance(_f, dict):
+                            _cands = list(_f.get("cves") or [])
+                            if _f.get("cve"):
+                                _cands.append(_f.get("cve"))
+                            _t = _f.get("title") or _f.get("name")
+                        else:
+                            _cands = list(getattr(_f, "cves", None) or [])
+                            if getattr(_f, "cve", None):
+                                _cands.append(getattr(_f, "cve"))
+                            _t = getattr(_f, "title", None) or getattr(_f, "name", None)
+                        for _cv in _cands:
+                            _s = str(_cv or "").strip().upper()
+                            if _s.startswith("CVE-"):
+                                _cves.append(_s)
+                        if _t:
+                            _vulns.append(str(_t))
+                    for _key, _vals in (("cves", _cves), ("vulnerabilities", _vulns)):
+                        if not _vals:
+                            continue
+                        _ex = self._intel.get(_key) or []
+                        _seen = {str(e) for e in _ex}
+                        for _it in _vals:
+                            if str(_it) not in _seen:
+                                _ex.append(_it)
+                                _seen.add(str(_it))
+                        self._intel[_key] = _ex
                 continue
 
             for k in STRUCTURED:
@@ -2867,6 +3272,9 @@ class MasterAgent(BaseAgent):
             session_id  = session_id,
             db_store_fn = db.store_negative_memory,
             db_load_fn  = db.load_negative_memory,
+            # [79] Stream each recorded failure to the Reasoning "Negative Memory"
+            # panel, which consumed a negative_memory_added event nothing emitted.
+            on_record   = lambda _p: self._emit("negative_memory_added", _p),
         )
         await self._negative_memory.load_from_db()
 
@@ -2912,6 +3320,181 @@ class MasterAgent(BaseAgent):
         # Restore score from checkpoint
         self._decision_engine.set_score(self._intel.get("action_score", 0))
 
+    async def _run_graph_engine_gated(self, session_id: str, target: str) -> bool:
+        """Run the FLAG-GATED graph control plane for this host.
+
+        Returns True only when the graph completed the host successfully (the caller
+        then skips the loop engine but still runs the normal report path).  Returns
+        False when the graph is disabled, unavailable, or ROLLED BACK — in which case
+        the loop engine runs, resuming from the state the graph already produced.
+
+        A rollback is never silent: GraphEngine records the traceback, snapshots the
+        state, emits ``graph_engine_rollback``, bumps summary.json's graph_rollbacks
+        counter and marks the session DEGRADED before returning here."""
+        if not (_GRAPH_AVAILABLE and _graph_enabled()):
+            return False
+        try:
+            scope = [h for h in (list(getattr(self, "_scope_hosts", None) or [])
+                                 or [target]) if h]
+            ctx = _GraphNodeContext(
+                session_id  = session_id,
+                scope_hosts = scope,
+                master      = self,
+                hypothesis_engine = getattr(self, "_hypothesis_engine", None),
+                attack_planner    = getattr(self, "_attack_planner", None),
+                decision_engine   = getattr(self, "_decision_engine", None),
+                negative_memory   = getattr(self, "_negative_memory", None),
+            )
+            engine = _GraphEngine(
+                ctx,
+                checkpointer = _GraphCheckpointer(session_id=session_id, host=target),
+                master       = self)
+            state = _make_graph_state(session_id, [target], scope_hosts=scope)
+            await self._emit("graph_engine_start", {
+                "session_id": session_id, "target": target,
+                "edges": engine.edge_map()})
+            outcome = await engine.run_host(state, target)
+            self._graph_state = state
+            if outcome.rolled_back:
+                # DEGRADED: the loop engine takes over from here with the handed-off
+                # state (findings + executed-tool ledger already merged into _intel).
+                return False
+            await self._emit("graph_engine_done", {
+                "session_id": session_id, "target": target,
+                "tally": state.tally(), "terminal_reason": outcome.reason})
+            return True
+        except Exception as _g_exc:                          # noqa: BLE001
+            # Beyond the graph's own rollback (e.g. the fallback latch tripped, or the
+            # graph could not even be constructed).  Surface LOUDLY and continue on the
+            # loop engine — never a silent empty scan.
+            import traceback as _gtb
+            _tb = _gtb.format_exc()
+            logger.error("[graph] engine unusable for %s — continuing on the LOOP "
+                         "engine: %s\n%s", target, _g_exc, _tb)
+            try:
+                if getattr(self, "_scan_logger", None):
+                    self._scan_logger.log_error("graph_engine", exc=_g_exc)
+            except Exception:
+                pass
+            try:
+                await self._emit("graph_engine_unavailable", {
+                    "session_id": session_id, "target": target,
+                    "error": f"{type(_g_exc).__name__}: {_g_exc}",
+                    "traceback": _tb[-2000:],
+                    "message": ("Graph engine could not run this host — the engagement "
+                                "is continuing on the LEGACY LOOP engine.")})
+            except Exception:
+                pass
+            return False
+
+    async def _handle_reasoning_engine_failure(
+        self, session_id: str, target: str, err: Exception, stage: str = "init"
+    ) -> None:
+        """F2/F4: record + LOUDLY surface a reasoning-ENGINE failure so it is NEVER swallowed
+        into an empty 'completed' scan.
+
+        ``stage='init'`` — the engine never started (the caller degrades this host to the
+        legacy phase pipeline, a real working fallback engine).
+        ``stage='loop'`` — it started then crashed (the partial evidence it gathered is kept
+        and reported honestly).
+
+        Sets ``self._engine_error`` so ``_scan_outcome`` can distinguish "engine error — no
+        scan performed" from "scan ran, no findings".  Best-effort; never raises."""
+        detail = f"{type(err).__name__}: {err}"
+        self._engine_error = detail
+        try:
+            it = self._intel if isinstance(getattr(self, "_intel", None), dict) else {}
+            it["_reasoning_engine_error"] = {"stage": stage, "error": detail}
+            it.setdefault("_engine_errors", []).append({"stage": stage, "error": detail})
+        except Exception:
+            pass
+        # Count it as a REAL error in the scan summary + keep the traceback for the operator.
+        try:
+            if getattr(self, "_scan_logger", None):
+                self._scan_logger.log_error(f"reasoning_engine:{stage}", exc=err)
+        except Exception:
+            pass
+        try:
+            await self._note_operator_fallback(f"reasoning-{stage}", detail)
+        except Exception:
+            pass
+        _msg = ("Reasoning engine failed to initialise — ARGUS is running the LEGACY phase "
+                "pipeline for this host, so the scan is NOT a silent no-op. Fix the "
+                "reasoning-component contract to restore the primary engine."
+                if stage == "init" else
+                "Reasoning engine crashed mid-loop — saving the partial evidence it gathered "
+                "and reporting honestly (this is not an empty 'successful' scan).")
+        try:
+            await self._emit("reasoning_engine_error", {
+                "session_id": session_id, "target": target,
+                "stage": stage, "error": detail, "fatal": False, "message": _msg,
+            })
+        except Exception:
+            pass
+
+    @staticmethod
+    async def preflight_reasoning_components() -> "tuple[bool, str]":
+        """F3 pre-flight smoke: construct EVERY reasoning component EXACTLY as
+        ``_init_reasoning_components`` does (same kwargs, including the ``on_record`` wiring
+        the live dashboard relies on) and prove the ``on_record`` callback actually fires —
+        BEFORE a multi-host engagement spawns N host sessions that would each silently fail
+        on a constructor-contract mismatch.
+
+        Returns ``(ok, reason)``.  Uses only in-memory stubs (no DB, no network) and never
+        raises — a mismatch is reported, not thrown.  This is the exact check that would
+        have caught the stale-`negative_memory.py` (`on_record`) crash at pre-flight time
+        instead of on every host."""
+        if not _REASONING_AVAILABLE:
+            return True, ""   # reasoning layer intentionally absent → legacy engine is used
+        try:
+            fired = {"n": 0}
+
+            async def _store(**_k):          return None
+            async def _load(*_a, **_k):      return []
+            async def _think(*_a, **_k):     return {}
+            async def _emit(*_a, **_k):      return None
+            def _kb(*_a, **_k):              return ""
+            def _rank(actions, *_a, **_k):   return actions
+            def _rel(*_a, **_k):             return {}
+            async def _on_record(_p):        fired["n"] += 1
+
+            nm = NegativeMemory(session_id="preflight", db_store_fn=_store,
+                                db_load_fn=_load, on_record=_on_record)
+            # Prove the on_record → negative_memory_added wiring is live (the exact thing the
+            # stale Kali copy broke): recording a failure must invoke the callback.
+            await nm.record_failure(tool="preflight", args="", target_service="smoke:0",
+                                    failure_reason="preflight smoke")
+            HypothesisEngine(think_json_fn=_think, kb_fn=_kb, session_id="preflight")
+            AttackPlanner(think_json_fn=_think, kb_fn=_kb, session_id="preflight")
+            DecisionEngine(think_json_fn=_think, emit_fn=_emit, session_id="preflight",
+                           auto_execute_threshold=0.70, voi_rank_fn=_rank,
+                           tool_reliability_fn=_rel)
+            if fired["n"] < 1:
+                return False, ("negative_memory on_record callback never fired — the "
+                               "negative_memory_added dashboard event would be dead")
+            return True, ""
+        except Exception as exc:   # noqa: BLE001 — a mismatch is a RESULT, not a crash
+            return False, f"{type(exc).__name__}: {exc}"
+
+    @staticmethod
+    def _scan_outcome(engine_error, phases_completed, intel) -> str:
+        """F2: choose the HONEST terminal state for a run.
+
+        Returns ``'engine_error'`` ONLY when the reasoning engine failed AND no fallback
+        evidence was produced — this host was NOT scanned, so it must never be reported as a
+        successful empty scan.  Otherwise ``'completed'``: a run that produced ANY evidence
+        (open ports / services / findings / …) is a real, completed engagement — and a
+        genuinely-empty result with NO engine error is a correctly-empty success, not a
+        failure."""
+        it = intel if isinstance(intel, dict) else {}
+        did_scan = bool(phases_completed) or bool(it.get("findings")) \
+            or bool(it.get("open_ports")) or bool(it.get("services")) \
+            or bool(it.get("vulnerabilities")) or bool(it.get("web_findings")) \
+            or bool(it.get("credentials")) or bool(it.get("cves"))
+        if engine_error and not did_scan:
+            return "engine_error"
+        return "completed"
+
     def _read_tool_reliability(self) -> Dict[str, Dict[str, int]]:
         """Per-tool {success, fail} telemetry for the DecisionEngine read-side (Gap #7).
         Consumes the reliability signals ARGUS ALREADY tracks in-memory this engagement:
@@ -2942,35 +3525,31 @@ class MasterAgent(BaseAgent):
             return {}
 
     async def _note_operator_fallback(self, reason: str, detail: str) -> None:
-        """Make an operator→legacy fallback VISIBLE on the findings page + feed.
-
-        Without this, when the operator core can't start (e.g. its first
-        reasoning call comes back empty), ARGUS silently runs the weaker legacy
-        phase pipeline and the user is left wondering why 'the operator did
-        nothing'.  Best-effort; never raises."""
+        """LOG an operator→legacy fallback — a DIAGNOSTIC for the scan log + the live ops
+        feed, NEVER a client finding.  ARGUS's own operational status belongs in logging,
+        not in the client report (an internal fallback is not a security finding on the
+        target).  Best-effort; never raises."""
+        msg = (
+            f"Operator core could not start its reasoning loop ({reason}: {detail}). "
+            "ARGUS ran the LEGACY phase pipeline instead — a weaker, less-targeted "
+            "engagement that does NOT weaponize the CVE/PoC leads. Usual causes: a "
+            "reasoning-LLM policy refusal (claude-code Usage Policy) or a local model "
+            "overflowing its context window — set LLM_PROVIDER to a model that answers "
+            "offensive-but-authorized prompts and/or raise OLLAMA_NUM_CTX, then re-run.")
         try:
-            fn = getattr(self, "store_finding", None)
-            if fn is None:
-                return
-            msg = (
-                "The operator core could not start its reasoning loop "
-                f"({reason}: {detail}). ARGUS ran the LEGACY phase pipeline "
-                "instead — a weaker, less-targeted engagement that does NOT "
-                "weaponize the CVE/PoC leads. Check the reasoning LLM: a primary "
-                "policy refusal (claude-code Usage Policy) or a local model "
-                "overflowing its context window are the usual causes. Set "
-                "LLM_PROVIDER to a model that answers offensive-but-authorized "
-                "prompts and/or raise OLLAMA_NUM_CTX, then re-run.")
-            sev = "MEDIUM"
-            try:
-                from schemas import FindingSeverity as _FS
-                sev = getattr(_FS, "MEDIUM", "MEDIUM")
-            except Exception:
-                pass
-            await fn(severity=sev,
-                     title="Operator core unavailable — legacy fallback engaged",
-                     description=msg, host=getattr(self, "_target", "") or "",
-                     tool_used="operator_core", cves=[], evidence=detail)
+            import logging as _lg
+            _lg.getLogger(__name__).warning("[operator_fallback] %s", msg)
+        except Exception:
+            pass
+        # Surface on the live OPERATIONS event feed if the agent exposes one — still visible
+        # to the human operator, but as a diagnostic event, NOT a client-facing finding.
+        try:
+            emit = getattr(self, "_emit_event", None) or getattr(self, "emit_event", None)
+            if emit is not None:
+                res = emit("operator_fallback",
+                           {"reason": str(reason), "detail": str(detail)[:400], "message": msg})
+                if hasattr(res, "__await__"):
+                    await res
         except Exception:
             pass
 
@@ -2990,6 +3569,24 @@ class MasterAgent(BaseAgent):
             return True
         except Exception:
             return False
+
+    def _apply_resume_from(self, resume_from) -> None:
+        """[84] Mark every phase up to AND INCLUDING resume_from as completed.
+
+        resume_from (the checkpoint's target phase) was threaded through three layers
+        then dropped — the resumed engine re-ran everything.  Populating
+        _phases_completed makes the phase-gating / playbook-skip / report treat those
+        phases as done.  Strict no-op when resume_from is falsy."""
+        if not resume_from:
+            return
+        _order = ["recon", "vuln_id", "web", "exploit", "post_exploit", "lateral", "privesc"]
+        key = str(resume_from).lower()
+        if key in _order:
+            for _p in _order[:_order.index(key) + 1]:
+                if _p not in self._phases_completed:
+                    self._phases_completed.append(_p)
+        elif key not in self._phases_completed:
+            self._phases_completed.append(key)
 
     async def _reasoning_loop_run(
         self,
@@ -3028,6 +3625,21 @@ class MasterAgent(BaseAgent):
         self._reasoning_loop_inst = loop
         # Expose QuestionEngine on master for guidance-question routing
         self._question_engine = loop._question_engine
+
+        # [84] Honour the checkpoint's resume target (was dropped — resumed runs re-ran
+        # every phase).  Strictly guarded so a fresh run (resume_from=None) is unchanged.
+        if resume_from:
+            self._apply_resume_from(resume_from)
+            try:
+                await self.emit_reasoning(
+                    step       = "checkpoint_resume",
+                    reasoning  = (f"Resuming after checkpoint phase {resume_from!r}; phases up "
+                                  f"to it are marked complete and will not be re-run."),
+                    decision   = f"resume_from={resume_from}",
+                    next_action= "Continue from the next uncompleted phase",
+                )
+            except Exception:
+                pass
 
         # ── Start the reactive entry-attempt dispatcher IN PARALLEL ──────
         # The legacy dispatcher start (in _execute_phases) is bypassed by
@@ -3880,6 +4492,72 @@ class MasterAgent(BaseAgent):
 
         return tool, args
 
+    @staticmethod
+    def _resolve_reasoning_selection(use_reasoning_loop: bool, available: bool,
+                                     env_val: Optional[str]) -> bool:
+        """[I6] The single, REACHABLE engine selector.  The reasoning/operator engine
+        is the default, but the caller's `use_reasoning_loop` argument (and the
+        ARGUS_USE_REASONING_LOOP env override) genuinely reach the DOCUMENTED linear
+        phase pipeline instead of the choice being silently ignored.  Availability
+        gates: reasoning cannot be selected when its module failed to import.  Pure."""
+        if env_val is not None:
+            want = env_val.strip().lower() not in ("0", "false", "no", "off", "")
+        else:
+            want = bool(use_reasoning_loop)
+        return want and bool(available)
+
+    @staticmethod
+    def _derive_agent_exit(result: Any) -> int:
+        """[17] The REAL exit code for a specialist-agent dispatch — 0 only when it produced
+        a genuine result (findings, or substantive non-failure output); 1 when it returned
+        nothing or only a tool-failure marker.  Never hardcode 0 (that masked timed-out /
+        connect-refused tools as success and inflated the store)."""
+        r = result if isinstance(result, dict) else {}
+        if r.get("findings"):
+            return 0
+        raw = str(r.get("raw_output") or r.get("stdout") or "").strip()
+        if len(raw) < 8:
+            return 1
+        import re as _re
+        if _re.fullmatch(
+                r"(\[fail\][^\n]*|\[circuit-breaker\][^\n]*|curl:\s*\(7\)[^\n]*|"
+                r"[^\n]*connection refused[^\n]*|[^\n]*0 hosts up[^\n]*|"
+                r"[^\n]*could not connect[^\n]*|[^\n]*timed out[^\n]*)", raw, _re.I):
+            return 1
+        return 0
+
+    def _governor_shell_verdict(self, tool: str, command: str) -> dict:
+        """[95] Run a shell_exec / evil-winrm command through the SAME safety governor as
+        run_tool — these two dispatch paths bypassed it entirely.  Returns the verdict
+        (allow / deny / rewrite); fail-closed on error (override ARGUS_GOVERNOR_FAILOPEN=1)."""
+        import os as _gos
+        try:
+            from knowledge import safety_governor as _gov
+            _intel = self._intel if isinstance(self._intel, dict) else {}
+            _scope = list(_intel.get("target_scope") or [])
+            if _scope:
+                for _k in ("target_host", "target_resolved_ip", "target", "target_url"):
+                    if _intel.get(_k):
+                        _scope.append(str(_intel[_k]))
+                for _k in ("subdomains", "vhosts"):
+                    _scope += [str(x) for x in (_intel.get(_k) or []) if x]
+            _enf = ["destructive", "ot_life_safety"]
+            if _scope and _gos.environ.get("ARGUS_GOVERNOR_SCOPE", "1") != "0":
+                _enf.insert(0, "scope")
+            return _gov.evaluate({
+                "tool_name": tool, "args": command,
+                "target_host": self._target_host or _intel.get("target_host") or "",
+                "scope_hosts": _scope,
+                "ceiling": _intel.get("scan_intrusiveness") or "intrusive",
+                "domain": _safety_domain(_intel),
+                "life_safety": bool(_intel.get("life_safety")),
+                "authorized": bool(_intel.get("ot_authorized") or _intel.get("authorized")),
+            }, enforce=_enf)
+        except Exception as _e:
+            if _gos.environ.get("ARGUS_GOVERNOR_FAILOPEN", "0") == "1":
+                return {"decision": "allow", "reason": f"governor error (fail-open): {_e}"}
+            return {"decision": "deny", "reason": f"governor error (fail-closed): {_e}"}
+
     async def _dispatch_to_agent(
         self,
         tool:    str,
@@ -3901,6 +4579,19 @@ class MasterAgent(BaseAgent):
         # target" — NOT "spawn it on the operator host via MCP".  Route
         # through the active shell session instead.
         if tool == "shell_exec":
+            # [95] gate the post-foothold shell command through the governor (this path
+            # bypassed it) — deny out-of-scope/OT-unauth, rewrite host-destructive ops.
+            _sv = self._governor_shell_verdict("shell_exec", args)
+            if _sv.get("decision") == "deny":
+                try:
+                    await self._emit("governor_block", {"tool": "shell_exec",
+                                     "reason": _sv.get("reason"), "args": str(args)[:200]})
+                except Exception:
+                    pass
+                return {"stdout": "", "stderr": f"[safety-governor] blocked: {_sv.get('reason')}",
+                        "exit_code": -1, "output_id": None, "governor": _sv}
+            if _sv.get("decision") == "rewrite" and _sv.get("rewritten_args") is not None:
+                args = _sv["rewritten_args"]
             return await self._dispatch_active_shell_command(
                 command = args, purpose = purpose, timeout = timeout,
             )
@@ -3913,6 +4604,18 @@ class MasterAgent(BaseAgent):
         # `*Evil-WinRM* PS C:\>` prompt is captured, the session lives
         # for follow-up commands, and register_shell trips properly.
         if tool in ("evil-winrm", "evilwinrm"):
+            # [95] gate the interactive WinRM login/command through the governor too.
+            _wv = self._governor_shell_verdict("evil-winrm", args)
+            if _wv.get("decision") == "deny":
+                try:
+                    await self._emit("governor_block", {"tool": "evil-winrm",
+                                     "reason": _wv.get("reason"), "args": str(args)[:200]})
+                except Exception:
+                    pass
+                return {"stdout": "", "stderr": f"[safety-governor] blocked: {_wv.get('reason')}",
+                        "exit_code": -1, "output_id": None, "governor": _wv}
+            if _wv.get("decision") == "rewrite" and _wv.get("rewritten_args") is not None:
+                args = _wv["rewritten_args"]
             return await self._dispatch_evil_winrm(
                 args = args, purpose = purpose, timeout = timeout,
             )
@@ -4052,9 +4755,9 @@ class MasterAgent(BaseAgent):
                     if result.get(key) is not None:
                         self._intel[key] = result[key]
                 return {
-                    "stdout":    str(result.get("raw_output", result))[:65536],
+                    "stdout":    str(result.get("stdout") or result.get("raw_output") or result)[:65536],  # [21] prefer clean stdout, not the whole dict-repr
                     "stderr":    "",
-                    "exit_code": 0,
+                    "exit_code": self._derive_agent_exit(result),
                     "output_id": "",
                     "tool":      tool,
                     "args":      args,
@@ -4082,9 +4785,9 @@ class MasterAgent(BaseAgent):
                         else:
                             self._intel[key] = result[key]
                 return {
-                    "stdout":    str(result.get("raw_output", result))[:65536],
+                    "stdout":    str(result.get("stdout") or result.get("raw_output") or result)[:65536],  # [21] prefer clean stdout, not the whole dict-repr
                     "stderr":    "",
-                    "exit_code": 0,
+                    "exit_code": self._derive_agent_exit(result),
                     "output_id": "",
                     "tool":      tool,
                     "args":      args,
@@ -4111,9 +4814,9 @@ class MasterAgent(BaseAgent):
                         else:
                             self._intel[key] = result[key]
                 return {
-                    "stdout":    str(result.get("raw_output", result))[:65536],
+                    "stdout":    str(result.get("stdout") or result.get("raw_output") or result)[:65536],  # [21] prefer clean stdout, not the whole dict-repr
                     "stderr":    "",
-                    "exit_code": 0,
+                    "exit_code": self._derive_agent_exit(result),
                     "output_id": "",
                     "tool":      tool,
                     "args":      args,
@@ -4130,7 +4833,7 @@ class MasterAgent(BaseAgent):
                     if result.get(key) is not None:
                         self._intel[key] = result[key]
                 return {
-                    "stdout":    str(result.get("raw_output", result))[:65536],
+                    "stdout":    str(result.get("stdout") or result.get("raw_output") or result)[:65536],  # [21] prefer clean stdout, not the whole dict-repr
                     "stderr":    "",
                     "exit_code": 0 if result.get("shell_access") else 1,
                     "output_id": "",
@@ -4149,7 +4852,7 @@ class MasterAgent(BaseAgent):
                     if result.get(key) is not None:
                         self._intel[key] = result[key]
                 return {
-                    "stdout":    str(result.get("raw_output", result))[:65536],
+                    "stdout":    str(result.get("stdout") or result.get("raw_output") or result)[:65536],  # [21] prefer clean stdout, not the whole dict-repr
                     "stderr":    "",
                     "exit_code": 0 if result.get("elevated_shell") else 1,
                     "output_id": "",
@@ -4166,9 +4869,9 @@ class MasterAgent(BaseAgent):
                     self._target, [task], phase or "RECON", self._intel
                 )
                 return {
-                    "stdout":    str(result.get("raw_output", result))[:65536],
+                    "stdout":    str(result.get("stdout") or result.get("raw_output") or result)[:65536],  # [21] prefer clean stdout, not the whole dict-repr
                     "stderr":    "",
-                    "exit_code": 0,
+                    "exit_code": self._derive_agent_exit(result),
                     "output_id": "",
                     "tool":      tool,
                     "args":      args,
@@ -4431,14 +5134,54 @@ class MasterAgent(BaseAgent):
                 fired.append(_sid)
         ceiling = str(self._intel.get("scan_intrusiveness") or "safe")
         domain = "OT" if any(_d.get("domain") == "OT" for _d in skill_dets) else "IT"
+        # [P4] Fail-closed for OT/ICS even when NO vendor skill matched — a novel PLC /
+        # unknown control-system protocol must NOT silently default to 'IT' (which would
+        # let an intrusive probe disrupt a physical process).  Derive OT from data-driven
+        # signals (an industrial-protocol port, an industrial device class, or an ICS
+        # banner) so the governor's OT/life-safety gate fires safe-by-default.
+        if domain != "OT":
+            try:
+                from knowledge.safety_governor import ot_suspected as _ot_suspected
+                if _ot_suspected(open_ports=self._intel.get("open_ports"),
+                                 device_kind=(self._intel.get("device_classification") or {}).get("kind"),
+                                 banners=self._intel.get("banners")):
+                    domain = "OT"
+                    self._intel["ot_unconfirmed"] = True   # honest: suspected, not skill-confirmed
+            except Exception:
+                pass
+        # [94] surface the OT/IT classification + life-safety to the safety governor —
+        # base_agent.run_tool reads intel['domain']/['life_safety'], which is what makes the
+        # governor's OT/life-safety gate actually fire (it saw a hardcoded 'IT'/False before).
+        try:
+            if domain == "OT":
+                # Its OWN key — intel['domain'] belongs to the AD domain name.
+                self._intel["safety_domain"] = "OT"
+            if any(_d.get("life_safety") for _d in skill_dets):
+                self._intel["life_safety"] = True
+        except Exception:
+            pass
+        # #6 — an operator who explicitly set an intrusive/disruptive ceiling HAS
+        # authorized intrusive action (this is exactly the consent the scan UI binds to
+        # the ceiling).  Derive it so allowed()'s OT/life-safety clamp lifts for the
+        # DISPLAY-ONLY advisory below.  The safe/default ceiling → False → the advisory
+        # is byte-identical to before.  The auto-RUN path (_capability_autodispatch) keeps
+        # authorized=False so life-safety never auto-actuates and OT stays read-only.
+        import os as _authz_os
+        _authorized = (_authz_os.environ.get("ARGUS_SKILL_AUTHZ_FROM_CEILING", "1") != "0"
+                       and str(ceiling).strip().lower() in ("intrusive", "disruptive"))
         # #2 — one prioritised, focused advisory so the operator does not drown.
         try:
             guidance = _sr.prioritized_guidance(skill_dets, ceiling=ceiling, domain=domain,
-                                                authorized=False, top_n=6)
+                                                authorized=_authorized, top_n=6)
             if guidance:
-                self._meta_advisory_context.append(
-                    "PRIORITISED technology matches (highest-yield first; respect the "
-                    f"scan-intrusiveness ceiling = {ceiling}):\n" + guidance)
+                _adv = ("PRIORITISED technology matches (highest-yield first; respect the "
+                        f"scan-intrusiveness ceiling = {ceiling}):\n" + guidance)
+                self._meta_advisory_context.append(_adv)
+                # Live channel the OPERATOR actually reads.  _meta_advisory_context has no
+                # live drain in operator-driven mode (its only formatter,
+                # _meta_advisory_prompt_block, had zero callers), so also stamp intel —
+                # operator_core._skill_advisory_block() renders this into the state brief.
+                self._intel["skill_advisory"] = _adv
         except Exception:
             pass
         # #3 — gated safe-quick-win auto-dispatch (default OFF).  Check the toggle
@@ -5068,6 +5811,56 @@ class MasterAgent(BaseAgent):
         except Exception:
             pass
 
+    def _sync_ctx(self) -> None:
+        """[20] Build/refresh the documented PentestContext from the live intel.
+
+        PentestContext ('single source of truth' per its docstring) was NEVER
+        instantiated — self._ctx was never assigned — so the /sessions/{id}/context
+        'active' branch (guarded on hasattr(agent,'_ctx') and agent._ctx) was
+        unreachable and the endpoint always fell back to the stale DB snapshot.  This
+        projects the live self._intel into a PentestContext (self._intel stays the real
+        source of truth; the context is a read-model), refreshed best-effort at session
+        start and after the loop.  Never raises."""
+        try:
+            from agents.pentest_context import PentestContext
+        except Exception:
+            return
+        it = self._intel or {}
+        try:
+            ctx = PentestContext(target=str(self._target or it.get("target") or ""))
+            ctx.open_ports      = list(it.get("open_ports") or [])
+            _svc = it.get("services")
+            ctx.services        = dict(_svc) if isinstance(_svc, dict) else {}
+            ctx.web_targets     = list(it.get("web_targets") or [])
+            ctx.technologies    = list(it.get("technologies") or [])
+            ctx.vulnerabilities = list(it.get("vulnerabilities") or [])
+            ctx.credentials     = list(it.get("credentials") or [])
+            ctx.flags           = list(it.get("flags") or [])
+            self._ctx = ctx
+        except Exception:
+            pass
+
+    def _sync_phases_completed_from_intel(self) -> None:
+        """[83] Populate self._phases_completed from the evidence in self._intel.
+
+        The DEFAULT operator/reasoning engine returns before the linear phase
+        executor, so nothing ever appended to _phases_completed — leaving checkpoints,
+        resume-gating and the report claiming zero phases ran.  Infer each milestone
+        from the evidence it would have produced (order-preserving + deduped)."""
+        it = self._intel or {}
+        milestones = [
+            ("recon",        bool(it.get("open_ports") or it.get("services"))),
+            ("vuln_id",      bool(it.get("cves") or it.get("vulnerabilities"))),
+            ("web",          bool(it.get("web_findings") or it.get("web_paths")
+                                  or it.get("endpoints"))),
+            ("exploit",      bool(it.get("shell_access") or it.get("exploited")
+                                  or it.get("rce_confirmed"))),
+            ("post_exploit", bool(it.get("loot") or it.get("credentials"))),
+        ]
+        for token, present in milestones:
+            if present and token not in self._phases_completed:
+                self._phases_completed.append(token)
+
     async def _execute_phases(
         self,
         session_id:   str,
@@ -5087,9 +5880,10 @@ class MasterAgent(BaseAgent):
         which replaces linear phase execution with hypothesis-driven evidence loop.
         """
         # ── REASONING LOOP ROUTING ──────────────────────────────────────────
-        # When the reasoning engine is enabled, skip the linear phase executor
-        # and use the hypothesis-driven loop instead.
-        # Default (use_reasoning_loop=False) runs the original code unchanged.
+        # When the reasoning engine is selected (the default), skip the linear
+        # phase executor and use the hypothesis-driven loop instead.  When the
+        # selector resolves to False (caller arg or ARGUS_USE_REASONING_LOOP=0),
+        # the original linear phase pipeline below runs unchanged [I6].
         if self._use_reasoning_loop and _REASONING_AVAILABLE:
             # ── Parse operator context via LLM (replaces regex CTF parser) ──
             # Only parse if notes or scope provided and not already parsed
@@ -5123,59 +5917,107 @@ class MasterAgent(BaseAgent):
                         "note":            "Scan is proceeding with best-guess assumptions. Answer to improve accuracy.",
                     })
 
-            await self._init_reasoning_components(session_id, target)
-            await self._reasoning_loop_run(session_id, target, plan, resume_from)
+            # F2/F4: the reasoning ENGINE must actually START before we commit the whole scan
+            # to it.  A crash in _init_reasoning_components (e.g. a constructor-contract
+            # mismatch after a partial deploy — the `on_record` kwarg the stale Kali copy
+            # lacked) previously propagated to run()'s catch-all, which logged it as a
+            # "non-fatal" phase error and then marked the session COMPLETED with ZERO
+            # findings: a SILENT empty scan on every host.  Instead we catch an init-time
+            # failure, surface it LOUDLY (_handle_reasoning_engine_failure), and degrade to
+            # the legacy linear pipeline (a real, working engine) so this host still gets a
+            # genuine scan — never a silent no-op.
+            self._engine_error = None
+            _init_done = False
+            # ── GRAPH CONTROL PLANE (flag-gated, default OFF) ──────────────────
+            # With ARGUS_GRAPH_ENGINE unset this is a strict no-op and the loop path
+            # below is byte-for-byte unchanged (Z1).  When the graph runs and
+            # COMPLETES the host we skip the loop but still take the normal report
+            # path; when it ROLLS BACK, the loop runs and resumes from the state the
+            # graph already produced (its findings + executed-tool ledger are already
+            # merged into self._intel by the handoff).
+            _graph_ok = False
+            if _GRAPH_AVAILABLE and _graph_enabled():
+                _graph_ok = await self._run_graph_engine_gated(session_id, target)
+            try:
+                await self._init_reasoning_components(session_id, target)
+                _init_done = True
+                if not _graph_ok:
+                    await self._reasoning_loop_run(session_id, target, plan, resume_from)
+            except Exception as _eng_err:
+                # stage=init  → engine never started → degrade to the legacy pipeline below.
+                # stage=loop  → engine started then crashed → keep the partial evidence it
+                #               gathered and report honestly (never re-scan/double-run).
+                await self._handle_reasoning_engine_failure(
+                    session_id, target, _eng_err,
+                    stage=("loop" if _init_done else "init"))
+            if _init_done:
+                # [83] The reasoning/operator engine returns before the linear phase
+                # executor, so self._phases_completed (checkpoints + resume gating + report)
+                # was never populated on the DEFAULT path.  Infer the completed milestones
+                # from the evidence the run actually produced.
+                self._sync_phases_completed_from_intel()
+                self._sync_ctx()   # [20] final live context projection
 
-            # ── B-4: REPORT GENERATION IN DEFAULT (REASONING-LOOP) MODE ─────
-            # CRITICAL: when use_reasoning_loop=True (the default) the
-            # original linear executor below was bypassed via `return`.
-            # That meant `_phase_evidence_collection` and `_phase_reporting`
-            # NEVER ran in default mode — the platform completed scans
-            # without ever generating a report.  We now invoke evidence
-            # collection + report generation explicitly after the
-            # reasoning loop exits.  Both calls are wrapped with
-            # try/except so a broken report generator can't poison the
-            # session-end teardown / DB updates.
-            try:
-                await self._wait_for_agents_idle(timeout=120.0)
-            except Exception:
-                pass
-            # ── COMPROMISE-READINESS GATE ───────────────────────────────
-            # ARGUS exists to COMPROMISE, not to file a CVE list.  If the run
-            # achieved no shell / flag / harvested creds / verified exploit,
-            # force ONE final genuine exploitation pass before reporting.
-            try:
-                await self._final_compromise_gate(session_id, target)
-            except Exception:
-                pass
-            try:
-                await self._phase_evidence_collection(session_id, target)
-            except Exception as _ec_err:
-                import logging as _l
-                _l.getLogger(__name__).warning(
-                    "evidence_collection failed (non-fatal): %s", _ec_err
-                )
-            try:
-                await self._emit("plan_step_update", {
-                    "step_id": "reporting", "status": "active",
-                    "result":  "Generating penetration test report",
-                    "detail":  "", "found": None, "ts": datetime.utcnow().isoformat()
-                })
-                await self._transition_state("REPORT_GENERATION")
-                await self._phase_reporting(session_id, target)
-                await self._emit("plan_step_update", {
-                    "step_id": "reporting", "status": "done",
-                    "result":  "Penetration test report ready",
-                    "detail":  f"Findings: {self._intel.get('findingsSummary',{})}",
-                    "found":   True, "ts": datetime.utcnow().isoformat()
-                })
-                await self._transition_state("COMPLETE")
-            except Exception as _r_err:
-                import logging as _l
-                _l.getLogger(__name__).warning(
-                    "report generation failed (non-fatal): %s", _r_err
-                )
-            return
+                # ── B-4: REPORT GENERATION IN DEFAULT (REASONING-LOOP) MODE ─────
+                # CRITICAL: when use_reasoning_loop=True (the default) the
+                # original linear executor below was bypassed via `return`.
+                # That meant `_phase_evidence_collection` and `_phase_reporting`
+                # NEVER ran in default mode — the platform completed scans
+                # without ever generating a report.  We now invoke evidence
+                # collection + report generation explicitly after the
+                # reasoning loop exits.  Both calls are wrapped with
+                # try/except so a broken report generator can't poison the
+                # session-end teardown / DB updates.
+                try:
+                    await self._wait_for_agents_idle(timeout=120.0)
+                except Exception:
+                    pass
+                # ── COMPROMISE-READINESS GATE ───────────────────────────────
+                # ARGUS exists to COMPROMISE, not to file a CVE list.  If the run
+                # achieved no shell / flag / harvested creds / verified exploit,
+                # force ONE final genuine exploitation pass before reporting.
+                try:
+                    await self._final_compromise_gate(session_id, target)
+                except Exception:
+                    pass
+                # [62] Make the specialist phases reachable on the DEFAULT engine (they were
+                # only dispatched in the linear pipeline this branch never reaches).
+                try:
+                    await self._run_optional_specialist_phases(target)
+                except Exception:
+                    pass
+                try:
+                    await self._phase_evidence_collection(session_id, target)
+                except Exception as _ec_err:
+                    import logging as _l
+                    _l.getLogger(__name__).warning(
+                        "evidence_collection failed (non-fatal): %s", _ec_err
+                    )
+                try:
+                    await self._emit("plan_step_update", {
+                        "step_id": "reporting", "status": "active",
+                        "result":  "Generating penetration test report",
+                        "detail":  "", "found": None, "ts": datetime.utcnow().isoformat()
+                    })
+                    await self._transition_state("REPORT_GENERATION")
+                    await self._phase_reporting(session_id, target)
+                    await self._emit("plan_step_update", {
+                        "step_id": "reporting", "status": "done",
+                        "result":  "Penetration test report ready",
+                        "detail":  f"Findings: {self._intel.get('findingsSummary',{})}",
+                        "found":   True, "ts": datetime.utcnow().isoformat()
+                    })
+                    await self._transition_state("COMPLETE")
+                except Exception as _r_err:
+                    import logging as _l
+                    _l.getLogger(__name__).warning(
+                        "report generation failed (non-fatal): %s", _r_err
+                    )
+                return
+            # Reasoning engine failed to INITIALISE → degrade to the legacy linear phase
+            # pipeline below (F4 resilience).  Flip the selector off so any downstream branch
+            # treats this host as a legacy engagement; do NOT return (fall through).
+            self._use_reasoning_loop = False
         # ── END REASONING LOOP ROUTING ──────────────────────────────────────
         phases = self._phases_to_run
 
@@ -5335,7 +6177,9 @@ class MasterAgent(BaseAgent):
 
         parallel_coros = []
         if (phase_enabled("vuln_id") or phase_enabled("scan")) and not already_done("vuln_id"):
-            parallel_coros.append(("vuln", self._phase_vuln_id(target)))
+            # [105] Run under the per-phase wall-clock budget — vuln_id ran 40 min unbounded
+            # in the post-mortem because is_phase_budget_exceeded had no consumer.
+            parallel_coros.append(("vuln", self._run_phase_budgeted("vuln_id", self._phase_vuln_id(target))))
 
         web_ports = []
         _COMMON_WEB_PORTS = {80, 443, 8080, 8443, 8000, 8008, 8888, 3000, 5000, 9000, 8181, 4443, 7443}
@@ -5405,8 +6249,45 @@ class MasterAgent(BaseAgent):
         if (not web_ports) and self._intel.get("target_kind") in ("hostname", "url", "app"):
             web_ports = [80, 443]
 
-        if web_ports and not already_done("web_testing"):
-            parallel_coros.append(("web", self._phase_web_testing(target, web_ports)))
+        # ── Device-type router (fingerprint → playbook) ───────────────────────
+        # A camera / router / PBX phone / AV controller / PLC / smart-TV with a web
+        # management port used to pull in the full generic web-app battery
+        # (WordPress/sqlmap/commix/dirb), which burns the whole per-host budget
+        # returning HTTP-000 while the REAL foothold is a device-specific protocol or
+        # CVE.  Classify here (before the web phase dispatches) and, for embedded/OT/IoT
+        # device classes, SUPPRESS the generic sweep and surface the device playbook so
+        # the operator + matched skills drive the device-specific vector instead.
+        # Env ARGUS_DEVICE_ROUTER=0 disables (behaviour unchanged).
+        _suppress_web = False
+        try:
+            from knowledge.device_playbook import route_host
+            _dev_route = route_host(self._intel)
+            self._intel["device_playbook"] = _dev_route
+            _suppress_web = bool(_dev_route.get("suppress_generic_web") and web_ports)
+        except Exception as _dre:
+            _dev_route = None
+
+        if web_ports and not already_done("web_testing") and not _suppress_web:
+            # [105] Run under the per-phase wall-clock budget — WSTG ran 27 min unbounded.
+            parallel_coros.append(("web", self._run_phase_budgeted("web_testing",
+                                                                    self._phase_web_testing(target, web_ports))))
+        elif _suppress_web:
+            self._intel["suppress_generic_web"] = True
+            _sk = ", ".join(s.get("id", "") for s in (_dev_route.get("device_skills") or [])[:6])
+            try:
+                await self.emit_reasoning(
+                    step       = "device_playbook_route",
+                    reasoning  = (
+                        f"Host classified as {_dev_route.get('kind')} "
+                        f"(conf {_dev_route.get('confidence')}). {_dev_route.get('rationale','')} "
+                        f"The generic web-app battery (WordPress/sqlmap/commix/dirb) is "
+                        f"SUPPRESSED — it returns nothing against this device class; the "
+                        f"device-specific playbook takes priority."),
+                    decision   = "SUPPRESS generic web sweep → run device playbook",
+                    next_action= f"Device skills: {_sk or 'device-specific probes'}",
+                )
+            except Exception:
+                pass
 
         if phase_enabled("osint") and not already_done("osint"):
             parallel_coros.append(("osint", self._phase_osint(target)))
@@ -6754,55 +7635,67 @@ class MasterAgent(BaseAgent):
             return await agent.execute_tasks(target, tasks, "WEB_TESTING", self._intel)
 
         extension_key = "extend_web_testing"
+        _empty = {"web_paths": [], "paths": [], "login_pages": [],
+                  "web_vulns": [], "raw_outputs": {}}
 
+        # NON-BLOCKING deadline.  The old code cancelled the running tool at the
+        # soft deadline and then BLOCKED the whole engagement for up to 5 min waiting
+        # for an answer (freezing the scan — and in a CIDR run, holding a host slot so
+        # the queue starved).  Now the tool KEEPS RUNNING past the soft deadline; we
+        # only surface the popup, and we cancel solely on an EXPLICIT human "stop".
+        # No answer ⇒ the tool simply runs to its natural completion (its own per-tool
+        # caps still bound it).  "Extend N minutes" just pushes the soft deadline out.
+        self._extend_events.setdefault(extension_key, asyncio.Event()).clear()
+        self._stop_phase_events.setdefault(extension_key, asyncio.Event()).clear()
+        task = asyncio.create_task(
+            agent.execute_tasks(target, tasks, "WEB_TESTING", self._intel))
+        deadline = time.monotonic() + float(timeout_secs)
+        prompted = False
         while True:
-            try:
-                result = await asyncio.wait_for(
-                    agent.execute_tasks(target, tasks, "WEB_TESTING", self._intel),
-                    timeout=float(timeout_secs)
-                )
-                return result
-            except asyncio.TimeoutError:
-                # Emit time-extension popup to frontend
-                await self._emit("awaiting_time_extension", {
-                    "phase":          "web_testing",
-                    "timeout_secs":   timeout_secs,
-                    "message": (
-                        f"Web testing has been running for {timeout_secs}s. "
-                        "Extend to continue or stop web testing now."
-                    ),
-                })
-
-                # Prepare the extend event
-                if extension_key not in self._extend_events:
-                    self._extend_events[extension_key] = asyncio.Event()
-                else:
-                    self._extend_events[extension_key].clear()
-
-                # Wait up to 5 minutes for the operator to respond
+            done, _ = await asyncio.wait({task}, timeout=2.0)
+            if task in done:
                 try:
-                    await asyncio.wait_for(
-                        self._extend_events[extension_key].wait(),
-                        timeout=300.0
-                    )
-                    # Operator clicked "Extend" — loop back and run again
-                    await self._emit("phase_extended", {
-                        "phase":   "web_testing",
-                        "message": "Web testing time extended by operator",
-                    })
-                    await self._apply_pending_guidance()
-                    # Reset agent state so it continues from where tools left off
-                    # (execute_tasks with remaining tasks only — already-run tools cached)
-                    continue
-                except asyncio.TimeoutError:
-                    # No response — stop web testing gracefully
-                    agent.request_stop()
-                    await self._emit("phase_stopped", {
-                        "phase":   "web_testing",
-                        "message": "Web testing stopped — no response to time extension request",
-                    })
-                    return {"web_paths": [], "paths": [], "login_pages": [],
-                            "web_vulns": [], "raw_outputs": {}}
+                    return task.result()
+                except asyncio.CancelledError:
+                    return dict(_empty)
+                except Exception as _exc:      # tool crashed — don't kill the engagement
+                    logger.warning("[master] web testing task failed: %s", _exc)
+                    return dict(_empty)
+            # Explicit human stop (or a global scan stop) — cancel and move on.
+            if getattr(self, "_stop_requested", False) or self._stop_phase_events[extension_key].is_set():
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
+                agent.request_stop()
+                await self._emit("phase_stopped", {
+                    "phase": "web_testing",
+                    "message": "Web testing stopped by operator — moving on."})
+                return dict(_empty)
+            # Human granted more time — push the soft deadline out; keep running.
+            if self._extend_events[extension_key].is_set():
+                self._extend_events[extension_key].clear()
+                _mins = float(self._extend_minutes.get(extension_key, 0) or 0)
+                _bump = _mins * 60.0 if _mins > 0 else float(timeout_secs)
+                deadline = time.monotonic() + _bump
+                prompted = False
+                await self._apply_pending_guidance()
+                await self._emit("phase_extended", {
+                    "phase": "web_testing",
+                    "message": f"Web testing extended by {int(_bump)}s — continuing."})
+                continue
+            # Soft deadline elapsed — prompt ONCE, but the tool keeps running.
+            if not prompted and time.monotonic() >= deadline:
+                prompted = True
+                await self._emit("awaiting_time_extension", {
+                    "phase":        "web_testing",
+                    "timeout_secs": timeout_secs,
+                    "non_blocking": True,
+                    "message": (
+                        f"Web testing has run for {timeout_secs}s and is STILL RUNNING. "
+                        "It keeps going until you extend (add minutes) or stop it."),
+                })
 
     # ─── PHASE: OSINT ─────────────────────────────────────────
 
@@ -6852,15 +7745,22 @@ class MasterAgent(BaseAgent):
         if result.get("exploit_chain"):
             self._intel["exploit_chain"] = result["exploit_chain"]
         if result.get("critical_cves"):
-            self._intel["critical_cves"] = list(dict.fromkeys(
-                (self._intel.get("critical_cves") or []) +
-                list(result["critical_cves"])
-            ))
+            # OSINT synthesis can emit CVEs as dicts ({"id":..,"cvss":..} or malformed).
+            # Coerce to a canonical HASHABLE id-string before dedup so this merge (and the
+            # downstream reasoning-loop dedup) can never raise "unhashable type: 'dict'".
+            def _cid2(_c):
+                if isinstance(_c, dict):
+                    _c = (_c.get("id") or _c.get("cve") or _c.get("cve_id")
+                          or _c.get("name") or "")
+                return str(_c or "").strip().upper()
+            self._intel["critical_cves"] = [x for x in dict.fromkeys(
+                _cid2(c) for c in ((self._intel.get("critical_cves") or [])
+                                   + list(result["critical_cves"]))) if x]
         if result.get("next_commands"):
+            # Coerce to str so a stray dict can't make dict.fromkeys() raise either.
             self._intel["next_commands"] = list(dict.fromkeys(
-                (self._intel.get("next_commands") or []) +
-                list(result["next_commands"])
-            ))
+                str(c) for c in ((self._intel.get("next_commands") or [])
+                                 + list(result["next_commands"])) if c))
 
         # ── PIVOT TRIGGER ── if OSINT identified a CRITICAL/HIGH chain
         # with concrete next commands, signal that the exploit phase
@@ -7176,6 +8076,14 @@ class MasterAgent(BaseAgent):
         _log = _lg.getLogger(__name__)
         try:
             while not self._stop_requested:
+                # [88] Honour PAUSE — a paused scan must HALT offensive activity, not keep
+                # draining queued/re-detected entry points and firing exploit attempts at the
+                # target while the operator believes the engagement is paused.  _pause_event
+                # is SET while running, cleared while paused; block here until resume/stop.
+                if not self._pause_event.is_set():
+                    await self._pause_event.wait()
+                    if self._stop_requested:
+                        return
                 # If we've already won, stop dispatching new attempts
                 if ctx.is_post_exploit_mode():
                     await self.emit_reasoning(
@@ -8158,12 +9066,30 @@ class MasterAgent(BaseAgent):
             if eval_r.get("store_finding") and eval_r.get("finding_title"):
                 sev_map = {"critical": FindingSeverity.CRITICAL,"high": FindingSeverity.HIGH,
                            "medium": FindingSeverity.MEDIUM,"low": FindingSeverity.LOW}
+                # Derive operational-severity signals from the evidence the
+                # evaluator actually extracted (not the LLM's self-assigned tier),
+                # so knowledge.severity_policy.grade() — not the model — sets the
+                # headline.  shell_obtained ⇒ demonstrated foothold; recovered
+                # credentials ⇒ demonstrated foothold; otherwise a confirmed
+                # weakness whose chainability follows the LLM tier (high/critical
+                # ⇒ directly-exploitable, medium ⇒ chainable, low ⇒ info-leak).
+                _ev_sev = str(eval_r.get("finding_severity", "medium")).lower()
+                _ev_signals = {"confirmed": True}
+                if eval_r.get("shell_obtained") or _safe_list(eval_r.get("credentials_found")):
+                    _ev_signals["compromise"] = "foothold"
+                elif _ev_sev in ("critical", "high"):
+                    _ev_signals["directly_exploitable"] = True
+                elif _ev_sev == "low":
+                    _ev_signals["info_leak_only"] = True
+                else:
+                    _ev_signals["chainable"] = True
                 await self.store_finding(
-                    severity    = sev_map.get(eval_r.get("finding_severity","medium"), FindingSeverity.MEDIUM),
+                    severity    = sev_map.get(_ev_sev, FindingSeverity.MEDIUM),
                     title       = _safe_str(eval_r.get("finding_title")),
                     description = eval_r.get("reasoning","")[:500],
                     host        = target, tool_used = vi.get("tool",""),
-                    evidence    = result.get("stdout","")[:1000]
+                    evidence    = result.get("stdout","")[:1000],
+                    signals     = _ev_signals,
                 )
 
             if eval_r.get("shell_obtained"):
@@ -8212,14 +9138,16 @@ class MasterAgent(BaseAgent):
                     severity=FindingSeverity.HIGH,
                     title=f"Valid Credentials: {c.get('service','?')} — {c.get('user','?')}",
                     description=f"Credentials: {c.get('user','')}:{c.get('pass','')}",
-                    host=target, tool_used="exploit_phase")
+                    host=target, tool_used="exploit_phase",
+                    signals={"confirmed": True, "compromise": "foothold"})
             for s in [s for s in self._intel.get("shares",[])
                       if "READ" in s.upper() or "OK" in s.upper()]:
                 await self.store_finding(
                     severity=FindingSeverity.MEDIUM,
                     title=f"Readable SMB Share: {s}",
                     description="Accessible without authentication",
-                    host=target, tool_used="smbclient")
+                    host=target, tool_used="smbclient",
+                    signals={"confirmed": True, "info_leak_only": True})
             await self.emit_reasoning(
                 step="exploit_complete", reasoning="All vectors exhausted",
                 decision="No shell obtained — partial findings stored",
@@ -8802,16 +9730,50 @@ Return JSON:
             "ts": datetime.utcnow().isoformat()
         })
 
+    def _resolve_os_family(self) -> str:
+        """[P6] Best-effort OS family from ALL available evidence — os_guess, the device
+        classification's os_family, and the captured shell OS.  Returns
+        'windows' | 'linux' | 'macos' | 'unknown'.  It never GUESSES: when no signal
+        supports a family it returns 'unknown', and callers must handle that honestly
+        (label it unconfirmed) instead of silently assuming an OS."""
+        blob = " ".join([
+            str(self._intel.get("os_guess") or ""),
+            str((self._intel.get("device_classification") or {}).get("os_family") or ""),
+            str(self._intel.get("shell_os") or ""),
+        ]).lower()
+        if any(t in blob for t in ("windows", "microsoft", "win32", "win64", "ntlm")):
+            return "windows"
+        if any(t in blob for t in ("darwin", "apple", "mac os", "macos", "osx")):
+            return "macos"
+        if any(t in blob for t in ("linux", "ubuntu", "debian", "centos", "rhel", "fedora",
+                                   "unix", "bsd", "android", "busybox")):
+            return "linux"
+        return "unknown"
+
+    def _os_type_for_phase(self, phase: str) -> "tuple[str, bool]":
+        """Resolve (os_type, unconfirmed) for an OS-specific post-exploit phase.  When the OS
+        is unconfirmed we DON'T claim a specific OS — we record it honestly and fall back to a
+        tool-compatible default (linux) clearly LABELLED unconfirmed, rather than silently
+        asserting 'Shell obtained on LINUX'."""
+        fam = self._resolve_os_family()
+        if fam == "unknown":
+            self._intel["os_unconfirmed"] = True
+            return "linux", True          # tool-compat fallback, surfaced as unconfirmed
+        return fam if fam in ("windows", "linux") else "linux", False
+
     # ─── PHASE: AV/EDR Evasion ────────────────────────────────
 
     async def _phase_evasion(self, target: str):
         """AV/EDR defense enumeration and evasion techniques."""
-        os_type = "windows" if "windows" in self._intel.get("os_guess", "").lower() else "linux"
+        os_type, _os_unconf = self._os_type_for_phase("evasion")
+        _os_label = "an UNCONFIRMED OS (no fingerprint)" if _os_unconf else f"a {os_type.upper()} system"
         lhost   = self._intel.get("lhost", "LHOST")
         lport   = int(self._intel.get("lport", 4444))
         await self.emit_reasoning(
             step       = "evasion_start",
-            reasoning  = f"Shell obtained on {os_type.upper()} system. Enumerating defenses and applying evasion.",
+            reasoning  = (f"Shell obtained on {_os_label}. Enumerating defenses and applying "
+                          + ("os-agnostic evasion (OS unconfirmed — best-effort defaults)."
+                             if _os_unconf else "evasion.")),
             decision   = "Run EvasionAgent: DefenseEnum → AvEvasion + (AMSI bypass on Windows)",
             next_action= "EvasionAgent dispatching subagents"
         )
@@ -8864,11 +9826,12 @@ Return JSON:
 
     async def _phase_forensics_deep(self, target: str):
         """Digital forensics — artifact collection, timeline, memory analysis."""
-        os_type      = "windows" if "windows" in self._intel.get("os_guess", "").lower() else "linux"
+        os_type, _os_unconf = self._os_type_for_phase("forensics")
+        _os_label = "an UNCONFIRMED OS (no fingerprint)" if _os_unconf else f"a {os_type.upper()} target"
         attack_start = self._intel.get("session_start", "")
         await self.emit_reasoning(
             step       = "forensics_start",
-            reasoning  = f"Running forensic collection on {os_type.upper()} target for artifact preservation.",
+            reasoning  = f"Running forensic collection on {_os_label} for artifact preservation.",
             decision   = "Run ForensicsAgent: ArtifactCollect → Timeline + MemoryAnalysis",
             next_action= "ForensicsAgent dispatching subagents"
         )
@@ -8893,13 +9856,14 @@ Return JSON:
 
     async def _phase_evidence_enhanced(self, target: str):
         """Screenshot capture and flag/proof harvesting via EvidenceAgent."""
-        os_type = "windows" if "windows" in self._intel.get("os_guess", "").lower() else "linux"
+        os_type, _os_unconf = self._os_type_for_phase("evidence")
+        _os_label = "an UNCONFIRMED OS (no fingerprint)" if _os_unconf else f"a {os_type.upper()} target"
         web_ports = [p for p, s in self._intel.get("services", {}).items()
                      if ("http" in str(s).lower())]
         web_urls  = [f"http://{target}:{p}" for p in web_ports[:3]]
         await self.emit_reasoning(
             step       = "evidence_enhanced_start",
-            reasoning  = f"Harvesting screenshots and flags from {os_type.upper()} target.",
+            reasoning  = f"Harvesting screenshots and flags from {_os_label}.",
             decision   = "Run EvidenceAgent: Screenshot + FlagCapture in parallel",
             next_action= "EvidenceAgent dispatching subagents"
         )
@@ -9177,6 +10141,201 @@ Return JSON:
             "verified_exploit":  verified_exploit,
         }
 
+    async def _phase_device_capability_verify(self, target: str) -> None:
+        """E1: SAFE, read-only, EVIDENCE-PRODUCING active verification of a classified device.
+
+        Replaces 'banner → INFO, present-not-exploitable' with real read-only checks whose
+        severity is DERIVED FROM THE CAPTURED EVIDENCE (the verifier proves the capability or
+        records an honest 'unconfirmed — requires a human-gated active test').  Every probe is
+        governor-gated on the authorized scope, so no traffic is sent to an unscoped host."""
+        kind = str((self._intel.get("device_classification") or {}).get("kind") or "")
+        if not kind:
+            return
+        scope = list(self._intel.get("target_scope") or [target])
+        try:
+            from agents.verify.active_verifier import verify_device_capabilities
+            from db.schemas import FindingSeverity as _FS
+        except Exception:
+            return
+        results = await verify_device_capabilities(target, kind, scope_hosts=scope, emit=self._emit)
+        self._intel.setdefault("device_capability_results", []).extend(results)
+        _smap = {"critical": _FS.CRITICAL, "high": _FS.HIGH, "medium": _FS.MEDIUM,
+                 "low": _FS.LOW, "info": _FS.INFO}
+        proven = 0
+        for r in results:
+            pkg = r.get("package") or {}
+            if not r.get("proven"):
+                continue               # unconfirmed checks stay in intel, never a graded finding
+            proven += 1
+            try:
+                await self.store_finding(
+                    severity=_smap.get(str(r.get("severity") or "info"), _FS.INFO),
+                    title=str(r.get("capability") or "Device capability verified"),
+                    description=str(pkg.get("business_impact") or r.get("capability") or ""),
+                    host=target, service=kind, tool_used="device_capability_verify",
+                    evidence=str(r.get("artifact") or ""),
+                    remediation=str(pkg.get("remediation") or ""),
+                    extra={"reproduction": pkg.get("reproduction") or [],
+                           "business_impact": pkg.get("business_impact") or "",
+                           "probe_id": r.get("probe_id"), "read_only_verified": True})
+            except Exception:
+                pass
+        try:
+            await self.emit_reasoning(
+                step="device_capability_verify",
+                reasoning=(f"Ran {len(results)} SAFE read-only capability checks on the "
+                           f"{kind} device; {proven} capability(ies) PROVEN from captured evidence, "
+                           f"{len(results) - proven} unconfirmed."),
+                decision="Severity derived from captured evidence (evidence-or-silence)",
+                next_action="Proven capabilities packaged with repro + artifact + remediation")
+        except Exception:
+            pass
+
+    async def _phase_segmentation_correlation(self, target: str) -> None:
+        """E2 + E3: cross-host/segmentation/architectural analysis over CAPTURED observations.
+
+        Emits first-class SYSTEMIC findings ONLY when a real in-scope cross-segment reachability
+        / internal-DNS / multicast leak is demonstrated (E2), and REPORTS (never probes) assets
+        passively observed outside the authorized scope (E3).  Reads capture keys populated by
+        best-effort adapters; with no captured data it produces nothing (honest)."""
+        it = self._intel or {}
+        try:
+            from agents.recon.segmentation_analysis import analyze_segmentation, discover_out_of_scope
+            from db.schemas import FindingSeverity as _FS
+        except Exception:
+            return
+        scope = list(it.get("target_scope") or [target])
+        _smap = {"high": _FS.HIGH, "medium": _FS.MEDIUM, "low": _FS.LOW, "info": _FS.INFO}
+        systemic = analyze_segmentation(
+            reachability=it.get("segment_reachability") or [],
+            leaks=it.get("multicast_leaks") or [],
+            segments=it.get("scope_segments") or scope,
+            scope_hosts=scope)          # both endpoints must be authorized-in-scope [E2/E3 boundary]
+        oos = discover_out_of_scope(observed=it.get("passive_observed") or [], scope_hosts=scope)
+        for f in systemic + oos:
+            try:
+                await self.store_finding(
+                    severity=_smap.get(str(f.get("severity") or "info"), _FS.INFO),
+                    title=str(f.get("title") or ""), description=str(f.get("description") or ""),
+                    host=str(f.get("host") or target),
+                    tool_used=("out_of_scope_observer" if f.get("category") == "out_of_scope"
+                               else "segmentation_analysis"),
+                    evidence=str(f.get("evidence") or ""),
+                    remediation=str(f.get("remediation") or ""),
+                    extra={"systemic": True, "category": f.get("category"),
+                           "in_scope": f.get("in_scope", True), "probed": f.get("probed", True)})
+            except Exception:
+                pass
+        if systemic or oos:
+            try:
+                await self.emit_reasoning(
+                    step="segmentation_correlation",
+                    reasoning=(f"{len(systemic)} systemic segmentation finding(s) from demonstrated "
+                               f"cross-segment evidence; {len(oos)} out-of-scope asset(s) observed "
+                               "(reported, NOT probed)."),
+                    decision="Systemic findings carry the reachability/leak proof",
+                    next_action="Out-of-scope assets recommended for scope review")
+            except Exception:
+                pass
+
+    async def _run_optional_specialist_phases(self, target: str) -> None:
+        """[62] Run the specialist phases (traffic / wireless / iot / evasion / forensics /
+        enhanced-evidence) on the DEFAULT reasoning/operator engine.
+
+        These are dispatched ONLY inside the linear pipeline, which the default engine
+        returns before ever reaching — so WirelessAgent / IoTAgent / TrafficAgent /
+        EvasionAgent / ForensicsAgent and the enhanced-evidence phase never ran on the
+        default path.  Gated by EXPLICIT selection (in _phases_to_run) OR a positive
+        detection signal, so the capability becomes reachable WITHOUT firing irrelevant
+        specialist scans (forensics/traffic/wireless) on every unrelated engagement — a
+        deliberate, conservative deviation from the linear path's permissive gate to
+        avoid a latency/noise regression.  Each phase is try/except-wrapped."""
+        it = self._intel or {}
+        try:
+            want = {str(p).lower().split(".")[-1] for p in (self._phases_to_run or [])}
+        except Exception:
+            want = set()
+        shell = bool(it.get("shell_access") or it.get("rce_confirmed"))
+        _dc = it.get("device_classification") or {}
+        _is_device = bool(it.get("_iot_detected") or it.get("is_iot")
+                          or str(_dc.get("os_family") or "") == "embedded"
+                          or str(_dc.get("kind") or "").startswith(("iot_", "network_device", "embedded")))
+        # ≥2 in-scope endpoints/segments, or any captured cross-segment observation -> correlate.
+        _multi = (len({str(h) for h in (it.get("target_scope") or [])}) >= 2
+                  or bool(it.get("segment_reachability") or it.get("multicast_leaks")
+                          or it.get("passive_observed")))
+        plan = [
+            ("traffic",   ("traffic" in want),                                   self._phase_traffic),
+            ("wireless",  ("wireless" in want) or bool(it.get("wireless_config")), self._phase_wireless),
+            ("iot",       ("iot" in want) or bool(it.get("_iot_detected") or it.get("is_iot")), self._phase_iot),
+            # E1 — evidence-producing device/IoT/AV/OT capability verification (read-only, scoped).
+            ("device_verify", ("device_verify" in want) or _is_device,           self._phase_device_capability_verify),
+            # E2/E3 — cross-host segmentation + out-of-scope observation (multi-target/segmented).
+            ("segmentation",  ("segmentation" in want) or _multi,                self._phase_segmentation_correlation),
+            ("evasion",   ("evasion" in want) and shell,                          self._phase_evasion),
+            ("forensics", ("forensics" in want),                                  self._phase_forensics_deep),
+            ("evidence",  ("evidence" in want) and shell,                         self._phase_evidence_enhanced),
+        ]
+        for name, gate, fn in plan:
+            if not gate:
+                continue
+            try:
+                await fn(target)
+            except Exception as _sp_err:      # a broken specialist can't poison reporting
+                import logging as _l
+                _l.getLogger(__name__).debug(
+                    "optional specialist phase %s failed (non-fatal): %s", name, _sp_err)
+
+    def _exploitation_push_allowed(self) -> "tuple[bool, str]":
+        """May ARGUS force an autonomous exploitation pass on this engagement?
+
+        Returns (allowed, reason).  Says NO when either:
+          * the per-target authorization forbids autonomous exploitation — DENY (never)
+            or REQUIRE_APPROVAL (a human must authorize each exploit, so a *forced*
+            autonomous push is precisely what must not happen); or
+          * the engagement's win conditions contain no compromise/access goal at all
+            (a vulnerability assessment succeeds on evidenced findings).
+        Fail-safe: on any error, do NOT force exploitation."""
+        it = self._intel if isinstance(getattr(self, "_intel", None), dict) else {}
+        try:
+            _map = it.get("target_authorization") or {}
+            if _map:
+                from knowledge.authorization import (AuthorizationPolicy as _AP,
+                                                     TargetAuthorization as _TA,
+                                                     EXPLOIT_ALLOW as _EX_ALLOW)
+                _host = str(it.get("target_host") or it.get("target") or "")
+                _authz = (_AP.from_dict(_map).resolve(_host)
+                          if ("entries" in _map or "default" in _map)
+                          else _TA.from_dict(_map))
+                if _authz.exploitation != _EX_ALLOW:
+                    if _authz.exploitation == "require_approval":
+                        return False, ("exploitation on this target requires per-action "
+                                       "human approval (public/external engagement) — "
+                                       "an autonomous forced push is not authorized")
+                    return False, ("exploitation is not authorized against this "
+                                   f"{_authz.owner} target")
+        except Exception as exc:                                  # noqa: BLE001
+            return False, f"authorization could not be resolved ({exc}) — failing safe"
+
+        try:
+            from agents.mission.win_conditions import win_conditions_for
+            _ctx = it.get("engagement_context") or {}
+            _wc = list(it.get("win_conditions_configured") or []) or win_conditions_for(
+                str(_ctx.get("engagement_type") or ""),
+                objectives=list(getattr(self._mission_brief, "win_conditions", []) or [])
+                if getattr(self, "_mission_brief", None) is not None else None)
+            _compromise_goals = ("shell", "flag", "access", "privilege", "privesc",
+                                 "lateral", "persist", "exfil", "loot", "domain_admin",
+                                 "rce", "exploit")
+            if _wc and not any(any(k in str(c).lower() for k in _compromise_goals)
+                               for c in _wc):
+                return False, ("this engagement's objectives are assessment-only "
+                               f"({', '.join(str(c) for c in _wc)}) — evidenced findings "
+                               "ARE the deliverable, so no compromise is forced")
+        except Exception:                                         # noqa: BLE001
+            pass
+        return True, ""
+
     async def _final_compromise_gate(self, session_id: str, target: str) -> None:
         """Refuse to report a pure recon/CVE-list as a finished engagement.
 
@@ -9193,6 +10352,31 @@ Return JSON:
             assess = self._assess_compromise()
             self._intel["engagement_outcome"] = assess["level"]
             self._intel["compromised"]        = assess["compromised"]
+
+            # ── Does this engagement even AUTHORIZE a forced exploitation push? ──
+            # Not every engagement is a compromise hunt.  An external vulnerability
+            # assessment's deliverable is evidenced findings, and on a public target
+            # exploitation is human-approved, never autonomous.  Forcing an
+            # exploitation pass there would be an AUTHORIZATION VIOLATION, not
+            # diligence.  Decide from the per-target authorization + the engagement's
+            # own win conditions, and record the honest reason either way.
+            _push_ok, _push_why = self._exploitation_push_allowed()
+            self._intel["forced_exploitation_allowed"] = _push_ok
+            if not _push_ok:
+                self._intel["engagement_outcome_note"] = _push_why
+                logger.info("[compromise_gate] NOT forcing an exploitation pass: %s",
+                            _push_why)
+                try:
+                    await self._emit("compromise_gate", {
+                        "session_id": session_id, "outcome": assess["level"],
+                        "compromised": assess["compromised"],
+                        "forced_push": False, "push_allowed": False,
+                        "reason": _push_why,
+                        "message": (f"Engagement outcome: {assess['level']}. No forced "
+                                    f"exploitation pass — {_push_why}")})
+                except Exception:
+                    pass
+                return
 
             # Observability: ALWAYS surface the honest verdict (level + the
             # signals behind it) on EVERY path — including the early returns
@@ -9546,7 +10730,10 @@ RULES:
         import logging as _log
         try:
             raw = await self.think_json(prompt, system)
-            if raw and isinstance(raw, dict):
+            # [11] think_json returns {"raw_response":…, "parse_error": True} on a parse
+            # failure; that dict is truthy, so from_dict would build a context from the
+            # error payload instead of taking the default fallback below.  Skip it.
+            if raw and isinstance(raw, dict) and not raw.get("parse_error"):
                 ctx = EngagementContext.from_dict(raw)
                 _log.getLogger(__name__).info(
                     "Engagement context: type=%s, objectives=%d, questions=%d",
@@ -11007,7 +12194,7 @@ Return JSON with enumeration goals: {{
             _qe = getattr(self, "_question_engine", None)
             if _qe is None and _REASONING_AVAILABLE:
                 # QuestionEngine may live on ReasoningLoop — try to get it
-                _rl = getattr(self, "_reasoning_loop_instance", None)
+                _rl = getattr(self, "_reasoning_loop_inst", None)  # [7] was a typo'd attr name
                 if _rl is not None:
                     _qe = getattr(_rl, "_question_engine", None)
 
@@ -11083,20 +12270,55 @@ Return JSON with enumeration goals: {{
         self._guidance_queue.put_nowait(guidance)
 
     def confirm_action(self, phase: str):
-        evt = self._confirm_events.get(f"confirm_{phase}")
-        if evt:
-            evt.set()
+        # [22] Resolve the legacy phase gate AND a reasoning-loop action gate.  The
+        # reasoning loop's _wait_for_confirmation registers under
+        # `reasoning_<action_id>` (the reasoning_confirmation_required event ships
+        # data.action_id), but this resolver only ever set `confirm_<phase>` — so a
+        # confirm for a reasoning action never resolved its Event, every low-confidence /
+        # self-critique-hold action stalled the full 60s timeout and was skipped +
+        # written to NegativeMemory.  Accept a bare phase, a bare action_id, or a
+        # already-namespaced key, and resolve whichever pending gate matches.
+        p = str(phase or "")
+        _keys = [f"confirm_{p}", f"reasoning_{p}"]
+        if p.startswith(("confirm_", "reasoning_")):
+            _keys.append(p)
+        _resolved = False
+        for _key in _keys:
+            evt = self._confirm_events.get(_key)
+            if evt:
+                evt.set()
+                _resolved = True
+        # No exact match (e.g. the UI sent only a generic confirm): the reasoning loop
+        # processes ONE action at a time, so resolve the single pending reasoning gate.
+        if not _resolved:
+            for _k, _e in list(self._confirm_events.items()):
+                if _k.startswith("reasoning_"):
+                    _e.set()
 
-    def extend_phase(self, phase: str):
+    def extend_phase(self, phase: str, minutes: float = 0):
         """
         Called by agent_server when operator clicks 'Extend' in the time-extension dialog.
         Sets the extend event for the given phase so _phase_web_testing() (or any other
-        timed phase) can resume.  Also works as the confirmation gate for confirm_web.
+        timed phase) can push its soft deadline out.  ``minutes`` (any number) sets how
+        much more time to grant; 0 = one more default period.  Also works as the
+        confirmation gate for confirm_web.  Non-blocking: the tool never stopped running.
         """
         key = f"extend_{phase}"
+        try:
+            self._extend_minutes[key] = float(minutes or 0)
+        except (TypeError, ValueError):
+            self._extend_minutes[key] = 0.0
         if key not in self._extend_events:
             self._extend_events[key] = asyncio.Event()
         self._extend_events[key].set()
+
+    def stop_phase(self, phase: str):
+        """Operator clicked 'Stop' on a still-running timed phase.  Signals the
+        non-blocking deadline loop to cancel the running tool NOW and move on."""
+        key = f"extend_{phase}"
+        if key not in self._stop_phase_events:
+            self._stop_phase_events[key] = asyncio.Event()
+        self._stop_phase_events[key].set()
 
     def stop_all_agents(self):
         for agent in [self._recon_agent, self._vuln_agent, self._web_agent,
@@ -11331,7 +12553,12 @@ Return JSON with enumeration goals: {{
 
         ports = i.get('open_ports', [])
         if ports:
-            lines.append(f"Open ports  : {', '.join(str(p) for p in sorted(ports)[:20])}")
+            # open_ports may hold dicts (passive-capture path appends {'port':...} entries),
+            # so a keyless sorted() would compare two dicts → TypeError that aborted the
+            # whole report ("report generation failed (non-fatal): '<' not supported between
+            # instances of 'dict' and 'dict'").  Key on the stringified port for a total order.
+            _pkey = lambda _p: str(_p.get("port") if isinstance(_p, dict) else _p)
+            lines.append(f"Open ports  : {', '.join(str(p) for p in sorted(ports, key=_pkey)[:20])}")
 
         svcs = i.get('services', {})
         if svcs:
@@ -11460,3 +12687,168 @@ Return JSON with enumeration goals: {{
 
         lines.append("=== END INTELLIGENCE ===")
         return "\n".join(lines)
+
+    def _reasoning_context_for_prompt(self) -> str:
+        """[33/34] The reasoning-context render blocks, extracted from _intel_summary so
+        BOTH drivers can use them.  These were previously reachable ONLY through
+        _intel_summary(), which the default OperatorCore driver bypasses — so the
+        documented reasoning biases (episodic priors, defensive posture, technique
+        chains, inferred attack paths, hypothesis scan bias, goal timeline, the reasoning
+        trace + last self-critique) never reached the driving LLM on the shipped path.
+        This renders whichever of those keys are populated; empty => "" (no-op).  Pure
+        render of self._intel + a couple of self attributes; no side effects."""
+        i = self._intel
+        lines: List[str] = []
+
+        # Improvement #18 — live goal-progress timeline.
+        gtl = getattr(self, "goal_timeline", None)
+        if gtl is not None and getattr(gtl, "goals", None):
+            try:
+                from agents.reasoning.goal_timeline import render_timeline_for_prompt
+                block = render_timeline_for_prompt(gtl)
+                if block:
+                    lines.append(block)
+            except Exception:
+                pass
+
+        # Improvement #17 — reasoning-trace self-reference (prior decision pathway).
+        trace = getattr(self, "reasoning_trace", None)
+        if trace is not None and len(trace) > 0:
+            try:
+                from agents.reasoning.reasoning_trace import render_chain_for_prompt
+                recent = trace.recent(40)
+                anchor = next((s for s in reversed(recent) if s.kind == "finding"), None) \
+                       or next((s for s in reversed(recent) if s.kind == "validate"), None) \
+                       or (recent[-1] if recent else None)
+                chain = trace.chain_for(anchor.step_id) if anchor else []
+                block = render_chain_for_prompt(chain)
+                if block:
+                    lines.append(block)
+            except Exception:
+                pass
+
+        # Improvement #15 — last self-critique verdict (now populated on the operator
+        # path too, so the operator sees what its pre-mortem just held/aborted and why).
+        crit = i.get("last_self_critique")
+        if isinstance(crit, dict) and crit.get("recommendation"):
+            try:
+                from agents.reasoning.self_critique import render_critique_for_prompt
+                block = render_critique_for_prompt(crit)
+                if block:
+                    lines.append(block)
+            except Exception:
+                pass
+
+        # Improvement #12 — defensive posture (EDR/WAF fingerprint + tradecraft bias).
+        dp = i.get("defensive_posture")
+        if isinstance(dp, dict) and (dp.get("products") or {}):
+            try:
+                from agents.reasoning.defensive_posture import (
+                    DefensivePosture, render_posture_for_prompt,
+                )
+                rebuilt = DefensivePosture(
+                    products            = dict(dp.get("products") or {}),
+                    evidence            = list(dp.get("evidence") or []),
+                    weight              = int(dp.get("weight") or 0),
+                    iteration           = int(dp.get("iteration") or 0),
+                    stealth_recommended = bool(dp.get("stealth_recommended")),
+                    summary             = str(dp.get("summary") or ""),
+                )
+                block = render_posture_for_prompt(rebuilt)
+                if block:
+                    lines.append(block)
+            except Exception:
+                pass
+
+        # Improvement #10 — Neo4j-inferred attack paths.
+        inferred = i.get("inferred_paths") or []
+        if inferred:
+            try:
+                from agents.reasoning.path_inference import render_paths_for_prompt
+                block = render_paths_for_prompt(inferred)
+                if block:
+                    lines.append(block)
+            except Exception:
+                pass
+
+        # Improvement #9 — procedural technique chains (RAG-selected).
+        chain_attachments = i.get("technique_chains") or []
+        if chain_attachments:
+            try:
+                from agents.reasoning.technique_chains import (
+                    TechniqueChain, TechniqueStep, render_chains_for_prompt,
+                )
+                chain_objs: list = []
+                for att in chain_attachments:
+                    if not isinstance(att, dict):
+                        continue
+                    raw = att.get("chain") or {}
+                    if not isinstance(raw, dict):
+                        continue
+                    try:
+                        steps = [TechniqueStep(**s) for s in raw.get("steps", [])
+                                 if isinstance(s, dict)]
+                        chain_objs.append(TechniqueChain(
+                            chain_id    = raw.get("chain_id", ""),
+                            name        = raw.get("name", ""),
+                            description = raw.get("description", ""),
+                            phase       = raw.get("phase", ""),
+                            applies_when= raw.get("applies_when") or {},
+                            steps       = steps,
+                            mitre       = list(raw.get("mitre") or []),
+                            source      = raw.get("source", "builtin"),
+                            confidence  = float(raw.get("confidence", 0.85)),
+                        ))
+                    except Exception:
+                        continue
+                block = render_chains_for_prompt(chain_objs)
+                if block:
+                    lines.append(block)
+            except Exception:
+                pass
+
+        # Improvement #8 — episodic-memory recalls (prior-engagement lessons as priors).
+        recalls = i.get("episodic_recalls") or []
+        if recalls:
+            try:
+                from agents.reasoning.episodic_memory import render_recall_block
+                block = render_recall_block(recalls)
+                if block:
+                    lines.append(block)
+            except Exception:
+                pass
+
+        # Improvement #7 — hypothesis-conditioned scan profile (rendered INLINE — no
+        # helper).  Unlike the seven blocks above this has no helper to guard it, so it
+        # gets its OWN try/except + str-coerced joins + build-then-extend: a malformed
+        # scan_profile (e.g. a non-string priority entry) can only lose scan_profile, it
+        # can never TypeError out the whole reasoning block, and never leaves a dangling
+        # header with no body.
+        try:
+            sp = i.get("scan_profile")
+            if isinstance(sp, dict) and any(sp.get(k) for k in (
+                "priority_ports", "priority_services", "priority_cves",
+                "priority_paths", "priority_hosts",
+            )):
+                _sp_lines = ["--- Scan profile (hypothesis-conditioned) ---"]
+                if sp.get("top_statement"):
+                    _sp_lines.append(f"  Top hypothesis : {str(sp['top_statement'])[:160]}")
+                if sp.get("priority_services"):
+                    _sp_lines.append(f"  Priority svcs  : {', '.join(str(x) for x in sp['priority_services'][:8])}")
+                if sp.get("priority_ports"):
+                    _sp_lines.append(f"  Priority ports : {', '.join(str(p) for p in sp['priority_ports'][:12])}")
+                if sp.get("priority_cves"):
+                    _pc = [(c.get('cve') or str(c)) if isinstance(c, dict) else str(c)
+                           for c in sp['priority_cves'][:8]]
+                    _sp_lines.append(f"  Priority CVEs  : {', '.join(s for s in _pc if s)}")
+                if sp.get("priority_paths"):
+                    _sp_lines.append(f"  Priority paths : {', '.join(str(x) for x in sp['priority_paths'][:8])}")
+                if sp.get("priority_hosts"):
+                    _sp_lines.append(f"  Priority hosts : {', '.join(str(x) for x in sp['priority_hosts'][:6])}")
+                _sp_lines.append("  → Bias scans toward these targets; defer catch-all defaults.")
+                _sp_lines.append("---")
+                lines.extend(_sp_lines)
+        except Exception:
+            pass
+
+        return "\n".join(lines).strip()

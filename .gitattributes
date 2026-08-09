@@ -1,0 +1,11 @@
+# Shell scripts MUST be checked out with LF endings — they run on Kali/Linux, and
+# CRLF breaks bash ("set: invalid option name" on `set -euo pipefail`, "bad
+# interpreter" on the shebang).  The Windows dev box has core.autocrlf=true, which
+# would otherwise convert these to CRLF on checkout; this rule overrides that.
+*.sh            text eol=lf
+knowledge/fetch_sources.sh text eol=lf
+
+# Keep other line-ending-sensitive Unix files LF too.
+*.bash          text eol=lf
+Dockerfile      text eol=lf
+*.j2            text eol=lf

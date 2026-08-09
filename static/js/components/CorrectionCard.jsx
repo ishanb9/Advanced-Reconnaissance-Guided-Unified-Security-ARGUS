@@ -15,7 +15,7 @@ function CorrectionCard({ correction }) {
     ? new Date(correction.timestamp * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
     : '';
 
-  return React.createElement('div', {
+  return React.createElement('div', { 'data-slot': 'CorrectionCard.CorrectionCard',
     onClick: () => setExpanded(e => !e),
     style: {
       background:   'var(--bg-panel)',

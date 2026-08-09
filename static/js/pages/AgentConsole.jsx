@@ -134,7 +134,7 @@ function CommsEntry({ entry, agentColor }) {
   const reply     = isLLM ? entry.response : entry.result;
   const hasReply  = reply && reply !== '(no results)';
 
-  return React.createElement('div', {
+  return React.createElement('div', { 'data-slot': 'AgentConsole.CommsEntry',
     onClick: () => setExpanded(e => !e),
     style: {
       borderRadius: 6, padding: '8px 10px', marginBottom: 5, cursor: 'pointer',
@@ -277,7 +277,7 @@ function SubagentRow({ name, agentColor, sessionId }) {
     fontFamily: 'var(--font-mono)', boxSizing: 'border-box',
   };
 
-  return React.createElement('div', {
+  return React.createElement('div', { 'data-slot': 'AgentConsole.SubagentRow',
     style: {
       borderRadius: 6, marginBottom: 4, overflow: 'hidden',
       border: `1px solid ${expanded ? agentColor + '30' : isStopped ? 'rgba(255,170,0,0.2)' : 'var(--border)'}`,
@@ -513,7 +513,7 @@ function SubagentsPanel({ selectedAgent, agentColor, sessionId }) {
   const subagentNames = AGENT_SUBAGENTS[selectedAgent] || [];
 
   if (subagentNames.length === 0) {
-    return React.createElement('div', {
+    return React.createElement('div', { 'data-slot': 'AgentConsole.SubagentsPanel',
       style: { flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center',
                flexDirection: 'column', gap: 8, color: 'var(--border)', fontFamily: 'var(--font-mono)' }
     },
@@ -618,7 +618,7 @@ function SubagentMatrix() {
 
   const isActive = (s) => s === 'running' || s === 'thinking';
 
-  return React.createElement('div', {
+  return React.createElement('div', { 'data-slot': 'AgentConsole.SubagentMatrix',
     style: {
       background: 'var(--bg-surface)', border: '1px solid var(--border)', borderRadius: 8,
       padding: '8px 12px', flexShrink: 0,
@@ -754,7 +754,7 @@ function AgentConsole() {
     }
   }, label);
 
-  return React.createElement('div', {
+  return React.createElement('div', { 'data-slot': 'AgentConsole.AgentConsole',
     style: { display: 'flex', flexDirection: 'column', height: '100%',
              padding: 16, gap: 12, background: 'var(--bg-base, var(--bg-surface))' }
   },

@@ -75,7 +75,7 @@ function severityColor(sev) {
 // ── Source badge component ─────────────────────────────────────────────────
 function SourceBadge({ source }) {
   const m = SOURCE_META[source] || SOURCE_META.default;
-  return React.createElement('span', {
+  return React.createElement('span', { 'data-slot': 'OsintIntel.SourceBadge',
     style: {
       padding: '1px 7px', borderRadius: 4, fontSize: 10, whiteSpace: 'nowrap',
       background: m.bg, border: `1px solid ${m.border}`, color: m.text,
@@ -89,7 +89,7 @@ function DataTypePill({ dataType }) {
   if (!dataType) return null;
   const m = DATA_TYPE_LABELS[dataType];
   if (!m) return null;
-  return React.createElement('span', {
+  return React.createElement('span', { 'data-slot': 'OsintIntel.DataTypePill',
     style: {
       padding: '1px 6px', borderRadius: 3, fontSize: 9, whiteSpace: 'nowrap',
       background: 'rgba(255,255,255,0.04)', border: `1px solid ${m.color}30`,
@@ -216,7 +216,7 @@ function StatsBar({ results }) {
     }
   }, `${val} ${label}`);
 
-  return React.createElement('div', { style: { display: 'flex', flexWrap: 'wrap', gap: 4, flexShrink: 0 } },
+  return React.createElement('div', { 'data-slot': 'OsintIntel.StatsBar', style: { display: 'flex', flexWrap: 'wrap', gap: 4, flexShrink: 0 } },
     pill('CVE records',  byCve,   'var(--critical)'),
     pill('exploits',     byExpl,  '#ff8c00'),
     pill('high/critical',byHigh,  '#ff5050'),
@@ -293,7 +293,7 @@ function OsintIntel() {
   };
   const card = { background: 'var(--bg-surface)', border: '1px solid var(--border)', borderRadius: 8 };
 
-  return React.createElement('div', {
+  return React.createElement('div', { 'data-slot': 'OsintIntel.OsintIntel',
     style: { display: 'flex', flexDirection: 'column', height: '100%', padding: 16, gap: 12, background: 'var(--bg-surface)' }
   },
     // ── Header ──────────────────────────────────────────────────

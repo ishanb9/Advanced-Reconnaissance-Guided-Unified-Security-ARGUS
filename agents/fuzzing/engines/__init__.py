@@ -25,6 +25,12 @@ _REGISTRY = {
     # Closed-source greybox (AFL++ QEMU user-mode + ASan/QASan oracle).  Lab-only,
     # opt-in modality — never auto-selected by the autonomous engine.
     "binary_blackbox": "agents.fuzzing.engines.binary_greybox:BinaryGreyboxEngine",
+    # Source-available code reasoning (taint → hypothesis → harness-build prove).  Lab-only,
+    # opt-in, source-tree only — never auto-selected by the autonomous engine.
+    "source": "agents.fuzzing.engines.source_engine:SourceEngine",
+    # Differential testing: same input to target + reference → silent logic/parse divergences.
+    # Lab-only, opt-in — requires an operator-supplied authorized reference endpoint.
+    "differential": "agents.fuzzing.engines.diff_engine:DiffEngine",
 }
 
 

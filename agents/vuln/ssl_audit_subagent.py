@@ -29,6 +29,30 @@ logger = logging.getLogger(__name__)
 _HEARTBLEED_RE = re.compile(
     r"(heartbleed|VULNERABLE|CVE-2014-0160)", re.IGNORECASE
 )
+
+# [50] A TLS vuln is CONFIRMED only when the scanner emits an explicit VULNERABLE VERDICT
+# for it — nmap NSE "State: VULNERABLE" / a "VULNERABLE:" result block, testssl
+# "VULNERABLE (NOT ok)", or "vulnerable to <x>" — NOT the bare test NAME (nmap echoes every
+# --script name it runs, and prints "ssl-heartbleed:" headers) nor a lone "VULNERABLE"
+# keyword.  Stops a CRITICAL CVE being minted from a tool test-name.
+_SSL_VERDICT_POS_RE = re.compile(
+    r"state:\s*vulnerable|vulnerable \(not ok\)|^\s*\|?\s*vulnerable:\s*$|\bis vulnerable\b|"
+    r"vulnerable to\b", re.I | re.M)
+_SSL_VERDICT_NEG_RE = re.compile(
+    r"not vulnerable|likely safe|state:\s*(?:not|likely)\b|no ssl|not offered|offers no", re.I)
+
+
+def _confirmed_ssl_vuln(text: str, *terms: str) -> bool:
+    """True only when the scanner explicitly flagged one of ``terms`` as VULNERABLE — a
+    positive verdict within a short window of the term, with no negation nearby — never
+    from the test name or a bare keyword alone.  Pure + unit-testable."""
+    t = text or ""
+    for term in terms:
+        for m in re.finditer(re.escape(term), t, re.I):
+            win = t[max(0, m.start() - 60): m.end() + 320]
+            if _SSL_VERDICT_POS_RE.search(win) and not _SSL_VERDICT_NEG_RE.search(win):
+                return True
+    return False
 _POODLE_RE = re.compile(
     r"(poodle|VULNERABLE to POODLE|CVE-2014-3566)", re.IGNORECASE
 )
@@ -177,8 +201,8 @@ class SslAuditSubagent(BaseSubagent):
 
             # ── Parse and emit findings ───────────────────────────────────
 
-            # Heartbleed (CRITICAL)
-            if _HEARTBLEED_RE.search(combined):
+            # Heartbleed (CRITICAL) — gated on an explicit VULNERABLE verdict [50]
+            if _confirmed_ssl_vuln(combined, "heartbleed", "CVE-2014-0160"):
                 await self.store_finding(Finding(
                     title=f"Heartbleed (CVE-2014-0160) on {host_port}",
                     description=(
@@ -197,8 +221,8 @@ class SslAuditSubagent(BaseSubagent):
                     exploit_suggestion="MSF: auxiliary/scanner/ssl/openssl_heartbleed",
                 ))
 
-            # POODLE (CRITICAL)
-            if _POODLE_RE.search(combined):
+            # POODLE (CRITICAL) — gated on an explicit VULNERABLE verdict [50]
+            if _confirmed_ssl_vuln(combined, "poodle", "CVE-2014-3566"):
                 await self.store_finding(Finding(
                     title=f"POODLE (CVE-2014-3566) on {host_port}",
                     description=(
@@ -216,8 +240,8 @@ class SslAuditSubagent(BaseSubagent):
                     exploit_suggestion="Disable SSLv3 server-side. No direct MSF module.",
                 ))
 
-            # BEAST (CRITICAL)
-            if _BEAST_RE.search(combined):
+            # BEAST (CRITICAL) — gated on an explicit VULNERABLE verdict [50]
+            if _confirmed_ssl_vuln(combined, "BEAST", "CVE-2011-3389"):
                 await self.store_finding(Finding(
                     title=f"BEAST (CVE-2011-3389) on {host_port}",
                     description=(
@@ -234,8 +258,8 @@ class SslAuditSubagent(BaseSubagent):
                     exploit_suggestion="Disable TLS 1.0 and prefer TLS 1.2+ with GCM ciphers.",
                 ))
 
-            # CCS Injection (CRITICAL)
-            if _CCS_RE.search(combined):
+            # CCS Injection (CRITICAL) — gated on an explicit VULNERABLE verdict [50]
+            if _confirmed_ssl_vuln(combined, "ccs injection", "openssl ccs", "CVE-2014-0224"):
                 await self.store_finding(Finding(
                     title=f"OpenSSL CCS Injection (CVE-2014-0224) on {host_port}",
                     description=(

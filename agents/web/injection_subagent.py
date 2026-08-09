@@ -38,7 +38,16 @@ _SSRF_VULN_RE    = re.compile(r"SSRF found|vulnerable to SSRF|successful.*ssrf|r
 _SSRF_INTERNAL_RE = re.compile(r"169\.254\.169\.254|metadata\.google|169\.254|10\.\d|192\.168\.|172\.(1[6-9]|2\d|3[01])\.", re.IGNORECASE)
 
 # commix
-_COMMIX_VULN_RE  = re.compile(r"is vulnerable|shell.*prompt|commix.*\$|command injection|os-shell", re.IGNORECASE)
+# [60] commix CONFIRMS injection only via its real positive VERDICT — "the parameter '…'
+# is vulnerable", an os-shell prompt, or an injection point — NOT its startup BANNER
+# ("Automated All-in-One OS Command Injection tool"), which literally contains the phrase
+# "command injection".  A negative-result guard rejects "no usable links"/"not injectable".
+_COMMIX_VULN_RE  = re.compile(
+    r"parameter[^\n]{0,80}is vulnerable|is vulnerable to (?:os )?command|os-shell>|"
+    r"injection point(?:s)? (?:found|detected|identified)", re.IGNORECASE)
+_COMMIX_NEG_RE   = re.compile(
+    r"no usable links|not injectable|does not seem to be injectable|"
+    r"no parameter[^\n]{0,40}vulnerable|\bunable to\b|nothing to (?:test|inject)", re.IGNORECASE)
 _COMMIX_SHELL_RE = re.compile(r"os-shell>|pseudo-terminal shell|commix pseudo-shell", re.IGNORECASE)
 
 # nosqlmap
@@ -229,7 +238,7 @@ class InjectionSubagent(BaseSubagent):
                 )
                 self._tool_outputs[f"commix_{url}"] = commix_out
 
-                if _COMMIX_VULN_RE.search(commix_out):
+                if _COMMIX_VULN_RE.search(commix_out) and not _COMMIX_NEG_RE.search(commix_out):
                     shell_confirmed = bool(_COMMIX_SHELL_RE.search(commix_out))
                     sev = "CRITICAL" if shell_confirmed else "HIGH"
                     finding = {

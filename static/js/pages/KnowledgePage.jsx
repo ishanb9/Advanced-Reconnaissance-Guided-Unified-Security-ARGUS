@@ -33,7 +33,7 @@ const OUTCOME_COLORS = {
 
 function Bar({ label, value, max, color }) {
   const pct = max > 0 ? Math.min(100, (value / max) * 100) : 0;
-  return React.createElement('div', { style: { marginBottom: 8 } },
+  return React.createElement('div', { 'data-slot': 'KnowledgePage.Bar', style: { marginBottom: 8 } },
     React.createElement('div', { style: { display: 'flex', justifyContent: 'space-between', fontSize: 11, marginBottom: 3 } },
       React.createElement('span', { style: { color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' } }, label),
       React.createElement('span', { style: { color, fontFamily: 'var(--font-mono)' } }, value)
@@ -120,7 +120,7 @@ function KnowledgePage() {
 
   const notInstalled = stats && !stats.available;
 
-  return React.createElement('div', {
+  return React.createElement('div', { 'data-slot': 'KnowledgePage.KnowledgePage',
     style: { padding: 16, height: '100%', overflowY: 'auto', background: 'var(--bg-surface)', display: 'flex', flexDirection: 'column', gap: 14 }
   },
     // Header

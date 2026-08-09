@@ -1,0 +1,142 @@
+/* ═══════════════════════════════════════════════════════════════════════
+   AVATAR · WARDEN — cyber risk & governance
+   CISO / board / risk & audit committee. Risk-register energy: graphite +
+   brass, MUTED risk ramp (no neon), ledger rules, authoritative type,
+   minimal motion, few defensible numbers. Light variant for board packs.
+
+   WARDEN shows ONLY substantiated metrics. Anything requiring data ARGUS
+   does not hold (asset criticality, owner/RACI, inherent-vs-residual,
+   risk appetite, framework mapping, financial impact, SLA policy) renders
+   as an explicit NOT-CONFIGURED state — never estimated, never inferred.
+   ═══════════════════════════════════════════════════════════════════════ */
+:root[data-avatar="warden"] {
+  --avatar-name: 'WARDEN';
+
+  /* SURFACE — graphite */
+  --bg-base:      #0F1114;
+  --bg-void:      #0F1114;
+  --bg-surface:   #16191E;
+  --bg-panel:     #16191E;
+  --bg-elevated:  #1E222A;
+  --bg-glass:     rgba(30, 34, 42, 0.84);
+  --bg-sidebar:   #0B0D10;
+
+  /* BORDERS */
+  --border-dim:   #23272F;
+  --border:       #343A45;
+  --border-light: #343A45;
+  --border-bright:#4C5462;
+  --border-focus: var(--accent);
+
+  /* PRIMARY — brass (seniority, not neon) */
+  --accent:       #C9A227;
+  --accent-dim:   #8F7318;
+  --accent-glow:  rgba(201, 162, 39, 0.20);
+  --accent-subtle:rgba(201, 162, 39, 0.06);
+
+  --cyan:         #7FA8C9;
+  --violet:       #8A7FA8;
+  --violet-glow:  rgba(138, 127, 168, 0.24);
+
+  /* TEXT */
+  --text-primary: #E8EAED;
+  --text-secondary:#A3AAB5;
+  --text-muted:   #6B7280;
+
+  /* SEVERITY — deliberately MUTED / professional, not alarmist */
+  --critical:     #C0392B;
+  --high:         #CF7B31;
+  --medium:       #C9A227;
+  --amber:        #C9A227;
+  --low:          #3E8E5A;
+  --info:         #7FA8C9;
+  --supernova:    #9B4F7A;
+  --critical-bg:  rgba(192, 57, 43, 0.13);   --critical-bd: rgba(192, 57, 43, 0.46);
+  --high-bg:      rgba(207,123, 49, 0.13);   --high-bd:     rgba(207,123, 49, 0.44);
+  --medium-bg:    rgba(201,162, 39, 0.13);   --medium-bd:   rgba(201,162, 39, 0.44);
+  --low-bg:       rgba( 62,142, 90, 0.12);   --low-bd:      rgba( 62,142, 90, 0.42);
+  --info-bg:      rgba(127,168,201, 0.12);   --info-bd:     rgba(127,168,201, 0.42);
+
+  /* TYPE — authoritative headings, tabular figures */
+  --font-ui:      'Inter', system-ui, sans-serif;
+  --font-display: 'Inter', system-ui, sans-serif;
+  --font-mono:    'JetBrains Mono', 'Courier New', monospace;
+
+  /* SURFACE LANGUAGE — ledger plates */
+  --panel-radius: 4px;
+  --panel-border: 1px solid var(--border-dim);
+  --panel-bg: var(--bg-surface);
+  --panel-shadow: 0 2px 8px -4px rgba(0,0,0,.6);
+  --rail-gradient: linear-gradient(90deg, var(--accent), transparent 55%);
+
+  /* DENSITY / MOTION / TEXTURE */
+  --density: 1.18;             /* low-medium: few, well-defended numbers */
+  --tex-opacity: 0.12;         /* faint ledger rules */
+  --dur-3: 260ms; --dur-4: 420ms;
+  --radius: 4px; --radius-md: 5px; --radius-lg: 6px; --radius-xl: 10px;
+}
+
+/* Light board-pack variant */
+:root[data-avatar="warden"][data-avatar-variant="light"] {
+  --bg-base:      #F4F5F7;
+  --bg-void:      #F4F5F7;
+  --bg-surface:   #FFFFFF;
+  --bg-panel:     #FFFFFF;
+  --bg-elevated:  #FBFBFD;
+  --bg-sidebar:   #EAECEF;
+  --border-dim:   #DDE1E6;
+  --border:       #C2C8D0;
+  --border-bright:#9AA3AE;
+  --text-primary: #14171C;
+  --text-secondary:#4A515C;
+  --text-muted:   #757D89;
+  --accent:       #96751A;
+  --panel-shadow: 0 1px 3px rgba(20,23,28,.10);
+}
+
+/* Governance chrome — measured, not shouty */
+:root[data-avatar="warden"] .page-title {
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+:root[data-avatar="warden"] .section-title {
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  font-size: var(--fs-xs);
+  color: var(--text-muted);
+}
+
+/* Ledger rule under headline figures */
+:root[data-avatar="warden"] .stat-tile {
+  border-left: 3px solid var(--border);
+}
+:root[data-avatar="warden"] .stat-value {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+/* 5×5 likelihood × impact matrix (rendered by the viz layer) */
+:root[data-avatar="warden"] .a-riskmatrix {
+  display: grid; grid-template-columns: auto repeat(5, 1fr);
+  gap: 2px; font-family: var(--font-mono); font-size: var(--fs-xs);
+}
+:root[data-avatar="warden"] .a-riskmatrix .cell {
+  aspect-ratio: 1 / 1; display: flex; align-items: center; justify-content: center;
+  border: 1px solid var(--border-dim); border-radius: 2px;
+  color: var(--text-primary); font-weight: 700;
+}
+:root[data-avatar="warden"] .a-riskmatrix .cell[data-band="low"]      { background: var(--low-bg); }
+:root[data-avatar="warden"] .a-riskmatrix .cell[data-band="medium"]   { background: var(--medium-bg); }
+:root[data-avatar="warden"] .a-riskmatrix .cell[data-band="high"]     { background: var(--high-bg); }
+:root[data-avatar="warden"] .a-riskmatrix .cell[data-band="critical"] { background: var(--critical-bg); }
+:root[data-avatar="warden"] .a-riskmatrix .cell[data-band="none"]     { background: transparent; color: var(--text-muted); }
+
+/* Governance "not configured" is a first-class state, styled to be
+   obviously an absence of data rather than a measured zero. */
+:root[data-avatar="warden"] .a-nodata-block { background: transparent; }
+
+@media print {
+  :root[data-avatar="warden"] #argus-avatar-tex { display: none !important; }
+  :root[data-avatar="warden"] .panel { box-shadow: none; }
+}

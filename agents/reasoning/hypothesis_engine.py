@@ -718,9 +718,22 @@ class HypothesisEngine:
 
             query = " ".join(query_parts)[:200]
 
+            # #8 — tech-key the retrieval toward the CURRENT host's stack so tech-relevant
+            # KB chunks surface.  Empty tech (or a kb_fn that doesn't accept the kwarg) →
+            # falls back to the identical unbiased call, so behaviour is unchanged.
+            _tb: list = []
+            try:
+                from knowledge.knowledge_base import _tech_bias_from_intel as _tbi
+                _tb = _tbi(intel)
+            except Exception:
+                _tb = []
+
             # Await coroutine if kb_fn is async, otherwise call directly
             import inspect
-            result = self._kb(query, top_k=3)
+            try:
+                result = self._kb(query, top_k=3, tech_bias=_tb) if _tb else self._kb(query, top_k=3)
+            except TypeError:
+                result = self._kb(query, top_k=3)
             if inspect.iscoroutine(result):
                 result = await result
 

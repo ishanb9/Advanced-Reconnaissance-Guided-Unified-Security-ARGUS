@@ -42,9 +42,17 @@ Classifications produced:
   • bad_args       — args malformed; re-craft
   • unsupported    — protocol/feature not applicable to this target
                      (e.g. enum4linux on Linux, AD scripts on web app)
-  • scope_drift    — target outside operator scope
   • dead_endpoint  — endpoint doesn't exist; mark dead
   • other          — generic; surface as advisory only
+
+SCOPE IS NOT THIS AGENT'S JOB.  It could previously answer `scope_drift`, which is
+a category error: this agent sees one tool's stderr, never the engagement's
+authorization.  In the field it read ANOTHER CLIENT's addresses out of recalled
+memory, concluded the actual client was out of scope, and advised stopping the
+scan and going after the other client's subnet instead.  A tool failure cannot
+establish what is in scope.  Scope is fixed before launch at the target-selection
+gate and enforced by the safety governor + per-target authorization; this agent
+classifies TECHNICAL failure only.
 
 Course corrections produced:
 
@@ -191,6 +199,16 @@ class ErrorAnalyzerAgent(BaseMetaAgent):
             "classify the error and recommend a SPECIFIC, ACTIONABLE "
             "course correction so the engagement can move forward "
             "instead of looping on the same dead end.\n\n"
+            "SCOPE IS OUT OF YOUR REMIT.  You are looking at ONE tool failure. "
+            "You cannot see the engagement's authorization and must not infer it. "
+            "Never decide, state or imply that the target is out of scope, "
+            "unauthorized, or the wrong client; never recommend stopping the "
+            "engagement; and never name a different host, IP or network to scan "
+            "instead of the current target.  Addresses appearing in memory or "
+            "prior-engagement context belong to OTHER engagements and are never "
+            "alternatives you may propose.  If a failure looks like a scope or "
+            "authorization problem, classify it \"other\" and describe the "
+            "technical symptom only — the human operator owns scope.\n\n"
             "CRITICAL VHOST RULE: a redirect or Host-header reference to an "
             "internal-looking hostname (*.htb, *.local, *.lan, *.corp, "
             "*.internal, *.thm) is NOT scope_drift — that hostname is a "
@@ -207,7 +225,7 @@ class ErrorAnalyzerAgent(BaseMetaAgent):
             "{\n"
             "  \"classification\": one of "
             "\"transient\" | \"wrong_target\" | \"tool_missing\" | "
-            "\"bad_args\" | \"unsupported\" | \"scope_drift\" | "
+            "\"bad_args\" | \"unsupported\" | "
             "\"dead_endpoint\" | \"other\",\n"
             "  \"confidence\": 0.0-1.0,\n"
             "  \"reasoning\": one short sentence,\n"
@@ -375,16 +393,69 @@ class ErrorAnalyzerAgent(BaseMetaAgent):
         parsed = self._parse_json(response)
         if not parsed:
             return
+        # Defence in depth: the prompt forbids scope verdicts, but the answer is
+        # model output and must not be trusted to obey.  Anything scope-shaped is
+        # demoted to a plain technical advisory, and foreign addresses are stripped
+        # from the advice before it can be pinned into every later prompt.
+        _cls = self._sanitize_classification(parsed.get("classification", "other"))
+        _cc  = self._strip_foreign_targets(evt, parsed.get("course_correction", "")[:400])
         await self._apply_classification(
             evt, sig,
-            classification    = parsed.get("classification", "other"),
+            classification    = _cls,
             confidence        = float(parsed.get("confidence", 0.5) or 0.5),
             reasoning         = parsed.get("reasoning", "")[:300],
-            course_correction = parsed.get("course_correction", "")[:400],
+            course_correction = _cc,
             block_tool        = bool(parsed.get("block_tool", False)),
             block_target      = bool(parsed.get("block_target", False)),
             replacement_cmd   = (parsed.get("replacement_command") or "")[:400],
         )
+
+    # ── Guards: this agent never decides scope, and never names another
+    #    engagement's addresses ─────────────────────────────────────────────
+
+    #: Everything this agent is allowed to conclude.  Purely technical.
+    ALLOWED_CLASSIFICATIONS = ("transient", "wrong_target", "tool_missing",
+                               "bad_args", "unsupported", "dead_endpoint", "other")
+
+    @classmethod
+    def _sanitize_classification(cls, raw: str) -> str:
+        """Coerce anything outside the technical taxonomy to 'other'.
+
+        `scope_drift` used to be a valid answer.  A tool's stderr cannot establish
+        authorization, and when recalled memory put another client's subnet in the
+        context the model duly concluded the REAL client was out of scope.  Scope
+        belongs to the pre-launch gate and the governor; a stray verdict here is
+        demoted rather than obeyed.
+        """
+        v = str(raw or "").strip().lower()
+        return v if v in cls.ALLOWED_CLASSIFICATIONS else "other"
+
+    @staticmethod
+    def _strip_foreign_targets(evt: "ErrorEvent", text: str) -> str:
+        """Remove IPs/CIDRs that are not part of THIS engagement.
+
+        The course correction is pinned into every subsequent LLM prompt, so an
+        address that leaks in here becomes a standing instruction.  In the field
+        that produced "stop scanning <client A> ... resume against 192.168.50.0/24"
+        — another client's lab range, recalled from memory.  Only addresses tied to
+        the failing event survive; anything else is replaced with a neutral marker
+        so the technical advice still reads sensibly.
+        """
+        import re as _re
+        if not text:
+            return text
+        _own = {str(getattr(evt, "target", "") or "").strip()}
+        _own.discard("")
+        _ipish = _re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}(?:/\d{1,2})?\b")
+
+        def _keep(m):
+            tok = m.group(0)
+            bare = tok.split("/")[0]
+            if any(bare == o or o.startswith(bare) or bare in o for o in _own):
+                return tok
+            return "[out-of-engagement address removed]"
+
+        return _ipish.sub(_keep, text)
 
     # ── Apply the classification to the EngagementContext ──────
 
@@ -446,8 +517,7 @@ class ErrorAnalyzerAgent(BaseMetaAgent):
         if ctx is not None:
             try:
                 severity = ("critical" if classification in (
-                    "tool_missing", "unsupported", "scope_drift",
-                    "wrong_target"
+                    "tool_missing", "unsupported", "wrong_target"
                 ) else "important")
                 ctx.pin_insight(
                     text=(

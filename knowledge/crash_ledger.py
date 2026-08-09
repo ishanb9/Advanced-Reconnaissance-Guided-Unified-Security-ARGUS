@@ -38,6 +38,10 @@ import re
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, Optional
+try:
+    from knowledge.identifier_scrub import contains_identifier as _has_ident
+except ImportError:                                          # flat/script mode
+    from identifier_scrub import contains_identifier as _has_ident
 
 log = logging.getLogger(__name__)
 
@@ -54,6 +58,14 @@ def _short(target: str, n: int = 24) -> str:
     try:
         base = os.path.basename(str(target).rstrip("/\\")) or str(target)
         slug = _SAFE.sub("_", base).strip("_")
+        # The ledger is a repo-level JSON shared by every engagement, so the slug
+        # must not name a client asset.  A URL/host/binary path here would persist
+        # one client's identity into the next client's crash clustering.  Hash it
+        # instead: still stable (same target always clusters together), no longer
+        # a name.  A plainly non-identifying slug is kept for readability.
+        if _has_ident(slug) or _has_ident(str(target)):
+            import hashlib as _h
+            return "t_" + _h.sha256(str(target).encode("utf-8", "ignore")).hexdigest()[:12]
         return (slug or "target")[:n]
     except Exception:
         return "target"

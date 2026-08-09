@@ -53,7 +53,7 @@ function PhaseTimeline(props) {
 
   // ── Compact: horizontal pill strip ─────────────────────────────
   if (compact) {
-    return React.createElement('div', {
+    return React.createElement('div', { 'data-slot': 'PhaseTimeline.PhaseTimeline',
       style: { display: 'flex', alignItems: 'center', overflowX: 'auto', padding: '2px 0', gap: 4 }
     },
       _PT_PHASES.map(function(phase) {

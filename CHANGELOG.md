@@ -15,6 +15,32 @@ The format is grouped by:
 
 ## Unreleased
 
+### Changed — One canonical report (theme consolidation)
+
+- **The 5 selectable report themes were consolidated into a single canonical
+  report** (`report/themes/argus.html.j2`): a "dark hero + light body" design
+  carrying every section — executive summary, engagement dashboard, per-finding
+  reproduction steps, the compromise-basis block, findings register + detailed
+  cards, coverage/attempts, MITRE mapping, detection map, loot/evidence, AI/LLM
+  security, methodology, and reasoning journal.
+- **New server-side inline-SVG chart engine** (`report/charts.py`): severity
+  donut, risk gauge, coverage-outcome bars, MITRE tactic coverage, and the
+  attack-path kill-chain — rendered as pure SVG (WeasyPrint runs no JavaScript),
+  authored at true render width so text stays crisp.
+- **Primary PDF engine is now headless Chromium (Playwright)** for browser-grade
+  fidelity, with WeasyPrint kept as the pure-python fallback and wkhtmltopdf last.
+  Both run off the event loop; page numbering is drawn via the engine's native
+  footer. **Premium fonts** (`fonts-inter`, `fonts-jetbrains-mono`,
+  `fonts-noto-core`) are embedded when installed (theme falls back to system fonts).
+- The report now also surfaces the **attack-surface / services table**, **observed
+  (unvalidated) issues**, captured **flags**, **exploit modules / PoCs considered**,
+  **tool-chain coverage**, and **win conditions** — data that was previously collected
+  but not shown.
+- The report **theme picker was removed** from the UI (nothing to pick).
+- **Backward-compat:** `GET /sessions/{id}/report?theme=…` still returns HTTP
+  200 — any theme value now renders the single `argus` report; `/report/themes`
+  returns the single entry; the legacy `report/` template remains the fallback.
+
 ### Added — Autonomous engagement engine
 
 - **Tiered-LLM OPERATOR engine** (`agents/operator_agent/`) — an

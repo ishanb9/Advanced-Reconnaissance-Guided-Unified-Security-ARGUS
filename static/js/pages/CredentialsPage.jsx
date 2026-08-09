@@ -33,7 +33,7 @@ function CredTypeDonut({ creds }) {
   const total = creds.length;
 
   if (total === 0) {
-    return React.createElement('div', {
+    return React.createElement('div', { 'data-slot': 'CredentialsPage.CredTypeDonut',
       style: { display: 'flex', alignItems: 'center', justifyContent: 'center',
                height: 100, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', fontSize: 11 }
     }, '— no data —');
@@ -137,7 +137,7 @@ function CredTypeDonut({ creds }) {
 // ── ServiceBar: horizontal bar chart for top services ───────────────────────
 function ServiceBar({ creds }) {
   if (creds.length === 0) {
-    return React.createElement('div', {
+    return React.createElement('div', { 'data-slot': 'CredentialsPage.ServiceBar',
       style: { display: 'flex', alignItems: 'center', justifyContent: 'center',
                height: 100, color: 'var(--text-muted)', fontFamily: 'var(--font-mono)', fontSize: 11 }
     }, '— no data —');
@@ -303,7 +303,7 @@ function CredentialsPage({ sessionId }) {
     },
   ];
 
-  return React.createElement('div', { style: { padding: 24 } },
+  return React.createElement('div', { 'data-slot': 'CredentialsPage.CredentialsPage', style: { padding: 24 } },
 
     // Title
     React.createElement(Title, { level: 3, style: { color: 'var(--cyan)', marginBottom: 16 } },

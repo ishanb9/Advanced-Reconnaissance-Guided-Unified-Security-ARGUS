@@ -387,6 +387,15 @@ OUTCOME_PATTERNS: List[Tuple[str, str]] = [
     (r"no access|failed|not vulnerable|patched|could not|did not work|unsuccessful",                          "failed"),
     (r"lateral movement|moved.*domain|compromised.*host",                                                     "lateral"),
     (r"exfil|data.*stolen|credential.*dump",                                                                  "post_exploit"),
+    # Scan-derived documents (auto_ingest) speak a different dialect to writeups:
+    # they say "shell_obtained: true" and "**CRITICAL** ... RCE", never "got a
+    # shell".  Without these every ingested engagement scored outcome=unknown —
+    # so the ONE thing a TTP memory exists to record, whether the technique
+    # actually worked, was absent from the whole scan corpus.
+    (r"root_obtained:\s*true|root:\s*YES",                                                                    "root"),
+    (r"shell_obtained:\s*true|shell obtained:\s*YES",                                                         "shell obtained"),
+    (r"\*\*(?:CRITICAL|HIGH)\*\*.*(?:rce|remote code|deserial|injection|traversal|upload|auth bypass)",   "exploited"),
+    (r"reached=(?:privesc|foothold)",                                                                     "shell obtained"),
 ]
 
 DIFFICULTY_PATTERNS: Dict[str, str] = {
@@ -401,6 +410,24 @@ PORT_RE    = re.compile(r'\b(\d{2,5})/(?:tcp|udp|open)\b|\bport[s]?\s+(\d{2,5})\
 CVE_RE     = re.compile(r'CVE-\d{4}-\d{4,7}', re.I)
 MITRE_RE   = re.compile(r'T\d{4}(?:\.\d{3})?', re.I)
 BOX_NAME_RE = re.compile(r'(?:machine|box|target|room|challenge)[:\s]+([A-Za-z0-9_-]{3,20})', re.I)
+
+# PRODUCT + VERSION.  "tomcat" retrieves noise; "tomcat 9.0.30" retrieves the CVE.
+# Version is the strongest signal a pentest corpus can carry, and nothing was
+# capturing it — services came back as bare product names, so a chunk about a
+# patched release ranked identically to one about the vulnerable release.
+# Matches "Apache Tomcat/9.0.30", "OpenSSH 8.2p1", "nginx/1.18.0", "PHP 7.4.3".
+# The product class deliberately EXCLUDES '.' and '-': allowing them lets the
+# product token swallow the version's leading digits.  Word boundaries keep
+# "Started: 2026-07-25" and "Findings: 4" from being read as products.
+PRODUCT_VERSION_RE = re.compile(
+    r'\b([A-Za-z][A-Za-z0-9+]{2,24})[\s/_-]v?(\d+\.\d+(?:\.\d+)?(?:[a-z]\d*)?)\b'
+)
+#: Words that look like a product but are not one, so "Findings 4.2" is dropped.
+_NOT_A_PRODUCT = frozenset({
+    "cve", "cvss", "version", "port", "ports", "findings", "finding", "score",
+    "severity", "duration", "started", "count", "total", "python", "utf",
+    "http", "https", "tcp", "udp", "step", "phase", "line", "col", "id",
+})
 
 # Common command-line indicators
 CMD_LINE_RE = re.compile(
@@ -983,6 +1010,26 @@ def extract_metadata(text: str) -> Dict[str, Any]:
     box_match = BOX_NAME_RE.search(head)
     box_name  = box_match.group(1).lower() if box_match else ""
 
+    # product@version pairs, deduped, most specific first.
+    # IPv4 is masked FIRST: "-p8080 192.168.50.44" otherwise yields the bogus
+    # product "p8080" with "version" 192.168.50 — an address read as a version,
+    # which would pollute the corpus with junk products and skew retrieval.
+    _vtext = IP_RE.sub(" ", text) if "IP_RE" in globals() else re.sub(
+        r"\b(?:\d{1,3}\.){3}\d{1,3}\b", " ", text)
+    versions = []
+    for m in PRODUCT_VERSION_RE.finditer(_vtext):
+        prod, ver = m.group(1).lower().strip("._-"), m.group(2)
+        if len(prod) < 3 or prod in _NOT_A_PRODUCT or prod.isdigit():
+            continue
+        # A single letter followed by digits is a CLI flag ("p8080", "x64"), a
+        # product name is not.
+        if re.fullmatch(r"[a-z]\d+", prod):
+            continue
+        pair = f"{prod} {ver}"
+        if pair not in versions:
+            versions.append(pair)
+    versions = versions[:15]
+
     # Determine phase
     phase = "mixed"
     if any(a in attack_types for a in ["sqli", "lfi", "rfi", "rce", "file_upload", "xxe", "ssrf", "ssti", "xss"]):
@@ -1008,7 +1055,12 @@ def extract_metadata(text: str) -> Dict[str, Any]:
         "ports":        ports,
         "cves":         cves,
         "mitre_ttps":   mitre_ttps,
+        # box_name is retained for BACKWARD COMPATIBILITY with already-indexed
+        # chunks only.  It was scraped from the ingest "target:" line, which no
+        # longer exists (it named the client), so it is empty for every new
+        # document and must not be reintroduced as a retrieval signal.
         "box_name":     box_name,
+        "versions":     versions,
         "phase":        phase,
     }
 

@@ -654,6 +654,17 @@ class ServiceBannerSubagent(BaseSubagent):
 
         # ── Cleartext protocol ────────────────────────────────────────────
         if port in _CLEARTEXT_PORTS or svc in ("telnet", "rsh", "rexec", "rlogin"):
+            # [56] Confirm the port is actually OPEN before reporting a cleartext service.
+            # A filtered/closed cleartext port is NOT a finding (15.1/50.1 had 23/512/513/514
+            # all 'filtered', yet each was shipped CRITICAL). Proof of open = nmap 'open'
+            # (not 'filtered') on this port, OR a real banner response from the service.
+            _raw = str(banner.get("raw") or "")
+            _banner_txt = str(banner.get("banner") or "")
+            _nmap_open = any(
+                (f"{port}/tcp" in ln and "open" in ln.lower() and "filtered" not in ln.lower())
+                for ln in _raw.splitlines())
+            if not (_nmap_open or len(_banner_txt.strip()) >= 3):
+                return
             await self.store_finding(Finding(
                 title=f"Cleartext Protocol on port {port}: {svc.upper()}",
                 description=(

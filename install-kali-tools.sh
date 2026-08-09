@@ -126,11 +126,21 @@ ensure_mongodb() {
 }
 ensure_mongodb
 
-# weasyprint (server-side styled PDF report export) needs Pango/Cairo/GDK-Pixbuf.
-# Best-effort; the report still exports a styled PDF via browser print-to-PDF if absent.
-c_info "Installing weasyprint system libs (pango/cairo) for styled PDF export"
+# weasyprint (pure-python PDF fallback) needs Pango/Cairo/GDK-Pixbuf.  The PRIMARY
+# report PDF engine is headless Chromium via the PYTHON Playwright.  Both engines are
+# best-effort; the report still exports via browser print-to-PDF if neither is present.
+c_info "Installing weasyprint system libs (pango/cairo) for the pure-python PDF fallback"
 for _wlib in libpango-1.0-0 libpangocairo-1.0-0 libgdk-pixbuf-2.0-0 libcairo2 libffi-dev; do
     apti "$_wlib"
+done
+
+# Premium typography for the report (embedded into the PDF by both engines).  The theme
+# falls back to system fonts if these are absent, so this is best-effort polish.  Each is
+# installed independently — a missing candidate on this distro just warns, never aborts.
+# (fonts-jetbrains-mono is not in Kali's repos; Fira Code is the equivalent premium mono.)
+c_info "Installing premium report fonts (Inter · Fira Code · Noto Serif)"
+for _font in fonts-inter fonts-firacode fonts-noto-core; do
+    apti "$_font"
 done
 
 # The giant Kali meta-package (pulls most of the registry) is OFF by default —

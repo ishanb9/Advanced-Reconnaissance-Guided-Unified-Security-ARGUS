@@ -32,7 +32,7 @@ function MissionBriefBanner() {
     : progress >= 33 ? '#fbbf24'
     : '#E8435A';
 
-  return React.createElement('div', {
+  return React.createElement('div', { 'data-slot': 'MissionBriefBanner.MissionBriefBanner',
     style: {
       borderRadius: 10,
       border: `1px solid ${allDone ? 'rgba(74,222,128,0.4)' : 'rgba(232,67,90,0.30)'}`,

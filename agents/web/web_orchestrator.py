@@ -344,6 +344,13 @@ class WebOrchestrator:
                 ("wafw00f", base),
             ]
             await self._dispatch_tools(tasks, "info_gathering", r)
+        # [58] Content discovery / fingerprint / proxy-audit subagents that were
+        # registered but never auto-dispatched (only the dead `web` branch called them):
+        # directory fuzzing, CMS scanning (wpscan/joomscan/droopescan), and the Burp
+        # Suite integration.  Each is wrapped in _invoke_subagent's own try/except, so a
+        # missing tool (e.g. no Burp installed) degrades to a note, never a crash.
+        for sa in ("DirFuzzSubagent", "CmsSubagent", "BurpSubagent"):
+            await self._invoke_subagent(sa, r)
 
     async def _phase_config(self, r: PhaseResult) -> None:
         # Sensitive files & TLS audit
@@ -415,10 +422,14 @@ class WebOrchestrator:
         await self._invoke_subagent("BrokenAccessControlSubagent", r)
 
     async def _phase_input(self, r: PhaseResult) -> None:
-        # Heavy lifting — call all the existing input-validation subagents
+        # Heavy lifting — call all the existing input-validation subagents.
+        # [58] SsrfSubagent + OWASP2025NativeProbesSubagent were registered but had NO
+        # autonomous caller (the only dispatch was the dead `web` branch of
+        # _run_phase_subagents), so SSRF probing + the OWASP-2025 native suite never ran.
         for sa in (
             "WebVulnScanSubagent", "SqliSubagent", "XssSubagent",
             "InjectionSubagent", "DataIntegritySubagent",
+            "SsrfSubagent", "OWASP2025NativeProbesSubagent",
         ):
             await self._invoke_subagent(sa, r)
 
@@ -537,8 +548,39 @@ class WebOrchestrator:
                     "claims":       {k: body.get(k) for k in ("sub","iss","aud","exp","iat") if k in body},
                     "weak_signals": weak,
                 })
-                if weak:
+                # [61] Persist a REAL finding for genuine weaknesses (was counted in
+                # r.findings + stashed in evidence but never stored, so it never
+                # reached findings.jsonl / the report).  Respect I1: only a real
+                # weakness becomes >=MEDIUM — alg=none enables full forgery (HIGH);
+                # a kid carrying a URL / path-traversal is an injection candidate
+                # (MEDIUM).  A plain HS* token is NOT a vuln on its own (a strong
+                # secret is fine) — keep it as evidence only, never a finding.
+                real_sev = None
+                if alg == "NONE":
+                    real_sev = "high"
+                elif "://" in str(kid) or "../" in str(kid):
+                    real_sev = "medium"
+                if real_sev:
                     r.findings += 1
+                    _store = getattr(self._master, "store_finding", None)
+                    if _store is not None:
+                        try:
+                            try:
+                                from db.schemas import FindingSeverity as _FS
+                                _sv = _FS(real_sev)
+                            except Exception:
+                                _sv = real_sev
+                            await _store(
+                                severity=_sv,
+                                title=f"JWT weakness ({alg or 'unknown alg'})",
+                                description=("A JSON Web Token observed in web traffic is "
+                                             f"weak: {'; '.join(weak)}. alg={alg}, kid={kid!r}."),
+                                host=self._target, service="http",
+                                evidence=f"token={tok[:32]}... alg={alg} kid={kid}",
+                                extra={"source": "web_orchestrator.jwt_analyzer",
+                                       "weak_signals": weak})
+                        except Exception:
+                            pass
 
     async def _invoke_inline_business_logic(self, r: PhaseResult) -> None:
         """LLM-driven business-logic probe.  Pulls discovered forms +
@@ -622,8 +664,19 @@ class WebOrchestrator:
                 pass
             try:
                 inst = cls(**kw)
-                # Most subagents accept url=base via execute()
-                res = await inst.execute(url=base, lhost="LHOST", lport=4444)
+                # [59] Web subagents read the target URL(s) from `web_targets` / `web_urls`
+                # — NOT `url`.  The old `url=base` fell into **kwargs and was DISCARDED, so
+                # every subagent silently fell back to http://{bare_target} (the constructor
+                # host), losing the resolved vhost / HTTPS scheme / non-standard port that
+                # _resolve_targets built.  Pass the base under BOTH accepted names so each
+                # subagent tests the REAL application surface (`url` kept as a harmless extra).
+                # [58] web_targets is consumed as a list of DICTS ([{"url": ...}]) by
+                # every web subagent (`wt["url"]`, guarded by isinstance dict) — a bare
+                # string was silently filtered out, so DirFuzz/OWASP2025/sqli/xss/... fell
+                # back to the bare host.  Pass the dict form so they hit the resolved
+                # vhost/HTTPS/port; keep web_urls (string list) + url for the others.
+                res = await inst.execute(web_targets=[{"url": base}], web_urls=[base],
+                                         url=base, lhost="LHOST", lport=4444)
                 find_added = 0
                 if hasattr(res, "to_dict"):
                     find_added = len(res.to_dict().get("findings") or [])
@@ -648,9 +701,16 @@ class WebOrchestrator:
                 except Exception:
                     pass
 
+    # [58] Classes whose module name the CamelCase splitter can't derive (digits/acronyms).
+    # OWASP2025NativeProbesSubagent would become 'o_w_a_s_p2025_native_probes_subagent',
+    # so its import silently failed and the OWASP-2025 suite never loaded.
+    _MOD_OVERRIDE = {"OWASP2025NativeProbesSubagent": "owasp2025_native_probes"}
+
     @staticmethod
     def _class_to_module(class_name: str) -> str:
         # AuthBypassSubagent -> auth_bypass_subagent
+        if class_name in WebOrchestrator._MOD_OVERRIDE:
+            return WebOrchestrator._MOD_OVERRIDE[class_name]
         out = []
         for i, c in enumerate(class_name):
             if c.isupper() and i > 0:

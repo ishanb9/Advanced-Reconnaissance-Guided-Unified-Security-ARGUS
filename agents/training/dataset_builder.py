@@ -48,6 +48,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+from knowledge.identifier_scrub import scrub_payload as _scrub_rec
 
 logger = logging.getLogger(__name__)
 
@@ -241,6 +242,10 @@ def build_training_set(
             if not session_dir.is_dir():
                 continue
             for rec in emit_for_session(session_dir, label_filter):
+                # This file aggregates EVERY engagement's prompts and responses
+                # into one repo-level artifact — the widest-reach store in the
+                # platform.  Raw prompts carry hosts, URLs and credentials.
+                rec = _scrub_rec(rec)
                 out.write(json.dumps(rec, ensure_ascii=False, default=str) + "\n")
                 count += 1
     logger.info("[training] wrote %d records to %s", count, out_file)

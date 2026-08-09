@@ -1,0 +1,261 @@
+/* ═══════════════════════════════════════════════════════════════════════
+   ARGUS — COMPONENT CONTAINMENT & RICH DIALOGS
+   ───────────────────────────────────────────────────────────────────────
+   Two jobs:
+
+   1. OVERFLOW CONTAINMENT — stop unbounded lists from eating the page.
+      ARGUS panels are inline-styled and mostly had no max-height, so a
+      large data set (50 targets, a long objectives set, dozens of creds)
+      grew the container until it overlapped or starved its siblings.
+      Rules here cap the height and move the overflow INSIDE the panel.
+      Because the inline styles never set max-height/overflow, plain CSS
+      wins without needing !important.
+
+   2. RICH DIALOGS — a shared, avatar-aware dialog language so the
+      human-in-the-loop prompts (target selection, confirmations, token
+      budget, tool timeout) read as deliberate product surfaces.
+
+   Everything is scoped to explicit classes — nothing global is restyled.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/* ═══ 1 · OVERFLOW CONTAINMENT ══════════════════════════════════════════ */
+
+/* ── MissionControl · host/target selector ────────────────────────────────
+   Was: flexWrap:wrap with no cap — 50 IPs pushed the page apart.
+   Now: scrolls internally after ~3 rows, label pinned, edges faded.      */
+.mc-host-selector {
+  max-height: calc(112px * var(--density));
+  overflow-y: auto;
+  overflow-x: hidden;
+  align-content: flex-start;
+  scrollbar-width: thin;
+  /* fade the bottom edge so it's obvious more content exists */
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 14px), transparent 100%);
+          mask-image: linear-gradient(to bottom, #000 calc(100% - 14px), transparent 100%);
+}
+.mc-host-selector:not(:hover) { scrollbar-color: transparent transparent; }
+.mc-host-selector .mc-host-selector-label {
+  position: sticky; left: 0;
+  align-self: flex-start;
+  padding-top: 4px;
+}
+/* When there is nothing to scroll, drop the mask so nothing looks clipped */
+@supports (animation-timeline: scroll()) {
+  .mc-host-selector { }
+}
+
+/* ── FindingsBoard · objectives panel ─────────────────────────────────────
+   Was: flexShrink:0 + uncapped list — long objective sets starved the
+   findings table beneath. Now capped to ~⅓ of the viewport and scrolls.  */
+.fb-objectives {
+  display: flex;
+  flex-direction: column;
+  max-height: clamp(160px, 34vh, 320px);
+  overflow: hidden;              /* the LIST scrolls, not the panel shell */
+}
+.fb-objectives-head {
+  flex-shrink: 0;
+  user-select: none;
+}
+.fb-objectives-head:hover { background: var(--state-hover-bg); }
+.fb-objectives-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+/* ── Generic containment helpers (opt-in via class) ──────────────────────
+   Any panel that renders an unbounded list can adopt these.              */
+.a-scroll-y     { overflow-y: auto; min-height: 0; overscroll-behavior: contain; }
+.a-cap-sm       { max-height: clamp(140px, 24vh, 220px); }
+.a-cap-md       { max-height: clamp(180px, 34vh, 340px); }
+.a-cap-lg       { max-height: clamp(240px, 48vh, 520px); }
+/* A flex column whose child list must scroll rather than push siblings */
+.a-flex-contain { display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+
+/* Long identifiers (IPs, hosts, CVEs, hashes) must never blow out a column */
+.a-wrap-any  { overflow-wrap: anywhere; word-break: break-word; }
+.a-ellipsis  { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+
+/* Chip/pill rows: keep them on one line with horizontal scroll instead of
+   silently growing the page vertically. */
+.a-chiprow {
+  display: flex; gap: 6px; align-items: center;
+  overflow-x: auto; overflow-y: hidden;
+  padding-bottom: 2px; scrollbar-width: thin;
+}
+.a-chiprow > * { flex-shrink: 0; }
+
+/* ═══ 2 · RICH DIALOG LANGUAGE ══════════════════════════════════════════ */
+
+/* Backdrop — dimmed, blurred, avatar-tinted */
+.a-dlg-backdrop {
+  position: fixed; inset: 0; z-index: 9999;
+  display: flex; align-items: center; justify-content: center;
+  padding: 20px;
+  background:
+    radial-gradient(120% 120% at 50% 0%,
+      color-mix(in srgb, var(--accent) 12%, transparent) 0%, transparent 60%),
+    rgba(0, 0, 0, 0.68);
+  backdrop-filter: blur(6px);
+  animation: a-dlg-fade var(--dur-2) var(--ease) both;
+}
+@keyframes a-dlg-fade { from { opacity: 0; } to { opacity: 1; } }
+
+/* Shell — fixed header/footer, single scrolling body */
+.a-dlg {
+  display: flex; flex-direction: column;
+  width: min(980px, 96vw);
+  max-height: max(320px, 90vh);   /* px floor: a dialog must never collapse if vh resolves to 0 */
+  overflow: hidden;
+  border-radius: var(--panel-radius);
+  border: 1px solid color-mix(in srgb, var(--accent) 55%, var(--border));
+  background: var(--bg-surface);
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--accent) 10%, transparent),
+    0 0 70px color-mix(in srgb, var(--accent) 16%, transparent),
+    0 18px 50px rgba(0,0,0,.66);
+  font-family: var(--font-ui);
+  animation: a-dlg-rise var(--dur-3) var(--ease-out-expo) both;
+}
+@keyframes a-dlg-rise {
+  from { opacity: 0; transform: translateY(14px) scale(.985); }
+  to   { opacity: 1; transform: none; }
+}
+
+/* Header — accent rail, title, sub, and a live counter slot */
+.a-dlg-head {
+  flex-shrink: 0; position: relative;
+  padding: 16px 22px 13px;
+  border-bottom: 1px solid var(--border-dim);
+  background: linear-gradient(180deg,
+    color-mix(in srgb, var(--accent) 8%, transparent) 0%, transparent 100%);
+}
+.a-dlg-head::before {
+  content: ""; position: absolute; inset: 0 0 auto 0; height: 2px;
+  background: var(--rail-gradient);
+}
+.a-dlg-title {
+  display: flex; align-items: center; gap: 9;
+  font-size: var(--fs-lg); font-weight: 700; color: var(--accent);
+  letter-spacing: .01em; margin-bottom: 4px;
+}
+.a-dlg-sub {
+  font-size: var(--fs-sm); color: var(--text-secondary); line-height: var(--lh-body);
+}
+
+/* Body — the ONLY scrolling region */
+.a-dlg-body {
+  flex: 1 1 auto; min-height: 0; overflow-y: auto;
+  padding: 14px 22px;
+  overscroll-behavior: contain;
+}
+
+/* Sticky group headers inside the body */
+.a-dlg-group {
+  position: sticky; top: -14px; z-index: 2;
+  margin: 12px -22px 6px; padding: 7px 22px;
+  background: color-mix(in srgb, var(--bg-surface) 94%, transparent);
+  backdrop-filter: blur(6px);
+  border-top: 1px solid var(--border-dim);
+  border-bottom: 1px solid var(--border-dim);
+  font-family: var(--font-mono); font-size: var(--fs-xs); font-weight: 700;
+  letter-spacing: var(--tracking-eyebrow); text-transform: uppercase;
+  color: var(--text-secondary);
+  display: flex; align-items: center; gap: 8;
+}
+.a-dlg-group:first-child { margin-top: 0; border-top: none; }
+.a-dlg-group .count {
+  margin-left: auto; font-weight: 700;
+  color: var(--accent);
+}
+
+/* Selectable rows */
+.a-dlg-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 12px; cursor: pointer;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  transition: background var(--dur-1) var(--ease), border-color var(--dur-1) var(--ease);
+}
+.a-dlg-row + .a-dlg-row { margin-top: 2px; }
+.a-dlg-row:hover { background: var(--state-hover-bg); }
+.a-dlg-row[data-picked="true"] {
+  background: var(--state-selected-bg);
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+}
+.a-dlg-row .primary {
+  font-family: var(--font-mono); font-size: var(--fs-md); font-weight: 600;
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+.a-dlg-row .secondary {
+  font-size: var(--fs-xs); color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+/* Classification tags (in-network / third-party / dangling …) */
+.a-dlg-tag {
+  font-family: var(--font-mono); font-size: 9px; font-weight: 700;
+  letter-spacing: .08em; text-transform: uppercase;
+  padding: 2px 7px; border-radius: 5px; white-space: nowrap;
+  border: 1px solid currentColor;
+  background: color-mix(in srgb, currentColor 12%, transparent);
+}
+
+/* Footer — pinned actions + live selection summary */
+.a-dlg-foot {
+  flex-shrink: 0;
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 12px 22px;
+  border-top: 1px solid var(--border-dim);
+  background: linear-gradient(0deg,
+    color-mix(in srgb, var(--accent) 6%, transparent) 0%, transparent 100%);
+}
+.a-dlg-summary {
+  flex: 1 1 auto; min-width: 0;
+  font-family: var(--font-mono); font-size: var(--fs-sm);
+  color: var(--text-secondary);
+}
+.a-dlg-summary b { color: var(--accent); }
+.a-dlg-warn { color: var(--high); }
+
+/* Buttons */
+.a-dlg-btn {
+  padding: 9px 16px; border-radius: var(--radius); cursor: pointer;
+  font-family: var(--font-mono); font-size: var(--fs-sm); font-weight: 700;
+  letter-spacing: .04em;
+  border: 1px solid var(--border);
+  background: transparent; color: var(--text-secondary);
+  transition: all var(--dur-1) var(--ease);
+}
+.a-dlg-btn:hover:not(:disabled) { border-color: var(--border-bright); color: var(--text-primary); }
+.a-dlg-btn[data-primary="true"] {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--bg-base);
+}
+.a-dlg-btn[data-primary="true"]:hover:not(:disabled) { filter: brightness(1.1); }
+.a-dlg-btn:disabled { opacity: .45; cursor: not-allowed; }
+
+/* Toolbar of bulk actions inside a dialog */
+.a-dlg-tools {
+  display: flex; gap: 6px; flex-wrap: wrap; align-items: center;
+  padding-bottom: 10px; margin-bottom: 8px;
+  border-bottom: 1px dashed var(--border-dim);
+}
+.a-dlg-tools .a-dlg-btn { padding: 5px 10px; font-size: var(--fs-xs); }
+
+/* Responsive: dialogs go full-bleed on small screens */
+@media (max-width: 760px) {
+  .a-dlg { width: 100vw; max-height: max(320px, 100vh); border-radius: 0; border-left: 0; border-right: 0; }
+  .a-dlg-backdrop { padding: 0; }
+  .a-dlg-foot { position: sticky; bottom: 0; }
+}
+
+/* PHOSPHOR keeps dialogs square and flat, consistent with its language */
+:root[data-avatar="phosphor"] .a-dlg { border-radius: 0; box-shadow: none; }
+:root[data-avatar="phosphor"] .a-dlg-backdrop { backdrop-filter: none; background: rgba(0,0,0,.86); }
+/* DOSSIER dialogs read as inserted document pages */
+:root[data-avatar="dossier"] .a-dlg { box-shadow: 0 10px 40px rgba(28,26,22,.35); }

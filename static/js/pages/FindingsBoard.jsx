@@ -21,7 +21,7 @@ const SEV_BG = {
 
 function SevBadge({ sev }) {
   const c = SEV_COLOR[sev] || '#888';
-  return React.createElement('span', {
+  return React.createElement('span', { 'data-slot': 'FindingsBoard.SevBadge',
     style: {
       padding: '2px 8px', borderRadius: 4, fontSize: 10,
       background: SEV_BG[sev] || 'transparent',
@@ -52,7 +52,7 @@ function SeverityDonut({ findings, findingsSummary }) {
     return { sev, count, dash, gap, offset };
   });
 
-  return React.createElement('div', {
+  return React.createElement('div', { 'data-slot': 'FindingsBoard.SeverityDonut',
     style: { display: 'flex', alignItems: 'center', gap: 20,
              background: 'var(--bg-surface)', border: '1px solid var(--border)',
              borderRadius: 8, padding: '10px 16px', flexShrink: 0 }
@@ -162,7 +162,14 @@ function ObjectivesPanel({ objectives, answers, engagementType }) {
   });
   if (currentSection.items.length) sections.push(currentSection);
 
-  return React.createElement('div', {
+  // OVERFLOW FIX: this panel had flexShrink:0 and an uncapped list, so a long
+  // objectives set consumed the whole column and left almost no room for the
+  // actual findings underneath. It is now height-capped with an internally
+  // scrolling list (.fb-objectives-list) and can still be collapsed entirely.
+  // Caps live in avatars/_components.css so every avatar/density agrees.
+  return React.createElement('div', { 'data-slot': 'FindingsBoard.ObjectivesPanel',
+    className: 'fb-objectives',
+    'data-slot': 'FindingsBoard.objectives',
     style: {
       background: 'rgba(0,229,160,0.03)',
       border: '1px solid rgba(0,229,160,0.2)',
@@ -171,6 +178,8 @@ function ObjectivesPanel({ objectives, answers, engagementType }) {
   },
     // Header row
     React.createElement('div', {
+      className: 'fb-objectives-head',
+      title: collapsed ? 'Expand objectives' : 'Collapse objectives',
       onClick: () => setCollapsed(c => !c),
       style: {
         display: 'flex', alignItems: 'center', gap: 10,
@@ -191,8 +200,8 @@ function ObjectivesPanel({ objectives, answers, engagementType }) {
       React.createElement('span', { style: { fontSize: 10, color: 'var(--text-muted)', marginLeft: 4 } }, collapsed ? '▶' : '▼')
     ),
 
-    // Objectives list
-    !collapsed && React.createElement('div', { style: { padding: '8px 0' } },
+    // Objectives list — height-capped + internally scrollable (see _components.css)
+    !collapsed && React.createElement('div', { className: 'fb-objectives-list', style: { padding: '8px 0' } },
       sections.map((sec, si) =>
         React.createElement('div', { key: si },
           // Section header
@@ -350,7 +359,7 @@ function FindingsBoard(props) {
     padding: '5px 10px', outline: 'none', fontFamily: 'var(--font-mono)'
   };
 
-  return React.createElement('div', {
+  return React.createElement('div', { 'data-slot': 'FindingsBoard.FindingsBoard',
     'data-view-mode': vm,
     className: vm === 'CLIENT' ? 'client-mode' : undefined,
     style: { fontSize: fontScale, height: '100%' },

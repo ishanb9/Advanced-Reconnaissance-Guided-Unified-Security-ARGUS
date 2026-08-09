@@ -117,7 +117,7 @@ const API = (() => {
     sessionState: (id)           => get(`/sessions/${id}/state`),
 
     // ── Report ────────────────────────────────────────────────────────
-    reportUrl: (id, fmt='html') => `${BASE}/sessions/${id}/report?format=${fmt}`,
+    reportUrl: (id, fmt='html', theme) => `${BASE}/sessions/${id}/report?format=${fmt}` + (theme ? `&theme=${encodeURIComponent(theme)}` : ''),
     reportThemes: ()            => get('/report/themes'),
 
     // ── Shells ────────────────────────────────────────────────────────

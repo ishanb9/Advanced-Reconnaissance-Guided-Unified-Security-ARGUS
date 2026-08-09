@@ -42,6 +42,32 @@ class FlagCaptureSubagent(BaseSubagent):
         result = SubagentResult(session_id=self.session_id, subagent_name=self.SUBAGENT_NAME, target=target)
         extra_paths = extra_paths or []
 
+        # [65] STUB-FABRICATION GUARD.  These proof-of-compromise commands (whoami/id,
+        # cat /root/root.txt, cat /etc/shadow) run as a LOCAL subprocess on the ARGUS host —
+        # bash/powershell are local tools and no target shell is threaded to this subagent —
+        # so on a root Kali/Docker box they fabricate "ROOT on {target}" / "/etc/shadow
+        # readable" CRITICALs for a target where NO shell was ever obtained.  Only run when a
+        # REAL foothold on the target is confirmed; otherwise return empty (a correctly-empty
+        # result), never fabricated compromise attributed to the target.
+        import os as _os
+        _shell_ok = bool(kwargs.get("shell_access") or kwargs.get("shell_confirmed")
+                         or kwargs.get("shell_id"))
+        if not _shell_ok:
+            try:
+                from agents.engagement_context import get_context as _gc
+                _ctx = _gc(self.session_id)
+                _intel = (getattr(_ctx, "intel", None) or getattr(_ctx, "_intel", None) or {}) if _ctx else {}
+                _shell_ok = bool(_intel.get("shell_access"))
+            except Exception:
+                pass
+        if not (_shell_ok or _os.environ.get("ARGUS_EVIDENCE_FORCE") == "1"):
+            logging.getLogger("argus.evidence.flag_capture").info(
+                "[flag_capture] no confirmed foothold on %s — skipping the LOCAL proof-of-"
+                "compromise commands that would otherwise fabricate target compromise", target)
+            result.findings = []
+            result.tool_outputs = {}
+            return result
+
         if os_type.lower() == "windows":
             await self._capture_windows(target, evidence_dir, extra_paths)
         else:
